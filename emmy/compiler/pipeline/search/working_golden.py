@@ -143,57 +143,6 @@ def write_trace_inventories(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
-def _placement_finalized_loops(graph, ctx):
-    """Lower ``graph`` through placement, but leave every executable target as Loop IR.
-
-    Placement is a whole-graph decision: a cut residue may be recomposed with its sole
-    reduction consumer, and a compact producer may replace an expanded workspace only after
-    inspecting every consumer.  Inventorizing the fused LoopOps independently before that
-    boundary loses this context and can manufacture standalone targets whose outputs are not
-    executable kernel ABIs (for example an ``M x K x N`` product that placement eliminates).
-
-    Run the regular frontend/Loop pipeline followed by only tile recognition, the phase that
-    owns placement.  Recognition's terminal is an *unmapped* ``TileOp``; convert that structural
-    term straight back to semantic Loop IR without selecting workers, tiles, stages, or a reduce
-    plan.  The resulting per-node slices therefore retain the full inner tuning space while
-    their node set and boundaries are the placement-finalized executable ones.
-    """
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Body, Write  # noqa: PLC0415
-    from emmy.compiler.ir.tile import TileOp, effect_tail  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import operand_name  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pass, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _nest  # noqa: PLC0415
-
-    passes = [Pass.load(name, index) for index, name in enumerate(LOOP_PASSES)]
-    passes.append(Pass.load("lowering/tile", len(passes), select={"recognize"}))
-    placed = Pipeline(passes=passes).run(graph, ctx=ctx)
-
-    for node in placed.nodes.values():
-        tile = node.op
-        if not isinstance(tile, TileOp):
-            continue
-        if tile.work is not None or tile.workers is not None or tile.schedule or tile.place.grid:
-            raise AssertionError("placement inventory crossed into schedule selection")
-        cell = effect_tail(tile.op.lower(), tile.stores)
-        if not any(isinstance(stmt, Write) for stmt in Body(tuple(cell)).iter()):
-            cell.append(
-                Write(
-                    output=node.output.name,
-                    index=tuple(Var(axis.name) for axis in tile.place.free),
-                    value=operand_name(tile.op),
-                )
-            )
-        node.op = LoopOp(
-            body=Body(tuple(_nest(cell, list(tile.place.free)))),
-            name=tile.name,
-            knobs=dict(tile.knobs),
-            source=tile.source,
-        )
-    return placed
-
-
 def _append_trace_inventory(
     graph,
     *,
@@ -206,10 +155,18 @@ def _append_trace_inventory(
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
 ) -> None:
-    """Append one placement-finalized graph to shared trace-inventory pools."""
+    """Append one maximally fused graph to shared trace-inventory pools.
+
+    Placement is a tuner-visible structural fork, so inventory capture must stop before it.
+    Each retained Loop target enters the outer placement search with all legal fused/cut
+    alternatives available instead of baking one machine's current routing evidence into the
+    target ABI.
+    """
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _product_reduction_pair  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
@@ -232,24 +189,26 @@ def _append_trace_inventory(
         traced_node.hints.remove(provenance.PROV)
     provenance.seed(graph)
     input_graph = graph.copy()
-    placed = _placement_finalized_loops(graph, ctx)
+    fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
 
-    # Match tuning's fold-aware executable target set. A flash score producer is
-    # part of its consuming attention target, not a second inventory row. Placement
-    # has already run in whole-graph context, so a materialized seam or a recomposed
-    # producer/consumer pair is inventoried as the kernels that can actually execute,
-    # never as a pre-placement standalone ABI that may require an impossible workspace.
+    # Match two-level tuning's context-complete target set. A flash score producer is
+    # part of its consuming attention target, not a second inventory row. Likewise, a
+    # placement residue whose expanded product has one additive-reduction consumer must
+    # travel with that consumer: the outer fork needs both endpoints to compare
+    # ``PLACE@product=fuse`` recomposition with retaining the materialized pair.
     absorbed: dict[str, str] = {}
-    for node_id in placed.topological_order():
-        node = placed.nodes[node_id]
+    for node_id in fused.topological_order():
+        node = fused.nodes[node_id]
         if not isinstance(node.op, LoopOp):
             continue
-        for producer_id in fused_producer_ids(placed, node):
+        for producer_id in fused_producer_ids(fused, node):
             absorbed[producer_id] = node_id
+        if (consumer := _product_reduction_pair(fused, node, allow_nested_producer=True)) is not None:
+            absorbed[node.id] = consumer.id
 
     targets: list[tuple[str, object]] = []
-    for node_id in placed.topological_order():
-        node = placed.nodes[node_id]
+    for node_id in fused.topological_order():
+        node = fused.nodes[node_id]
         if not isinstance(node.op, LoopOp) or node_id in absorbed:
             continue
         targets.append((node_id, node))
@@ -261,7 +220,7 @@ def _append_trace_inventory(
     program_ref: int | None = None
     inventory = []
     for node_id, node in targets:
-        folded = [placed.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
+        folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
         target_prov = provenance.union(*(provenance.get(item) for item in (node, *folded)))
         origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
         inventory.append((node_id, node, folded, origins))
@@ -296,7 +255,7 @@ def _append_trace_inventory(
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
-            loop_graph = single_node_graph(placed, node_id, absorb=frozenset(item.id for item in folded))
+            loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
             loop_ref = intern_loop_program(loops, loop_graph)
             if seen_loops is not None and loop_ref in seen_loops:
                 continue

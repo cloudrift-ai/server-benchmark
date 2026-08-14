@@ -3,10 +3,10 @@ an inner, separable, per-op search.
 
 ``emmy tune`` used to run one SP-MCTS tree over the whole graph. Because
 the pipeline applies rules sequentially, op-variant forks (tile / pad / stage
-choices for one kernel) and placement forks (which closed seams become kernel boundaries) **nest**
-and cross-product under one global patience — so the bottleneck op starves the
-deep ops (see ``project_mcts_exploration_limit``). The two kinds of decision
-have opposite structure:
+choices for one kernel) and placement forks (which closed seams become kernel
+boundaries) **nest** and cross-product under one global patience — so the
+bottleneck op starves the deep ops (see ``project_mcts_exploration_limit``).
+The two kinds of decision have opposite structure:
 
 - **op-variant forks are separable** — every multi-option fork today is an
   in-place ``Op`` rebind that leaves the graph unchanged, so the whole-graph
@@ -109,8 +109,8 @@ _FAIL_US = 1e12
 class OpResult:
     """One unique kernel's inner-search outcome, for the per-op summary.
 
-    ``multiplicity`` is the number of structurally-identical ``LoopOp`` nodes
-    in the fused graph that share this ``op_key`` — 24 for a 24-layer
+    ``multiplicity`` is the number of structurally-identical recognized kernels
+    in the outer terminal that share this ``op_key`` — 24 for a 24-layer
     RMSNorm, 1 for a singleton. The outer reward's ``total_us`` weights
     ``best_us`` by ``multiplicity`` so the Σ across ``per_op`` equals the
     whole-graph latency (every node position counts, even though dedup
@@ -142,8 +142,8 @@ class InnerReward:
     def searched_winner(self) -> tuple[dict[str, str], float] | None:
         """The actual searched winner when it maps to exactly one CUDA kernel.
 
-        A target can contain repeated/heterogeneous post-fusion kernels, and one
-        post-fusion kernel can lower to several CudaOps. In either case there is
+        A target can contain repeated or heterogeneous recognized kernels, and
+        one recognized kernel can lower to several CudaOps. In either case there is
         no single golden-format knob row whose latency represents the target, so
         callers must omit a winner annotation instead of inventing one.
         """
@@ -159,9 +159,9 @@ class InnerReward:
 class TwoLevelResult:
     """Outcome of :func:`run_two_level_tune`."""
 
-    best_fused: Graph | None  # winning fused graph (finalized LoopOps)
+    best_fused: Graph | None  # winning kernel set (unmapped TileOps)
     best_reward: InnerReward | None  # its Σ-per-op breakdown
-    n_terminals: int  # outer terminals evaluated (1 today)
+    n_terminals: int  # kernel-set alternatives evaluated by the outer search
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
     prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
 
@@ -209,7 +209,7 @@ async def _inner_reward_async(
     backend_slots=None,
     close_backends: bool = True,
 ) -> InnerReward:
-    """Tune every post-fusion kernel of ``fused_graph`` in its own single-node slice
+    """Tune every kernel in the outer terminal in its own single-node slice
     and return ``Σ best-per-op time`` — the outer terminal reward.
 
     One coroutine per unique kernel over a slot queue of ``len(pool)`` device-pinned
@@ -255,17 +255,15 @@ async def _inner_reward_async(
     # the two keys would coincide).
     o3_ctx_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key() if "-O3" not in ctx.compile_flags else None
     backend_name = getattr(pool[0], "name", "cuda")
-    # Fold-aware slicing: a flash fold offer site's slice must CARRY the score producer its
-    # fusion consumes (``absorbed[producer] = consumer``) — a single-node slice turns the
-    # producer into a synthetic input, ``try_flash`` can never re-fuse, and every tune
-    # trajectory silently degrades to the cut (benching fragment kernels that greedy deploy
-    # never picks). The absorbed producer loses its own slice — the offer site's slice benches
-    # the whole attention (fused: one kernel; a cut trajectory: both), so the Σ stays honest.
+    # Fold-aware LoopOp guardrail: if recognition could not lift a flash offer in the outer
+    # pipeline, its inner slice must carry the score producer that recognition may consume.
+    # Normal outer terminals already contain the recognized TileOp and take this path with no
+    # absorbed producer.
     absorbed: dict[str, str] = {}
     for nid, _op in _kernel_nodes(fused_graph):
         for pid in fused_producer_ids(fused_graph, fused_graph.nodes[nid]):
             absorbed[pid] = nid
-    # Group structurally-identical LoopOps under one ``Op.cache_key`` —
+    # Group structurally-identical recognized kernels under one ``Op.cache_key`` —
     # insertion order = first occurrence (drives the progress tail name).
     # Ops with no cache key are unreachable through the bench path so they
     # don't enter the dedup map at all (matches the previous filter).
@@ -299,7 +297,7 @@ async def _inner_reward_async(
             if progress is not None:
                 progress.op_start(name, slot=op_idx)
             sub = single_node_graph(fused_graph, nid, absorb=frozenset(p for p, c in absorbed.items() if c == nid))
-            # Base knobs the prior sees on every row: the LoopOp's ``S_*``
+            # Base knobs the prior sees on every row: the kernel's ``S_*``
             # structural identity (op-aware rows) + the ``H_*`` host/hardware
             # regime (GPU + nvcc opt level), so one global prior spans ops and
             # regimes from the feature vector alone.
@@ -436,9 +434,8 @@ async def run_two_level_tune(
     backend_slots=None,
     close_backends: bool = True,
 ) -> TwoLevelResult:
-    """Drive the outer structural search, scoring each terminal by
-    :func:`_inner_reward_async`, then greedy-assemble the DB-best kernels and bench
-    the whole graph once for the separability check.
+    """Drive outer placement search, score each kernel set with
+    :func:`_inner_reward_async`, then lower the winning set with its DB-best schedules.
 
     ``backends`` (a list of device-pinned :class:`CudaBackend`s) fans the inner
     per-kernel search out across GPUs; the default single ``backend`` is the
@@ -449,9 +446,9 @@ async def run_two_level_tune(
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
     ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through the pre-partition tile rules, so each structural fork
-    branches the outer tree —
-    one terminal per kernel-set, compared by Σ-per-op cost. A graph with no
+    through algebra recognition and stops before scheduling, so each ``PLACE``
+    fork branches the outer tree — one terminal per kernel set, compared by
+    Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each
     op once, sum, assemble". Identical offer sites within one trajectory
     replay the first decision (read off the graph —
@@ -474,8 +471,8 @@ async def run_two_level_tune(
 
         prior = load_prior(seed=prior_seed)
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
-    # The outer drives only the graph-changing passes (through the
-    # pre-partition tile head) — no dump on this Run; the winning config's
+    # The outer drives fusion, recognition, and placement, stopping before the
+    # per-kernel schedule — no dump on this Run; the winning config's
     # full stage artifacts and in-memory frontend provenance slices come
     # from the final assembled CUDA_PASSES run below.
     outer_run = Run(pipeline=outer_pipeline(), ctx=ctx, search=outer, db=db)
@@ -507,7 +504,7 @@ async def run_two_level_tune(
         outer.observe(token, stats, "ok" if reward.ok else "bench_fail")
         positions = sum(r.multiplicity for r in reward.per_op)
         logger.info(
-            "[tune] fused terminal #%d: Σ per-op = %.2f us (%d unique kernels, %d positions)",
+            "[tune] placement terminal #%d: Σ per-op = %.2f us (%d unique kernels, %d positions)",
             n_terminals,
             reward.total_us,
             len(reward.per_op),

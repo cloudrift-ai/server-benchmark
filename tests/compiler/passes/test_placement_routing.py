@@ -1,12 +1,10 @@
 """Phase 4 — placement routing + the cut realizer.
 
-ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins resolve a cut BEFORE
-any schedule fork exists; the realizer splits the recognized tree at the seam into un-mapped
-``LoopOp`` pieces that re-recognize as fresh roots (recursive — a piece's entry may itself cut).
-Fuse is the evidence-free default by absence when generic capability and workspace invariants
-admit the fused schedule. These tests run off-GPU: the pieces compile through the full
-CUDA pass list with deterministic option-0 resolution, so kernel SETS and buffer wiring are
-asserted without a device (GPU accuracy is covered by the e2e smoke on the 5090 host).
+Placement offers the maximal fused region plus every realizable single-seam cut before schedule
+enumeration. ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins collapse
+that fork; otherwise option-0 is fused and search may measure the fragments. Cut pieces re-recognize
+and schedule as fresh roots, recursively. These tests run off-GPU through the full CUDA pass list,
+asserting fork identity, kernel sets, and buffer wiring.
 """
 
 from __future__ import annotations
@@ -300,6 +298,21 @@ def _placed_product_reduction_graph(K: int = 32, N: int = 16, M: int | None = No
     return g
 
 
+def _norm_gate_up_graph(S: int = 2, H: int = 16, inter: int = 32) -> Graph:
+    g = Graph()
+    _inp(g, "x", (1, S, H))
+    _inp(g, "wn", (H,))
+    _inp(g, "wg", (H, inter))
+    _inp(g, "wu", (H, inter))
+    g.add_node(RmsNormOp(), ["x", "wn"], Tensor("xn", (1, Dim(S), Dim(H)), dtype=F16), node_id="xn")
+    g.add_node(MatmulOp(), ["xn", "wg"], Tensor("gate", (1, Dim(S), Dim(inter)), dtype=F16), node_id="gate")
+    g.add_node(MatmulOp(), ["xn", "wu"], Tensor("up", (1, Dim(S), Dim(inter)), dtype=F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Dim(S), Dim(inter)), dtype=F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["x", "wn", "wg", "wu"], ["o"]
+    return g
+
+
 # --- the loader split (routing vs schedule entries) ----------------------------------------------
 
 
@@ -378,7 +391,125 @@ def test_place_sites_are_the_non_root_nodes() -> None:
 
 def test_rms_norm_deploys_unchanged_under_default_fuse(monkeypatch) -> None:
     out = _compile(_rms_graph(), None, monkeypatch)
-    assert len(_kernel_ids(out)) == 1, "no routing entry and no pin = fuse = the recognized form"
+    assert len(_kernel_ids(out)) == 1, "cold option-0 keeps the recognized form fused"
+
+
+def _placement_rows(graph: Graph, ctx: Context, passes=TILE_PASSES) -> list[dict]:
+    """Capture the first placement fork and keep its fused option."""
+    from emmy.compiler.pipeline.knob import family_of
+
+    rows: list[dict] = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        offered = [
+            {key: value for key, value in (getattr(leaf, "knobs", {}) or {}).items() if family_of(key) == "PLACE"} for leaf in leaves
+        ]
+        if not rows and offered and all(offered):
+            rows.extend(offered)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(passes), ctx=ctx).resolve(graph, decide)
+    return rows
+
+
+def test_unpinned_placement_offers_fused_and_every_legal_cut(monkeypatch) -> None:
+    """Placement is a structural fork, not an edit to the maximal fused region."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = _placement_rows(_norm_linear_graph(S=2, H=16, inter=32), Context.from_target((9, 0)))
+    assert len(rows) >= 2
+    assert all(value == "fuse" for value in rows[0].values())
+    assert all(set(row) == set(rows[0]) for row in rows), "every option must spell the same seam keys"
+    assert all(sum(value == "cut" for value in row.values()) == 1 for row in rows[1:])
+
+
+def test_placement_space_is_capability_independent(monkeypatch) -> None:
+    """Recognition and placement enumerate the same algebraic seams on every target."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = [
+        _placement_rows(_norm_linear_graph(S=2, H=16, inter=32), Context.from_target(target))
+        for target in ((6, 0), (7, 0), (8, 0), (9, 0), (10, 0), (12, 0))
+    ]
+    assert rows and all(row == rows[0] for row in rows[1:])
+    assert rows[0][0]["PLACE@a"] == "fuse"
+    assert any(row["PLACE@a"] == "cut" for row in rows[0][1:])
+
+
+def test_selecting_place_cut_schedules_each_resulting_kernel(monkeypatch) -> None:
+    """A cut is followed by independent recognition and schedule enumeration for both pieces."""
+    from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    selected = False
+
+    def decide(fp):
+        nonlocal selected
+        leaves = flatten_leaves(fp.options)
+        if not selected:
+            cut = next(
+                (leaf for leaf in leaves if any(family_of(key) == "PLACE" and value == "cut" for key, value in leaf.knobs.items())),
+                None,
+            )
+            if cut is not None:
+                selected = True
+                return cut
+        return leaves[0]
+
+    out, trace = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((9, 0))).resolve(
+        _norm_linear_graph(S=2, H=16, inter=32), decide
+    )
+    kernels = [node.op for node in out.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert selected and len(kernels) >= 2
+    assert any(decision.chosen_kind == "graph" for decision in trace)
+    assert all(any(family_of(key) in SCHEDULE_FAMILIES for key in kernel.knobs) for kernel in kernels)
+    assert all(not any(family_of(key) == "PLACE" for key in kernel.knobs) for kernel in kernels)
+    assert all(any(family_of(key) == "PLACE" for key in kernel.decision_knobs) for kernel in kernels)
+    assert all(all(family_of(key) == "PLACE" for key in kernel.decision_knobs) for kernel in kernels)
+
+
+def test_shared_a_product_cut_retains_every_contraction_channel(monkeypatch) -> None:
+    """A cut materializes the shared A edge; recursive recognition must preserve the whole product."""
+    from emmy.compiler.ir.tile import Fold, TileOp
+    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.tile.ops import axis_names
+    from emmy.compiler.pipeline.search.two_level import outer_pipeline
+
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@a=cut")
+    graph, _ = Run(pipeline=outer_pipeline(), ctx=Context.from_target((9, 0))).resolve(
+        _norm_gate_up_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    products = []
+    for node in graph.nodes.values():
+        if not isinstance(node.op, TileOp):
+            continue
+        root = node.op.op
+        contraction = root.operands[0] if isinstance(root, Fold) and root.axis is None and root.operands else root
+        if is_contraction(contraction) and len(contraction.channels) > 1:
+            products.append((node.op, root, contraction))
+    assert len(products) == 1
+    tile, root, product = products[0]
+    assert len(product.channels) == 2
+    assert not (root.lift.free_names() - axis_names(root) - {axis.name for axis in tile.place.free})
+
+    lowered = _compile(_norm_gate_up_graph(), "PLACE@a=cut", monkeypatch)
+    assert all(not isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_nested_placement_delta_excludes_the_inherited_parent_choice() -> None:
+    """Recursive placement replay compares both metadata channels on the recognized root."""
+    from emmy.compiler.pipeline.pipeline import _option_decision
+
+    fragment = Graph()
+    fragment.add_node(
+        InputOp(decision_knobs={"PLACE@a": "cut", "PLACE@b": "cut"}),
+        [],
+        Tensor("out", (), dtype=F16),
+        node_id="out",
+    )
+    assert _option_decision(fragment, {"PLACE@a": "cut"}) == {"PLACE@b": "cut"}
 
 
 def test_rms_norm_place_cut_splits_stat_and_scale(monkeypatch) -> None:
@@ -403,25 +534,14 @@ def test_norm_linear_cone_cut_recurses_to_the_full_cascade(monkeypatch) -> None:
     assert "y" in kernels, "the residue matmul keeps the original output"
 
 
-def test_materialized_only_atom_cuts_computed_a_without_routing_evidence(monkeypatch) -> None:
-    """Any target whose only dtype-legal atom requires materialized edges cuts computed A."""
-    out = _compile(_norm_linear_graph(S=1), None, monkeypatch, ctx=Context.from_target((7, 0)))
+def test_computed_a_cut_is_replayable_on_materialized_only_target(monkeypatch) -> None:
+    """Capability constrains schedules, not whether the computed-A placement exists."""
+    out = _compile(_norm_linear_graph(S=1), "PLACE@a=cut", monkeypatch, ctx=Context.from_target((7, 0)))
     kernels = _kernel_ids(out)
     assert any("__cut_" in k for k in kernels), kernels
     assert "y" in kernels, "the materialized residue keeps the original linear output"
-    assert len(kernels) == 2, f"the target-legality cut must not recursively split RMSNorm: {kernels}"
-
-
-def test_computed_capable_atom_preserves_fusion_without_routing_evidence(monkeypatch) -> None:
-    """A target with any computed-edge-capable atom keeps the recognized fused form."""
-    out = _compile(_norm_linear_graph(S=1), None, monkeypatch, ctx=Context.from_target((8, 0)))
-    assert not any("__cut_" in k for k in _kernel_ids(out))
-
-
-def test_explicit_fuse_overrides_required_computed_a_materialization(monkeypatch) -> None:
-    """PLACE pins remain authoritative over the capability-derived placement default."""
-    out = _compile(_norm_linear_graph(S=1), "PLACE=fuse", monkeypatch, ctx=Context.from_target((7, 0)))
-    assert not any("__cut_" in k for k in _kernel_ids(out))
+    fused = _compile(_norm_linear_graph(S=1), "PLACE@a=fuse", monkeypatch, ctx=Context.from_target((7, 0)))
+    assert not any("__cut_" in k for k in _kernel_ids(fused))
 
 
 def test_rejoined_projection_reshape_recognizes_separable_contraction(monkeypatch) -> None:
@@ -429,7 +549,7 @@ def test_rejoined_projection_reshape_recognizes_separable_contraction(monkeypatc
     from emmy.compiler.ir.tile.ir import is_contraction
     from emmy.compiler.ir.tile.path import sites
 
-    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@a=cut")
     monkeypatch.delenv("EMMY_PLACE", raising=False)
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((7, 0))).resolve(
         _norm_linear_rejoined_reshape_graph(), lambda fp: flatten_leaves(fp.options)[0]
@@ -441,35 +561,35 @@ def test_rejoined_projection_reshape_recognizes_separable_contraction(monkeypatc
     assert weight.index == (Var("a2"), Var("a1"))
 
 
-def test_nested_contraction_materializes_when_hardware_atom_cannot_compose_it(monkeypatch) -> None:
-    """A raw two-reduction cell recovers independently schedulable contraction kernels."""
-    out = _compile(_sequential_linears_graph(), None, monkeypatch, ctx=Context.from_target((7, 0)))
+def test_nested_contraction_cut_is_replayable_and_target_independent(monkeypatch) -> None:
+    """A raw nested contraction offers the same fused/cut rows on every target."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    rows = [_placement_rows(_sequential_linears_graph(), Context.from_target(target)) for target in ((6, 0), (7, 0), (9, 0))]
+    assert rows[0] == rows[1] == rows[2]
+    assert rows[0][0] == {"PLACE@nested": "fuse"}
+    assert rows[0][1] == {"PLACE@nested": "cut"}
+
+    out = _compile(_sequential_linears_graph(), "PLACE@nested=cut", monkeypatch, ctx=Context.from_target((7, 0)))
     kernels = _kernel_ids(out)
     assert any("__cut_" in kernel for kernel in kernels), kernels
     assert "y" in kernels
     assert len(kernels) == 2
 
 
-def test_nested_contraction_stays_fused_without_a_hardware_atom(monkeypatch) -> None:
-    """Materialization is not a platform policy when it cannot recover a hardware tier."""
-    out = _compile(_sequential_linears_graph(), None, monkeypatch, ctx=Context.from_target((6, 0)))
-    assert _kernel_ids(out) == ["y"]
-
-
-def test_explicit_fuse_overrides_nested_contraction_materialization(monkeypatch) -> None:
-    """The placement pin remains authoritative over the structural legality default."""
-    out = _compile(_sequential_linears_graph(), "PLACE=fuse", monkeypatch, ctx=Context.from_target((7, 0)))
+def test_explicit_fuse_keeps_nested_contraction_maximal(monkeypatch) -> None:
+    out = _compile(_sequential_linears_graph(), "PLACE@nested=fuse", monkeypatch, ctx=Context.from_target((7, 0)))
     assert _kernel_ids(out) == ["y"]
 
 
 def test_nested_contraction_lifts_closed_enclosing_statistic_prologue(monkeypatch) -> None:
     """An enclosing RMS statistic closes the compact child instead of blocking placement."""
-    out = _compile(_norm_gated_mlp_graph(), None, monkeypatch, ctx=Context.from_target((7, 0)))
+    out = _compile(_norm_gated_mlp_graph(), "PLACE@nested=cut", monkeypatch, ctx=Context.from_target((7, 0)))
     kernels = _kernel_ids(out)
-    assert len(kernels) == 4, kernels
+    assert len(kernels) == 3, kernels
     cuts = [node for node in out.nodes.values() if "__cut_" in node.output.name]
-    assert {tuple(dim.as_static() for dim in node.output.shape) for node in cuts} == {(16,), (32,)}
-    activation = next(node for node in cuts if tuple(dim.as_static() for dim in node.output.shape) == (32,))
+    assert {tuple(dim.as_static() for dim in node.output.shape) for node in cuts} == {(32,)}
+    activation = cuts[0]
     assert activation.output.dtype is F16
     expanded = next(node for node in out.nodes.values() if tuple(dim.as_static() for dim in node.output.shape) == (1, 32, 16))
     assert expanded.inputs == [activation.output.name]
@@ -506,13 +626,12 @@ def test_nested_cut_retains_only_parent_live_prologue_slice() -> None:
     assert residue[1] is survivor
 
 
-def test_materialized_multichannel_contraction_preserves_every_fold(monkeypatch) -> None:
-    """Cutting shared computed A must bind both gate/up product-monoid channels."""
-    from emmy.compiler.ir.tile.ir import TileOp, is_contraction
-    from emmy.compiler.ir.tile.path import sites
+def test_nested_cut_preserves_multichannel_activation_closure(monkeypatch) -> None:
+    """The lifted gate/up activation is closed and retains its typed compact boundary."""
+    from emmy.compiler.ir.tile.ir import TileOp
+    from emmy.compiler.ir.tile.ops import axis_names
 
-    monkeypatch.delenv("EMMY_KNOBS", raising=False)
-    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@nested=cut")
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((7, 0))).resolve(
         _norm_gated_mlp_graph(M=2), lambda fp: flatten_leaves(fp.options)[0]
     )
@@ -521,16 +640,15 @@ def test_materialized_multichannel_contraction_preserves_every_fold(monkeypatch)
         for node in out.nodes.values()
         if isinstance(node.op, TileOp) and tuple(dim.as_static() for dim in node.output.shape) == (2, 32)
     )
-    contractions = [site.node for site in sites(activation.op.op) if is_contraction(site.node)]
-    assert len(contractions) == 1
-    contraction = contractions[0]
-    assert len(contraction.channels) == 2
-    assert tuple(activation.op.op.lift.params) == tuple(channel.acc for channel in contraction.channels)
+    root = activation.op.op
+    assert activation.output.dtype is F16
+    assert activation.op.decision_knobs == {"PLACE@nested": "cut"}
+    assert not (root.lift.free_names() - axis_names(root) - {axis.name for axis in activation.op.place.free})
 
 
 @pytest.mark.parametrize("consumer_first", [False, True])
 def test_placement_recomposes_product_with_its_additive_reduction(monkeypatch, consumer_first: bool) -> None:
-    """A placement residue must not materialize a full K×N product used by one sum."""
+    """Product recomposition is maximal option 0 from either recognized endpoint."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _product_reduction_producer
 
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
@@ -540,6 +658,11 @@ def test_placement_recomposes_product_with_its_additive_reduction(monkeypatch, c
     consumer = graph.nodes["y"]
     endpoints = (consumer, producer) if consumer_first else (producer, consumer)
     assert [_product_reduction_producer(graph, endpoint) for endpoint in endpoints] == [producer, producer]
+    lowering = TILE_PASSES[len(LOOP_PASSES) :]
+    assert _placement_rows(graph.copy(), Context.from_target((7, 0)), passes=lowering) == [
+        {"PLACE@product": "fuse"},
+        {"PLACE@product": "cut"},
+    ]
 
     lowering = CUDA_PASSES[len(LOOP_PASSES) :]
     out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((7, 0))).resolve(
@@ -567,9 +690,31 @@ def test_placement_recomposition_recognizes_m512_multicell_contraction(monkeypat
     assert any(is_contraction(site.node) for site in sites(tile.op))
 
 
-def test_place_fuse_pin_preserves_product_reduction_boundary(monkeypatch) -> None:
-    """The explicit placement override keeps even an inefficient diagnostic boundary."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
+def test_product_recomposition_preserves_a_real_narrow_tensor_boundary() -> None:
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _product_reduction_producer
+
+    graph = _placed_product_reduction_graph()
+    graph.rename_node("activation__cut_v", "activation")
+    assert _product_reduction_producer(graph, graph.nodes["product"]) is None
+    assert _product_reduction_producer(graph, graph.nodes["y"]) is None
+
+
+def test_cold_greedy_uses_graph_first_maximal_recomposition(monkeypatch) -> None:
+    """Option 0 is the structural default even when the maximal leaf is a Graph splice."""
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+    from emmy.compiler.pipeline.search.two_level import outer_pipeline
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    out, _ = Run(pipeline=outer_pipeline(), ctx=Context.from_target((7, 0))).resolve(
+        _placed_product_reduction_graph(M=512), greedy_decide(prior=object())
+    )
+    assert out.buffer("product") is None
+
+
+def test_product_cut_pin_preserves_product_reduction_boundary(monkeypatch) -> None:
+    """The explicit cut reading retains the already-materialized product pair."""
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@product=cut")
     lowering = CUDA_PASSES[len(LOOP_PASSES) :]
     out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((7, 0))).resolve(
         _placed_product_reduction_graph(), lambda fp: flatten_leaves(fp.options)[0]
@@ -579,13 +724,40 @@ def test_place_fuse_pin_preserves_product_reduction_boundary(monkeypatch) -> Non
     assert "product" in out.nodes["y"].inputs
 
 
+def test_product_fuse_pin_replays_recomposition(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@product=fuse")
+    lowering = CUDA_PASSES[len(LOOP_PASSES) :]
+    out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((7, 0))).resolve(
+        _placed_product_reduction_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    assert _kernel_ids(out) == ["y"]
+    assert out.buffer("product") is None
+
+
+def test_schedule_pin_keeps_product_residue_for_exact_rerecord(monkeypatch) -> None:
+    """A schedule pin applies to the current kernel and suppresses structural placement."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    lowering = CUDA_PASSES[len(LOOP_PASSES) :]
+    out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((7, 0))).resolve(
+        _placed_product_reduction_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    assert _kernel_ids(out) == ["product", "y"]
+    assert out.buffer("product") is not None
+
+
 def test_broadcast_expansion_materializes_the_compact_producer_domain(monkeypatch) -> None:
-    """PLACE never allocates a store-sweep dimension the producer value does not read."""
+    """Selecting compact placement never allocates the virtual broadcast dimension."""
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     monkeypatch.delenv("EMMY_PLACE", raising=False)
     lowering = CUDA_PASSES[len(LOOP_PASSES) :]
+
+    def choose_compact(fp):
+        leaves = flatten_leaves(fp.options)
+        return next((leaf for leaf in leaves if leaf.knobs.get("PLACE@broadcast") == "cut"), leaves[0])
+
     out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((12, 0))).resolve(
-        _expanded_reduce_graph(), lambda fp: flatten_leaves(fp.options)[0]
+        _expanded_reduce_graph(), choose_compact
     )
     compact = out.buffer("expanded__cut_compact")
     assert compact is not None
@@ -594,17 +766,33 @@ def test_broadcast_expansion_materializes_the_compact_producer_domain(monkeypatc
     assert "expanded__cut_compact" in out.nodes["y"].inputs
 
 
-def test_place_fuse_pin_preserves_expanded_boundary_for_diagnostics(monkeypatch) -> None:
-    """The existing authoritative fuse pin remains an escape hatch for placement A/Bs."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    lowering = CUDA_PASSES[len(LOOP_PASSES) :]
-    out, _ = Run(pipeline=Pipeline.build(lowering), ctx=Context.from_target((12, 0))).resolve(
+def test_broadcast_rows_are_replayable_and_default_to_maximal(monkeypatch) -> None:
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    lowering = TILE_PASSES[len(LOOP_PASSES) :]
+    rows = _placement_rows(_expanded_reduce_graph(), Context.from_target((12, 0)), passes=lowering)
+    assert rows[0] == {"PLACE": "fuse", "PLACE@broadcast": "fuse"}
+    assert all(set(row) == set(rows[0]) for row in rows)
+    assert all(sum(value == "cut" for value in row.values()) == 1 for row in rows[1:])
+    assert any(row["PLACE@broadcast"] == "cut" for row in rows[1:])
+    cuda_lowering = CUDA_PASSES[len(LOOP_PASSES) :]
+    out, _ = Run(pipeline=Pipeline.build(cuda_lowering), ctx=Context.from_target((12, 0))).resolve(
         _expanded_reduce_graph(), lambda fp: flatten_leaves(fp.options)[0]
     )
     assert out.buffer("expanded__cut_compact") is None
     expanded = out.buffer("expanded")
     assert expanded is not None
     assert tuple(dim.as_static() for dim in expanded.shape) == (2, 8, 16)
+
+    # The canonical ordinary seam may spell bare ``PLACE``.  It is still one
+    # scoped row member when a specialized boundary is selected, not a command
+    # that short-circuits the remaining keys during replay.
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE=fuse,PLACE@broadcast=cut")
+    replayed, _ = Run(pipeline=Pipeline.build(cuda_lowering), ctx=Context.from_target((12, 0))).resolve(
+        _expanded_reduce_graph(), lambda fp: flatten_leaves(fp.options)[0]
+    )
+    assert replayed.buffer("expanded__cut_compact") is not None
+    assert replayed.buffer("expanded") is None
 
 
 def test_scoped_place_pin_from_replay_context_cuts_the_cone(monkeypatch) -> None:

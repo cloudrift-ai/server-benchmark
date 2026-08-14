@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
+from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
@@ -826,25 +827,14 @@ def test_transpose_fold_sub_sm90_matvec_exception():
     matvec weight (the decode gemv tier needs the k-major layout for the
     ``b<n>t`` REDUCE band — the recorded ``.m1.t`` golden winners on sm_89);
     a matrix-matmul weight keeps the historic no-fold behavior."""
-    from emmy.compiler import target as target_mod
-
-    target_mod.set_target((8, 9))
-    try:
-        folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1)))
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
+    ctx = Context(compute_capability=(8, 9))
+    folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1), ctx=ctx))
+    folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64), ctx=ctx))
     assert folded_m1, "M=1 matvec weight must fold k-major below sm_90 (the .m1.t golden layout)"
     assert not folded_m64, "M>1 weights must keep the historic sub-sm_90 no-fold behavior"
 
 
 def test_transpose_fold_sm90_unchanged():
     """At sm_90+ the fold fires for every parameter transpose, matvec or not."""
-    from emmy.compiler import target as target_mod
-
-    target_mod.set_target((12, 0))
-    try:
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
+    folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64), ctx=Context(compute_capability=(12, 0))))
     assert folded_m64

@@ -10,14 +10,10 @@ That op IS the rewrite's result. The schedule picks it up on the next rule sweep
 axes onto the grid and offers the scheduling forks; materialization back to loop IR happens in
 ``lowering/kernel``.
 
-Recognition itself reads no knob or pin: it always constructs the same maximal algebraic tree from
-the same Loop IR. Placement then consumes that tree at the recognition/schedule boundary. A
-``PLACE`` pin, routing golden, or generic schedulability invariant parameterized by the target's
-declared capabilities may materialize one of its closed internal seams before schedule
-enumeration. This ordering is load-bearing: fusion and recognition describe WHAT may execute
-together; placement decides WHETHER the target can schedule
-that region efficiently. A hardware capability, product name, or benchmark result must never alter
-the fused/recognized algebra.
+Algebra recognition reads no hardware or profitability signal. After the recognized tree exists,
+step 3.5 offers placement as a separate structural ``PLACE`` fork: keep the maximal region fused or
+cut one closed seam into un-mapped ``LoopOp`` pieces. A routing golden or pin may collapse that fork.
+Placement must run before ``020`` because every piece needs its own schedule enumeration.
 
 All recognition lives in THIS one rule (no separate flash / softmax pass), in order (each
 step unconditional — no knobs):
@@ -85,7 +81,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._atomize import (
     make_cone,
     map_cone,
 )
-from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
+from emmy.compiler.pipeline.passes.lowering.tile._cut import placement_options
 from emmy.compiler.pipeline.passes.lowering.tile._flash import is_flash_score_producer, try_flash
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -343,9 +339,10 @@ def _nodify_contraction(node, free: tuple):
             # output axes / tile / stage are caller facts, stamped at the point of use.
             candidate, stores = _project(con, epi)
             # A root projection has no enclosing value scope beyond the free grid and boundary
-            # store sweeps. Every other read must be supplied by its operand results. This closure
-            # check is algebraic: an incomplete future channel binder declines to the complete
-            # PLANAR fold rather than leaking an unbound accumulator into code generation.
+            # store sweeps: every other value read by its lift must be bound by an operand result.
+            # This closes the recognition boundary generically; a future binder that omits a
+            # product channel declines to the complete fold below instead of emitting undefined
+            # CUDA. A swept store's axis is bound when ``effect_tail`` reconstitutes its loop.
             captures = lexical_free_values(
                 candidate.lift.body,
                 bound={
@@ -416,7 +413,7 @@ def _order_free_by_output(node: Fold, free: list, stores: tuple = ()) -> tuple:
     return tuple(sorted(free, key=lambda ax: pos[ax.name]))
 
 
-def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
+def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     # (1) Flash attention — a graph rewrite that fuses a softmax-then-P@V kernel with its
     # scaled-QK producer. Tried first on every node; flash precedes online-softmax precedes
     # normalize, each consuming the Accums the next would match. The fusion is unconditional:
@@ -451,29 +448,20 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # it from the graph again when a later pass matches the scheduled op.
     map_tile = TileOp(op=node, name=loop.name, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
     pro = bind_prologue_contraction(node, free)
-    # (3.5) PLACEMENT ROUTING (phase 4) — resolved FIRST, before any schedule fork exists: a
-    # ROUTING golden (PLACE-only knobs for this kernel's (kind, shape)) or an authoritative
-    # PLACE pin cuts the recognized tree into a fragment of un-mapped LoopOps; each piece
-    # re-recognizes as a fresh root on the pass-scan restart and resolves its OWN entry
-    # (recursive — a piece's entry may itself cut). No entry / no pin = fuse = the recognized
-    # form, by absence. The fused (computed-A) reading is the routing reference tree when it
-    # binds — its seams (the `a` cone edge) are the ones a routing entry spells.
+    # (3.5) PLACEMENT (phase 4) — a structural PLACE fork is offered before the schedule fork:
+    # the fused form plus every structurally legal single-seam cut. Each cut piece re-recognizes
+    # and schedules independently, so recursive cuts remain possible. An authoritative pin or
+    # routing golden collapses the fork to its recorded side; a cold deploy keeps fused option 0.
+    # The computed-A reading is the reference tree when it binds, because its `a` cone edge is a
+    # placement seam even though schedule may later choose the ordinary map reading.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
-    seam = route_cut(
-        ctx,
-        dict(loop.knobs or {}),
-        route_tree,
-        route_stores,
-        route_free,
-        inputs=map_tile.inputs,
-        graph=graph,
-        graph_root=root,
-    )
-    if seam is not None:
-        cut = realize_cut(match, root, route_tree, route_free, route_stores, seam)
-        if cut is not None:
-            return cut
-    # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer
+    placed = placement_options(ctx, dict(loop.knobs or {}), match, root, route_tree, route_free, route_stores, map_tile)
+    if isinstance(placed, list):
+        return placed
+    if isinstance(placed, Graph):
+        return placed
+    map_tile = placed
+    # Recognition ends here: the UNMAPPED tile is the fused rewrite's result. The MONOID-producer
     # composition (``pro``) is re-derived by the schedule — it is a decision about the SCHEDULE
     # (which of the two readings of this one loop each fork row realizes), not about the structure,
     # and it needs the schedule results to arbitrate (a warp ``TILE`` pin keeps the contraction

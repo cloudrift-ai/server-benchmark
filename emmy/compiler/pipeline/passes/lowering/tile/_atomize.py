@@ -1,12 +1,13 @@
 """Atomize — resolve the algebra→hardware-atom binding structurally.
 
 The warp matmul materializer needs to know which operand is the mma ``a`` vs ``b`` (by
-axis-in-index), the fold accumulator, and the projection epilogue.
-:func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
-— the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
-the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
-contraction structural node at RECOGNIZE time (the node
-is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
+axis-in-index), every fold accumulator, and the projection epilogue.
+:func:`bind_contraction_channels` reads them **structurally** off the annotated ``CONTRACTION``
+reduce loop — the operand ``Load``\\ s indexed over the K axis and its additive ``Accum`` targets —
+and returns one shared A edge plus every ``(b, accumulator)`` channel for
+``010_recognize._nodify_contraction`` to stamp onto the contraction structural node at RECOGNIZE
+time (the node is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself).
+The one-channel form delegates to :func:`bind_contraction`. Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕
 algebra a property of the loop, so no per-algebra op-tree node class is needed. The cooperative reduce
 needs no binding here — its accumulator dtype + shuffle/tree

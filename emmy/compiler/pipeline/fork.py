@@ -77,14 +77,31 @@ class Fork(ABC):
 class OptionFork(Fork):
     """Leaf Fork around an already-concrete rewrite option. Built by
     :meth:`LazyCandidate.from_option` so every ``LazyCandidate.pending``
-    carries a uniform Fork shape."""
+    carries a uniform Fork shape.
+
+    ``consumed`` / ``output`` are optional per-leaf splice overrides. Most
+    alternatives replace the same matched region and leave them unset. A
+    structural fork whose Graph leaves rewrite different proven regions uses
+    them so each sibling configures its own remapped Match only when resolved;
+    they are application metadata, never part of knob or evidence identity.
+    """
 
     option: Op | Graph
     knobs: dict = field(default_factory=dict)
+    consumed: frozenset[str] | None = None
+    output: str | dict[str, str] | None = None
     is_leaf = True
 
     def expand(self) -> list[Op | Graph | Fork]:
         return [self.option]
+
+    def configure_match(self, match):
+        """Apply this leaf's splice overrides to a leaf-local Match."""
+        if self.consumed is not None:
+            match.consumed = set(self.consumed)
+        if self.output is not None:
+            match.output = dict(self.output) if isinstance(self.output, dict) else self.output
+        return match
 
 
 def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fork]:

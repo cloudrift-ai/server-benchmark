@@ -211,8 +211,11 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
         leaves = flatten_leaves(fp.options)
-        rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
+        offered = [dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves]
+        rows.extend(row for row in offered if any(family_of(key) in SCHEDULE_FAMILIES for key in row))
         if pick is not None:
             for leaf in leaves:
                 if pick(dict(getattr(leaf, "knobs", {}) or {})):
@@ -503,6 +506,28 @@ def test_channel_binding_shares_structurally_equal_a_and_preserves_product_dtype
     assert all(isinstance(channel.b, Load) for channel in channels)
     assert product_dtype == F32
     assert epilogue == Body()
+
+
+def test_bind_contraction_rejects_operand_that_varies_across_both_output_axes():
+    """An mma B fragment is stationary across M; crossed (m, n, k) algebra stays PLANAR."""
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+    from emmy.compiler.pipeline.pipeline import LoweringError
+
+    loop = Loop(
+        axis=Axis("k", Dim(32)),
+        role=AxisRole.CONTRACTION,
+        body=Body(
+            (
+                Load(name="a", input="a_buf", index=(Var("k"),)),
+                Load(name="b", input="b_buf", index=(Var("m"), Var("k"), Var("n"))),
+                Assign(name="prod", op="multiply", args=("a", "b")),
+                Accum(name="acc", value="prod", op="add", axes=("k",)),
+            )
+        ),
+    )
+
+    with pytest.raises(LoweringError, match="could not bind A/B operands"):
+        bind_contraction(loop, "m", "n", Body(()))
 
 
 # --------------------------------------------------------------------------- #

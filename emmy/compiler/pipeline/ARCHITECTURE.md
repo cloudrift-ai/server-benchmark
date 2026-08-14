@@ -199,6 +199,9 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
 - The dispatcher binds `rewrite`'s parameters **by name**. Reserved names: `graph`, `match`, `root`, `out`, `ctx`.
   Pattern names from `PATTERN` bind to their matched `Node` objects. Anything else binds positionally to
   `root.inputs[i]`. Take only what you need — `ctx` is optional.
+- A hardware-dependent rule takes `ctx` and asks a named primitive-capability predicate. Passes never import the
+  process-global target probe or compare `ctx.compute_capability` to an SM threshold; the executable contract is in
+  [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
 - Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
 
@@ -477,7 +480,7 @@ yet supported; today `emmy fit` trains on goldens only).
 
 **Whichever tier decides, the µs of the winning row is written onto the fork's trace entry** (`Decision.score`): a
 measured µs when a golden or an evidence row decided, the model's predicted µs otherwise. That number is what the
-structural cost estimate reads off the partition fork (Part 4), so the Σ compared there mixes measured and predicted
+structural cost estimate reads off the placement fork (Part 4), so the Σ compared there mixes measured and predicted
 µs — measured wherever the tune benched that kernel, predicted only where nothing was.
 
 **How to see which tier answered.** There is no flag that reports, per fork, which tier decided it; a live compile
@@ -488,22 +491,21 @@ audits — `emmy eval golden` re-runs the golden-tier consultations and prints a
 Part 7). Answering "which tier decided this fork, and did I expect that one?" means correlating those three, not
 flipping one switch.
 
-**Where the kernel gets cut is settled before any of this.** Fusion first constructs target-independent maximal
-regions. Ahead of the schedule pick, placement then splits — or does not split — the recognized work into kernels.
-A **routing** golden entry is how an evidence-driven decision is recorded: an
-entry whose knobs are only `PLACE@<label>` values, where the label names an edge inside the recognized kernel.
-`PLACE@cone = cut`, for instance, says "split at the edge labelled `cone`, so that sub-computation becomes its own
-kernel". The loader rejects an entry that mixes `PLACE` with schedule knobs, and `_golden_evidence_index` skips
-routing entries. They are consulted during recognition (`lowering/tile/_cut.py`, joined by `ShapeKey.joins` against
-the live GPU, and restricted to `-O3` like the golden tier itself). Each resulting piece is then recognized afresh and
-resolves its OWN `(kind, shape)` through the same hierarchy above; see the tile-lowering ARCHITECTURE's
-placement-routing section. Keeping the work in one kernel is the evidence-free default only when generic
-schedulability invariants admit that reading. A legality-derived cut requires neither a model nor a GPU special case;
-it selects a closed `PLACE` seam from the target's atom capabilities and the tree's workspace geometry. An explicit
-pin remains authoritative, including `fuse` for diagnostics. That makes placement one of exactly two ways a greedy compile
-can change which kernels exist: a legality default, routing golden, or pin cuts with no prior involved, while a structural fork
-(Part 4) needs the trusted online prior to estimate its cost. Everything else — offline prior and option-0
-included — keeps the default kernel set.
+**Where the kernel gets cut is settled after fusion and recognition, before scheduling.** Fusion first forms the
+largest reasonable algebraic region subject only to semantic preservation and general work-duplication brakes. It
+does not consult hardware, schedule coverage, or profitability evidence. `PLACE@<label>` then names an edge inside
+the recognized term. With no authoritative decision, placement offers a structural fork: the maximal region first,
+plus one `Graph` fragment per realizable seam. Tuning compares those kernel sets; a cold prior or option-0 keeps the
+maximal region. A schedule that cannot realize that region does not justify weakening fusion: extend the generic
+schedule domain or expose a realizable `PLACE` cut, then measure the choice.
+
+A **routing** golden is the durable measured form of that decision: its knobs are `PLACE` keys only. The loader
+rejects records that mix placement and schedule knobs, and `_golden_evidence_index` skips routing entries. A matching
+routing golden or authoritative pin collapses the structural fork before ranking. Each cut piece is recognized afresh
+and resolves its own placement and schedule choices recursively. `Op.decision_knobs` carries structural rows across
+lowering for replay, while `Op.knobs` remains the schedule realization of one kernel. The two-level tuner trains
+placement only from outer, whole-kernel-set Σ rows (`PLACE_sites` / `PLACE_cut`); those features never enter the
+per-kernel schedule rows, tune DB node keys, or O3 signatures.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the DB perf index are
 memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar. A generative
@@ -781,51 +783,48 @@ lowest measured latency.
 ### Two-level search: outer structural MCTS + inner per-op tuning
 
 `emmy tune` does **not** run one MCTS over the whole graph. The pipeline applies rules one after another, so the two
-kinds of fork would nest and multiply out under a single patience budget, starving the ops deepest in the graph. The
-two kinds are **op-variant** forks, which choose tile / pad / stage settings inside one kernel, and **structural**
-forks, which change which kernels exist — how ops are grouped into kernels, and the split taken by a demoted matmul
-(one whose shape makes the compiler handle it as a plain reduction rather than as a contraction). Because the two have
-opposite structure, `two_level.py` separates them by the fork's *effect*, reusing the `Op`-rebind vs `Graph`-splice
-classification made where the children are pushed.
+kinds of fork would nest and multiply out under a single patience budget, starving the kernels deepest in the graph.
+The two kinds are **op-variant** forks, which choose tile / pad / stage settings inside one kernel, and **placement**
+forks, which choose whether a closed seam in an already-recognized algebraic region becomes a kernel boundary. Because
+the two have opposite structure, `two_level.py` gives placement to the outer search and scheduling to the inner search.
 
-**Outer search** (`run_two_level_tune`) drives the graph-changing passes: `frontend` + `loop`, plus the part of
-`lowering/tile` that runs before `partition_loops`. A **terminal** here is the state in which the cursor reaches
-`partition_loops` with every structural fork resolved. Each terminal is one candidate grouping of ops into kernels;
-its **reward** is `1 / Σ best-per-op time` from the inner search, backpropagated by the reused `TuningSearch`.
+**Outer search** (`run_two_level_tune`) drives `frontend` + `loop` and `lowering/tile/010_recognize`, then stops before
+`020_schedule`. Fusion is deterministic and maximal; recognition is algebraic and offers the structural
+`PLACE@<path>=fuse|cut` rows. An outer **terminal** has every placement decision resolved and every resulting kernel
+represented by an unmapped `TileOp`. Its **reward** is `1 / Σ best-per-kernel time` from the inner search,
+backpropagated by the reused `TuningSearch`.
 
 Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
-of *unique* kernels rather than as `2^n` in the number of such points. Fusion itself is still deterministic (no rule
-offers a multi-option fusion fork), so a graph with no structural forks yields exactly one terminal and the whole
-thing reduces to "tune each op once, sum, assemble". The global prior drives the outer PUCT too: each terminal emits
-one combined Σ row per structural decision it took (features `{ctx, op knobs before the decision, the decision's knob
-delta}`, label = the Σ of that side's per-kernel bests), so a re-tune on a warm machine descends into the kernel set
-predicted to be cheaper first.
+of *unique* kernels rather than as `2^n` in the number of such points. A term with no realizable seam yields one outer
+terminal and reduces to "tune each kernel once, sum, assemble". The global prior drives the outer PUCT too: each
+terminal emits a whole-kernel-set Σ row with context features, the offer kernel's structural `S_*` features, and
+pooled placement features (`PLACE_sites`, `PLACE_cut`). The row does not contain any resulting kernel's schedule
+realization.
 
-**Inner search** (`_inner_reward_async`) tunes each finalized kernel **independently** in its own single-node slice
-(`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes only (`tile → kernel → cuda`):
+**Inner search** (`_inner_reward_async`) tunes each recognized kernel **independently** in its own single-node slice
+(`single_node_graph`, `slice.py`) with a plain `TuningSearch` beginning at schedule enumeration
+(`schedule → kernel → cuda`):
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
   It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
   inputs and persisted Loop programs stay byte-identical across fresh Python processes.
-- One fold-aware exception: a flash fold offer site's slice CARRIES the score producer its fusion consumes
-  (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`), and the absorbed producer loses its own slice. A
-  synthetic-input boundary would make `try_flash` unfusable in-slice, silently degrading every tune trajectory to the
-  cut (benching fragment kernels greedy deploy never picks) and leaving the fused flash fork unreachable under tune.
+- The LoopOp guardrail retains one fold-aware exception: a flash offer site's slice carries the score producer its
+  recognition consumes (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`). Normal outer terminals have
+  already recognized this algebra into `TileOp`, so the inner search does not revisit that decision.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
-- **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
+- **Leaves are deduped by `Op.cache_key`**: 24 equivalent kernels across 24 layers collapse to one work unit, and the
   outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
 
-**Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
-rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
-name-invariant body+knobs digest), so a kernel tuned in its slice transfers to the assembled graph unchanged **and**
-is shared across outer terminals — two fusion candidates sharing an identical op reuse its tuning (a DB hit). After
-the best fusion is picked, the assembled `Graph[CudaOp]` is benched **once** for the real in-context whole-graph
-latency; comparing it to the `Σ` estimate is the **separability check** — a gap exposes L2 / clock / launch coupling
-the isolated benches can't see (in practice <2% for small graphs).
+**Separability + the placement handoff.** Op-variant forks are separable: every multi-option schedule fork is an
+in-place `Op` rebind that leaves the kernel set unchanged, so the outer estimate is `Σ_k t_k`. Results key
+structurally (`Op.cache_key` = name-invariant body+knobs digest), so a kernel tuned in its slice transfers to the
+assembled graph unchanged and is shared across outer terminals. Placement lives only in `Op.decision_knobs` for
+structural replay; inner node rows, schedule prior rows, O3 signatures, and kernel cache keys exclude it. The winning
+outer terminal is lowered directly, so an unfitted prior cannot replay a different kernel set during assembly.
 
 **Always re-run, replay from the cache.** The inner search runs for **every** op on every pass — it is never skipped
 on prior effort. Replay is cheap, not gated: each benched terminal hits the per-variant `perf` cache, so an
@@ -1381,13 +1380,12 @@ attribution POOLS GPUs and flag settings, which is safe because regret is a rati
 ## Part 9: Tile lowering at the pipeline level
 
 `lowering/tile/` lowers each fused `LoopOp` to a kernel-ready `TileOp` over the block-DAG Tile IR (`ir/tile/ir.py`):
-`010_recognize` (lift `LoopOp` → `TileOp`, recognize the flash / softmax streaming forms, annotate each reduce
-`Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — and **atomize**: resolve the
-algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_atomize.py`) →
-`030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
-shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; flash
-attention is the `TWISTED` fold on the streaming schedule, a twisted monoid is a monoid, selected structurally), not
-on a matmul / pointwise / attention archetype. The full design lives in
+`010_recognize` lifts `LoopOp` → `TileOp`, recognizes the flash / softmax streaming forms, annotates each reduce
+`Loop` with its `AxisRole`, binds every algebraic operand channel, and offers `PLACE` at every realizable closed seam;
+`020_schedule` maps the selected kernel set and chooses among capability-compatible hardware atoms;
+`030_split_reduce` realizes a selected cross-CTA reduction.
+The pass **never dispatches on a named shape or GPU product** — every decision follows the stored fold and named
+capability predicates. The full design lives in
 [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 
 The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
@@ -1395,8 +1393,10 @@ The step BETWEEN those two — schedule enumeration: mapping the free axes onto 
 tree (the `020_schedule` rule). It covers every single-site term, the COMPUTED `a` edge (the fused norm→linear /
 gate⊗up cone) and the flash streaming pair — the two-site families are why it recurses. A term it cannot schedule
 enumerates NO rows and stays unmapped rather than being guessed at — the guardrail contract, with any coverage gap
-riding `tests/xfail_registry.py`. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for
-the design.
+riding `tests/xfail_registry.py`. A schedule coverage or profitability gap must not become a fusion exception. If a
+closed seam makes independently schedulable kernels, recognition exposes it through `PLACE`; the outer tuner compares
+the maximal and cut kernel sets by their measured sum. Otherwise the repair belongs in the generic schedule domain.
+See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the design.
 
 ## Tunable knobs
 
@@ -1606,7 +1606,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
-| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
+| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` reads the algebra, offers post-fusion `PLACE`, and emits an unmapped `TileOp` → `020_schedule` enumerates one generic product over term sites → `030_split_reduce` realizes a selected cross-CTA reduction. Dispatch is on structural fold readings and roles, never a named shape or GPU product. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/010_recognize._nodify_contraction` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` (+ `040_demote_to_write_dtype`) resolve dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch, symbolic-shaped accumulators, and accumulators past the one-CTA break-even cap (`_MAX_DELEGATED_WORDS`, 64 KB — CTA 0 zeroes serially, so a large buffer costs more than the MEMSET node it replaces) keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
@@ -1629,7 +1629,7 @@ prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `
 letters the CLI accepts in `--passes dolft` (`commands/compile.py` imports `PASS_SHORTHAND` so the flag and the marker
 prefix can't drift). Skipped rules collapse to a one-liner. The bracketing makes per-rule / per-pass slicing trivial
 via `awk`; ANSI color is applied only inside the diff body so the markers stay plain ASCII. Color follows
-`compile --color`. Body-carrying ops render through their own `pretty_body` (the in-flight `TileGraphOp` pretty-prints
+`compile --color`. Body-carrying ops render through their own `pretty_body` (the in-flight `TileOp` pretty-prints
 its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The structured `.rules.json` dump is
 unaffected — the diff is purely presentation.
 

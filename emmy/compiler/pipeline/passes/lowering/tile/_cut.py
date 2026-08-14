@@ -1,16 +1,14 @@
-"""The placement CUT realizer (phase 4) — routing entries partition the recognized tree.
+"""The post-recognition placement fork and cut realizer.
 
 ``PLACE@<child-path> = cut`` on an in-tree parent↔child seam splits the kernel: the child
 subtree becomes its own graph node (a plain un-mapped ``LoopOp``, re-entering recognition as a
 fresh tree), the seam value materializes to a workspace buffer, and the parent consumes a plain
-``Load`` where the child was. Resolution is TWO-LEVEL and RECURSIVE: the ROUTING entry (a golden
-whose knobs are ``PLACE`` keys only — cuts, never schedules) or an authoritative ``PLACE`` pin
-decides the cut BEFORE any schedule fork is built; every resulting piece then re-recognizes on
-the pass-scan restart and resolves its OWN ``(kind, shape)`` entry through the full deploy
-hierarchy — a piece's entry may itself cut (the cone piece re-recognizes as the rms_norm shape
-and its routing entry cuts the statistic out). No routing entry keeps the recognized form unless
-a generic schedulability invariant selects a closed seam from the target's declared atom
-capabilities or the tree's workspace geometry.
+``Load`` where the child was. With no authoritative pin or routing entry, every structurally legal
+seam is offered beside the maximal form as a structural ``PLACE`` fork. Outer search measures those choices;
+a cold deploy keeps the first, fused option, while trusted evidence can price the fragment as the sum
+of its independently scheduled kernels. This happens before ``020_schedule``. Resolution is recursive:
+every cut piece re-enters recognition
+and may offer its own placement fork.
 
 The realizer is seam-agnostic by design: the two seam shapes (a zero-axis ``Fold`` projection seam, a fold
 operand edge) fall out of the node kinds — the child's index space is DERIVED (the enclosing
@@ -30,12 +28,11 @@ from dataclasses import dataclass, replace
 from emmy import config
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp, splice_loop_ops
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write, lexical_free_values
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.ir import (
@@ -46,11 +43,11 @@ from emmy.compiler.ir.tile.ir import (
     deep_reads,
     effect_tail,
     is_contraction,
-    operand_body,
     operand_name,
 )
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
+from emmy.compiler.pipeline.fork import OptionFork
 from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of, parse_knob_spec
 from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
@@ -59,6 +56,10 @@ logger = logging.getLogger(__name__)
 
 #: The one value that routes a rewrite; ``fuse`` (or absence) is the recognized form.
 _CUT = "cut"
+_FUSE = "fuse"
+_PRODUCT_KEY = "PLACE@product"
+_BROADCAST_KEY = "PLACE@broadcast"
+_NESTED_KEY = "PLACE@nested"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,28 @@ class _ProductReductionCollapse:
     producer: str
 
 
+type _PlacementSite = Site | _CompactBroadcastCut | _NestedReductionCut | _ProductReductionCollapse
+
+
+@dataclass(frozen=True)
+class _PlacementAlternative:
+    """One replayable structural alternative and the value that realizes it."""
+
+    key: str
+    site: _PlacementSite
+    realized_value: str = _CUT
+
+
+@dataclass(frozen=True)
+class _PlacementDecision:
+    """An authoritative placement result, or the undecided alternative set to enumerate."""
+
+    decided: bool
+    selected: _PlacementAlternative | None
+    alternatives: tuple[_PlacementAlternative, ...]
+    knobs: dict
+
+
 def _place_pins() -> dict[str, str]:
     """The live ``PLACE`` pins — authoritative over routing entries. ``PLACE@…`` keys ride the
     ``EMMY_KNOBS`` aggregate (an ``@`` key is not a shell-var name); a bare ``EMMY_PLACE`` pin
@@ -126,19 +149,6 @@ def _schedule_pins_live() -> bool:
     return any(family_of(k) in SCHEDULE_FAMILIES for k in parse_knob_spec(config.knobs_aggregate()))
 
 
-def _card_has_routing(gpu_name, cap) -> bool:
-    """Whether ANY routing golden exists for this card — the cheap gate that keeps the per-kernel
-    seam scan off the common compile (no pins, no routing entries → recognition is untouched)."""
-    if not gpu_name:
-        return False
-    try:
-        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-
-        return any(g.is_routing and g.gpu_name == gpu_name and tuple(g.compute_cap) == cap for g in GOLDEN_RECORDS)
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _has_computed_a(node) -> bool:
     """Whether the tree carries a computed-A contraction — an ``a`` edge stored INLINE (a cone
     node) rather than materialized (a gmem ``Load``). The structural twin of the offer signal
@@ -149,45 +159,6 @@ def _has_computed_a(node) -> bool:
     Walked through ``path.sites`` — the ONE node walk in the layer, already imported here — rather
     than a private recursion over ``operands``."""
     return any(is_contraction(s.node) and not isinstance(s.node.a, Load) for s in sites(node))
-
-
-def _edge_dtype(edge, axis: str, inputs: dict):
-    """The tensor dtype feeding ``edge`` along contraction ``axis``, if structurally known."""
-    load = next(
-        (s for s in operand_body(edge) if isinstance(s, Load) and axis in {name for expr in s.index for name in expr.free_vars()}),
-        None,
-    )
-    tensor = inputs.get(load.input) if load is not None else None
-    return getattr(tensor, "dtype", None)
-
-
-def _computed_a_requiring_materialization(ctx, root, inputs: dict):
-    """The first computed-A edge no target-legal atom can consume inline, or ``None``.
-
-    A contraction's computed A is schedulable as one fused kernel only when at least one atom
-    available for the target and operand dtype accepts computed edges. If every available atom
-    declares ``materialized_edges_only``, retaining the cone would remove the entire tensor-core
-    family and leave a dense projection on the scalar/planar fallback. Materializing that edge
-    once lets the residue re-recognize as an ordinary contraction using those same atoms.
-
-    The decision derives solely from target capability, operand dtype, and atom legality. It does
-    not name a GPU generation or product. No available atom means the operation has no hardware
-    contraction tier to recover, so the existing functional fallback remains unchanged.
-    """
-    for site in sites(root):
-        node = site.node
-        if not (is_contraction(node) and isinstance(node.a, Fold) and node.a.axis is None):
-            continue
-        dtype = _edge_dtype(node.a, node.axis.name, inputs)
-        names = atoms_for(dtype, ctx=ctx)
-        if not names:
-            channel_dtypes = {getattr(inputs.get(ch.b.input), "dtype", None) for ch in node.channels if isinstance(ch.b, Load)}
-            channel_dtypes.discard(None)
-            if len(channel_dtypes) == 1:
-                names = atoms_for(next(iter(channel_dtypes)), ctx=ctx)
-        if names and all(ATOM_REGISTRY[name].materialized_edges_only for name in names):
-            return node.a
-    return None
 
 
 def _compact_broadcast_cut(root, stores: tuple, free: tuple) -> _CompactBroadcastCut | None:
@@ -222,14 +193,13 @@ def _compact_broadcast_cut(root, stores: tuple, free: tuple) -> _CompactBroadcas
     return _CompactBroadcastCut(tuple(positions))
 
 
-def _has_hardware_contraction(loop: Loop, ctx, inputs: dict) -> bool:
-    """Whether ``loop`` is an additive product fold with a target atom for its dtype.
+def _is_contraction_loop(loop: Loop) -> bool:
+    """Whether ``loop`` structurally carries an additive product contraction.
 
-    This is deliberately a negative legality probe, not a named-shape recognizer. A square/sum
-    statistic has one K-indexed source and declines; a contraction has at least two K-indexed
-    source loads in an accumulator's backward cone. If the target exposes no atom for the common
-    source dtype, materializing cannot recover a hardware tier and the functional raw fallback
-    remains authoritative.
+    Placement alternatives are algebraic and therefore identical on every target. A square/sum
+    statistic has one reduction-indexed source and declines; a contraction has a multiply in an
+    additive accumulator's backward cone and at least two reduction-indexed source loads.
+    Hardware capability only filters schedules after a placement option has been selected.
     """
     accums = tuple(s for s in loop.body if isinstance(s, Accum) and s.op.reduce_canon == "add")
     if not accums:
@@ -242,20 +212,18 @@ def _has_hardware_contraction(loop: Loop, ctx, inputs: dict) -> bool:
         loads = tuple(load for load in cone_body.loads if loop.axis.name in {name for expr in load.index for name in expr.free_vars()})
         if len(loads) < 2:
             continue
-        dtypes = {getattr(inputs.get(load.input), "dtype", None) for load in loads}
-        dtypes.discard(None)
-        if len(dtypes) == 1 and atoms_for(next(iter(dtypes)), ctx=ctx):
+        if len(loads) >= 2:
             return True
     return False
 
 
-def _nested_reduction_cut(ctx, root, free: tuple, inputs: dict) -> _NestedReductionCut | None:
-    """Find a closed inner contraction that the raw-cell fallback cannot schedule as an atom.
+def _nested_reduction_cut(root, free: tuple) -> _NestedReductionCut | None:
+    """Find a closed inner contraction embedded in a raw nested-reduction cell.
 
     Recognition intentionally preserves a cell with nested non-flash reductions as raw Loop IR.
     That representation is always correct, but it has no contraction site and therefore offers
-    only scalar/planar schedules. When an inner additive product fold has a hardware atom, lift its
-    closed result cone to a compact workspace. Pointwise projection after the fold joins the cone
+    only scalar/planar schedules. Placement may lift an inner additive product fold's closed result
+    cone to a compact workspace. Pointwise projection after the fold joins the cone
     only while it introduces no new iteration axis; thus a gated activation materializes at its
     natural ``M×K`` boundary, while multiplying it by a downstream ``K×N`` weight stays in the
     residue rather than expanding the workspace to ``M×K×N``.
@@ -276,7 +244,7 @@ def _nested_reduction_cut(ctx, root, free: tuple, inputs: dict) -> _NestedReduct
             nested = scan(stmt.body, (*scopes, body))
             if nested is not None:
                 return nested
-            if not stmt.is_reduce or not _has_hardware_contraction(stmt, ctx, inputs):
+            if not stmt.is_reduce or not _is_contraction_loop(stmt):
                 continue
             accums = tuple(s for s in stmt.body if isinstance(s, Accum) and s.op.reduce_canon == "add")
             base_axes = set().union(*(body.deps_closure.get(acc.name, frozenset()) for acc in accums)) & all_axis_names
@@ -397,11 +365,7 @@ def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
     scope it captures from) — which is why that seam is not cuttable.
 
     Returned sorted, so callers can put it straight into an error message."""
-    stmts = list(root.lower())
-    defs: set[str] = set()
-    for s in stmts:
-        defs |= deep_defines(s)
-    return tuple(sorted(deep_reads(stmts) - defs - axes))
+    return tuple(sorted(lexical_free_values(root.lower(), bound=axes)))
 
 
 def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
@@ -439,90 +403,165 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     return True
 
 
+def _placement_alternatives(root, stores: tuple, free: tuple, graph: Graph | None, graph_root: Node | None):
+    """Enumerate the target-independent placement space for this recognized root.
+
+    A product workspace left by an earlier selected cut is already a split reading. Its local
+    maximal alternative is recomposition, so it forms a standalone two-sided fork and will
+    reconsider any ordinary seams after the recomposed cell re-enters recognition.
+    """
+    product = _product_reduction_producer(graph, graph_root) if graph is not None and graph_root is not None else None
+    if product is not None:
+        return (_PlacementAlternative(_PRODUCT_KEY, _ProductReductionCollapse(product.id), _FUSE),)
+
+    all_sites = sites(root)
+    out = [
+        _PlacementAlternative(spell(root, "PLACE", site.node, all_sites=all_sites), site)
+        for site in family_sites("PLACE", all_sites)
+        if _cuttable(root, site, stores, free)
+    ]
+    if (compact := _compact_broadcast_cut(root, stores, free)) is not None:
+        out.append(_PlacementAlternative(_BROADCAST_KEY, compact))
+    if (nested := _nested_reduction_cut(root, free)) is not None:
+        out.append(_PlacementAlternative(_NESTED_KEY, nested))
+    return tuple(out)
+
+
+def _match_alternative(key: str, root, alternatives: tuple[_PlacementAlternative, ...]):
+    """Resolve a canonical specialized key or any accepted ordinary path alias."""
+    exact = next((alt for alt in alternatives if alt.key == key), None)
+    if exact is not None:
+        return exact
+    ordinary = tuple(alt for alt in alternatives if isinstance(alt.site, Site))
+    try:
+        site = resolve(root, key, all_sites=sites(root))
+    except ValueError:
+        return None
+    return next((alt for alt in ordinary if alt.site == site), None)
+
+
+def _decide_values(values: dict, root, alternatives: tuple[_PlacementAlternative, ...], *, source: str):
+    """Map a pin/golden row to its one active alternative and canonical decision row."""
+    bare = values.get("PLACE")
+    # ``PLACE`` is both the legacy bare command and a valid canonical key for the
+    # unique shallowest ordinary seam.  When that exact alternative exists, read it
+    # alongside every scoped key so a full row such as
+    # ``PLACE=fuse,PLACE@broadcast=cut`` remains replayable.  Only trees without a
+    # canonical bare seam use the legacy "primary/maximal" command semantics.
+    if bare is not None and not any(alt.key == "PLACE" for alt in alternatives):
+        active = next((alt for alt in alternatives if alt.realized_value == str(bare)), None)
+        return active, {"PLACE": bare}
+
+    matched: dict[str, str] = {}
+    active: list[_PlacementAlternative] = []
+    for key, value in values.items():
+        if family_of(key) != "PLACE":
+            continue
+        alt = _match_alternative(key, root, alternatives)
+        if alt is None:
+            continue
+        matched[alt.key] = str(value)
+        if str(value) == alt.realized_value:
+            active.append(alt)
+    if len(active) > 1:
+        raise NotImplementedError(f"{source}: exactly one placement alternative may be active, got {[alt.key for alt in active]}")
+    return (active[0] if active else None), matched
+
+
+def _placement_decision(
+    ctx,
+    knobs: dict,
+    root,
+    stores: tuple = (),
+    free: tuple = (),
+    graph: Graph | None = None,
+    graph_root: Node | None = None,
+) -> _PlacementDecision:
+    """Resolve authoritative evidence, otherwise expose every algebraic alternative."""
+    alternatives = _placement_alternatives(root, stores, free, graph, graph_root)
+    if not alternatives:
+        return _PlacementDecision(True, None, (), {})
+    if (pins := _place_pins()):
+        selected, row = _decide_values(pins, root, alternatives, source="placement pin")
+        if not row:
+            selected = next((alt for alt in alternatives if alt.realized_value == _FUSE), None)
+        return _PlacementDecision(True, selected, alternatives, row)
+    if _schedule_pins_live():
+        return _PlacementDecision(True, None, alternatives, {})
+    entry = _routing_entry(ctx, knobs, root)
+    if entry is None:
+        return _PlacementDecision(False, None, alternatives, {})
+    selected, row = _decide_values(dict(entry.knobs), root, alternatives, source=f"routing golden {entry.name!r}")
+    if not row:
+        logger.warning("routing golden %r no longer names a placement alternative; using the maximal form", entry.name)
+        selected = next((alt for alt in alternatives if alt.realized_value == _FUSE), None)
+    return _PlacementDecision(True, selected, alternatives, row)
+
+
 def route_cut(
     ctx,
     knobs: dict,
     root,
     stores: tuple = (),
     free: tuple = (),
-    inputs: dict | None = None,
     graph: Graph | None = None,
     graph_root: Node | None = None,
-) -> Site | _CompactBroadcastCut | _NestedReductionCut | _ProductReductionCollapse | None:
-    """The routing resolution for a freshly-recognized kernel: the cut seam to realize, or
-    ``None`` (= fuse, the default — spelled as the ABSENCE of a routing entry). ``PLACE`` pins
-    are authoritative over the recorded routing entry (a ``fuse`` pin suppresses a recorded
-    cut), and so is any live schedule-family pin (a pinned re-record / ``--ab`` compile keeps
-    the recognized form so the pinned row can realize); a key that names no seam (or an uncuttable one) on this tree is skipped for a pin (a
-    whole-model pin targets one kernel shape) and falls through with a warning for an entry
-    (the drift case — deploy keeps the recognized form). A bare ``PLACE=cut`` pin takes the
-    shallowest CUTTABLE seam."""
-    pins = _place_pins()
-    materialize_a = _computed_a_requiring_materialization(ctx, root, inputs or {})
-    compact_broadcast = _compact_broadcast_cut(root, stores, free)
-    nested_reduction = _nested_reduction_cut(ctx, root, free, inputs or {})
-    product_producer = _product_reduction_producer(graph, graph_root) if graph is not None and graph_root is not None else None
-    product_reduction = _ProductReductionCollapse(product_producer.id) if product_producer is not None else None
-    if (
-        not pins
-        and materialize_a is None
-        and compact_broadcast is None
-        and nested_reduction is None
-        and product_reduction is None
-        and not _card_has_routing(getattr(ctx, "gpu_name", None), tuple(getattr(ctx, "compute_capability", ()) or ()))
-    ):
-        return None  # nothing could ever route — skip the seam scan (the common compile)
-    all_sites = sites(root)
-    seams = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
-    for key, value in pins.items():
-        if key == "PLACE":
-            if value == _CUT:
-                return product_reduction or compact_broadcast or (min(seams, key=lambda s: s.depth) if seams else nested_reduction)
-            return None  # bare fuse pin — authoritative
+) -> _PlacementSite | None:
+    """Compatibility view of authoritative placement: the selected realization, if any."""
+    decision = _placement_decision(ctx, knobs, root, stores, free, graph, graph_root)
+    return decision.selected.site if decision.selected is not None else None
+
+
+def _stamp_decision(graph: Graph, row: dict) -> None:
+    for node in graph.nodes.values():
+        if isinstance(node.op, LoopOp):
+            node.op.decision_knobs.update(row)
+
+
+def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, stores: tuple, fused):
+    """Return authoritative placement or maximal-first replayable structural alternatives."""
+    decision = _placement_decision(ctx, knobs, tree, stores, free, match.graph, root)
+    if decision.decided:
+        if decision.selected is not None:
+            placed = realize_cut(match, root, tree, free, stores, decision.selected.site)
+            if placed is not None:
+                _stamp_decision(placed, decision.knobs)
+                return placed
+        return replace(fused, decision_knobs={**fused.decision_knobs, **decision.knobs}) if decision.knobs else fused
+
+    original_consumed, original_output = set(match.consumed), match.output
+    realized = []
+    for alternative in decision.alternatives:
+        match.consumed, match.output = set(original_consumed), original_output
         try:
-            site = resolve(root, key, all_sites=all_sites)
-        except ValueError:
-            continue  # the pin names no seam on THIS tree (a whole-model pin targets one kernel)
-        if site is None or site not in seams:
+            placed = realize_cut(match, root, tree, free, stores, alternative.site)
+        except (RuleSkipped, ValueError) as exc:
+            logger.debug("placement: alternative %s is not realizable: %s", alternative.key, exc)
             continue
-        return site if value == _CUT else None  # an explicit fuse pin suppresses any routing entry
-    if product_reduction is not None:
-        return product_reduction
-    if compact_broadcast is not None:
-        return compact_broadcast
-    if materialize_a is not None:
-        target_seam = next((site for site in seams if site.node is materialize_a), None)
-        if target_seam is not None:
-            return target_seam
-    if nested_reduction is not None:
-        return nested_reduction
-    if not seams:
-        return None  # a bare fold / flat cell has no in-tree seam (or none is legal)
-    if _schedule_pins_live():
-        return None  # a pinned compile: the pin decides the form — recorded routing entries do not fire
-    entry = _routing_entry(ctx, knobs, root)
-    if entry is None:
-        return None
-    cuts = [k for k, v in entry.knobs.items() if str(v) == _CUT]
-    if len(cuts) != 1:
-        raise NotImplementedError(f"routing golden {entry.name!r}: exactly ONE cut per entry for now, got {sorted(cuts)}")
-    if cuts[0] == "PLACE":
-        # A bare routing cut takes the SHALLOWEST CUTTABLE seam — the same rule as the bare pin.
-        # The consult tree is the PRE-fork recognized form (the fused kinds' map form), whose
-        # canonical primary seam can be uncuttable (the fold) or spell differently than the
-        # warp-form tree a suffixed key was recorded against; the recursion reaches the same
-        # cascade from whichever legal seam goes first, so the shallowest-cuttable rule is the
-        # tree-robust reading of a bare entry (measured: the cone-cut A/Bs ran exactly this).
-        return min(seams, key=lambda s: s.depth)
-    try:
-        site = resolve(root, cuts[0], all_sites=all_sites)
-    except ValueError as e:
-        logger.warning("routing golden %r: %s — the recorded cut no longer names a seam; deploying the recognized form", entry.name, e)
-        return None
-    if site not in seams:
-        logger.warning("routing golden %r: %s names an uncuttable seam — deploying the recognized form", entry.name, cuts[0])
-        return None
-    return site
+        if placed is not None:
+            realized.append((alternative, placed, frozenset(match.consumed), match.output))
+    match.consumed, match.output = original_consumed, original_output
+    if not realized:
+        return fused
+
+    alternatives = tuple(alt for alt, _graph, _consumed, _output in realized)
+    base_row = {alt.key: (_CUT if alt.realized_value == _FUSE else _FUSE) for alt in alternatives}
+    structural = {key: value for key, value in knobs.items() if key.startswith("S_")}
+    fused = replace(fused, decision_knobs={**fused.decision_knobs, **base_row})
+    base = OptionFork(option=fused, knobs={**structural, **base_row})
+    realized_options = []
+    for alternative, placed, consumed, output in realized:
+        row = {**base_row, alternative.key: alternative.realized_value}
+        _stamp_decision(placed, row)
+        realized_options.append(
+            OptionFork(
+                option=placed,
+                knobs={**structural, **row},
+                consumed=consumed,
+                output=output,
+            )
+        )
+    return [*realized_options, base] if any(alt.realized_value == _FUSE for alt in alternatives) else [base, *realized_options]
 
 
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
@@ -829,16 +868,22 @@ def _realize_compact_broadcast(match, root: Node, tile_op, free: tuple, stores: 
     return frag
 
 
-def _product_reduction_pair(graph: Graph, producer: Node) -> Node | None:
-    """The sole additive-reduction consumer of a placement-residue product, if exact."""
-    if not any("__cut_" in inp for inp in producer.inputs) or len(graph.users(producer.id)) != 1:
+def _product_reduction_pair(graph: Graph, producer: Node, *, allow_nested_producer: bool = False) -> Node | None:
+    """The sole additive-reduction consumer of a virtual wide product, if exact.
+
+    The product may be exposed directly by maximal loop fusion (an internal f32 carrier) or by
+    an earlier placement boundary (a ``__cut_`` input). A real narrow tensor product is not a
+    reassociable carrier and therefore remains materialized.
+    """
+    virtual_product = producer.output.dtype is F32 or any("__cut_" in inp for inp in producer.inputs)
+    if not virtual_product or len(graph.users(producer.id)) != 1:
         return None
     consumer_id = next(iter(graph.users(producer.id)))
     consumer = graph.nodes[consumer_id]
     consumer_loop = _placed_loop(consumer)
     if not isinstance(producer.op, LoopOp) or consumer_loop is None:
         return None
-    if any(isinstance(stmt, Accum) for stmt in producer.op.body.iter()):
+    if not allow_nested_producer and any(isinstance(stmt, Accum) for stmt in producer.op.body.iter()):
         return None
     if not any(isinstance(stmt, Assign) and stmt.op.name == "multiply" for stmt in producer.op.body.iter()):
         return None
@@ -887,13 +932,14 @@ def _placed_loop(node: Node) -> LoopOp | None:
 
 
 def _collapse_materialized_product_reduction(match, producer: Node) -> Graph | None:
-    """Reconstitute a contraction split by a placement-owned product workspace.
+    """Reconstitute a contraction split by a virtual product workspace.
 
     A compact activation cut can leave the residue as ``A[K] * B[K,N] -> P[K,N]`` followed by
     one additive reduction of ``P``.  The workspace is correct but defeats contraction
     recognition and launches a bandwidth-bound product plus reduction.  This is a placement
-    repair, not fusion policy: only a placement-produced ``__cut_`` edge with exactly one Loop
-    consumer is eligible, and the generic Loop splicer must prove the coordinate substitution.
+    repair, not fusion policy: only a virtual wide carrier with exactly one Loop consumer is
+    eligible, and the generic Loop splicer must prove the coordinate substitution. A real narrow
+    product tensor remains a semantic boundary.
     The merged LoopOp re-enters recognition as one product-reduction cell (and binds a
     contraction atom whenever its output geometry admits one).
     """
@@ -932,14 +978,7 @@ def _collapse_materialized_product_reduction(match, producer: Node) -> Graph | N
     return frag
 
 
-def realize_cut(
-    match,
-    root: Node,
-    tile_op,
-    free: tuple,
-    stores: tuple,
-    site: Site | _CompactBroadcastCut | _NestedReductionCut | _ProductReductionCollapse,
-) -> Graph | None:
+def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: _PlacementSite) -> Graph | None:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
     the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces are
@@ -1004,4 +1043,4 @@ def realize_cut(
     return frag
 
 
-__all__ = ["realize_cut", "route_cut"]
+__all__ = ["placement_options", "realize_cut", "route_cut"]

@@ -504,10 +504,10 @@ def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
 
 
 def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
-    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
-    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
-    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+    """The mandatory ``sync`` :class:`Stage` for a computed-operand contraction.
+
+    A computed edge needs synchronous evaluation and has no gmem-direct or copy-transport sibling;
+    a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
     slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
     ``stats`` — the same node boundary the materializer fills through).
 

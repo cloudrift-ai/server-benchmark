@@ -3,9 +3,10 @@
 command:
   stage:
     - emmy
+    - LICENSE
+    - README.md
     - pyproject.toml
     - requirements.txt
-    - Makefile
     - experiments/golden-bench-2026/kernels/recipe.yaml
   strict: true
   run: |
@@ -23,14 +24,17 @@ command:
         final_status=1
       fi
       printf 'study=%s\nstatus=%s\n' "$study" "$$final_status" > $task_dir/status.txt
-      archive_tmp=$${task_dir}.artifacts.tar.gz
+      archive_tmp=$task_dir.artifacts.tar.gz
       tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
       mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
       exit "$$final_status"
     }
     trap finalize EXIT
 
-    [ -d venv ] || make setup
+    if [ ! -x ./venv/bin/emmy ]; then
+      python3.12 -m venv venv --prompt emmy
+      ./venv/bin/pip install -e ".[dev]"
+    fi
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins

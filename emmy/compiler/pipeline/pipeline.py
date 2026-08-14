@@ -780,7 +780,9 @@ class Run:
             # own graph — see :func:`_replay_structural_decision` — so no
             # side-table state is threaded through resolves.
             if structural and (chosen := _replay_structural_decision(cand.graph, match.root.op, options)) is not None:
-                cand.apply(match, chosen)
+                option = _concrete_option(chosen)
+                assert option is not None
+                cand.apply(_configure_option_match(chosen, match), option)
                 continue
             return match, options, structural
         return None
@@ -827,7 +829,7 @@ class Run:
             if option is None:
                 raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
             knob_delta = _choice_knobs(choice, option, root_op)
-            cand.apply(match, option)
+            cand.apply(_configure_option_match(choice, match), option)
             trace.append(
                 Decision(
                     rule_name=match.rule.name,
@@ -946,6 +948,11 @@ def _concrete_option(option: object) -> object | None:
     return option
 
 
+def _configure_option_match(choice: object, match: Match) -> Match:
+    """Apply a leaf's splice metadata only to the Match choosing that leaf."""
+    return choice.configure_match(match) if isinstance(choice, OptionFork) else match
+
+
 def _option_decision(option: object, root_metadata: dict) -> dict | None:
     """The decision-knob delta one raw structural-fork option would stamp vs
     the offer op: non-``S_*`` knob keys the option's op / fork knobs **add or
@@ -1016,7 +1023,7 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
         found = {k: knobs[k] for k in decision_keys}
         for opt, delta in deltas:
             if delta == found:
-                return _concrete_option(opt)
+                return opt
         return None  # decided, but no option matches (emission drift) — fork normally
     return None
 

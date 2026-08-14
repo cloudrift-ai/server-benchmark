@@ -886,9 +886,10 @@ def greedy_decide(
     Structural (``Graph``-splicing) options are priced with the trained prior
     grounded in measured DB evidence — :func:`_pick_structural` — so an
     unpinned ``compile`` / ``run`` can deploy the kernel sets ``tune`` measured
-    best (the demoted-matmul split); cold, the structural leaf is filtered and
-    kernel sets stay unchanged.
-    ``price_structural=False`` keeps the filter behavior — used by
+    best (for example, a placement cut). Cold or unpriceable structural forks
+    take option 0, which placement guarantees is the maximal form; this is based
+    on the fork contract rather than the option's ``Op``/``Graph`` representation.
+    ``price_structural=False`` filters graph-splicing leaves — used by
     ``Pipeline.run``'s retry after a structural pick failed to lower, and by
     the nested pricing probes themselves (no recursive splitting inside a
     price probe). The price memo is per-factory-call (one compile attempt),
@@ -1003,8 +1004,10 @@ def greedy_decide(
         # loaded, :func:`_pick_structural` prices the option properly — Σ of
         # nested per-kernel predicted-bests vs the keep-fused side — and
         # returns the split when it predicts faster. Cold (offline / no
-        # prior), or when an option can't be priced, the structural leaf is
-        # filtered so a cold compile never changes kernel sets. ``tune``
+        # prior), or when an option can't be priced, the structural fork takes
+        # option 0, whose rule contract is the maximal form. It may itself be a
+        # Graph splice (product/reduction recomposition), so Graph-vs-Op cannot
+        # identify the default. ``tune``
         # explores them regardless (MCTS walks every sibling); an env pin
         # makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
@@ -1012,6 +1015,8 @@ def greedy_decide(
             pick = _pick_structural(fp, leaves, the_prior, memo, price_structural, db)
             if pick is not None:
                 return pick
+            if price_structural:
+                return leaves[0]
             op_leaves = [o for o in leaves if not _is_structural_option(o)]
             if op_leaves:
                 leaves = op_leaves

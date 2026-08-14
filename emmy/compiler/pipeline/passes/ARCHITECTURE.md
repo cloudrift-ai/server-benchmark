@@ -9,6 +9,28 @@ walk; the derived `Fold.role` for the loop annotation the materializer reads), n
 flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
 
+## Hardware portability is a compiler invariant
+
+Recognition describes algebra and dataflow; it never names a GPU, model, operator provenance, or workload shape.
+Scheduling may ask whether a primitive is available, but that fact has one source: a named capability predicate on
+the per-compilation `Context` (`has_cp_async`, `has_tma`, an MMA-family predicate, and so on). Lowering consumes the
+primitive selected by the schedule and may validate the same named capability; it must not rediscover eligibility
+from an SM-number threshold or a product name. A path therefore applies to every target whose `Context` advertises
+the primitives it needs, including future targets, without adding a sibling target-specific branch.
+
+Physical product identity is allowed only where measurement identity matters: golden and node evidence may key on
+`Context.hardware_id` / `gpu_name`, and device limits such as shared-memory size may be carried as context facts.
+Product identity may select measured placement evidence in `_cut.py`; it may not define an implementation path.
+Neither identity nor a physical limit may decide whether an algebraic form is recognized or whether an instruction
+family is legal. Profitability comes from measured evidence and the prior; primitive legality comes from capability
+predicates.
+
+This boundary is executable. `tests/compiler/passes/test_hardware_capability_contract.py` scans every pass module and
+rejects process-global target probes and direct comparisons against `Context.compute_capability`. When a new
+instruction family lands, add its predicate to `Context`, test the predicate across the architectural boundary, and
+exercise recognition plus schedule/lowering with synthetic contexts on both sides. Do not add an exception to the
+guardrail; move the hardware fact to `Context`.
+
 ## Quantization is not a concept past the decomposition band
 
 A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
@@ -207,6 +229,10 @@ How to comply:
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side decode cone) is covered for free.
+- **Preserve the primitive's structural laws.** A tensor-core A fragment is stationary across N and B is stationary
+  across M. A load indexed by both output axes and K is valid scalar contraction algebra, but it is not a matrix
+  atom operand; recognition declines that atom binding and the term remains on the PLANAR guardrail path. Do not
+  patch its emitted index for one reshape — state the stationary-operand law once.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
@@ -220,6 +246,29 @@ How to comply:
   condition. See the dependence-cones section of `compiler/ir/ARCHITECTURE.md`.
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
+
+Fusion and placement have separate ownership. Loop fusion forms the largest reasonable algebraic region subject to
+semantic preservation and its general work-duplication brakes; it never asks which GPU will run it, which schedule is
+available, or whether one kernel will be faster than two. Once recognition has built that region's term, the
+`PLACE@<path>` structural fork may keep it fused or materialize a closed subtree. Every resulting kernel then enters
+the same recognition and schedule paths independently. A scheduling gap is therefore repaired by extending the
+schedule domain or its placement choices, never by adding a profitability exception to fusion.
+
+Recognition is total over the algebra it accepts: a product contraction binds every additive channel sharing its A
+edge, and a root projection must bind every value it reads. If an optimized reading cannot preserve that complete
+term, recognition declines it and retains the general `Fold` spelling. A `PLACE` cut may expose a simpler term, but
+it cannot make a partial or open term legal. These are target-independent formation rules; hardware capabilities are
+consulted only when schedule and lowering choose a realizable primitive.
+
+This ownership boundary is executable: the pass contract test rejects context, hardware, search, schedule, and
+placement dependencies from `loop/fusion`. A new fusion condition must be justified only by algebraic correctness or
+bounded work duplication. Product names, workload provenance, schedule families, and placement keys belong later.
+
+The two-level tuner enforces the same boundary operationally. Its outer pipeline ends after `010_recognize`, where
+`PLACE` changes the kernel set; each terminal is a set of unmapped `TileOp`s priced by the sum of independently tuned
+kernels. The inner pipeline begins at `020_schedule`. Placement rows train the outer prior only, while schedule rows,
+node-store keys, O3 signatures, and kernel cache keys contain no `PLACE` metadata. Assembly lowers the measured outer
+winner directly rather than asking a later greedy schedule replay to reconstruct the kernel set.
 
 Loop fusion first keeps a contraction producer materialized when it fans out into the statistic and value paths of a
 downstream normalization. The N-way splicer shares repeated equal-coordinate demands, but this fan-out would duplicate
@@ -240,21 +289,19 @@ Fusion also lets a decomposed contraction's pointwise product reunite with its s
 upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
 product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
 
-## Resolve the hardware-atom binding once, structurally, at the tile level
+## Resolve algebraic roles once; select hardware from the schedule
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
-option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
-RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
-contraction-shaped `Fold`, so materialize reads the operands /
-`acc` off the node and only `factorize`s (the projection is peeled off the wrapping zero-axis fold's `lift` — its one
-home). Resolving it before the schedule means an atom that **cannot** be
-bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never gets built in the bilinear shape: its
-loads stay INLINE in a fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
+the tile IR already holds. The **atomize** helper (`lowering/tile/_atomize.py`, called by recognition rather than as a
+standalone pass) resolves target-independent operand roles once
+(`010_recognize._nodify_contraction` / `_atomize.bind_contraction_channels`) and feeds them into the
+contraction-shaped `Fold`. It does not select an instruction. Schedule enumeration later pairs that algebra with
+each hardware atom whose declared capabilities and operand laws fit; materialize reads the chosen pair and only
+`factorize`s it. An algebraic form that cannot be bound completely stays in the general `Fold` spelling instead of
 failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
-  (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
+- a `CONTRACTION` contraction → the shared A edge, every `(b_i, acc_i)` channel, and the projection
+  (`_atomize.bind_contraction_channels`): operands are named by each ⊗ **lift** — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
   has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`_atomize.make_cone`
   — a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
@@ -272,9 +319,9 @@ failing several passes later:
   no let table, no reference arm, and no resolve step:
   every downstream reader takes the cone's K seam straight off the view's `a` edge (`ops.cone_seam`); `lower`
   flattens it once, at the point of use. **Edge iff closed holds by construction**: operands bind POSITIONALLY to
-  lift params, so an operand cannot see the fold's state or its siblings — the closure scan is demoted to the
-  validation reading (1q) and lives with its one consumer, the cut (`_cut._captured_values`); closure is the precondition for lifting any subtree into its own kernel (a placement
-  cut). Flash's `P = exp(s − m)` is `combine`'s derived singleton-specialization internals — material BELOW the seam
+  lift params, so an operand cannot see the fold's state or its siblings. The same lexical closure analysis validates
+  cut eligibility and the constructed root projection; closure is the precondition for lifting any subtree into its
+  own kernel. Flash's `P = exp(s − m)` is `combine`'s derived singleton-specialization internals — material BELOW the seam
   lattice, never a cut target — and flash's QK score is a hoisted operand edge of the kv stream (step 7): closed by
   construction, reading only the enclosing iteration var, never state. The derived PV contraction's A edge is
   precisely where "no reference arm" becomes visible: `P` is already in a register, and since an edge is a `Load` or
@@ -480,51 +527,43 @@ The fragment idiom's re-entry semantics are the rule's own: `030` opts its halve
 that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
 is what lets such rules compose without knowing about each other.
 
-**Placement routing (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
+**Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
-through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
-TWO-LEVEL and RECURSIVE, decided BEFORE any schedule fork exists (`010_recognize` consults it right after the lift /
-prologue bind): a ROUTING golden entry — an ordinary kind entry whose knobs are `PLACE` keys ONLY (the cut set,
-never a schedule; the loader rejects a mixed entry, and the schedule golden tier skips routing entries, so the
-retired single-namespace hazards — a cut row tying its knob-identical fused twin — cannot return) — or an
-authoritative `PLACE` pin picks a cut seam; the realizer (`lowering/tile/_cut.py`) splits the tree there: the child
-subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
-index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
-AXIS — bridges carrier state as **f32** per the split-reduce workspace rule, while a zero-axis projection child is
-the value seam and keeps its leaf operand dtype: in the one-kind IR every node is a `Fold`, so the axis is the
-discriminator, not the class), and the parent
-consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
-roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
-recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
-out, yielding the cascade statistic + scale + plain matmul, every piece joining an EXISTING golden kind's evidence.
-Computed-A routing uses the fused-key convention on both sides: the live tree supplies the computed-A fact before a
-schedule offer exists, while a persisted `PLACE@a` supplies it for a stat-free activation cone with no second reduce
-axis. Keeping one key prevents the routing entry from recursively matching its own materialized producer.
-**Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
-and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
-in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
-(cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
-non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not
-fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
-`025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
-routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the
-OLD piece shapes' keys and are re-seeded rather than joined).
+through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Placement runs
+after algebra recognition and before schedule enumeration. With no authoritative evidence, `_cut.py` offers one
+structural fork containing the fused form first and one option for every realizable single-seam cut; all options spell
+the same seam-key set, with exactly one `cut` on each fragment choice. A cold deploy therefore preserves the maximal
+fused region, tuning measures both kernel sets, and a trusted deploy prior prices a cut as the sum of its kernels.
+
+A ROUTING golden (a `PLACE`-only record) or an authoritative pin collapses that fork before search. Routing records
+remain separate from schedule goldens: the loader rejects mixed records and the schedule tier skips routing entries.
+The structural choice persists in `Op.decision_knobs`, not `Op.knobs`, so it can replay across the source chain without
+polluting any resulting kernel's cache identity or schedule evidence.
+
+The realizer splits the selected child into a plain un-mapped `LoopOp` writing a `…__cut_…` workspace and a parent
+`LoopOp` consuming a workspace `Load`. The workspace index space is derived from enclosing axes; a fold-axis child
+bridges carrier state as f32, while a zero-axis value child keeps its leaf operand dtype. Both pieces re-recognize and
+schedule as fresh roots, recursively offering their own placement choices. Cut legality is structural: the child is
+single-component and closed, the parent is closed after substitution, the pure-copy non-terminating seam is refused,
+and a materialized fragment that fails Loop-IR SSA validation is not offered. Fusion never revisits this decision.
 
 **Fusion/placement ownership invariant.** Loop fusion and algebra recognition are target-independent and maximal
 subject to semantic closure and target-independent work preservation: they may reject a splice that changes
 observable effects, escapes a value, duplicates a reduction, or causes pathological logical-work expansion, but
 they never inspect a GPU capability, atom inventory, tile, stage, timing, or product name. Whether the resulting
-region is executable and efficient as one kernel is exclusively a placement/schedule question. The scheduler may
-therefore choose a `PLACE` cut when the fused/composed reading excludes every target-available legal hardware atom,
-contains a reduce-bearing operand no available atom can compose, or would materialize an expanded virtual layout
-instead of its compact value. A target that exposes no applicable atom retains the functional fused fallback: a cut
-is useful only when it recovers a declared hardware tier. Those rules are phrased over the tree, operand capabilities, and workspace
-geometry; they apply unchanged to every target. Every such decision remains addressable by the ordinary `PLACE`
-control (`PLACE=fuse|cut`, and `PLACE@<path>` where the seam is part of the recognized tree). An explicit pin is
-authoritative; deployable routing evidence is consulted only when no structural schedulability invariant fires.
-Adding an operation or platform
-must extend atom/transport capabilities or generic legality predicates, never add `if gpu == ...` or
-`if model == ...` routing.
+region is executable and efficient as one kernel is exclusively a placement/schedule question. Placement enumerates
+every structurally valid boundary independently of the target: ordinary closed tree seams and the reserved structural
+residues for compact broadcasts, nested reductions, and product/reduction pairs. It never selects a boundary because
+one target lacks an atom or because a workspace looks expensive. Schedule legality may use named target capabilities
+to determine which implementations each resulting kernel admits; the outer tuner then compares complete kernel-set
+latencies and records the winning `PLACE` row as routing evidence. A target with no applicable atom still retains the
+functional fused fallback, while a target whose materialized pieces schedule better can select the measured cut.
+
+Every decision remains addressable by the ordinary `PLACE` control (`PLACE=fuse|cut`, scoped tree paths, and the
+reserved structural-residue keys). An explicit pin or matching deployable routing record is authoritative; without
+either, the structural fork remains visible to tuning and a cold deploy takes its first, maximal option. Adding an
+operation or platform must extend atom/transport capabilities or generic legality predicates, never add
+`if gpu == ...` or `if model == ...` routing and never hide or force a placement alternative.
 
 Maximal fusion also preserves numerical type boundaries. A narrow tensor result produced by a wide
 accumulator remains an explicit typed `copy` in Loop IR. A scalar path renders that conversion in the

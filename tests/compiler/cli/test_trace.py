@@ -317,8 +317,8 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
     assert record.loop_wire is not None
 
 
-def test_trace_inventory_captures_post_placement_product_reduction_targets(tmp_path) -> None:
-    """An eliminated MxKxN placement workspace must never become a standalone ABI."""
+def test_trace_inventory_keeps_product_reduction_placement_context(tmp_path) -> None:
+    """An MxKxN residue travels with its reduction; placement decides its boundary."""
     graph = Graph()
     M, H, K, N = 512, 16, 32, 16
     graph.add_node(InputOp(), [], Tensor("x", (M, H), "f16"), node_id="x")
@@ -341,16 +341,21 @@ def test_trace_inventory_captures_post_placement_product_reduction_targets(tmp_p
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, force_loop_targets=True)
     records = load_golden_records(load_golden_file(path))
-    kernel_outputs = [
+    target_output_shapes = [
+        tuple(dim.as_static() for dim in record.target_program.buffer(output).shape)
+        for record in records
+        for output in record.target_program.outputs
+    ]
+    internal_loop_shapes = [
         tuple(dim.as_static() for dim in node.output.shape)
         for record in records
         for node in record.target_program.nodes.values()
         if isinstance(node.op, LoopOp)
     ]
 
-    assert (M, K, N) not in kernel_outputs
-    assert (M, K) in kernel_outputs
-    assert (M, N) in kernel_outputs
+    assert (M, K, N) not in target_output_shapes, "the expanded residue must not be a standalone tune ABI"
+    assert (M, K, N) in internal_loop_shapes, "the outer placement fork still needs the split alternative"
+    assert (M, N) in target_output_shapes
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:

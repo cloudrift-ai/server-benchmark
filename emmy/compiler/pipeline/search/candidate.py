@@ -347,7 +347,10 @@ class LazyCandidate:
         assert len(leaves) == 1, f"leaf Fork must expand to a single option, got {len(leaves)}"
         option = leaves[0]
         resolved = Candidate(run=self.inner.run, graph=self.inner.graph.copy(), cursor=self.cursor)
-        resolved.apply(match.remap(resolved.graph), option)
+        leaf_match = match.remap(resolved.graph)
+        if isinstance(fork, OptionFork):
+            fork.configure_match(leaf_match)
+        resolved.apply(leaf_match, option)
         self.resolved_knobs = dict(fork.knobs)
         self.pending = None
         self.inner = resolved

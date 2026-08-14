@@ -15,6 +15,19 @@ This catches semantic bugs that structural tests (checking which ops are
 present) cannot: wrong axis in a reduction, swapped operands, missing
 scale constant, incorrect coordinate mapping, etc.
 
+## Pass-contract guardrails
+
+Some pass properties span every rule and are enforced statically in
+`test_hardware_capability_contract.py`. Passes receive target facts through `Context`, never a process-global target
+probe; primitive legality uses a named capability rather than a repeated compute-capability threshold; and physical
+product identity is restricted to measured placement routing. Algebra recognition cannot consult capabilities.
+
+The same guard keeps fusion independent of placement and scheduling. `loop/fusion` cannot import target, context,
+knob, search, or lowering policy; accept `ctx`; inspect hardware or knob attributes, including through `getattr`; or
+spell schedule-family keys. Fusion tests continue to prove semantics, while this static contract prevents a later
+performance workaround from weakening the maximal algebraic region instead of adding a generic `PLACE` or schedule
+choice.
+
 ## File Layout
 
 ```

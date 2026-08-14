@@ -1563,25 +1563,25 @@ class EmmyGenRunner:
         if hetero is not None:
             audit_layers.append(hetero)
         named = [
-            (f"L{runner.global_layer_id(li)}.{role}.{tag}", plist[li])
+            (f"L{runner.global_layer_id(li)}.{role}.{tag}", plist[li], m)
             for li in audit_layers
-            for tag, role, plist in (
-                (f"decode.m{decode_bucket}", "pre", runner._pre_decode),
-                (f"decode.m{decode_bucket}", "post", runner._post_decode),
-                ("decode.m1", "pre", runner._pre_m1),
-                ("decode.m1", "post", runner._post_m1),
-                (f"chunk.m{prefill_bucket}", "pre", runner._pre_prefill),
-                (f"chunk.m{prefill_bucket}", "post", runner._post_prefill),
+            for tag, role, plist, m in (
+                (f"decode.m{decode_bucket}", "pre", runner._pre_decode, decode_bucket),
+                (f"decode.m{decode_bucket}", "post", runner._post_decode, decode_bucket),
+                ("decode.m1", "pre", runner._pre_m1, 1),
+                ("decode.m1", "post", runner._post_m1, 1),
+                (f"chunk.m{prefill_bucket}", "pre", runner._pre_prefill, prefill_bucket),
+                (f"chunk.m{prefill_bucket}", "post", runner._post_prefill, prefill_bucket),
             )
             if plist is not None and plist[li] is not None
         ]
         named += [
-            (f"moe.expert.{'' if g == 0 else f'g{g}.'}{tag}", tiers[key])
+            (f"moe.expert.{'' if g == 0 else f'g{g}.'}{tag}", tiers[key], m)
             for g, tiers in enumerate(expert_tiers)
-            for key, tag in (("bucket", f"bucket.m{decode_bucket}"), ("one", "one.m1"), ("m256", "m256"))
+            for key, tag, m in (("bucket", f"bucket.m{decode_bucket}", decode_bucket), ("one", "one.m1", 1), ("m256", "m256", 256))
             if tiers[key] is not None
         ]
-        audit_boot_programs(named)
+        audit_boot_programs(named, dtype_bytes=np_dtype.itemsize)
         return runner
 
     def embed(self, input_ids):

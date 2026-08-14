@@ -114,8 +114,8 @@ from emmy.compiler.structural import digest
 logger = logging.getLogger(__name__)
 
 #: The per-site schedule families this enumeration decides, IN THE ORDER their keys lead the fork
-#: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the seam
-#: family — resolved from routing goldens / pins, never enumerated here.
+#: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the separate
+#: structural seam fork, enumerated before each resulting kernel reaches this schedule enumerator.
 #:
 #: Not a copy of ``path.SLICE_FAMILIES`` even though the members match: that one answers "which
 #: families key a slice" (a set) and this one "in what order do their levels nest" (a sequence).
@@ -462,10 +462,10 @@ class _Term:
         atoms = _warp_atoms(self, node)
         warp = [p for p in warp_tile_moves(atoms) if _tile_ok(self, node, p)] if atoms else []
         self.warp_eligible = self.warp_eligible or bool(warp)
-        # A COMPUTED ``a`` edge is warp-ONLY: the fill that evaluates a producer cone is the mma
-        # tier's compute fill, and a per-cell / scalar expansion would re-run the cone on every K
-        # step. The reduce tiers stay reachable — through the COLLAPSE reading, whose spliced fold
-        # computes the whole body per cell (:func:`_readings`).
+        # A COMPUTED operand is warp-ONLY: the fill evaluates its producer cone, while a scalar
+        # expansion would re-run that cone on every K step. Fully materialized product channels
+        # remain ordinary algebra: scalar, direct MMA, and every legal stage transport can carry
+        # all channels through the generalized backend.
         scalar = scalar_tile_moves() if not _has_computed_operand(node) else []
         grouped: dict[str, list[TilePlan]] = {}
         for plan in scalar + warp:
@@ -994,9 +994,10 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
 
 
 def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
-    """The RESOLVED compute-fill stages a COMPUTED operand offers — its depths, and nothing else:
-    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
-    evaluate a cone), so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer
+    """The resolved compute-fill stages a COMPUTED operand offers — its depths and nothing else.
+
+    The stage is MANDATORY because no copy transport can evaluate a producer cone, so a ``STAGE``
+    pin can only choose the depth. ``d1`` and the asynchronous-peer
     prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
     :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
@@ -1096,9 +1097,12 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
 
 
 def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
-    """The contraction's values at ``work``: the tile × stage × reduce legal product, over EITHER
-    inhabitant of the ``a`` edge — a materialized ``Load`` (both tiers, every transport) or a
-    COMPUTED cone (the warp tier alone, over the mandatory compute fill)."""
+    """The contraction's legal tile × stage × reduce product at ``work``.
+
+    Materialized forms of every arity reach direct and copy transports. A computed operand is
+    warp-only under mandatory ``sync`` staging; its demoted reading keeps the general reduce path
+    available independently.
+    """
     pin = term.pin("TILE", node)
     if pin is not None:
         try:

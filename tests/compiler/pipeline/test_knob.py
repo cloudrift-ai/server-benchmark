@@ -328,13 +328,12 @@ def test_knob_features_typed_knobs(monkeypatch):
 
 
 def test_knob_features_stage_codec():
-    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``) featurizes to the
+    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/p<reg_depth>]``) featurizes to the
     ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""
     feats = knob_features({"STAGE": "d3/tma"})
     assert feats["D_stage_depth"] == 3.0
     assert feats["D_stage_async"] == 1.0
     assert feats["D_stage_tma"] == 1.0
-    assert feats["D_stage_split"] == 0.0
     assert feats["D_stage_reg_depth"] == 1.0  # no /p<n> ⇒ register pipeline OFF
     sync = knob_features({"STAGE": "d2/cp"})
     assert sync["D_stage_depth"] == 2.0 and sync["D_stage_async"] == 1.0 and sync["D_stage_tma"] == 0.0
@@ -587,9 +586,9 @@ def test_values_equal_canonicalizes_stage_token_order():
     from emmy.compiler.pipeline.knob import values_equal
 
     assert values_equal("STAGE", "cp/d2", "d2/cp")
-    assert values_equal("STAGE@a1", "split/tma/d1", "d1/tma/split")
+    assert values_equal("STAGE@a1", "tma/d1", "d1/tma")
     assert not values_equal("STAGE", "d2/cp", "d3/cp")
-    assert not values_equal("STAGE", "d1/tma", "d1/tma/split")
+    assert not values_equal("STAGE", "d1/tma", "d2/tma")
 
 
 def test_knob_pinned_scopes_and_restores(monkeypatch):

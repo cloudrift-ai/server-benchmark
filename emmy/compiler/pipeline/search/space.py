@@ -396,21 +396,6 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
 # key block — today's deterministic stamp), so a cold tie keeps the historical geometry. Per-node
 # legality (kv / query-row divisibility, the dtype atom) is the scheduler's
 # (the twisted warp options), not the grid's.
-_FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own query-row block
-_FLASH_KEY_ATOMS: tuple[int, ...] = (2, 4, 8, 16)  # score n-atoms per streaming block (bn = n·atom_n keys)
-_FLASH_QTILES: tuple[int, ...] = (1, 2)  # register query tiles per warp (reg_m — FA-2's in-flight ILP)
-
-
-def twisted_warp_moves() -> list[tuple[int, int, int]]:
-    """The warp-flash geometry candidates ``(warps_m, key_atoms, q_tiles)`` — the
-    :data:`_FLASH_WARPS` × :data:`_FLASH_KEY_ATOMS` × :data:`_FLASH_QTILES` grid, conservative
-    option-0 ``(1, 2, 1)`` first. ``q_tiles`` is the register query-tile count per warp (the
-    ``TILE`` codec's ``f<FM>x<FN>`` reg_m): each warp streams ``q_tiles`` independent ``(m, l, O)``
-    chains against shared K/V fragments — FA-2's in-flight ILP, hiding the per-step
-    mma → rowmax → exp → rescale dependency chain without more warps. Each triple resolves into
-    the Q@K / P@V mma :class:`TilePlan`\\ s in the twisted warp options (the ``TILE``
-    codec spells the full plan; this grid only generates the free geometry — ``bk`` is shape-derived)."""
-    return [(um, nt, fm) for fm in _FLASH_QTILES for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
 
 
 def map_tile_moves() -> list[TilePlan]:
@@ -434,11 +419,6 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     atoms that lack an asynchronous copy instruction. Its depths use the same slot schedule but do
     not promise copy/compute overlap. The ``p2`` smem→register double-buffer is warp-only.
 
-    ``split`` — one transport PER staged edge instead of one over all of them — joins the warp list.
-    It resolves only where the fold's edges are consumed at DISTINCT positions of its derived
-    evaluation (``_legality.stage_split_groups``), which a contraction's single multiply never is,
-    so the matmul resolvers decline it and the streaming pair is where it lands.
-
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
     leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
     only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
@@ -446,7 +426,7 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     if not warp:
         return depths
     sync = [Stage.parse(s) for s in ("d1/sync", "d2/sync", "d3/sync", "d4/sync", "d1/sync/p2", "d2/sync/p2")]
-    return [*sync, *depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
+    return [*sync, *depths, Stage.parse("d2/cp/p2")]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is

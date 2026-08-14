@@ -24,9 +24,7 @@ The destination-buffer dtype comes from the op's ``outputs`` / ``inputs``
 (matcher-populated graph Tensors).
 
 NOTE: atomic reduce-writes must NOT vectorize (each lane needs its own
-``atomicAdd``). The scalar tier emits no atomic writes — cross-CTA reduction
-is future work — so the atomic guard is currently a no-op (``atomic_write_ids``
-empty); it needs rebuilding when split-K / split-reduce returns.
+``atomicAdd``) — the atomic guard below skips them.
 """
 
 from __future__ import annotations

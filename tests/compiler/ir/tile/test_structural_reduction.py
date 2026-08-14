@@ -20,7 +20,7 @@ from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, ReducePlan, TileOp
 from emmy.compiler.ir.tile.ir import operand_body, operand_name
-from emmy.compiler.ir.tile.ops import axis_role, cone_seam, reduce_loop, reduce_plan
+from emmy.compiler.ir.tile.ops import axis_role, reduce_loop, reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -299,64 +299,6 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     # QK (the hoisted edge) first, then the pre-PV probability, then the flattened PV loop, then the state fold.
     assert body.index(qk_loop) < body.index(prob) < body.index(pv_loop) < body.index(o_fold)
     assert pv_loop.role is AxisRole.CONTRACTION and isinstance(pv_loop.body[-1], Accum) and pv_loop.body[-1].name == "O_i__pv"
-
-
-def test_flash_op_is_a_two_contraction_tree() -> None:
-    """``_flash_op`` builds the blocked two-bilinear ``Fold`` tree: BOTH contractions ride the single
-    walked edge — ``step`` — with QK (``Σ_dd Q·K`` score) at its head and PV — a
-    **register-resident-A** contraction (``A = P``, the exp weight, a one-stmt cone INLINE on the
-    edge) — spliced later (block=1: a singleton ``pj`` reduce). There is no second composition
-    edge: a composed reduce spells it ONE way, so the walk reaches both QK and PV as nodes on
-    ``step``. Its A is computed, not a gmem load; its O-fold consumes the PV output ``O_i__pv``,
-    so the ⊗ is a contraction node, not an inline FMA."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
-
-    op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)  # (batch, s_q, s_k, head_dim, d_v)
-    (red,) = op.operands  # the streaming Fold under the O/l projection Map
-    assert red.role is AxisRole.TWISTED  # derived off the exp-family flash carrier
-    folds = [s for s in red.step_stmts() if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION]
-    assert len(folds) == 2 and folds[0].out == "sacc", "the QK score fold is the derived evaluation's head node"
-    assert folds[0] is red.operands[0], "the QK score is the hoisted operand edge (step 7)"
-    # Algebra reads come straight off the stored node — placement is the ``Placed`` view's job.
-    pv = folds[1]
-    assert (not isinstance(pv.a, Load)) and operand_name(pv.a) == "O_i__p", "PV's A operand is the inline exp weight P"
-    assert pv.a.out == "O_i__p"
-    assert pv.acc == "O_i__pv"
-    # A is the ONE-STMT node itself, not an identity ``Map`` wrapping a prologue in the cone shape:
-    # the copy is the reference (an edge is a Load or an inline node — no name-reference arm), and
-    # with an empty cell the wrapper carried nothing (``cone_seam`` bridges no stats either way).
-    assert not pv.a.operands, "PV's A is the one-stmt cone itself — no empty-cell cone wrapper"
-    assert [s.pretty()[0].strip() for s in operand_body(pv.a)] == ["O_i__p = copy(m_i__t5)"]
-    assert cone_seam(pv.a) == ((), tuple(pv.a.body), ()), "an empty-cell wrapper bridged no stats — the seam is the node"
-    # The reduce loop flattens BOTH folds; the O-fold reads the PV output (no inline v·P).
-    (kv_loop,) = red.lower()
-    o_fold = next(s for s in kv_loop.body if isinstance(s, Accum) and s.name == "O_i")
-    assert o_fold.value == "O_i__pv", "the O-fold consumes the PV contraction's output, not an inline product"
-
-
-def test_out_store_index_reproduces_output_layout() -> None:
-    """``_out_store_index`` maps the fragment's grid axes onto the ROOT output buffer's real slots
-    (by dim extent), keeping ``Literal`` slots (size-1 batch / broadcast dims). The bare grid order
-    would mis-stride a higher-rank / transposed output → the Gemma model-trace flash NaN."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import _out_store_index
-
-    grid = (Axis("b0", Dim(1)), Axis("b1", Dim(16)), Axis("m", Dim(32)), Axis("d", Dim(256)))
-
-    # Gemma's ``[b, h, s, 1, d]`` — a unit broadcast dim between seq and head_dim (Literal slots kept).
-    out5 = (Literal(0, "int"), Var("h"), Var("s"), Literal(0, "int"), Var("hd"))
-    idx = _out_store_index(out5, (Dim(1), Dim(16), Dim(32), Dim(1), Dim(256)), grid)
-    assert idx == (Literal(0, "int"), Var("b1"), Var("m"), Literal(0, "int"), Var("d"))
-
-    # A transposed ``[b, s, h, d]`` output — extent-match routes seq→m, head→b1 to their real slots.
-    outT = (Literal(0, "int"), Var("s"), Var("h"), Var("hd"))
-    idxT = _out_store_index(outT, (Dim(1), Dim(32), Dim(16), Dim(256)), grid)
-    assert idxT == (Literal(0, "int"), Var("m"), Var("b1"), Var("d"))
-
-    # No grid axis for a Var slot's extent → decline (the caller degrades flash to cut).
-    assert _out_store_index((Var("x"),), (Dim(999),), grid) is None
 
 
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #

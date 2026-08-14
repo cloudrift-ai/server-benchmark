@@ -42,7 +42,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   default). The knob is ephemeral — resolved here into the schedule's
   `ReducePlan`; the combine stays the `Fold` node's stored program. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
-  `sum`/`max`/`mean` AND twisted online-softmax / flash, scalar AND
+  `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
   full-row outputs); the default cooperates a wide reduce feeding an
   under-occupied grid.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
@@ -60,7 +60,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
   arg. The cross-CTA split (`030_split_reduce`), `reg` fold, a symbolic FREE
   axis (dynamic grid), strided rows, and the tensor-core `warp_tile`
-  (incl. flash's warp tier) are reserved future tiers.
+  are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
 
@@ -152,7 +152,7 @@ op names. The per-op trait *properties* (`op.semiring_product` — is this op a 
 in some semiring) and the binary method `⊗.distributes_over(⊕)` (does this product
 distribute over that reduce — the `_SEMIRING` table, only `(+, ×)` today) live on
 `ElementwiseImpl`; the module's op-name-free **role queries** the planner /
-atom-cell matchers / flash recognizer ask round them out: `reduce_canon` (alias →
+atom-cell matchers ask round them out: `reduce_canon` (alias →
 base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 (`reduce_spelling`) — the single op-keyed table
 behind the four sites that used to switch on the reduce op name (`Accum.render`'s
@@ -197,7 +197,7 @@ bilinear one. A predicate cannot be constructed, subclassed or annotated, which 
 type to dispatch on and no second place for a fact to live.
 
 - A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
-  softmax's normalize, RMSNorm's, and flash's `divide(O, l)` are all one kind composed at two depths.
+  softmax's normalize and RMSNorm's are one kind composed at two depths.
 - The BILINEAR shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive
   combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The `⊗` and the
   additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
@@ -217,8 +217,7 @@ A reduce is a contraction not by "two loads" but by the genuine algebra — the 
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
 operands) and contracts ≥ 2 distinct operand buffers (`x·x` is a squared reduce, not a
 contraction). Recognition stamps the `CONTRACTION` role on that form (keeping the matmul's
-`Accum` a loose `Accum` rather than degenerate-folding it like a plain reduce);
-The schedule gates flash structurally (a reduce loop nested inside a reduce loop); the mma
+`Accum` a loose `Accum` rather than degenerate-folding it like a plain reduce); the mma
 atom tier reads the operands off the annotated loop to pick the tensor-core cell.
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
@@ -233,7 +232,7 @@ through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a `Fol
 `state_b` / `twisted`, the `combine_states` re-emission, `state_merge(other)`, the finalize
 `identities`, and `loop_state_head` — the loop-body read of the carried state's head), consumed
 only by the kernel materializer and `030_split_reduce`. A *degenerate* fold is a plain
-`sum`/`max`/`mean` reduce; a *twisted* one is online-softmax / flash; a contraction's algebra is
+`sum`/`max`/`mean` reduce; a *twisted* one is online-softmax; a contraction's algebra is
 the degenerate algebra of its additive fold.
 
 The neutral element IS stored, as `Fold.init` — a monoid is `(S, ⊕, e)`, and a term that kept only
@@ -255,9 +254,9 @@ exponentials, fold identities, DCE/CSE) and a structural certificate asserts eve
 `exp_combine_states` for the stored combine) — a twisted `Fold`'s combine IS the generator's
 program (the formation invariant `Fold.__post_init__` asserts), and the component ROLES are shape-derived off
 the terms: component 0 the pivot (score), a literal-`1.0` term a denominator, a value term an
-expectation — softmax is flash minus the expectation component. **Example** — flash attention's
-online softmax: state `(m, l, O)`, partial `(score, value)`, identity `(−inf, 0, 0)`, merge
-`m_new=max(m,s); alpha=exp(m−m_new); l=l·alpha+exp(s−m_new); O=O·alpha+exp(s−m_new)·v; m=m_new`.
+expectation (no recognizer builds an expectation-bearing carrier today). **Example** — the
+online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
+`m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
 **The λ-foldMap primitives** (`ir/stmt/body.py` / `ir/stmt/algebra.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
@@ -554,7 +553,7 @@ non-empty (`λ() [captures m_i__t5] -> (…)`) — the free names that are not i
 closure predicate applies (`axis_names`, relocated to `tile/ops.py` so the dump and `_cut._captured_values` share one
 definition; the iteration space is the term's axes ∪ the placement's free/grid ∪ the boundary stores' sweep axes).
 Without a capture set a λ reads as closed, and closure is precisely what decides whether a subtree can hoist to an
-operand edge — flash's `P = exp(s − m)` captures the carrier's running max, which is why its seam is not cuttable. The
+operand edge — combine-derived material captures the carrier's running state, which is why its seam is not cuttable. The
 set is measured only when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted
 rather than reporting grid coordinates as captures.
 
@@ -562,13 +561,13 @@ rather than reporting grid coordinates as captures.
 The structure is already complete in the stored tree: the operand edges and their nesting say it, and a derived
 evaluation follows from the same params, as re-derivable as `Fold.lower()`'s output. Printing one beside storage is the
 inversion this layer exists to prevent, and it was the bulk of the output — measured over eight frontend kernels the
-step branch restated `lift` + `combine` and contributed no schedule site on seven of them (flash 50 → 28 term lines,
-softmax 31 → 21). `--ir loop` is where a reader goes for a body.
+step branch restated `lift` + `combine` and contributed no schedule site on seven of them (softmax 31 → 21 term
+lines). `--ir loop` is where a reader goes for a body.
 
 The caller facts that live BESIDE the term get their own regions — `place` / `work` / `wspec` above it, `schedule` and
 `stores` below. Schedule slices annotate a node as `⟨TILE=… REDUCE=… STAGE=…⟩` only when the owning `TileOp` is
-supplied (`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. The one
-slice whose site is DERIVED (flash's synthesized PV, `TILE@pj`) has no stored node to annotate: `ops.unplaced_slices`
+supplied (`pretty(op, tile=…)`), read through `Sched` and the path codec, so nothing on the term can carry one. A
+slice whose site is DERIVED (a synthesized node) has no stored node to annotate: `unplaced_slices`
 reports it and it prints in the `schedule` region, rather than reconstructing the derived node inside the term to hang
 it on. That region is empty — and therefore absent — for every kernel whose sites are all stored.
 
@@ -589,7 +588,7 @@ directly (no separate AST class).
 | `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit 2/2/8 counts because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
 | `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. |
 | `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. |
-| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps, or the flash streaming KV block) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
+| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. Stores f32 directly or downconverts to f16. Optional `RegEpilogue` loads and pointwise chains are evaluated at each element's own coordinates; guarded tails predicate every load and store. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Write`, `Select`, `Cond`. |
 

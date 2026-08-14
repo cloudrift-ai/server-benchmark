@@ -5,12 +5,9 @@ through the tree-path codec (:mod:`emmy.compiler.ir.tile.path`) and asserts the 
 is the canonical (shortest-unique) one. The golden loader does not validate spellings, so this is
 the only guard on the corpus: a structural change to a recognized tree that re-keys a canonical
 site, or a hand-seeded entry with a stale/wrong-site spelling, would otherwise just stop matching
-the stamped rows and the golden would silently never deploy. Documented exceptions, asserted
+the stamped rows and the golden would silently never deploy. Documented exception, asserted
 exactly:
 
-- a DYNAMIC attention golden records ONE bare ``TILE`` naming its PV plan (the masked-flash
-  golden form — schema-enforced in ``search/golden.py``); on the flash tree bare ``TILE`` is
-  ambiguous by design (two contraction sites), and the golden layer matches it any-of.
 - a bare key whose family has NO site on the kind's tree is the decided-empty stamp — its value
   must be the empty spelling.
 
@@ -117,18 +114,6 @@ def _mlp_geglu() -> Graph:
     return g
 
 
-def _attention() -> Graph:
-    pytest.importorskip("torch")
-    from emmy.commands.trace import graph_from_code
-
-    code = (
-        "torch.nn.functional.scaled_dot_product_attention(torch.randn(1,4,128,128,dtype=torch.float16), "
-        "torch.randn(1,4,128,128,dtype=torch.float16), torch.randn(1,4,128,128,dtype=torch.float16), is_causal=False)"
-    )
-    graph, _, _ = graph_from_code(code)
-    return graph
-
-
 def _trees(build, pick=None, *, target=(12, 0)):
     """The recognized tile trees for one target — resolve the tile passes and collect every
     ``TileOp``'s stored op. ``pick`` selects a fork leaf (default option-0; the schedule slices a
@@ -183,7 +168,6 @@ def trees():
         # its own, where the stat fold is itself the primary).
         "norm_linear": _tree(_norm_linear, pick=_is_warp_row),
         "mlp_geglu": _tree(_mlp_geglu, pick=_is_warp_row),
-        "attention": _tree(_attention),
     }
     return out
 
@@ -205,8 +189,6 @@ def _tree_kind(record) -> str | None:
     ShapeKey and the structural features.
     """
     origins = record.origin_ops
-    if "torch.sdpa" in origins:
-        return "attention"
     if record.shape_key.kind == "fused":
         contractions = sum(op in {"torch.linear", "torch.matmul"} for op in origins)
         return "mlp_geglu" if contractions > 1 else "norm_linear"
@@ -253,14 +235,6 @@ def test_every_stored_golden_spelling_is_canonical(trees):
                 continue
             ctx = f"{fname}:{cfg.name}: {key}={value!r}"
             if key == family_of(key):  # bare — the canonical spelling of the primary site
-                if kind == "attention" and key == "TILE":
-                    # The documented exception: a dynamic attention golden records ONE bare TILE
-                    # (its PV plan) — ambiguous on the tree by design, matched any-of by the
-                    # golden layer. Assert the exception holds exactly (dynamic entries only).
-                    assert cfg.dynamic, f"{ctx}: a STATIC attention golden must spell TILE@dd/TILE@pj"
-                    with pytest.raises(ValueError, match="ambiguous"):
-                        resolve(roots[0], key, all_sites=roots_and_sites[0][1])
-                    continue
                 resolved = [(root, all_sites) for root, all_sites in roots_and_sites if resolve(root, key, all_sites=all_sites) is not None]
                 if not resolved:
                     assert value in ("", None), f"{ctx}: no {key} site on the {kind} tree, yet a non-empty value"

@@ -155,19 +155,6 @@ def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
     # a plain key that cannot join the live tree's structural computed-A convention.
     if key.kind == "" and "PLACE@a" in knobs:
         key = replace(key, kind="fused", is_warp=True)
-    # Legacy dynamic-flash rows predate axis-keyed ``TILE@dd`` / ``TILE@pj`` knobs. Main's
-    # old fusion boundary left enough exp-family histogram on the consumer for ShapeKey's
-    # fallback classifier; gate-free fusion moves that histogram into the probability producer.
-    # The flash recognizer is the stronger fact, so target derivation stamps this marker when it
-    # certifies the consumer+producer unit. Keep those persisted rows on their stable flash key.
-    if structural_features.get("S_flash_certified"):
-        key = ShapeKey(
-            free_prod=key.free_prod,
-            reduce_max=0 if key.is_dyn else key.reduce_max,
-            is_warp=key.is_warp,
-            is_dyn=key.is_dyn,
-            kind="flash",
-        )
     return key
 
 
@@ -572,7 +559,6 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
         return result
 
     from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
     wanted = set(record.origins)
     program_key = (id(record.program_wire), record.compute_cap, record.gpu_name, record.bindings)
@@ -584,22 +570,15 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
         provenance.seed(graph)
         ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
         lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-        absorbed_ids = {
-            producer for node in lowered.nodes.values() if isinstance(node.op, LoopOp) for producer in fused_producer_ids(lowered, node)
-        }
         target_index = {}
         for node_id in lowered.topological_order():
             node = lowered.nodes[node_id]
-            if not isinstance(node.op, LoopOp) or node_id in absorbed_ids:
+            if not isinstance(node.op, LoopOp):
                 continue
-            fused = fused_producer_ids(lowered, node)
-            absorbed = [lowered.nodes[producer] for producer in fused if producer in lowered.nodes]
-            origins = frozenset(origin for item in (node, *absorbed) for origin in provenance.get(item) if origin in record.program.nodes)
+            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
             feature_map = {
                 name: float(value) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
             }
-            if fused:
-                feature_map["S_flash_certified"] = 1.0
             features = tuple(sorted(feature_map.items()))
             if origins and features:
                 target_index.setdefault(origins, set()).add(features)

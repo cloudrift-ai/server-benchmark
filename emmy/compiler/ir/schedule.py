@@ -92,9 +92,8 @@ class FoldMove(enum.Enum):
     """The per-level combine *mechanism* — the placement-keyed fold MOVE, derived from the
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
-    ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence), ``_twist``'s
-    streaming merge (the same SHFL move realized as a ``FragmentRowReduce`` at fragment
-    residence), and ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence) and
+    ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
@@ -696,17 +695,6 @@ class Stage:
     smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
-    # The transport GROUP GRANULARITY: how many transport groups this fold's staged edges are cut
-    # into. Off = ONE transport over all of them (a contraction's single multiply consumes both
-    # edges, so there is one group to cut). On = one transport PER edge, each with its own slab and
-    # mbarrier, so the refills interleave with the phases that no longer read them — the warp-flash
-    # stream's FA-2 choreography, where K refills under softmax + P·V and V under the next step's
-    # Q·K, so a wide (64-key) streaming block overlaps its copies within HALF the paired ring's
-    # smem. Implies the A (query) operand stages through smem too (the freed resident fragments are
-    # what make the wide block's registers fit). Eligible only where the fold has ≥ 2 staged operand
-    # edges consumed at DISTINCT positions of its derived evaluation, which is why the matmul
-    # resolvers decline it.
-    split: bool = False
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORT_SPELL:
@@ -715,15 +703,12 @@ class Stage:
             raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
         if self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
-        if self.split and self.depth != 1:
-            raise ValueError("the per-edge transport split is single-slab (d1) — its overlap comes from the phase split")
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
         """Decode the ``STAGE`` knob codec into a stage: ``/``-separated tokens —
-        ``d<depth>`` (gmem→smem ring depth), ``sync`` | ``cp`` | ``tma`` (the transport), an
-        optional ``split`` flag (one transport per staged edge), and an optional ``p<reg_depth>``
-        (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
+        ``d<depth>`` (gmem→smem ring depth), ``sync`` | ``cp`` | ``tma`` (the transport), and an
+        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
         caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
         only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
 
@@ -734,7 +719,7 @@ class Stage:
         it), naming the codec so a bad pin names its knob."""
         s = (spec or "").strip()
         seen: set[str] = set()
-        depth, transport, split, reg_depth = 1, "sync", False, 1
+        depth, transport, reg_depth = 1, "sync", 1
 
         def once(field: str, tok: str) -> None:
             if field in seen:
@@ -745,9 +730,6 @@ class Stage:
             if t in _TRANSPORT_CODEC:
                 once("transport", t)
                 transport = _TRANSPORT_CODEC[t]
-            elif t == "split":
-                once("split", t)
-                split = True
             elif t.startswith("d"):
                 once("d", t)
                 depth = _codec_width(t[1:], tok=t, codec="STAGE")
@@ -756,15 +738,13 @@ class Stage:
                 reg_depth = _codec_width(t[1:], tok=t, codec="STAGE")
             else:
                 raise ValueError(f"bad STAGE token {t!r} ({_STAGE_EXPECT})")
-        return cls(depth=depth, transport=transport, split=split, reg_depth=reg_depth)
+        return cls(depth=depth, transport=transport, reg_depth=reg_depth)
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
         derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
         toks = [f"d{self.depth}", _TRANSPORT_SPELL[self.transport]]
-        if self.split:
-            toks.append("split")
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
         return "/".join(toks)

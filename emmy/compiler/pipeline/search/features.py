@@ -147,7 +147,6 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         # The per-edge transport split (``/split`` — the flash stream's FA-2 choreography, which
         # also stages Q): enumerated as a sibling of the paired ring on flash rows, so without
         # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
-        "D_stage_split": 1.0 if st.split else 0.0,
     }
 
 
@@ -458,7 +457,7 @@ def _stage_sig(knobs: dict) -> tuple | None:
     if not spec:
         return None
     st = _parsed_stage(str(spec))
-    return (st.depth, st.transport, st.split) if st is not None else None
+    return (st.depth, st.transport) if st is not None else None
 
 
 def _geom_feats(

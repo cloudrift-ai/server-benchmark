@@ -53,7 +53,7 @@ def test_warp_alias_canonicalizes(alias: str, canonical: str) -> None:
     assert TilePlan.parse(alias, Workers.parse("w2x1")).spell() == canonical
 
 
-@pytest.mark.parametrize("spec", ["d1/sync", "d1/cp", "d2/cp", "d3/tma", "d4/cp/p2", "d1/tma/split"])
+@pytest.mark.parametrize("spec", ["d1/sync", "d1/cp", "d2/cp", "d3/tma", "d4/cp/p2", "d1/tma"])
 def test_stage_round_trip(spec: str) -> None:
     assert Stage.parse(spec).spell() == spec
 
@@ -63,7 +63,7 @@ def test_stage_binding_is_order_free() -> None:
     assert Stage.parse("cp/d2/p4") == Stage.parse("d2/cp/p4")
 
 
-@pytest.mark.parametrize("spec", ["d2/cp/d3", "sync/tma", "d1/cp/p2/p4", "d1/tma/split/split"])
+@pytest.mark.parametrize("spec", ["d2/cp/d3", "sync/tma", "d1/cp/p2/p4", "d1/tma/d2"])
 def test_stage_field_spelled_twice_raises(spec: str) -> None:
     """Binding is order-free, so a repeated token has no last-one-wins reading a caller could have
     meant: ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma`` would land ``d1/tma``, each quietly

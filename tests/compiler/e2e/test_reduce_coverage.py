@@ -283,10 +283,12 @@ def test_attention_combine_accuracy(variant, monkeypatch):
     if variant == "serial":
         assert "__shfl_xor_sync" not in src, "attention/serial: unexpected cooperative combine"
     else:
-        # The flash carrier folds 3 state components (m, l, O) through the SAME butterfly.
+        # The multi-component twisted carrier folds EVERY state component through the SAME
+        # butterfly — the online-softmax carrier is (m, d), so at least two distinct
+        # components ride the shuffle.
         assert "__shfl_xor_sync" in src, "attention/coop_warp: expected the cooperative-KV warp butterfly"
-        assert all(f"__shfl_xor_sync(__activemask(), {c}" in src for c in ("m_i", "l_i", "O_i")), (
-            "attention/coop_warp: the flash combine must shuffle all 3 carrier components"
+        assert src.count("__shfl_xor_sync(__activemask(),") >= 2, (
+            "attention/coop_warp: the twisted combine must shuffle every carrier component"
         )
 
 
@@ -327,7 +329,10 @@ def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatc
         assert n_global == 1, f"atomic finalize is one kernel, got {n_global}"
     else:
         assert "atomicAdd" not in src, "the deferred kernel finalize must not emit atomicAdd"
-        assert n_global == 2, f"deferred finalize splices a second combine kernel, got {n_global}"
+        # The finalize adds exactly ONE combine kernel over the carrier's own lowering
+        # (SDPA lowers as two kernels on the generic path, everything else as one).
+        base = 2 if carrier == "flash" else 1
+        assert n_global == base + 1, f"deferred finalize splices one combine kernel over {base}, got {n_global}"
         assert "__partial" in src, "the producer writes its partial state to a workspace"
 
 

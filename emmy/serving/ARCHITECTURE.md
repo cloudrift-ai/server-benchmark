@@ -473,7 +473,7 @@ Recorded follow-ups, in impact order:
    the concurrency-32 gap is batching. Step (a) — batch-correct masked tiles + the symbolic-seq batched program — is
    **done** (`EMMY_SERVING_BATCHED`, see the batched-modes section above); remaining is (b) cu_seqlens varlen tiles so
    one launch handles mixed lengths with no padding at all (its own session — the ragged row→sequence mapping in the
-   flash schedule + the mask derivation from `cu_seqlens`).
+   attention schedule + the mask derivation from `cu_seqlens`).
 2. **dlpack zero-copy I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors, bridged to the cupy
    buffers via `cp.from_dlpack` / `torch.from_dlpack` on torch's stream — no GPU↔host round-trip (`upload_prefix_device`
    / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span boundaries.

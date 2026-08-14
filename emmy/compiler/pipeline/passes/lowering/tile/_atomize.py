@@ -18,13 +18,10 @@ contraction leaf is built (the warp / tiled contraction options) — so an atom 
 fork construction, alongside the warp static-K divisibility check, instead of failing several passes later.
 Leading ``_`` so the pass loader skips this module.
 
-**Flash contractions are not recursively atomized.** Flash is a ``TWISTED`` kv
-``Fold`` over a ``Q@K`` contraction ``source`` +
-a ``P@V`` one in the ``step``, lowered on the scalar tier (block=1) — each contraction carries a
-scalar ``TilePlan()`` and factorizes through the one ``_factor`` contraction path. A tensor-core
-flash tier would attach an mma ``TilePlan`` to those same nodes and route through that same path (no
-bespoke emitter); ``bind_contraction`` stays loop-addressable (it binds the root contraction
-structurally), and the recursive-atomize path is unused — the flash tree carries its per-node
+**Nested contractions are not recursively atomized.** A fold whose step contains a contraction
+factorizes each contraction through the one ``_factor`` contraction path with its own
+``TilePlan``; ``bind_contraction`` stays loop-addressable (it binds the root contraction
+structurally), and the recursive-atomize path is unused — the tree carries its per-node
 geometry."""
 
 from __future__ import annotations

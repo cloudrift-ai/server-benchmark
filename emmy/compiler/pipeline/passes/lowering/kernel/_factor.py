@@ -48,21 +48,20 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, subst_index
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Fold, effect_tail, is_contraction
-from emmy.compiler.ir.tile.ops import cone_seam, head, stream_pair
+from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
-from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS, realize_warp_twist, warp_source
 
 # ---- the recursive node walk: Ctx down, Frag up ------------------------------------------------ #
 # The hierarchical emitter (the tile-IR-rebuild mandate: ONE recursion over the node tree, no
@@ -72,9 +71,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._twist import FLASH_WARP_AXIS
 # the reduce ``carrier`` when the node folds one). The ONE root binder (:func:`_bind`) consumes the
 # recursion: the output-tiled contraction arm splices the atom's codegen through ``grid_tile``,
 # and the reduce partitioner (:func:`_tile_reduce_axis`) builds its per-cell reduce loop via
-# :func:`_emit`, so a nested contraction (flash's Q@K / P@V) is reached AS A NODE — scalar-nested
-# at block=1, while a WARP-TILED tree realizes at fragment residence through ``_twist`` (the
-# ``warp_source`` read in :func:`_bind`), the per-node warp tiles stamped by the scheduler.
+# :func:`_emit`, so a nested contraction is reached AS A NODE — scalar-nested at block=1.
 
 
 @dataclass(frozen=True)
@@ -128,9 +125,8 @@ class Ctx:
 def _emit(op, ctx: Ctx) -> Frag:
     """Recurse over a structural node, returning its :class:`Frag` (per-cell body + wire + carrier).
     The single node-kind dispatch every kernel's compute flows through — walking ``source`` AND
-    ``step`` so flash's Q@K / P@V contractions are reached as nodes. Scalar-nested: a node's body
-    is its lowered loop-IR (byte-identical to ``Fold.lower``); a WARP-TILED tree does not reach this
-    walk — ``_bind`` realizes it at fragment residence through ``_twist`` instead."""
+    ``step`` so nested contractions are reached as nodes. Scalar-nested: a node's body is its
+    lowered loop-IR (byte-identical to ``Fold.lower``)."""
     if isinstance(op, Fold) and op.axis is None:
         src = _emit(op.operands[0], ctx) if op.operands else None
         prefix = list(src.body) if src is not None else []
@@ -326,28 +322,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
         # zero-axis ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        wsrc = warp_source(op, ctx.sched)
-        csrc = chain_source(op, ctx.sched) if wsrc is None else None
-        if wsrc is not None:
-            # A warp-tiled TWISTED tree (the schedule stamped mma TilePlans on its contractions):
-            # the per-step values live in mma C-fragments, so the whole reduce realizes at fragment
-            # residence (``_twist``) and the kernel is warp-collective — the same ``lanes`` seam the
-            # output-tiled contraction arm uses. ``units[0] > 1`` warps per CTA each own their own
-            # query-row block: the warp axis joins the Tile decode ahead of the lane axis, and the
-            # block launches ``units[0]`` warps.
-            state, fold, close = realize_warp_twist(op, ctx, tail)
-            wtile = ctx.sched.tile_of(wsrc)
-            lanes = wtile.atom.lanes
-            um = wtile.units[0]
-            if um > 1:
-                t = replace(t, axes=(Axis(name=FLASH_WARP_AXIS, extent=um),))
-            bt = lanes * um
-        elif csrc is not None:
-            # The chain schedule — the expect column axis rides a per-thread register vector (the
-            # FA-2 shared-score form); one thread per (grid) cell, the column index a literal.
-            state, fold, close = _realize_chain(op, ctx, tail, csrc)
-            bt = None
-        elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
+        if plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx).body, *tail]
             if boundary_stores:
                 body = effect_tail(body, boundary_stores)
@@ -591,115 +566,6 @@ def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
     if lane is not None:
         merge += emit_combine(red, t=lane.name, n_threads=coop)
     return merge
-
-
-def chain_source(op, sched):
-    """The expect fold of a TWISTED tree carrying a SCALAR register tile over its
-    output column axis (the chain schedule — the column axis rides a per-thread register vector),
-    or ``None``. The structural schedule read the one binder keys the chain realization on; the
-    tile is a schedule slice (``sched``), never a node field."""
-    red = head(op)  # the compute node through the projection wrapper — ONE accessor, not a ternary
-    if red is None or red.role is not AxisRole.TWISTED:
-        return None
-    _, pv = stream_pair(red)
-    if pv is None:
-        return None
-    ptile = sched.tile_of(pv)
-    if ptile is not None and not ptile.is_warp and ptile.regs != (1, 1):
-        return pv
-    return None
-
-
-def _flat_stmts(stmts):
-    for s in stmts:
-        yield s
-        for b in s.nested():
-            yield from _flat_stmts(list(b))
-
-
-def _stmt_axis_hit(s: Stmt, axis: str) -> bool:
-    idx = getattr(s, "index", None)
-    if idx and any(axis in e.free_vars() for e in idx):
-        return True
-    return isinstance(s, Select) and any(axis in br.select.free_vars() for br in s.branches)
-
-
-def _stmt_reads(s: Stmt) -> set[str]:
-    if isinstance(s, Accum):
-        return {s.name, s.value}
-    if isinstance(s, Select):
-        return {br.value for br in s.branches}
-    deps = getattr(s, "deps", None)
-    return set(deps()) if callable(deps) else set(getattr(s, "args", ()) or ())
-
-
-def _taint(stmts: list[Stmt], axis: str) -> frozenset[str]:
-    """The SSA names transitively dependent on the free ``axis`` — the register-vector slice of the
-    per-cell body (everything else is shared across the vector's columns)."""
-    tainted: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for s in _flat_stmts(stmts):
-            d = set(s.defines())
-            if d and not (d <= tainted) and (_stmt_axis_hit(s, axis) or (_stmt_reads(s) & tainted)):
-                tainted |= d
-                changed = True
-    return frozenset(tainted)
-
-
-def _vectorize_axis(stmts: list[Stmt], axis: str, count: int, tainted: frozenset[str], protected: frozenset[str]) -> list[Stmt]:
-    """Replicate every column-dependent stmt per register column (σ ``axis → j``, names suffixed
-    ``_{j}``), keeping shared stmts single — the FA-2 shared-score restructuring: the score /
-    softmax stats compute once per streamed key, the per-column slice fans out. Recurses into loop
-    bodies (a loop stays single; a column-touched carrier fans out per :func:`_vector_carrier`)."""
-    out: list[Stmt] = []
-    for s in stmts:
-        bodies = s.nested()
-        if bodies:
-            s = s.with_bodies(tuple(Body(tuple(_vectorize_axis(list(b), axis, count, tainted, protected))) for b in bodies))
-            out.append(s)
-            continue
-        if (set(s.defines()) & tainted) or _stmt_axis_hit(s, axis) or (_stmt_reads(s) & tainted):
-            for j in range(count):
-                out += copy_cell([s], Sigma({axis: Literal(j, "int")}), f"_{j}", protected)
-        else:
-            out.append(s)
-    return out
-
-
-def _realize_chain(op, ctx: Ctx, tail: tuple, pv) -> tuple[list[Stmt], list[Stmt], list[Stmt]]:
-    """Realize a chain-scheduled TWISTED tree — the ``(state, fold, close)`` triple: the per-cell
-    body with the expect column axis register-vectorized (the score shared), and the projection +
-    store replicated per column (the column index a literal — the axis left the grid). ``pv`` is the
-    stored expect fold; its column axis is the placement's trailing free axis (it left the grid)."""
-    axis = ctx.free[-1].name
-    count = ctx.sched.tile_of(pv).reg_n  # the column (n) register vector
-    (rloop,) = _emit(op, ctx).body
-    # A layout-aware output ``Write`` the node carries (flash's ``_out_store_index``) is the store
-    # TEMPLATE — its index already places the grid axes at the output buffer's real slots (transpose /
-    # broadcast dims). Split it off the projection tail; the per-column store reuses its index with the
-    # column (n) axis substituted by the register literal ``j``. Absent it, fall back to the bare
-    # grid-cell store (grid vars + the column literal) — the head-major identity.
-    store_tmpl = tail[-1] if tail and isinstance(tail[-1], Write) else None
-    proj_tail = tuple(tail[:-1]) if store_tmpl is not None else tail
-    all_stmts = [*rloop.body, *proj_tail]
-    tainted = _taint(all_stmts, axis)
-    protected = frozenset({nm for s in _flat_stmts(all_stmts) for nm in (*s.defines(), *_stmt_reads(s))} - tainted)
-    body = _vectorize_axis(list(rloop.body), axis, count, tainted, protected)
-    fold = [replace(rloop, body=Body(tuple(body)))]
-    close = _vectorize_axis(list(proj_tail), axis, count, tainted, protected)
-    if store_tmpl is not None:
-        out_val = store_tmpl.values[-1]
-        base_index = store_tmpl.index
-    else:
-        out_val = proj_tail[-1].defines()[-1] if proj_tail else pv.out
-        base_index = (*(Var(a.name) for a in ctx.grid), Var(axis))
-    for j in range(count):
-        val = f"{out_val}_{j}" if out_val in tainted else out_val
-        idx = subst_index(base_index, {axis: Literal(j, "int")})
-        close.append(Write(output=ctx.output, index=idx, value=val))
-    return [], fold, close
 
 
 def _tile_reduce_axis_transposed(

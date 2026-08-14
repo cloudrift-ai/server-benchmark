@@ -673,34 +673,6 @@ def test_audit_sink_records_unrealized_pin_only_entries(monkeypatch):
     assert rec["unrealized"] == [pin_only]
 
 
-def test_fork_shape_key_flash_sniff_scans_every_row():
-    """The flash OFFER signal (the ``TILE@dd`` + ``TILE@pj`` pair) marks the fork when
-    ANY row carries it — row 0 is whichever leaf the planner emitted first and need
-    not be a warp leaf. A row-0-only sniff mis-keyed such a fork ``kind=""`` (GAP), and
-    the attention goldens were silently skipped in favor of the model. The sig is the
-    RESTRUCTURED twisted op's: re-derived extents only, no histogram — so the stamp
-    classifier cannot fire and the key depends on the offer sniff alone."""
-    flash_sig = {
-        "S_ext_free_prod": 2097152.0,
-        "S_ext_reduce_max": 512.0,
-        "S_ext_n_free_axis": 3.0,
-        "S_ext_n_reduce_axis": 3.0,
-        "S_ext_n_symbolic_axis": 0.0,
-        "H_opt": 3.0,
-    }
-    scalar_row = {**flash_sig, "TILE": "b32x8/f1x1"}  # a bare-TILE non-warp sibling emitted first
-    warp_row = {
-        **flash_sig,
-        "TILE@dd": _DD_W4X1_SITE,
-        "TILE@pj": _PJ_SITE,
-        "WORK": "w4x1",
-        "REDUCE@kv": "",
-        "STAGE@kv": "d2/cp",
-    }
-    assert _fork_shape_key([warp_row, scalar_row]).kind == "flash"
-    assert _fork_shape_key([scalar_row, warp_row]).kind == "flash", "the sniff must not depend on row order"
-
-
 # ---------------------------------------------------------------------------
 # The live resolve: does the tier fire on a real fork?
 # ---------------------------------------------------------------------------
@@ -777,42 +749,6 @@ def _decoy():
         {"TILE@dd": "mma_m16n8k16_f16_f32/f1x2/k16", "WORK": "w1x1"},
         1.0,
     )
-
-
-@pytest.mark.parametrize("dyn", [[], _SDPA_DYN], ids=["static", "dynM"])
-def test_attention_golden_decides_the_live_flash_fork(monkeypatch, dyn):
-    # Probe resolve: capture the flash fork's offered rows (decoy keeps the tier live).
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [_decoy()])
-    rows_sink: list = []
-    picks_sink: list = []
-    _spying(monkeypatch, rows_sink, picks_sink)
-    _resolve(_SDPA, dyn)
-    flash_rows = next(r for r in rows_sink if any("TILE@dd" in row for row in r))
-    form = _offered_flash_form(flash_rows)
-    # Record that form as the golden: static keeps the axis-keyed all-or-nothing pins;
-    # the dynamic twin is schema-required to record ONE bare TILE (the dd plan).
-    knobs = (
-        {"TILE": form["TILE@dd"], "STAGE": form.get("STAGE@kv", "")}
-        if dyn
-        else {"TILE@dd": form["TILE@dd"], "TILE@pj": form["TILE@pj"], "STAGE": form.get("STAGE@kv", "")}
-    )
-    gold = _record(
-        "attention.hd256.test",
-        ShapeKey(4096 if dyn else 16 * 512 * 256, 0 if dyn else 512, True, bool(dyn), "flash"),
-        knobs,
-        44.3,
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [gold])
-    rows_sink.clear()
-    picks_sink.clear()
-    graph = _resolve(_SDPA, dyn)
-    hits = [(n, got) for n, got in picks_sink if got is not None]
-    assert hits and hits[0][1][1] == 44.3, f"attention golden never decided a fork: {picks_sink}"
-    # The resolved graph realized the golden's dd plan on its flash kernel.
-    realized = [
-        (getattr(n.op, "knobs", {}) or {}).get("TILE@dd") for n in graph.nodes.values() if "TILE@dd" in (getattr(n.op, "knobs", {}) or {})
-    ]
-    assert form["TILE@dd"] in realized
 
 
 def test_rms_norm_golden_decides_the_live_reduce_fork(monkeypatch):

@@ -160,9 +160,9 @@ fp8 bits carrier, the same rule as the constant side (`emmy/serving/gen_runner.p
 input at its own traced dtype for this reason) — and a new `<name>_scale` input is appended, with the same decode-cast
 / broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
 at gpt-oss expert shapes the gate_up matmul streams fp8 bytes with the scale on the accumulator epilogue at both the
-mma and the M=1 coop-reduce tiers. The down matmul's cone instead stays materialized by loop fusion's flash-consumer
-protection (the down projection sum-contracts the exp-bearing SwiGLU activation, which reads as a future
-softmax-then-P@V offer site) — a fusion-band decision upstream of the tile binding, shared with the constant path.
+mma and the M=1 coop-reduce tiers. Whether the down matmul's cone (the down projection sum-contracts the exp-bearing
+SwiGLU activation) inlines or stays materialized is loop fusion's ordinary outcome — a fusion-band decision upstream
+of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:

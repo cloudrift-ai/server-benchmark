@@ -436,8 +436,9 @@ def _placement_alternatives(root, stores: tuple, free: tuple, graph: Graph | Non
     reconsider any ordinary seams after the recomposed cell re-enters recognition.
     """
     product = _product_reduction_producer(graph, graph_root) if graph is not None and graph_root is not None else None
-    if product is not None:
-        return (_PlacementAlternative(_PRODUCT_KEY, _ProductReductionCollapse(product.id), _FUSE),)
+    collapse = _PlacementAlternative(_PRODUCT_KEY, _ProductReductionCollapse(product.id), _FUSE) if product is not None else None
+    if collapse is not None and not any(isinstance(stmt, Accum) for stmt in product.op.body.iter()):
+        return (collapse,)
 
     all_sites = sites(root)
     out = [
@@ -449,7 +450,33 @@ def _placement_alternatives(root, stores: tuple, free: tuple, graph: Graph | Non
         out.append(_PlacementAlternative(_BROADCAST_KEY, compact))
     if (nested := _nested_reduction_cut(root, free)) is not None:
         out.append(_PlacementAlternative(_NESTED_KEY, nested))
+    if collapse is not None and _wider_than_every_edge(graph, product):
+        # A producer carrying its own nested reductions recomposes only when its workspace is
+        # STATICALLY wider than every edge it bridges — the trace-native pre-reduction product
+        # (a 512-token Llama MLP block materializes 120 GB there). Symbolic shapes decline
+        # conservatively and keep the ordinary fork.
+        out.append(collapse)
     return tuple(out)
+
+
+def _wider_than_every_edge(graph: Graph, producer: Node) -> bool:
+    """Whether the pair's workspace is statically larger than each edge it bridges."""
+
+    def elems(tensor) -> int | None:
+        count = 1
+        for dim in tensor.shape:
+            if not getattr(dim, "is_static", False):
+                return None
+            count *= dim.as_static()
+        return count
+
+    out = elems(producer.output)
+    if out is None:
+        return False
+    consumer = graph.nodes[next(iter(graph.users(producer.id)))]
+    edges = [node.output for inp in producer.inputs if (node := graph.nodes.get(inp)) is not None and node.output is not None]
+    edges.append(consumer.output)
+    return all((size := elems(tensor)) is not None and out > size for tensor in edges)
 
 
 def _match_alternative(key: str, root, alternatives: tuple[_PlacementAlternative, ...]):
@@ -572,13 +599,18 @@ def placement_options(ctx, knobs: dict, match, root: Node, tree, free: tuple, st
                 output=output,
             )
         )
-    # Only a repair-flavored alternative (one that re-fuses placement's own residue, spelled
-    # ``fuse``) may lead the cold option 0 — it strictly shrinks memory. An ordinary value-seam
-    # ``cut`` materializes its seam value, which for an accumulator seam is the whole
-    # pre-reduction product; letting it lead cold turned a 512-token MLP block into a 120 GB
-    # workspace. Cuts stay behind the maximal fused base and win only by evidence.
-    repairs = [option for alt, option in zip(alternatives, realized_options) if alt.realized_value == _FUSE]
-    cuts = [option for alt, option in zip(alternatives, realized_options) if alt.realized_value != _FUSE]
+    # Only a repair may lead the cold option 0: a re-fusing recomposition (spelled ``fuse``)
+    # strictly shrinks memory, and the nested-reduction lift strictly shrinks work (the raw
+    # fused reading replays the inner fold per outer cell — the reading recognition keeps only
+    # as a functional fallback). An ordinary value-seam ``cut`` materializes its seam value,
+    # which for an accumulator seam is the whole pre-reduction product; letting it lead cold
+    # turned a 512-token MLP block into a 120 GB workspace. Ordinary cuts stay behind the
+    # maximal fused base and win only by evidence.
+    def leads_cold(alt: _PlacementAlternative) -> bool:
+        return alt.realized_value == _FUSE or alt.key == _NESTED_KEY
+
+    repairs = [option for alt, option in zip(alternatives, realized_options) if leads_cold(alt)]
+    cuts = [option for alt, option in zip(alternatives, realized_options) if not leads_cold(alt)]
     return [*repairs, base, *cuts]
 
 
@@ -886,22 +918,28 @@ def _realize_compact_broadcast(match, root: Node, tile_op, free: tuple, stores: 
     return frag
 
 
-def _product_reduction_pair(graph: Graph, producer: Node, *, allow_nested_producer: bool = False) -> Node | None:
+def _product_reduction_pair(graph: Graph, producer: Node) -> Node | None:
     """The sole additive-reduction consumer of a virtual wide product, if exact.
 
     The product may be exposed directly by maximal loop fusion (an internal f32 carrier) or by
     an earlier placement boundary (a ``__cut_`` input). A real narrow tensor product is not a
-    reassociable carrier and therefore remains materialized.
+    reassociable carrier and therefore remains materialized. A producer carrying its own nested
+    reductions (a fused projection chain feeding the product) recomposes too: the collapsed cell
+    re-enters recognition, where the nested-reduction lift leads the cold fork, so the inner
+    folds never replicate per output cell.
     """
     virtual_product = producer.output.dtype is F32 or any("__cut_" in inp for inp in producer.inputs)
     if not virtual_product or len(graph.users(producer.id)) != 1:
+        return None
+    if "__cut_" in producer.output.name:
+        # A workspace a placement decision just materialized (a lifted nested fold) must not
+        # re-merge into its consumer: the lift and the recomposition are inverse rewrites, and
+        # letting each lead the next fork alternates them forever.
         return None
     consumer_id = next(iter(graph.users(producer.id)))
     consumer = graph.nodes[consumer_id]
     consumer_loop = _placed_loop(consumer)
     if not isinstance(producer.op, LoopOp) or consumer_loop is None:
-        return None
-    if not allow_nested_producer and any(isinstance(stmt, Accum) for stmt in producer.op.body.iter()):
         return None
     if not any(isinstance(stmt, Assign) and stmt.op.name == "multiply" for stmt in producer.op.body.iter()):
         return None

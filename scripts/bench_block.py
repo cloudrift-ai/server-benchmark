@@ -284,7 +284,7 @@ def _build_emmy(block, x, rotary_emb, pos_emb, dump=None, debug=False):
                 input_data[nid] = [node.op.value]
 
         # Run with actual data.
-        run_result = backend.run(compiled, input_data=input_data)
+        run_result, _pre_result = backend.run(compiled, input_data=input_data)
         if dump and backend.last_debug_result is not None:
             dump.dump_per_launch_values(backend.last_debug_result.per_launch)
 

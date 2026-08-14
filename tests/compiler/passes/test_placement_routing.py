@@ -587,8 +587,10 @@ def test_nested_contraction_cut_is_replayable_and_target_independent(monkeypatch
     monkeypatch.delenv("EMMY_PLACE", raising=False)
     rows = [_placement_rows(_sequential_linears_graph(), Context.from_target(target)) for target in ((6, 0), (7, 0), (9, 0))]
     assert rows[0] == rows[1] == rows[2]
-    assert rows[0][0] == {"PLACE@nested": "fuse"}
-    assert rows[0][1] == {"PLACE@nested": "cut"}
+    # The nested-reduction lift is a work repair, so it leads the cold option order; the raw
+    # fused reading stays offered as the functional fallback and an explicit pin can select it.
+    assert rows[0][0] == {"PLACE@nested": "cut"}
+    assert rows[0][1] == {"PLACE@nested": "fuse"}
 
     out = _compile(_sequential_linears_graph(), "PLACE@nested=cut", monkeypatch, ctx=Context.from_target((7, 0)))
     kernels = _kernel_ids(out)
@@ -827,8 +829,11 @@ def test_raw_multireduction_broadcast_is_a_maximal_first_fork(monkeypatch) -> No
         return leaves[0]
 
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_sdpa_projection_graph(), choose_maximal)
-    assert offered and all(value == "fuse" for value in offered[0].values())
-    assert any(row["PLACE@broadcast"] == "cut" for row in offered[1:])
+    # The nested-reduction lift (a work repair) leads the cold order; the maximal fused row and
+    # the broadcast cut stay offered so evidence or a pin can select either.
+    assert offered
+    assert any(all(value == "fuse" for value in row.values()) for row in offered)
+    assert any(row["PLACE@broadcast"] == "cut" for row in offered)
     assert out.buffer("o_a_unsq_bc__cut_compact") is None
     expanded = out.buffer("o_a_unsq_bc")
     assert expanded is not None and tuple(str(dim) for dim in expanded.shape) == ("1", "seq_len", "256", "96")

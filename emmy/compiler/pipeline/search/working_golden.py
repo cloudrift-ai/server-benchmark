@@ -204,7 +204,7 @@ def _append_trace_inventory(
             continue
         for producer_id in fused_producer_ids(fused, node):
             absorbed[producer_id] = node_id
-        if (consumer := _product_reduction_pair(fused, node, allow_nested_producer=True)) is not None:
+        if (consumer := _product_reduction_pair(fused, node)) is not None:
             absorbed[node.id] = consumer.id
 
     targets: list[tuple[str, object]] = []

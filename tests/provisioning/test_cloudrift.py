@@ -17,6 +17,7 @@ from emmy.provisioning.cloudrift import (
     _add_ssh_key,
     _api_request,
     _ensure_ssh_key,
+    _extract_connection_info,
     _get_instance_info,
     _instance_fully_ready,
     _list_ssh_keys,
@@ -283,6 +284,14 @@ async def test_create_instance_pins_resolved_node(mock_wait, mock_resolve, mock_
     assert conn is not None
     mock_resolve.assert_awaited_once_with(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL, dry_run=False)
     assert mock_rent.call_args.kwargs["node_id"] == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+
+
+def test_extract_connection_info_hidden_password_username():
+    """v062 HiddenPassword login_info still names the user; don't fall back to "user"."""
+    instance = dict(INSTANCE_ACTIVE_RESPONSE["instances"][0])
+    instance["virtual_machines"] = [{"login_info": {"HiddenPassword": {"username": "riftuser"}}, "ready": True}]
+
+    assert _extract_connection_info(instance).username == "riftuser"
 
 
 # ── rental tags ───────────────────────────────────────────────────

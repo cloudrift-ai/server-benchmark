@@ -322,6 +322,21 @@ def _instance_fully_ready(info):
     return True
 
 
+def _vm_username(instance):
+    """VM login username from virtual_machines[].login_info, default "user".
+
+    login_info is a single-variant enum dict; every variant carries a username
+    (UsernameAndPassword, and HiddenPassword for callers without the
+    view-credentials permission), so read it variant-agnostically.
+    """
+    vms = instance.get("virtual_machines") or []
+    if not vms:
+        return "user"
+    login_info = vms[0].get("login_info") or {}
+    creds = next(iter(login_info.values()), None) or {}
+    return creds.get("username") or "user"
+
+
 def _extract_connection_info(instance, delete_info=()):
     """Extract connection info from an instance dict into a VMConnectionInfo.
 
@@ -330,14 +345,7 @@ def _extract_connection_info(instance, delete_info=()):
     """
     host = instance.get("host_address", "")
     port_mappings = instance.get("port_mappings", [])
-
-    # Extract login credentials from VM info
-    username = "user"
-    vms = instance.get("virtual_machines", [])
-    if vms:
-        login_info = vms[0].get("login_info", {})
-        creds = login_info.get("UsernameAndPassword", {})
-        username = creds.get("username", username)
+    username = _vm_username(instance)
 
     # Find SSH port mapping: each mapping is [internal_port, external_port]
     ssh_port = 22
@@ -363,14 +371,7 @@ def _log_connection_info(instance):
     """
     host = instance.get("host_address")
     port_mappings = instance.get("port_mappings", [])
-
-    # Extract login credentials from VM info
-    username = "user"
-    vms = instance.get("virtual_machines", [])
-    if vms:
-        login_info = vms[0].get("login_info", {})
-        creds = login_info.get("UsernameAndPassword", {})
-        username = creds.get("username", username)
+    username = _vm_username(instance)
 
     # Find SSH port mapping: each mapping is [internal_port, external_port]
     ssh_ext_port = None

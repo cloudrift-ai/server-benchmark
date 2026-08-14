@@ -19,6 +19,7 @@ import logging
 import math
 import os as _os
 import pickle
+import signal as _signal
 import sys as _sys
 import time as _time_module
 from dataclasses import dataclass, field
@@ -1534,6 +1535,7 @@ class _AsyncBenchWorker:
 
     _WORKER_MODULE = "emmy.compiler.backend.cuda._bench_worker"
     _STDERR_TAIL_CHARS = 4000
+    _REAP_TIMEOUT_S = 2.0
 
     def __init__(self, *, device_id: int | None = None) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -1544,6 +1546,16 @@ class _AsyncBenchWorker:
         # wall-timeout hang — and the tail is the diagnostic every failure path wants.
         self._stderr_tail = ""
         self._stderr_task: asyncio.Task | None = None
+        # The framed protocol is a single request/response stream.  Most tune callers
+        # lease a backend through a slot queue, but lifecycle/replay callers are also
+        # allowed to use the backend directly.  Serialize here, at the transport
+        # boundary, so two legal callers can never interleave frames or race one
+        # request's timeout teardown against the other's process handle.
+        self._job_lock = asyncio.Lock()
+        # True only for children spawned by :meth:`_spawn`.  Test harnesses replace
+        # ``_spawn`` with ordinary subprocesses, which must not be mistaken for a
+        # process-group leader.
+        self._owns_process_group = False
         # ``run_inputs_key``s this child has cached (see ``benchmark_pinned_isolated_async``).
         # Cleared on every (re)spawn — a fresh child holds no cache.
         self.cached_input_keys: set[str] = set()
@@ -1562,6 +1574,11 @@ class _AsyncBenchWorker:
         return env
 
     async def _spawn(self) -> None:
+        # A timed-out compile can still have nvcc/ptxas descendants running when the
+        # worker itself is SIGKILLed.  Give the worker a private process group on
+        # POSIX so teardown can kill the complete compiler tree.  Non-POSIX asyncio
+        # retains the direct-child fallback below.
+        spawn_kwargs = {"start_new_session": True} if _os.name == "posix" else {}
         self._proc = await asyncio.create_subprocess_exec(
             _sys.executable,
             "-m",
@@ -1570,7 +1587,9 @@ class _AsyncBenchWorker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._child_env(),
+            **spawn_kwargs,
         )
+        self._owns_process_group = _os.name == "posix"
         self._stderr_tail = ""
         self._stderr_task = asyncio.ensure_future(self._drain_stderr(self._proc))
         self.cached_input_keys.clear()
@@ -1591,39 +1610,138 @@ class _AsyncBenchWorker:
         except Exception:  # noqa: BLE001 — the drain is best-effort diagnostics
             return
 
+    @staticmethod
+    def _close_stdin(proc: asyncio.subprocess.Process) -> None:
+        stdin = getattr(proc, "stdin", None)
+        if stdin is not None:
+            with contextlib.suppress(Exception):
+                stdin.close()
+
+    @staticmethod
+    def _close_transport(proc: asyncio.subprocess.Process) -> None:
+        """Last-resort pipe cleanup after a bounded reap expires.
+
+        ``asyncio.subprocess.Process`` has no public stream-close API for stdout,
+        so closing its transport is the only way to detach inherited pipe handles
+        without waiting forever.  This is deliberately a timeout-only fallback.
+        """
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+
+    @staticmethod
+    def _terminate(proc: asyncio.subprocess.Process, *, process_group: bool) -> None:
+        if proc.returncode is not None:
+            return
+        if process_group and _os.name == "posix":
+            try:
+                _os.killpg(proc.pid, _signal.SIGKILL)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                # A replaced test spawn (or a platform without the promised group)
+                # still gets direct-child cleanup.
+                pass
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+    @staticmethod
+    async def _reap_adopted_group_children(pgid: int) -> None:
+        """Reap compiler descendants adopted by this process after a group kill.
+
+        A container command often runs as PID 1 (or as a child subreaper).  Killing
+        the bench worker while it is blocked in nvcc reparents nvcc/ptxas here; no
+        asyncio transport owns those adopted processes, so they otherwise remain
+        zombies for the rest of a long tune.  The worker is already awaited before
+        this helper runs, and its private group cannot contain another asyncio-owned
+        direct child, making ``waitpid(-pgid)`` safe.  Ordinary non-reaper parents get
+        ``ChildProcessError`` and return immediately.
+        """
+        if _os.name != "posix":
+            return
+        for _ in range(5):
+            reaped = False
+            while True:
+                try:
+                    pid, _status = _os.waitpid(-pgid, _os.WNOHANG)
+                except ChildProcessError:
+                    return
+                if pid == 0:
+                    break
+                reaped = True
+            if not reaped:
+                # Group members receive SIGKILL together but may be reparented a
+                # scheduling tick after the direct worker's watcher completes.
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0)
+
     def _kill(self) -> None:
         proc = self._proc
         self._proc = None
-        if proc is None or proc.returncode is not None:
+        process_group = self._owns_process_group
+        self._owns_process_group = False
+        self.cached_input_keys.clear()
+        if proc is None:
             return
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        self._close_stdin(proc)
+        self._terminate(proc, process_group=process_group)
 
     def close(self) -> None:
-        """Terminate the worker (driver teardown). The subprocess transport is
-        reaped when the event loop closes."""
+        """Best-effort synchronous kill for callers outside the worker's event loop.
+
+        Normal tune/session teardown must use :meth:`aclose` so process-group reap
+        and pipe cleanup are awaited and bounded.
+        """
         self._kill()
 
     async def aclose(self) -> None:
-        """Terminate the worker and await its reap — for one-shot bridges that
-        spawn + run + tear down within a single ``asyncio.run`` (so no orphaned
-        subprocess transport survives the loop)."""
+        """Drain an in-flight request, then terminate and boundedly reap the worker."""
+        async with self._job_lock:
+            await self._aclose_current(graceful=True)
+
+    async def _aclose_current(self, *, graceful: bool) -> None:
+        """Close the current child while the caller owns ``_job_lock``.
+
+        Normal session teardown first closes stdin so an idle worker can exit cleanly.
+        A timeout skips that grace period and SIGKILLs the private process group.  Both
+        paths bound ``Process.wait``: asyncio otherwise waits for every subprocess pipe
+        to close, which can be forever when an adopted compiler descendant inherited a
+        pipe.  The timeout-only transport close keeps the parent event loop live.
+        """
         proc = self._proc
         self._proc = None
-        if proc is not None and proc.returncode is None:
+        process_group = self._owns_process_group
+        self._owns_process_group = False
+        stderr_task = self._stderr_task
+        self._stderr_task = None
+        self.cached_input_keys.clear()
+        if proc is not None:
+            reaped = False
+            self._close_stdin(proc)
+            if graceful and proc.returncode is None:
+                with contextlib.suppress(TimeoutError, ProcessLookupError):
+                    await asyncio.wait_for(proc.wait(), timeout=0.25)
+            self._terminate(proc, process_group=process_group)
             try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-        if self._stderr_task is not None:
+                await asyncio.wait_for(proc.wait(), timeout=self._REAP_TIMEOUT_S)
+                reaped = True
+            except (TimeoutError, ProcessLookupError):
+                logger.warning("[bench-worker] subprocess reap exceeded %.1fs; closing its transport", self._REAP_TIMEOUT_S)
+                self._close_transport(proc)
+            if reaped and process_group:
+                await self._reap_adopted_group_children(proc.pid)
+        if stderr_task is not None:
             # The drain ends on the killed child's stderr EOF; reap it so no pending
             # task survives the caller's event loop.
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.wait_for(self._stderr_task, timeout=2.0)
-            self._stderr_task = None
+                await asyncio.wait_for(stderr_task, timeout=self._REAP_TIMEOUT_S)
+            if not stderr_task.done():
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
 
     async def _stderr_snapshot(self) -> str:
         """The drained stderr tail, letting the drain task flush briefly first (after a
@@ -1639,6 +1757,18 @@ class _AsyncBenchWorker:
         race on send respawns and retries once; a response-side timeout is a hard
         error. A response-side EOF (the child self-destructed mid-job) respawns and
         retries ONCE after a short drain grace — see the handler for why."""
+        async with self._job_lock:
+            try:
+                return await self._run_job_single(request_obj, wall_timeout_s=wall_timeout_s)
+            except asyncio.CancelledError:
+                # A cancelled reader may have already sent its frame.  Never release
+                # the single-flight lock with that response still pending: retire the
+                # whole stream so the next caller starts from a clean frame boundary.
+                await self._aclose_current(graceful=False)
+                raise
+
+    async def _run_job_single(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
+        """One serialized framed request.  Caller owns ``_job_lock``."""
         request = pickle.dumps(request_obj, protocol=pickle.HIGHEST_PROTOCOL)
         frame = len(request).to_bytes(8, "little") + request
         deadline = _time_module.perf_counter() + wall_timeout_s
@@ -1654,13 +1784,13 @@ class _AsyncBenchWorker:
                 proc.stdin.write(frame)
                 await asyncio.wait_for(proc.stdin.drain(), timeout=remaining)
             except TimeoutError as exc:
-                await self.aclose()
+                await self._aclose_current(graceful=False)
                 raise RuntimeError(
                     f"bench worker did not accept the request within {wall_timeout_s:.1f}s wall budget — SIGKILL'd, stream cleaned"
                     f"{self._tail_suffix()}"
                 ) from exc
             except (BrokenPipeError, ConnectionResetError) as exc:
-                await self.aclose()
+                await self._aclose_current(graceful=False)
                 if attempt == 1:
                     raise RuntimeError(f"bench worker died during request send: {exc}{self._tail_suffix()}") from exc
                 logger.info("[bench-worker] stale async worker on send (%s) — respawning", exc)
@@ -1677,13 +1807,13 @@ class _AsyncBenchWorker:
                     raise TimeoutError
                 body = await asyncio.wait_for(proc.stdout.readexactly(n), timeout=remaining)
             except TimeoutError as exc:
-                await self.aclose()
+                await self._aclose_current(graceful=False)
                 raise RuntimeError(
                     f"bench worker exceeded {wall_timeout_s:.1f}s wall budget — SIGKILL'd, stream cleaned{self._tail_suffix()}"
                 ) from exc
             except asyncio.IncompleteReadError as exc:
                 stderr_tail = await self._stderr_snapshot()
-                await self.aclose()
+                await self._aclose_current(graceful=False)
                 if attempt == 1:
                     raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
                 # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
@@ -1710,7 +1840,7 @@ class _AsyncBenchWorker:
                 # The child returned a completed same-input reference after its later greedy
                 # timing hit the hung-kernel watchdog. Retire it before returning the reference:
                 # a queued/nonterminating kernel must never share a context with pinned rows.
-                await self.aclose()
+                await self._aclose_current(graceful=True)
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 

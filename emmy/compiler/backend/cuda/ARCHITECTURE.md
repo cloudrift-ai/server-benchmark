@@ -269,6 +269,17 @@ on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after
 triggers one respawn + resend before surfacing as `bench worker died during request send`. Error paths `await aclose()`
 (SIGKILL + reap) so the subprocess transport is cleaned before the loop closes.
 
+The framed stream is **single-flight at the transport boundary**. Backend-slot queues are a scheduling optimization,
+not a correctness prerequisite: a post-search replay measurement may legally reach the same backend while another
+target owns a slot, so `_AsyncBenchWorker` serializes spawn/send/read/teardown itself. A timeout therefore cannot kill
+or replace the process underneath another request, and cancellation retires any stream with an unanswered frame.
+On POSIX the worker starts in a private process group; timeout
+teardown kills that complete group so an in-flight `nvcc`/`ptxas` compiler cannot survive its worker. Direct-child
+kill remains the non-POSIX fallback. A container PID 1 / subreaper also reaps compiler descendants it adopts from the
+killed group, preventing zombie accumulation. Reaping and stderr draining are bounded, with a timeout-only asyncio
+transport close for inherited-pipe EOF that never arrives, so subprocess cleanup can never park the tune event loop
+forever.
+
 Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into
 a bounded tail — a chatty child (HF shard-download progress, nvcc warnings) would otherwise fill the ~64 KB pipe and
 block mid-job, misread as a wall-timeout — and every failure message (timeout, EOF, in-child error) carries that tail;

@@ -656,6 +656,12 @@ def decode_record(record: GoldenRecord) -> str | None:
         for key, value in record.knobs.items():
             if str(value) != "cut":
                 return f"routing value {key}={value!r} is not a cut"
+            if str(key) == "PLACE":
+                # The bare family key IS the codec's "shallowest cuttable seam" spelling
+                # (``route_cut``'s pin semantics) — it decodes iff any seam is legal.
+                if not seams:
+                    return "bare PLACE=cut recorded, but the recognized tree has no legal cut seam"
+                continue
             try:
                 site = resolve(route_tree, str(key), all_sites=all_sites)
             except ValueError as exc:

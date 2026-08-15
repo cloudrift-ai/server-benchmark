@@ -183,6 +183,31 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
 
+def _max_head_dim(model: str, vllm_args: list[str]) -> int | None:
+    """The widest attention head the checkpoint's LOCAL config declares, or ``None`` when the
+    probe cannot tell (uncached model, unreadable config — same best-effort contract as
+    :func:`_is_moe_model`; the authoritative guard lives in ``EmmyGenModel.__init__``).
+    Gemma-4 declares ``head_dim`` for its sliding layers and a wider ``global_head_dim`` for
+    its full-attention layers, so both attributes count."""
+    cfg = _local_config(model, vllm_args)
+    if cfg is None:
+        return None
+    cfg = getattr(cfg, "text_config", cfg)
+    dims = []
+    for attr in ("head_dim", "global_head_dim"):
+        try:
+            value = getattr(cfg, attr, None)
+        except Exception:  # noqa: BLE001 — transformers' heterogeneous-config API raises on ambiguous global access
+            value = None
+        if isinstance(value, int):
+            dims.append(value)
+    if not dims:
+        hidden, heads = getattr(cfg, "hidden_size", None), getattr(cfg, "num_attention_heads", None)
+        if isinstance(hidden, int) and isinstance(heads, int) and heads > 0:
+            dims.append(hidden // heads)
+    return max(dims) if dims else None
+
+
 def _chunk_capture_rungs(vllm_args: list[str], bucket: int) -> set[int]:
     """Token-count capture sizes for the chunk/prefill and mixed prefill+decode steps
     (``EMMY_GEN_CHUNK_CAPTURE``). vLLM pads a step UP to the first rung at or above its
@@ -298,16 +323,31 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
             return ["--enforce-eager"]
     mode = "FULL_DECODE_ONLY"
     backend_args: list[str] = []
-    if query_len == 1 and emmy_config.gen_chunk_capture():
+    head_dim = _max_head_dim(model, vllm_args) if model is not None else None
+    if query_len == 1 and emmy_config.gen_chunk_capture() and not (head_dim is not None and head_dim > 256):
         # WHOLE-STEP CHUNK CAPTURE: mode FULL records the mixed prefill+decode steps too —
         # the eager mixed steps' per-program host framing (gpu_lock + DLPack dispatch) and
         # their per-step staging D2D were the measured c64 TPOT loss, and the eager
         # symbolic-prefill burst the short-prompt TTFT loss. FULL also retires the
         # uniform-decode dispatch routine: every step dispatches by padded token count.
+        # Gated OFF for a model with an attention head wider than 256 (the probe above):
+        # vLLM 0.23's two mixed-capture-capable backends both break there — TRITON_ATTN's
+        # unified-attention kernel raises an illegal memory access at the mixed-batch capture
+        # warmup, and FLEX_ATTENTION mis-shapes its sliding-window block mask (both measured
+        # on gemma-4-12B, whose global layers are 512-wide, RTX 5090 / vLLM 0.23.0). Such a
+        # model keeps decode-only capture on vLLM's own backend choice; the authoritative
+        # guard for a probe miss is in ``EmmyGenModel.__init__``.
         mode = "FULL"
         sizes = sorted(set(sizes) | _chunk_capture_rungs(vllm_args, bucket))
         if not _has_flag(vllm_args, "--attention-backend"):
             backend_args = ["--attention-backend", "TRITON_ATTN"]
+    elif query_len == 1 and emmy_config.gen_chunk_capture():
+        logger.warning(
+            "chunk capture off: this model's widest attention head (%d) exceeds 256, where both of vLLM 0.23's "
+            "mixed-batch-capture backends break (TRITON_ATTN illegal access / FLEX_ATTENTION sliding-mask shape "
+            "error); serving whole-step DECODE capture only",
+            head_dim,
+        )
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
     # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
     # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32

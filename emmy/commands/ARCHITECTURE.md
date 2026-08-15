@@ -394,7 +394,8 @@ so a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--compilation-config` with
 `cudagraph_mode: FULL` + capture sizes laddered up to `--max-num-seqs` plus the chunk rungs, and
 `--attention-backend TRITON_ATTN` — mixed-batch full capture needs a backend declaring always-supported capture;
-`EMMY_GEN_CHUNK_CAPTURE=0` restores the decode-only `FULL_DECODE_ONLY` config; see
+`EMMY_GEN_CHUNK_CAPTURE=0` restores the decode-only `FULL_DECODE_ONLY` config, and a model with an attention
+head wider than 256 keeps it automatically — vLLM 0.23's mixed-capture backends break there; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
 cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an

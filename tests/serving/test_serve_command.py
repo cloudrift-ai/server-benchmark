@@ -198,6 +198,34 @@ def test_serve_cmd_generate_chunk_capture_respects_user_attention_backend():
     assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"  # vLLM downgrades it if the backend can't
 
 
+def test_serve_cmd_generate_wide_head_model_keeps_decode_only(monkeypatch):
+    """vLLM 0.23's two mixed-batch-capture backends both break on a model with an attention
+    head wider than 256 (gemma-4's 512-wide global layers: TRITON_ATTN illegal access,
+    FLEX_ATTENTION sliding-mask shape error), so the head-dim probe keeps such a model on
+    decode-only capture with vLLM's own backend choice."""
+
+    class _Cfg:
+        head_dim = 256
+        global_head_dim = 512
+
+    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL_DECODE_ONLY"
+    assert cfg["cudagraph_capture_sizes"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    assert "--attention-backend" not in cmd
+
+
+def test_serve_cmd_generate_narrow_head_model_keeps_chunk_capture(monkeypatch):
+    class _Cfg:
+        head_dim = 128
+
+    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"
+    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
+
+
 def test_serve_cmd_generate_chunk_rungs_follow_prefill_bucket(monkeypatch):
     # The c4/c8 lane shape: chunk quantum 2048, bucket 8, mnbt = chunk + bucket. The rung
     # list must carry the exact chunk width and the rider top, drop the rider interior

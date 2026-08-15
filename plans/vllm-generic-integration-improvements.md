@@ -64,8 +64,17 @@ because mixed-batch FULL capture needs `AttentionCGSupport.ALWAYS` and FA2 decla
 (vLLM silently downgrades FULL to FULL_DECODE_ONLY there). This activates Milestone A2's post→pre chaining on
 chunk steps (the eager protective clone was the pointer-breaker) and removes the per-program host framing and
 per-step staging D2D from mixed steps. Off under speculative decoding; MoE keeps its capture-size-1 ladder.
-Validation per the serving findings protocol (small_c1 TTFT, c64 TPOT vs stock, 3 runs, greedy parity) is the
-next step; the decode-attention swap FA2→triton is the one regression risk the A/B must price.
+
+**2026-08-15 5090 validation result: gemma-4 mixed capture is BLOCKED UPSTREAM in vLLM 0.23.** Both backends
+whose full-graph support covers mixed batches break on gemma-4-12B (512-wide global-layer heads): TRITON_ATTN's
+`kernel_unified_attention` raises an illegal memory access at the first mixed-batch capture warmup (reproduced
+at fcbc880f+fix and on main, with a small KV pool too — not an offset-overflow artifact; pinned by a
+`CUDA_LAUNCH_BLOCKING=1` boot), and FLEX_ATTENTION fails its sliding-window block-mask build with a shape error
+(`used_pages.masked_fill_`: 256 vs 258 pages). The feature therefore gates itself off for any model with an
+attention head wider than 256 (serve-side probe + an authoritative `EmmyGenModel` boot guard), and the
+findings-protocol gemma-4 acceptance cells (small_c1 TTFT, c64 TPOT) cannot be measured until a fixed vLLM
+lands. Mechanism validation ran instead on Qwen3-0.6B (128-wide heads, homogeneous — TRITON-clean): capture
+ON vs OFF vs stock on the same 5090/tree, plus a greedy-parity probe.
 
 ## Target architecture
 

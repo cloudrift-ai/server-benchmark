@@ -395,6 +395,27 @@ class EmmyGenModel(nn.Module, SupportsPP):
         n_layers = self.runner.num_layers
         self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(config.hidden_size, self.runner.residual_dtype)
 
+        # AUTHORITATIVE mixed-capture guard (the serve command's head-dim probe is best-effort
+        # UX only): vLLM 0.23's two attention backends whose full-graph support covers mixed
+        # batches both break on a model with an attention head wider than 256 — TRITON_ATTN's
+        # unified-attention kernel raises an illegal memory access at the mixed-batch capture
+        # warmup and FLEX_ATTENTION mis-shapes its sliding-window block mask (both measured on
+        # gemma-4-12B, whose global layers are 512-wide). A scalar-FULL boot on such a model
+        # would die in CUDA mid-capture; fail readably instead. FULL_AND_PIECEWISE is exempt
+        # (its mixed steps run piecewise, attention outside the graphs), as is decode-only
+        # capture.
+        if not mc.enforce_eager:
+            cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+            widest = max((self.runner.layer_meta(i)[0] for i in range(n_layers)), default=0)
+            if cg_mode is not None and getattr(cg_mode, "name", str(cg_mode)) == "FULL" and widest > 256:
+                raise ValueError(
+                    f"cudagraph_mode FULL captures mixed prefill+decode steps, and this model's widest "
+                    f"attention head ({widest}) exceeds 256 — where vLLM 0.23's mixed-batch-capture "
+                    f"backends break (TRITON_ATTN: illegal memory access; FLEX_ATTENTION: sliding-mask "
+                    f"shape error). Serve with EMMY_GEN_CHUNK_CAPTURE=0 (whole-step decode capture only) "
+                    f"or an explicit --compilation-config without mixed FULL capture."
+                )
+
         # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
         # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
         # (``_moe_combine_slots`` — fixed launch set, no host sync), so an MoE boot may keep

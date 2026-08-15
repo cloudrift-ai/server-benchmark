@@ -389,8 +389,12 @@ def gen_chunk_capture(default: int = 1) -> int:
     plus ~170 MB/step of staging D2D on the 2026-08-12 5090 re-baseline) and the short-prompt
     TTFT loss (the eager symbolic-prefill burst). Set 0 to restore decode-only capture and
     vLLM's own attention-backend choice. Off automatically under speculative decoding (the
-    chunk rungs are not spec-adjusted). See ``commands/serve.py`` and
-    `serving/ARCHITECTURE.md`."""
+    chunk rungs are not spec-adjusted) and for a model with an attention head wider than 256
+    (gemma-4's global layers): BOTH mixed-capture-capable vLLM 0.23 backends break there —
+    TRITON_ATTN's unified-attention kernel faults at the mixed-batch capture warmup and
+    FLEX_ATTENTION mis-shapes its sliding-window block mask (measured on gemma-4-12B / RTX
+    5090) — so such a model keeps decode-only capture until a fixed vLLM lands. See
+    ``commands/serve.py`` and `serving/ARCHITECTURE.md`."""
     return int_env(GEN_CHUNK_CAPTURE, default)
 
 

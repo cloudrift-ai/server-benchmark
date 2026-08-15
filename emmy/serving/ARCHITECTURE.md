@@ -402,7 +402,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capture requires an attention backend declaring `AttentionCGSupport.ALWAYS`, so the emmy arm passes
   `--attention-backend TRITON_ATTN` (FA2 declares uniform-batch support only; on such a backend vLLM silently
   downgrades FULL back to FULL_DECODE_ONLY — the pre-chunk-capture behavior, also restorable explicitly with
-  `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). Capture sizes at or below
+  `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). A model with an attention
+  head WIDER than 256 keeps decode-only capture (the serve command's head-dim probe, plus an authoritative boot
+  guard in `EmmyGenModel.__init__`): both of vLLM 0.23's mixed-capture-capable backends break there —
+  TRITON_ATTN's unified-attention kernel raises an illegal memory access at the mixed-batch capture warmup, and
+  FLEX_ATTENTION mis-shapes its sliding-window block mask — measured on gemma-4-12B (512-wide global layers,
+  RTX 5090), so gemma-4 cannot take chunk capture until a fixed vLLM lands. Capture sizes at or below
   the decode bucket run the static
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
   `test_gen_capture_gpu` (the two-size live-replay test, the rider-split capture test), and BOTH drop their

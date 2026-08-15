@@ -66,15 +66,6 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
-#: The widest mixed-batch capture rung validated on a WIDE-HEAD model (attention heads past
-#: 256 — gemma-4-12B's 512-wide global layers) on RTX 5090 / vLLM 0.23: TRITON_ATTN's
-#: unified-attention kernel raises an illegal memory access capturing a 4128-token mixed batch
-#: but captures and serves cleanly through 2112 (the 2048 chunk quantum + a 64-wide rider top,
-#: benched end to end with greedy chat parity); the fault threshold between 2112 and 4128 is
-#: unbisected. Narrow-head models take the full rung list. Read by the serve command's rung
-#: builder and ``EmmyGenModel``'s boot guard — not an env var.
-WIDE_HEAD_MIXED_RUNG_CAP = 2112
-
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
 
@@ -399,10 +390,9 @@ def gen_chunk_capture(default: int = 1) -> int:
     TTFT loss (the eager symbolic-prefill burst); with capture on, small_c1 TTFT closed from
     1.36x to 1.09x of stock and greedy chat outputs stayed content-identical (2026-08-15 5090
     validation). Set 0 to restore decode-only capture and vLLM's own attention-backend choice.
-    Off automatically under speculative decoding (the chunk rungs are not spec-adjusted); a
-    model with an attention head wider than 256 (gemma-4's global layers) gets its rungs
-    capped at :data:`WIDE_HEAD_MIXED_RUNG_CAP` instead — see that constant for the vLLM 0.23
-    backend faults behind the cap. See ``commands/serve.py`` and
+    Off automatically under speculative decoding (the chunk rungs are not spec-adjusted).
+    Rungs above ``--max-model-len`` rely on the plugin's dummy-run seq-lens clamp
+    (``serving/vllm_patches.py``). See ``commands/serve.py`` and
     `serving/ARCHITECTURE.md`."""
     return int_env(GEN_CHUNK_CAPTURE, default)
 

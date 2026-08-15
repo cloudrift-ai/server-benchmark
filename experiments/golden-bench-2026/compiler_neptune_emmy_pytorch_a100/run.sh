@@ -43,6 +43,8 @@ mkdir -p /results/tune-logs /results/profile-logs /results/profiles
 status_file=/results/neptune-setup-status.tsv
 printf "operator\tsequence_length\ttune\tprofile\n" > "$status_file"
 successful_profiles=0
+tune_timeout=30m
+profile_timeout=15m
 operators=(
   prefill_global
   prefill_causal
@@ -60,16 +62,23 @@ sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)
 for operator in "${operators[@]}"; do
   for sequence_length in "${sequence_lengths[@]}"; do
     setup="${operator}-b1-s${sequence_length}"
-    if python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
+    if timeout --signal=TERM --kill-after=1m "$tune_timeout" \
+      python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
       2>&1 | tee "/results/tune-logs/$setup.log"; then
       tune_status=ok
       if grep -Fq "Top 0 schedules" "/results/tune-logs/$setup.log"; then
         tune_status=ok:no-valid-schedule
       fi
     else
-      tune_status="failed:$?"
+      tune_rc=$?
+      if [ "$tune_rc" -eq 124 ]; then
+        tune_status=timed-out
+      else
+        tune_status="failed:$tune_rc"
+      fi
     fi
-    if nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary \
+    if timeout --signal=TERM --kill-after=1m "$profile_timeout" \
+      nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary \
       python -u /experiment/run_neptune.py profile "$operator" "1,$sequence_length" --repeat 15 \
       2>&1 | tee "/results/profile-logs/$setup.log"; then
       profile_status=ok
@@ -81,7 +90,12 @@ for operator in "${operators[@]}"; do
       fi
       successful_profiles=$((successful_profiles + 1))
     else
-      profile_status="failed:$?"
+      profile_rc=$?
+      if [ "$profile_rc" -eq 124 ]; then
+        profile_status=timed-out
+      else
+        profile_status="failed:$profile_rc"
+      fi
     fi
     printf "%s\t%s\t%s\t%s\n" "$operator" "$sequence_length" "$tune_status" "$profile_status" >> "$status_file"
   done

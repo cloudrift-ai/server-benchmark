@@ -399,11 +399,15 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `--attention-backend TRITON_ATTN` (FA2 declares uniform-batch support only; on such a backend vLLM silently
   downgrades FULL back to FULL_DECODE_ONLY — the pre-chunk-capture behavior, also restorable explicitly with
   `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). A model with an attention
-  head WIDER than 256 keeps decode-only capture (the serve command's head-dim probe, plus an authoritative boot
-  guard in `EmmyGenModel.__init__`): both of vLLM 0.23's mixed-capture-capable backends break there —
-  TRITON_ATTN's unified-attention kernel raises an illegal memory access at the mixed-batch capture warmup, and
-  FLEX_ATTENTION mis-shapes its sliding-window block mask — measured on gemma-4-12B (512-wide global layers,
-  RTX 5090), so gemma-4 cannot take chunk capture until a fixed vLLM lands. Capture sizes at or below
+  head WIDER than 256 takes a CAPPED size list (`config.WIDE_HEAD_MIXED_RUNG_CAP`, 2112 — the serve command's
+  head-dim probe, plus an authoritative boot guard in `EmmyGenModel.__init__` that rejects over-cap sizes
+  readably): past that width vLLM 0.23's TRITON_ATTN raises an illegal memory access capturing WIDE mixed
+  batches (measured at 4128 tokens on gemma-4-12B's 512-wide global layers / RTX 5090; clean through 2112),
+  and FLEX_ATTENTION mis-shapes its sliding-window block mask outright — so gemma-4 runs chunk capture on the
+  2048-chunk-quantum lane and leaves wider steps eager. 5090-measured (2026-08-15, fcbc880f+fix tree, medians
+  of 3): small_c1 256/256 TTFT 90.4 → 72.2 ms (capture off → on; stock 66.5 — the 1.36x gap closes to 1.09x)
+  with TPOT unchanged, and c64 np256 on the capped lane TPOT 34.9 → 33.1 ms, 1243 → 1255 tok/s, greedy chat
+  outputs content-identical. Capture sizes at or below
   the decode bucket run the static
   decode twin; sizes above it capture the device-resident symbolic programs — both paths are capture-validated,
   `test_gen_capture_gpu` (the two-size live-replay test, the rider-split capture test), and BOTH drop their

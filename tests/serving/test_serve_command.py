@@ -198,11 +198,11 @@ def test_serve_cmd_generate_chunk_capture_respects_user_attention_backend():
     assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"  # vLLM downgrades it if the backend can't
 
 
-def test_serve_cmd_generate_wide_head_model_keeps_decode_only(monkeypatch):
-    """vLLM 0.23's two mixed-batch-capture backends both break on a model with an attention
-    head wider than 256 (gemma-4's 512-wide global layers: TRITON_ATTN illegal access,
-    FLEX_ATTENTION sliding-mask shape error), so the head-dim probe keeps such a model on
-    decode-only capture with vLLM's own backend choice."""
+def test_serve_cmd_generate_wide_head_model_caps_the_rungs(monkeypatch):
+    """On a model with an attention head wider than 256 (gemma-4's 512-wide global layers),
+    vLLM 0.23's TRITON_ATTN faults capturing mixed batches wider than the validated cap
+    (illegal access at 4128 tokens, clean through 2112 — 5090-measured), so the head-dim
+    probe caps the rung list there; wider steps stay eager."""
 
     class _Cfg:
         head_dim = 256
@@ -211,18 +211,23 @@ def test_serve_cmd_generate_wide_head_model_keeps_decode_only(monkeypatch):
     monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     cfg = _capture_cfg(cmd)
-    assert cfg["cudagraph_mode"] == "FULL_DECODE_ONLY"
-    assert cfg["cudagraph_capture_sizes"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    assert "--attention-backend" not in cmd
+    assert cfg["cudagraph_mode"] == "FULL"
+    sizes = cfg["cudagraph_capture_sizes"]
+    assert max(sizes) <= 2112
+    assert 2048 in sizes  # the c4/c8 chunk-quantum lane's exact chunk width stays covered
+    assert 272 in sizes  # the short-prompt rungs stay dense (a 257-token prefill pads to 272)
+    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
 
 
-def test_serve_cmd_generate_narrow_head_model_keeps_chunk_capture(monkeypatch):
+def test_serve_cmd_generate_narrow_head_model_keeps_full_rungs(monkeypatch):
     class _Cfg:
         head_dim = 128
 
     monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
-    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL"
+    assert {4096, 4112} <= set(cfg["cudagraph_capture_sizes"])
     assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
 
 

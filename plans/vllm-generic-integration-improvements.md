@@ -54,16 +54,30 @@ because mixed-batch FULL capture needs `AttentionCGSupport.ALWAYS` and FA2 decla
 chunk steps (the eager protective clone was the pointer-breaker) and removes the per-program host framing and
 per-step staging D2D from mixed steps. Off under speculative decoding; MoE keeps its capture-size-1 ladder.
 
-**2026-08-15 5090 validation result: gemma-4 mixed capture is BLOCKED UPSTREAM in vLLM 0.23.** Both backends
-whose full-graph support covers mixed batches break on gemma-4-12B (512-wide global-layer heads): TRITON_ATTN's
-`kernel_unified_attention` raises an illegal memory access at the first mixed-batch capture warmup (reproduced
-at fcbc880f+fix and on main, with a small KV pool too — not an offset-overflow artifact; pinned by a
-`CUDA_LAUNCH_BLOCKING=1` boot), and FLEX_ATTENTION fails its sliding-window block-mask build with a shape error
-(`used_pages.masked_fill_`: 256 vs 258 pages). The feature therefore gates itself off for any model with an
-attention head wider than 256 (serve-side probe + an authoritative `EmmyGenModel` boot guard), and the
-findings-protocol gemma-4 acceptance cells (small_c1 TTFT, c64 TPOT) cannot be measured until a fixed vLLM
-lands. Mechanism validation ran instead on Qwen3-0.6B (128-wide heads, homogeneous — TRITON-clean): capture
-ON vs OFF vs stock on the same 5090/tree, plus a greedy-parity probe.
+**2026-08-15 5090 validation (rented vast.ai 5090, tree = fcbc880f + this change + the #488 pack fix — the
+re-baseline base; transformers pinned 5.14.1; medians of 3 runs; greedy CHAT outputs content-identical between
+capture on and off).** Two upstream vLLM 0.23 limits surfaced first: TRITON_ATTN's `kernel_unified_attention`
+raises an illegal memory access capturing a WIDE mixed batch on gemma-4-12B (512-wide global heads) — faults at
+4128 tokens, captures and serves cleanly through 2112; reproduced on main and with a small KV pool (not an
+offset-overflow artifact), pinned by a `CUDA_LAUNCH_BLOCKING=1` boot — and FLEX_ATTENTION fails its
+sliding-window block-mask build outright (`used_pages.masked_fill_`: 256 vs 258 pages). So wide-head models get
+their rungs capped at `config.WIDE_HEAD_MIXED_RUNG_CAP` (2112) and run chunk capture on the 2048-chunk-quantum
+lane, wider steps eager; the 4096-chunk lane stays eager until a fixed vLLM lands.
+
+Measured cells (capture ON / capture OFF / stock):
+
+| cell | metric | ON | OFF | stock | verdict |
+| --- | --- | --: | --: | --: | --- |
+| small_c1 256/256 (b32, mnbt 4128, rungs ≤512) | median TTFT ms | 72.2 | 90.4 | 66.5 | 1.36x → **1.09x** of stock — the promoted item's TTFT claim confirmed |
+| small_c1 | median TPOT ms | 18.35 | 18.33 | 17.64 | unchanged (decode was already captured) |
+| c64 np256 (b64, pb 2048, mnbt 2112, rungs ≤2112) | median TPOT ms | 33.1 | 34.9 | 27.3* | capture wins −1.7 ms; stock* ran its own 4160 shape (the MM checkpoint refuses mnbt < 2496) and admitted fewer streams (TTFT 3990 ms, 1086 tok/s) |
+| c64 | tok/s | 1255 | 1243 | 1086 | emmy leads throughput and TTFT (1361 vs 3990 ms) |
+
+The c64 "TPOT at or below stock" target is NOT met on this lane (33.1 vs 27.3, but the arms are not
+shape-comparable — see the asterisk) and the projected ~5 ms/step host-idle recovery applies to the 4096-chunk
+lane, which the TRITON width fault keeps eager. Remaining follow-ups: the vLLM-side triton wide-head fix (then
+lift the cap and re-run the 4096-lane c64 cell), and re-benching against a stock arm at a comparable admission
+shape.
 
 ## Target architecture
 

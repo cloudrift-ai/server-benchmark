@@ -24,9 +24,10 @@ relevant `ARCHITECTURE.md` before answering.
   (`k_rms_norm`, `k_sdpa_reduce`).
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
-  resolve forks through the deploy evidence hierarchy — measured reservoir/DB evidence first, then the global
-  `Prior` (the online prior with its offline cold-start fallback). Recorded goldens are named pinned rows replayed
-  exactly (`run --golden NAME`, `--ab`); an unpinned compile never consults them. The online prior
+  resolve forks through the deploy evidence hierarchy — the card's verified goldens first (joined by exact
+  structural identity of the record's own persisted program, decoded by exact row equality; fail-closed on drift),
+  then measured reservoir/DB evidence, then the global `Prior` (the online prior with its offline cold-start
+  fallback). Goldens also replay exactly as pins (`run --golden NAME`, `--ab`). The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`) that `tune` writes and
   `compile` / `run` read. Use the README architecture index for the prior and
   two-level autotune design.

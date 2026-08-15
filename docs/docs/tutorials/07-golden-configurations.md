@@ -15,9 +15,10 @@ deploying on a guess.
 
 They do three jobs at once:
 
-1. **An exactly replayable recording.** A record's pins and knobs pin the compile to the measured kernel
-   (`run --golden NAME`, `--ab`) — the schedule codec fully encodes how the row replays. An *unpinned* compile never
-   consults a golden; [the hierarchy page](./06-deploy-evidence-hierarchy.md) explains what decides instead.
+1. **The first tier of the deploy evidence hierarchy** — joined by exact structural identity (the record's own
+   persisted program, lowered and recognized through the same code the live compile uses) and decoded by exact row
+   equality; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). The same record also replays exactly as
+   pins (`run --golden NAME`, `--ab`) — the schedule codec fully encodes how the row replays.
 2. **The training data** for the offline prior, which is fitted on them.
 3. **A regression reference** — if today's compiler produces something slower than the recording, that is a defect
    with a number attached.
@@ -122,7 +123,9 @@ own process, is reported as a failure, and the remaining rows continue.
 
 - **A recording is a pinned measurement, and replay is exact.** The knobs are decoded against the kernel's recognized
   structure — there is no fuzzy matching between a recording and a live compile, so a row either replays into
-  exactly the measured kernel or fails loudly.
+  exactly the measured kernel or fails loudly. The corpus is gated on that contract: every checked-in record must
+  decode strictly (the `test_golden_decode` tripwire), and a structural change that invalidates one fails the suite
+  with the reason instead of silently unkeying the row.
 
 ## Validating a file
 

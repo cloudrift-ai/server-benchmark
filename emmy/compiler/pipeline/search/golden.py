@@ -492,6 +492,131 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
+_IDENTITY_CACHE: dict[tuple, str | None] = {}
+
+
+def _record_cache_key(record: GoldenRecord) -> tuple:
+    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
+    return (payload_id, record.target_key, record.compute_cap, record.bindings)
+
+
+def _target_kernel_nodes(record: GoldenRecord):
+    """The record's target kernels in the CURRENT compiler: lower the persisted program through
+    the loop passes and select the target's ``LoopOp`` node(s) — every output kernel for a Loop IR
+    target, the provenance-selected ones for a frontend target. Returns ``(lowered graph, nodes)``.
+    Raises when the selector no longer resolves — the strict tripwire's loud case."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+    graph = record.target_program.copy()
+    if record.loop_wire is None:
+        provenance.seed(graph)
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+    if record.loop_wire is not None:
+        nodes = [node for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)]
+    else:
+        wanted = frozenset(record.origins)
+        nodes = []
+        for node_id in lowered.topological_order():
+            node = lowered.nodes[node_id]
+            if not isinstance(node.op, LoopOp):
+                continue
+            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
+            if origins == wanted:
+                nodes.append(node)
+    if not nodes:
+        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+    return lowered, nodes
+
+
+def _recognized_target(record: GoldenRecord):
+    """The record's ONE recognized tile (loud): the target must select exactly one kernel, and the
+    shared recognition core must lift it. Returns the ``TileOp``."""
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
+
+    lowered, nodes = _target_kernel_nodes(record)
+    if len(nodes) != 1:
+        raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
+    node = nodes[0]
+    node.op.populate_io(lowered, node)
+    tile = recognized_tile(node.op, node.output.name, name=node.id)
+    # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
+    # half of the identity (``deploy_identity``) reads the same output fingerprint.
+    tile.outputs = {node.output.name: node.output}
+    return tile
+
+
+def decode_record(record: GoldenRecord) -> str | None:
+    """STRICTLY decode one record against the current compiler — ``None`` on success, else the
+    failure reason. This is the replayability contract the corpus is gated on: the persisted
+    program selects exactly one kernel; a ROUTING record's ``PLACE`` keys resolve to legal cut
+    seams on the recognized tree; a SCHEDULE record's spelled row equals EXACTLY ONE enumerated
+    leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
+    any-of, no classified shape."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, stamp_schedule_families  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    try:
+        tile = _recognized_target(record)
+    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
+        return f"{type(exc).__name__}: {exc}"
+    if record.is_routing:
+        pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+        route_tree, route_free, route_stores = (
+            (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
+        )
+        seams = cuttable_seams(route_tree, route_stores, route_free)
+        all_sites = sites(route_tree)
+        for key, value in record.knobs.items():
+            if str(value) != "cut":
+                return f"routing value {key}={value!r} is not a cut"
+            try:
+                site = resolve(route_tree, str(key), all_sites=all_sites)
+            except ValueError as exc:
+                return f"routing key {key!r} does not resolve: {exc}"
+            if site is None or site not in seams:
+                return f"routing key {key!r} names no legal cut seam on the recognized tree"
+        return None
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+    with pinned_knobs(record.pin_map):
+        rows = enumerate_graph(record.target_program.copy(), ctx)
+    want = canonical_row_key(stamp_schedule_families(record.knobs))
+    hits = sum(1 for r in rows if canonical_row_key(stamp_schedule_families(r)) == want)
+    if hits == 1:
+        return None
+    if hits == 0:
+        return f"no enumerated row equals the recording ({len(rows)} rows offered)"
+    return f"{hits} enumerated rows equal the recording — the spelled row is not a unique identity"
+
+
+def kernel_identity(record: GoldenRecord) -> str | None:
+    """The record's kernel identity under the CURRENT compiler — the verified-tier join key
+    (``_schedule.deploy_identity``) of the recognized tile of the record's ONE target kernel,
+    derived through the exact recognition core the live compile uses (``_lift.recognized_tile``).
+    ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
+    (a schedule row decorates exactly one), or the selector/recognition fails — best-effort here
+    (a corpus row must never break a compile); the decode tripwire is where failure is loud."""
+    key = _record_cache_key(record)
+    if key in _IDENTITY_CACHE:
+        return _IDENTITY_CACHE[key]
+    try:
+        from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
+
+        identity = deploy_identity(_recognized_target(record))
+    except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
+        identity = None
+    _IDENTITY_CACHE[key] = identity
+    return identity
+
+
 _PROGRAM_TARGET_CACHE: dict[
     tuple[int, tuple[int, int], str, tuple[tuple[str, int], ...]],
     dict[frozenset[str], set[tuple[tuple[str, float], ...]]],

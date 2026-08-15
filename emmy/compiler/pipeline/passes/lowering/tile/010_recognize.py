@@ -78,6 +78,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # pure recognition core (:func:`._lift.recognized_tile`), shared verbatim with the strict
     # golden decode's record-side identity derivation.
     map_tile = recognized_tile(loop, root.output.name, name=loop.name)
+    # The matcher re-populates io when a later pass matches the op; seeding the output here makes
+    # the UNMAPPED tile self-describing at the placement fork, where the verified tier reads its
+    # identity (``deploy_identity`` folds the output dtype) before any match has run.
+    map_tile.outputs = {root.output.name: root.output}
     node, free, stores = map_tile.op, map_tile.place.free, map_tile.stores
     # A symbolic FREE (parallel) axis rides a **symbolic grid**: the ``Tile`` decode sizes the
     # launch from the runtime extent (``_gid < ∏extents``, the ``Dim`` name threaded as an

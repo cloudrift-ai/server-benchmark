@@ -210,11 +210,14 @@ class LinearModel:
     # --- artifact round-trip -----------------------------------------------------------------------------
 
     @classmethod
-    def from_artifact(cls, obj: dict) -> LinearModel:
+    def from_artifact(cls, obj: dict, *, base_dir=None) -> LinearModel:  # noqa: ARG003 — see below
         """Construct from an artifact dict. Deliberately does NOT version-gate: the strict ``feat_ver`` check is
         deploy policy and lives in ``offline._load_artifact``, while the fitter's incumbent-seed read must
         tolerate a mismatch — a refit after a featurizer change is exactly the case a refit exists to fix, and a
-        stale key simply seeds ``0.0``."""
+        stale key simply seeds ``0.0``.
+
+        ``base_dir`` is accepted and ignored: the loader calls both model classes the same way, and only the tree
+        needs a directory to resolve its ``model_file`` sidecar against. A linear artifact is self-contained."""
         params = obj.get("params", {})
         dyn = obj.get("weights_dynamic")
         return cls(
@@ -225,9 +228,13 @@ class LinearModel:
             atomic_free_split_threshold=float(params.get("atomic_free_split_threshold", 0.0)),
         )
 
-    def to_artifact(self, *, provenance: dict) -> dict:
+    def to_artifact(self, *, provenance: dict, model_file: str | None = None) -> dict:  # noqa: ARG002 — see below
         """This model as the weights artifact dict, in its checked-in shape. ``provenance`` is caller-supplied
-        whole (fitted date, script, args, case counts, notes) so the assembly stays pure and deterministic."""
+        whole (fitted date, script, args, case counts, notes) so the assembly stays pure and deterministic.
+
+        ``model_file`` is accepted and ignored for the same reason ``from_artifact`` ignores ``base_dir``: the
+        writer calls both classes identically, and only the tree has bytes that need a sidecar. Everything a
+        linear model knows is already text in this dict."""
         if self.weights_dynamic is None:
             raise ValueError("no dynamic weight set — substitute a fallback set before assembling the artifact")
         return {

@@ -35,6 +35,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -56,32 +57,42 @@ DEFAULT_SCALE = 1.0
 ABSENT = np.nan
 
 
-def to_b64(model) -> str:
-    """A fitted CatBoost model as a base64 ``cbm`` blob. CatBoost has no in-memory to-bytes API, so the native
-    file format round-trips through a tempfile. Shared with the online prior's checkpoint — ONE spelling of the
-    round-trip, so the two cannot drift on the format string."""
+def to_bytes(model) -> bytes:
+    """A fitted CatBoost model as native ``cbm`` bytes. CatBoost has no in-memory to-bytes API, so the format
+    round-trips through a tempfile. ONE spelling of that round-trip, so no two callers can drift on it."""
     with tempfile.NamedTemporaryFile(suffix=".cbm", delete=False) as f:
         tmp = f.name
     try:
         model.save_model(tmp, format="cbm")
         with open(tmp, "rb") as fh:
-            blob = fh.read()
+            return fh.read()
     finally:
         os.unlink(tmp)
-    return base64.b64encode(blob).decode("ascii")
 
 
-def from_b64(blob: str, model):
-    """Load a base64 ``cbm`` blob into ``model`` — a fresh estimator of the right class, which the caller supplies
+def from_bytes(blob: bytes, model):
+    """Load native ``cbm`` bytes into ``model`` — a fresh estimator of the right class, which the caller supplies
     because the blob does not carry it (the online prior loads a regressor, this one a ranker)."""
     with tempfile.NamedTemporaryFile(suffix=".cbm", delete=False) as f:
-        f.write(base64.b64decode(blob))
+        f.write(blob)
         tmp = f.name
     try:
         model.load_model(tmp, format="cbm")
     finally:
         os.unlink(tmp)
     return model
+
+
+def to_b64(model) -> str:
+    """:func:`to_bytes` base64'd — the spelling the ONLINE prior's checkpoint needs, being a single
+    self-contained JSON file with nowhere to put a sidecar. The offline artifact stores its bytes BESIDE the
+    JSON instead; see :meth:`CatBoostModel.to_artifact`."""
+    return base64.b64encode(to_bytes(model)).decode("ascii")
+
+
+def from_b64(blob: str, model):
+    """The read half of :func:`to_b64`."""
+    return from_bytes(base64.b64decode(blob), model)
 
 
 def new_ranker(**params):
@@ -157,27 +168,49 @@ class CatBoostModel:
 
     # --- artifact round-trip -----------------------------------------------------------------------------
 
-    @classmethod
-    def from_artifact(cls, obj: dict) -> CatBoostModel:
-        """Construct from an artifact dict (base64 ``cbm`` blob + column order + params). Deliberately does NOT
-        version-gate: the strict ``feat_ver`` check is deploy policy and lives in ``offline._load_artifact``."""
-        return cls(
-            booster=from_b64(obj["model"], new_ranker()),
-            cols=tuple(obj["cols"]),
-            scale=float(obj.get("params", {}).get("scale", DEFAULT_SCALE)),
-        )
+    @property
+    def blob(self) -> bytes:
+        """The fitted booster as ``cbm`` bytes — what the caller writes to the sidecar named by
+        :meth:`to_artifact`. A property rather than part of the artifact dict so the dict stays pure JSON."""
+        return to_bytes(self.booster)
 
-    def to_artifact(self, *, provenance: dict) -> dict:
+    @classmethod
+    def from_artifact(cls, obj: dict, *, base_dir=None) -> CatBoostModel:
+        """Construct from an artifact dict: column order, params, and the booster read from the ``model_file``
+        sidecar resolved RELATIVE TO ``base_dir`` (the directory the JSON was loaded from, so an artifact and its
+        weights move together).
+
+        Deliberately does NOT version-gate: the strict ``feat_ver`` check is deploy policy and lives in
+        ``offline._load_artifact``. An inline base64 ``model`` is still accepted — that was the pre-sidecar
+        spelling, and run artifacts under ``_tune/`` predate the split."""
+        name = obj.get("model_file")
+        if name is not None:
+            path = Path(name)
+            if not path.is_absolute():
+                if base_dir is None:
+                    raise ValueError(f"artifact names a relative model_file {name!r} but no base_dir was given to resolve it against")
+                path = Path(base_dir) / path
+            booster = from_bytes(path.read_bytes(), new_ranker())
+        else:
+            booster = from_b64(obj["model"], new_ranker())
+        return cls(booster=booster, cols=tuple(obj["cols"]), scale=float(obj.get("params", {}).get("scale", DEFAULT_SCALE)))
+
+    def to_artifact(self, *, provenance: dict, model_file: str = "weights.cbm") -> dict:
         """This model as a weights artifact dict. Same envelope as the linear model's (``feat_ver`` / ``kind`` /
         ``params`` / ``provenance``, with ``provenance`` caller-supplied whole so the assembly stays pure);
-        ``kind`` is what tells the loader which class to rebuild. The model itself rides as one opaque base64
-        blob rather than named weights — a tree has no reviewable line-level diff, which is a price of the model
-        class, not of this encoding."""
+        ``kind`` is what tells the loader which class to rebuild.
+
+        The booster does NOT ride in the JSON. It goes to ``model_file`` beside it — a RELATIVE name, so the pair
+        can be moved or copied to a host together — and the caller writes :attr:`blob` there. Base64 inside the
+        JSON cost 33% over the raw bytes and turned a reviewable text artifact into one unreadable line; a tree
+        has no line-level diff to offer either way, but the JSON's own fields (cols, params, provenance) stay
+        legible. Keep the name relative to the artifact: an absolute path would break the moment the pair is
+        rsynced to a box with a different scratch directory."""
         return {
             "feat_ver": FEATURIZER_VERSION,
             "kind": "catboost",
             "cols": list(self.cols),
-            "model": to_b64(self.booster),
+            "model_file": model_file,
             "params": {name: float(getattr(self, name)) for name in PARAM_ORDER},
             "provenance": provenance,
         }

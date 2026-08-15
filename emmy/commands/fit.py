@@ -192,6 +192,23 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     return cases, skipped
 
 
+def _write_artifact(path: Path, model, provenance: dict) -> None:
+    """Write one weights artifact — the JSON, plus the model's binary sidecar when it has one.
+
+    The sidecar is named after the JSON (``weights.json`` → ``weights.cbm``) and recorded RELATIVE in the JSON,
+    so the pair travels together: copied into a run directory, rsynced to a tuning box, or checked in beside the
+    shipped weights. Naming it after its own JSON is what lets two artifacts share a directory without one
+    silently overwriting the other's model.
+
+    Which classes have a sidecar is the MODEL's business, not this function's: it asks for ``model_file`` in the
+    artifact and writes ``blob`` only if the model put the key there. A linear artifact is self-contained and
+    simply does not."""
+    artifact = model.to_artifact(provenance=provenance, model_file=f"{path.stem}.cbm")
+    storage.write_json(path, artifact, indent=2)
+    if "model_file" in artifact:
+        (path.parent / artifact["model_file"]).write_bytes(model.blob)
+
+
 def _repo_commit() -> str:
     try:
         out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True, timeout=10)
@@ -310,21 +327,19 @@ def handle_fit(args) -> None:
         source = "incumbent" if incumbent.weights_dynamic is not None else "the static fit"
         model = replace(model, weights_dynamic=carried)
         notes = f"{notes}; dynamic set carried from {source}"
-    artifact = model.to_artifact(
-        provenance={
-            "fitted": datetime.date.today().isoformat(),
-            "script": "emmy fit",
-            "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
-            "features": view,
-            "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
-            "notes": notes,
-        }
-    )
+    provenance = {
+        "fitted": datetime.date.today().isoformat(),
+        "script": "emmy fit",
+        "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
+        "features": view,
+        "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
+        "notes": notes,
+    }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-    storage.write_json(out_dir / "weights.json", artifact, indent=2)
+    _write_artifact(out_dir / "weights.json", model, provenance)
     if args.artifact is not None:
         artifact_path = Path(args.artifact) if args.artifact else _DEFAULT_FILE
-        storage.write_json(artifact_path, artifact, indent=2)
+        _write_artifact(artifact_path, model, provenance)
         logger.info("wrote %s", artifact_path)
 
     for gpu, card in metrics["full_train"]["per_card"].items():

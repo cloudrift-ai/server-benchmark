@@ -599,7 +599,8 @@ A run writes `metrics.json` — the per-run record two fits
 are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and the `cv.shape`
 block (pooled holdout / train tables, per-card gap, per-fold detail); folds group by shape, so goldens sharing a
 candidate pool are held out together rather than scored by a model trained on that pool — and `weights.json`, the
-full-train artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
+full-train artifact in the shipped format (a `catboost` fit also writes the booster as a `weights.cbm` sidecar
+beside it, named after its own JSON so several artifacts can share a directory); `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
 `scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
 (`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and

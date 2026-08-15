@@ -332,7 +332,7 @@ layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never 
 | `kind` | The model | Fitted by |
 |---|---|---|
 | `linear` | Fixed weights over the features, plus one fitted non-linear interaction, and a *second* weight set for symbolic-axis (masked-tile) kernels. Reviewable as a line-level diff. | `--trainer linear`: random search + coordinate descent minimizing the goldens' mean `log2(rank+1)` |
-| `catboost` | A gradient-boosted tree ranker, shipped as one opaque base64 blob. No second weight set and no hand-built interaction — a tree splits on the routing stamp and forms products from its own columns. | `--trainer catboost`: CatBoost `QuerySoftMax`, one group per candidate pool, the golden its single positive |
+| `catboost` | A gradient-boosted tree ranker. The JSON carries only `cols` / `params` / `provenance` and a **relative `model_file`**; the booster itself is a `.cbm` sidecar written beside it (`weights.json` → `weights.cbm`), so the pair moves together and the JSON stays readable. No second weight set and no hand-built interaction — a tree splits on the routing stamp and forms products from its own columns. | `--trainer catboost`: CatBoost `QuerySoftMax`, one group per candidate pool, the golden its single positive |
 
 The tree trains on **sampled** negatives (uniform, then rounds of hard negatives mined from what the current model
 ranks near the golden) because the full golden corpus is ~38 M rows; the *metric* still ranks each golden inside its

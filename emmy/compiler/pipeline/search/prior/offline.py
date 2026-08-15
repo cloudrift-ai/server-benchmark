@@ -50,7 +50,9 @@ _DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 # hard error, not a fallback to linear — see :func:`_load_artifact`.
 _KINDS = {
     "linear": (LinearModel, ("weights", "weights_dynamic", "params"), linear_model.PARAM_ORDER),
-    "catboost": (CatBoostModel, ("cols", "model", "params"), catboost_model.PARAM_ORDER),
+    # ``model_file`` (the sidecar path) is the current spelling; the inline base64 ``model`` is the pre-split
+    # one, still readable so run artifacts written before the split keep loading. Either satisfies the check.
+    "catboost": (CatBoostModel, ("cols", "params"), catboost_model.PARAM_ORDER),
 }
 
 # The linear model's scalar scoring params, named identically in the JSON ``params`` block and the
@@ -87,6 +89,8 @@ def _load_artifact(path_str: str) -> dict:
         )
     _, top_keys, param_keys = _KINDS[kind]
     missing = [k for k in top_keys if k not in obj]
+    if kind == "catboost" and not (obj.get("model_file") or obj.get("model")):
+        missing.append("model_file")
     missing += [f"params.{k}" for k in param_keys if k not in obj.get("params", {})]
     if missing:
         raise RuntimeError(f"offline prior weights artifact {path_str} (kind={kind}) lacks {missing}")
@@ -146,7 +150,7 @@ class OfflinePrior(Prior):
                     f"the offline weights artifact {path} is kind={art['kind']!r}, which has no per-field "
                     f"overrides — pass a ready model= instead"
                 )
-            return cls.from_artifact(art)
+            return cls.from_artifact(art, base_dir=Path(path).parent)
         # ``from_artifact`` is lenient about the params block; ``_load_artifact`` has already proved every key
         # this kind needs is present, so the two agree here and the field-by-field merge is a plain replace.
         return replace(LinearModel.from_artifact(art), **{k: v for k, v in overrides.items() if v is not None})

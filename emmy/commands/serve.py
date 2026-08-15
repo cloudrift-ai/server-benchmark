@@ -323,31 +323,34 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
             return ["--enforce-eager"]
     mode = "FULL_DECODE_ONLY"
     backend_args: list[str] = []
-    head_dim = _max_head_dim(model, vllm_args) if model is not None else None
-    if query_len == 1 and emmy_config.gen_chunk_capture() and not (head_dim is not None and head_dim > 256):
+    if query_len == 1 and emmy_config.gen_chunk_capture():
         # WHOLE-STEP CHUNK CAPTURE: mode FULL records the mixed prefill+decode steps too —
         # the eager mixed steps' per-program host framing (gpu_lock + DLPack dispatch) and
         # their per-step staging D2D were the measured c64 TPOT loss, and the eager
         # symbolic-prefill burst the short-prompt TTFT loss. FULL also retires the
         # uniform-decode dispatch routine: every step dispatches by padded token count.
-        # Gated OFF for a model with an attention head wider than 256 (the probe above):
-        # vLLM 0.23's two mixed-capture-capable backends both break there — TRITON_ATTN's
-        # unified-attention kernel raises an illegal memory access at the mixed-batch capture
-        # warmup, and FLEX_ATTENTION mis-shapes its sliding-window block mask (both measured
-        # on gemma-4-12B, whose global layers are 512-wide, RTX 5090 / vLLM 0.23.0). Such a
-        # model keeps decode-only capture on vLLM's own backend choice; the authoritative
-        # guard for a probe miss is in ``EmmyGenModel.__init__``.
+        # A model with an attention head wider than 256 (the probe below) takes a CAPPED rung
+        # list instead of the full one: past that width the mixed-capture-capable vLLM 0.23
+        # backends are only partially usable — TRITON_ATTN's unified-attention kernel raises
+        # an illegal memory access capturing WIDE mixed batches (measured at 4128 tokens on
+        # gemma-4-12B / RTX 5090; clean through 2112, benched end to end with greedy chat
+        # parity), and FLEX_ATTENTION mis-shapes its sliding-window block mask outright.
+        # Steps wider than the capped top rung stay eager. The authoritative guard for a
+        # probe miss is in ``EmmyGenModel.__init__``.
         mode = "FULL"
         sizes = sorted(set(sizes) | _chunk_capture_rungs(vllm_args, bucket))
+        head_dim = _max_head_dim(model, vllm_args) if model is not None else None
+        if head_dim is not None and head_dim > 256:
+            cap = emmy_config.WIDE_HEAD_MIXED_RUNG_CAP
+            sizes = [s for s in sizes if s <= cap]
+            logger.info(
+                "chunk capture capped at %d-token rungs: this model's widest attention head (%d) exceeds 256, "
+                "where vLLM 0.23's TRITON_ATTN faults capturing wider mixed batches; wider steps stay eager",
+                cap,
+                head_dim,
+            )
         if not _has_flag(vllm_args, "--attention-backend"):
             backend_args = ["--attention-backend", "TRITON_ATTN"]
-    elif query_len == 1 and emmy_config.gen_chunk_capture():
-        logger.warning(
-            "chunk capture off: this model's widest attention head (%d) exceeds 256, where both of vLLM 0.23's "
-            "mixed-batch-capture backends break (TRITON_ATTN illegal access / FLEX_ATTENTION sliding-mask shape "
-            "error); serving whole-step DECODE capture only",
-            head_dim,
-        )
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
     # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
     # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32

@@ -434,7 +434,8 @@ defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--co
 `cudagraph_mode: FULL` + capture sizes laddered up to `--max-num-seqs` plus the chunk rungs, and
 `--attention-backend TRITON_ATTN` — mixed-batch full capture needs a backend declaring always-supported capture;
 `EMMY_GEN_CHUNK_CAPTURE=0` restores the decode-only `FULL_DECODE_ONLY` config, and a model with an attention
-head wider than 256 keeps it automatically — vLLM 0.23's mixed-capture backends break there; see
+head wider than 256 gets its rungs capped at `config.WIDE_HEAD_MIXED_RUNG_CAP` — vLLM 0.23's TRITON_ATTN
+faults capturing wider mixed batches on such models; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
 cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an

@@ -396,24 +396,27 @@ class EmmyGenModel(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(config.hidden_size, self.runner.residual_dtype)
 
         # AUTHORITATIVE mixed-capture guard (the serve command's head-dim probe is best-effort
-        # UX only): vLLM 0.23's two attention backends whose full-graph support covers mixed
-        # batches both break on a model with an attention head wider than 256 — TRITON_ATTN's
-        # unified-attention kernel raises an illegal memory access at the mixed-batch capture
-        # warmup and FLEX_ATTENTION mis-shapes its sliding-window block mask (both measured on
-        # gemma-4-12B, whose global layers are 512-wide). A scalar-FULL boot on such a model
-        # would die in CUDA mid-capture; fail readably instead. FULL_AND_PIECEWISE is exempt
-        # (its mixed steps run piecewise, attention outside the graphs), as is decode-only
-        # capture.
+        # UX only): on a model with an attention head wider than 256, vLLM 0.23's mixed-capture
+        # backends are only partially usable — TRITON_ATTN's unified-attention kernel raises an
+        # illegal memory access capturing a mixed batch wider than the validated rung cap
+        # (measured at 4128 tokens on gemma-4-12B, whose global layers are 512-wide; clean
+        # through 2112), and FLEX_ATTENTION mis-shapes its sliding-window block mask outright.
+        # A scalar-FULL boot with a capture size past the cap would die in CUDA mid-capture;
+        # fail readably instead. FULL_AND_PIECEWISE is exempt (its mixed steps run piecewise,
+        # attention outside the graphs), as is decode-only capture.
         if not mc.enforce_eager:
             cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+            sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
             widest = max((self.runner.layer_meta(i)[0] for i in range(n_layers)), default=0)
-            if cg_mode is not None and getattr(cg_mode, "name", str(cg_mode)) == "FULL" and widest > 256:
+            cap = emmy_config.WIDE_HEAD_MIXED_RUNG_CAP
+            over = sorted(s for s in sizes if s > cap)
+            if cg_mode is not None and getattr(cg_mode, "name", str(cg_mode)) == "FULL" and widest > 256 and over:
                 raise ValueError(
                     f"cudagraph_mode FULL captures mixed prefill+decode steps, and this model's widest "
-                    f"attention head ({widest}) exceeds 256 — where vLLM 0.23's mixed-batch-capture "
-                    f"backends break (TRITON_ATTN: illegal memory access; FLEX_ATTENTION: sliding-mask "
-                    f"shape error). Serve with EMMY_GEN_CHUNK_CAPTURE=0 (whole-step decode capture only) "
-                    f"or an explicit --compilation-config without mixed FULL capture."
+                    f"attention head ({widest}) exceeds 256 — where vLLM 0.23's TRITON_ATTN faults "
+                    f"capturing mixed batches wider than {cap} tokens (FLEX_ATTENTION breaks outright). "
+                    f"Capture sizes {over} exceed that cap; drop them, or serve with "
+                    f"EMMY_GEN_CHUNK_CAPTURE=0 (whole-step decode capture only)."
                 )
 
         # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX

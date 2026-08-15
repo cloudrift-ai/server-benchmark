@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Maintained as the BF16 Qwen3.6 MoE baseline for agent and coding workloads across Pro 6000 and H200."
+  rationale: "Maintained as the current flagship Qwen3.6 MoE with 5.9M downloads, strong coding and agent benchmark scores."
 
 engine:
   llm:

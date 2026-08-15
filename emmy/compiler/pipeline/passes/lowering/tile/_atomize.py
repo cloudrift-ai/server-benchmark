@@ -204,6 +204,31 @@ def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: L
     return a_leaf, b_leaf, raw, Body((*hoisted, *chain, *epilogue))
 
 
+def _bilinear_reads(body: list, is_b) -> list[tuple[Accum, Assign, Load | None, str]] | None:
+    """The ONE ⊗-lift reading every contraction binder shares: per additive ``Accum``, its
+    two-argument ``multiply`` lift (the ``(·, +)`` semiring — the only one
+    :meth:`Fold.contraction` generates), the directly-named B load among the lift's arguments
+    (selected by the caller's ``is_b`` role test; ``None`` when B rides a computed value), and the
+    other argument — the fold's A value. ``None`` when any fold lacks the bilinear shape, or when
+    both lift arguments are one value (a square product has no role split)."""
+    accums = [st for st in body if isinstance(st, Accum)]
+    if not accums or any(a.op.reduce_canon != "add" for a in accums):
+        return None
+    defs = {st.name: st for st in body if isinstance(st, Assign)}
+    loads = {st.names[0]: st for st in body if isinstance(st, Load)}
+    out: list[tuple[Accum, Assign, Load | None, str]] = []
+    for acc in accums:
+        lift = defs.get(acc.value)
+        if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
+            return None
+        b_name = next((a for a in lift.args if (ld := loads.get(a)) is not None and is_b(ld)), None)
+        a_arg = next((a for a in lift.args if a != b_name), None)
+        if a_arg is None:
+            return None
+        out.append((acc, lift, loads.get(b_name) if b_name is not None else None, a_arg))
+    return out
+
+
 def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tuple[Load | list, Load | list, str, Body]:
     """Resolve the ``(a_load, b_load, acc, epilogue)`` operand→role facts for a ``CONTRACTION``
     reduce ``loop`` (the lowered ``Accum``-in-``Loop`` form) whose output is indexed by grid axes
@@ -228,8 +253,11 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     k_name = loop.axis.name
     body = list(loop.body)
     loads = [s for s in body if isinstance(s, Load) and k_name in _idx_vars(s.index)]
-    a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index)), None)
-    b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index)), None)
+    # Role-EXCLUSIVE leaves: A is (…, m, k)-indexed and never reads n; B is (…, n, k)-indexed and
+    # never reads m. A load carrying both grid axes (``Σ x·x`` over a 2-D free grid) is neither
+    # role — such a candidate raises below and derives PLANAR.
+    a_leaf = next((ld for ld in loads if m_name in _idx_vars(ld.index) and n_name not in _idx_vars(ld.index)), None)
+    b_leaf = next((ld for ld in loads if n_name in _idx_vars(ld.index) and m_name not in _idx_vars(ld.index)), None)
     fold = next((s for s in body if isinstance(s, Accum)), None)
     if fold is None:
         raise LoweringError("warp tier: contraction loop has no fold accumulator")
@@ -242,12 +270,12 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
     # the true operands: B is its (n, k)-indexed load, A is the other argument — a plain ``Load``
     # (the clean gmem-direct contraction) or a computed cone (which rides the smem compute fill,
     # exactly like the norm→linear cone, just with no statistic prologue).
-    lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
-    if lift is not None and lift.op.name == "multiply" and len(lift.args) == 2 and b_leaf is not None:
-        if b_leaf.names[0] in lift.args:
-            a_arg = next(a for a in lift.args if a != b_leaf.names[0])
+    reads = _bilinear_reads(body, lambda ld: n_name in _idx_vars(ld.index) and m_name not in _idx_vars(ld.index))
+    if reads is not None and len(reads) == 1 and b_leaf is not None:
+        _, lift, b_direct, a_arg = reads[0]
+        if b_direct is not None:
             if a_leaf is not None and a_arg == a_leaf.names[0]:
-                return a_leaf, b_leaf, acc, epilogue
+                return a_leaf, b_direct, acc, epilogue
             # A rides a computed cone. A storage decode times k-invariant multiplicative factors
             # binds through the mul-hoist FIRST (the raw storage-dtype A load — the W8A8
             # activation side; the fp8 warp tier needs the materialized bits, and the scalar
@@ -257,33 +285,39 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
             if hoist is not None:
                 return hoist
             cone = map_cone(body, a_arg)
-            if cone and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone):
-                return cone, b_leaf, acc, epilogue
+            if (
+                cone
+                and not any(isinstance(st, Load) and n_name in _idx_vars(st.index) for st in cone)
+                and any(isinstance(st, Load) and k_name in _idx_vars(st.index) for st in cone)
+            ):
+                return cone, b_direct, acc, epilogue
             # The lift names a COMPUTED A whose cone declined (an Accum / Select inside it, or an
             # n-indexed load riding it) — falling through to the positional (m, k) rule below would
             # bind a cone-INTERNAL load as A and silently drop the rest of the cone: exactly the
             # wrong-kernel class the lift binding exists to prevent. Raise instead — the recognizer
             # catches LoweringError and demotes the cell to PLANAR, which computes the full body.
             raise LoweringError("warp tier: the ⊗ lift's A operand is a computed cone that does not bind")
-        # B is NOT directly named by the lift — it rides a computed cone (and A may too: the
-        # W8A8 double-cone). A storage decode times k-invariant multiplicative factors binds
-        # through the mul-hoist first (decode absorbed by the storage dtype, factors to the
-        # epilogue). Otherwise bind a pure MAP cone structurally, just as for A. The operand EDGE
-        # carries the whole producer tree; later scheduling may compute-fill it into the B slab,
-        # or the scalar reading may evaluate it per cell. This is role-generic computed-operand
-        # fusion: no storage-format fact survives recognition.
+        # B is NOT directly named by the lift (``b_direct is None``) — it rides a computed cone
+        # (and A may too: the W8A8 double-cone). A storage decode times k-invariant
+        # multiplicative factors binds through the mul-hoist first (decode absorbed by the
+        # storage dtype, factors to the epilogue). Otherwise bind a pure MAP cone structurally,
+        # just as for A. The operand EDGE carries the whole producer tree; later scheduling may
+        # compute-fill it into the B slab, or the scalar reading may evaluate it per cell. This
+        # is role-generic computed-operand fusion: no storage-format fact survives recognition.
         hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
         if hoist is not None:
             return hoist
         if a_leaf is not None and a_leaf.names[0] in lift.args:
             b_arg = next(a for a in lift.args if a != a_leaf.names[0])
             cone = map_cone(body, b_arg)
-            if cone and not any(isinstance(st, Load) and m_name in _idx_vars(st.index) for st in cone):
+            if (
+                cone
+                and not any(isinstance(st, Load) and m_name in _idx_vars(st.index) for st in cone)
+                and any(isinstance(st, Load) and k_name in _idx_vars(st.index) for st in cone)
+            ):
                 return a_leaf, cone, acc, epilogue
         raise LoweringError("warp tier: the ⊗ lift's B operand is a computed cone that does not bind")
-    if a_leaf is None or b_leaf is None:
-        raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
-    return a_leaf, b_leaf, acc, epilogue
+    raise LoweringError("warp tier: could not bind A/B operands by grid (m, n) axis")
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -347,30 +381,16 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
         return None  # the combine tail is a pure pointwise chain (Loads ride the stat-free prefix)
     k_ax = kloop.axis
     kbody = list(kloop.body)
-    accums = [st for st in kbody if isinstance(st, Accum)]
-    if not accums or any(a.op.name != "add" for a in accums):
+    kdefs = {st.names[0]: st for st in kbody if isinstance(st, Load)} | {st.name: st for st in kbody if isinstance(st, Assign)}
+
+    # Bind each fold's (B, acc, A-value) through the ONE ⊗-lift reading; every fold must name its
+    # B load directly and share ONE A value (value-tree key equality).
+    reads = _bilinear_reads(kbody, lambda ld: {n_ax.name, k_ax.name} <= _idx_vars(ld.index))
+    if reads is None or any(b is None for _, _, b, _ in reads):
         return None
-    defs = {st.name: st for st in kbody if isinstance(st, Assign)}
-    loads = {st.names[0]: st for st in kbody if isinstance(st, Load)}
-    kdefs = {**loads, **defs}
-
-    def _load_vars(nm: str) -> set | None:
-        ld = loads.get(nm)
-        return {v for e in ld.index for v in e.free_vars()} if ld is not None else None
-
-    # Bind each fold's (B, acc, A-value): the B operand is the (n, k)-indexed load of the ⊗ lift;
-    # the other arg is the fold's A value. Every fold must share ONE A value (key equality).
-    folds: list[tuple[Load, str]] = []
-    a_names: list[str] = []
-    for acc in accums:
-        lift = defs.get(acc.value)
-        if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
-            return None
-        b_name = next((a for a in lift.args if (vs := _load_vars(a)) and n_ax.name in vs and k_ax.name in vs), None)
-        if b_name is None:
-            return None
-        a_names.append(next(a for a in lift.args if a != b_name))
-        folds.append((loads[b_name], acc.name))
+    accums = [acc for acc, _, _, _ in reads]
+    folds: list[tuple[Load, str]] = [(b, acc.name) for acc, _, b, _ in reads]
+    a_names: list[str] = [a for _, _, _, a in reads]
     if len({_cone_value_key(nm, kdefs) for nm in a_names}) != 1:
         return None  # per-fold A values differ — not a shared-operand multi-fold
     cone = map_cone(kbody, a_names[0])

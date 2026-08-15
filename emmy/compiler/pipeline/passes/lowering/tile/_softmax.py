@@ -9,7 +9,11 @@ untouched, reading the final ``m`` + ``1/d``).
 
 ``online_softmax_combine`` builds the ``(m, d)`` carrier; :func:`try_online_softmax`
 recognizes an adjacent ``(rowmax, Σexp)`` reduce pair over the same input + reduce
-extent in a ``LoopOp`` body and rewrites it to the fused streaming loop. The carried
+extent in a ``LoopOp`` body and rewrites it to the fused streaming loop. The pair is
+recognized on the FOLD ALGEBRA — each loop reads through :func:`fold_from_loop`, the same
+byte-identity-gated λ parser every other recognition step consumes, and the condition is
+stated on the folds' combine canon and lifted values; the merge itself is the exp-family
+product monoid (``exp_merge``), so no stmt pattern survives here. The carried
 ``(m, d)`` states fold through ``base``-``Accum``\\ s, so when the cell is lifted (the reduce
 ``Loop`` annotated ``TWISTED``) the seed is derived from ``op.identity`` by
 ``Loop.render``; explicit
@@ -27,37 +31,57 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, component_ops
 from emmy.compiler.ir.stmt.carrier import exp_merge
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+
+def _fold_of(loop: Loop, canon: str):
+    r"""The loop read as a single-state fold of combine-canon ``canon`` through the ONE loop→node
+    parser (:func:`fold_from_loop` — the byte-identity-gated λ reading every recognition step
+    shares), or ``None``. Returns ``(state name, lifted value name, lift body stmts)``.
+
+    The pairing runs on the RAW pre-annotation body, whose ``Accum``\ s have no fold axes stamped
+    yet; the derivation regenerates them as ``(loop.axis,)``, so the raw loop is brought to that
+    canonical dissolved spelling before the byte-identity gate compares."""
+    dissolved = replace(
+        loop,
+        body=Body(tuple(replace(s, axes=(loop.axis.name,)) if isinstance(s, Accum) and not s.axes else s for s in loop.body)),
+    )
+    f = fold_from_loop(dissolved)
+    if f is None or len(f.combine.results) != 1 or len(f.lift.results) != 1:
+        return None
+    ops = component_ops(f.combine)
+    if ops is None or [op.reduce_canon for op in ops] != [canon]:
+        return None
+    return f.combine.results[0], f.lift.results[0], list(f.lift.body)
 
 
 def _rowmax(loop: Loop) -> tuple[str, str, tuple] | None:
-    """``(acc, input, index)`` if ``loop`` is a row-max reduce of a single ``Load``."""
-    body = list(loop.body)
-    maxes = [s for s in body if isinstance(s, Accum) and s.op.reduce_canon == "maximum"]
-    if len(maxes) != 1:
+    """``(state, input, index)`` if ``loop`` reads as a row-max fold of ONE loaded value."""
+    read = _fold_of(loop, "maximum")
+    if read is None:
         return None
-    acc = maxes[0]
-    ld = next((s for s in body if isinstance(s, Load) and s.name == acc.value), None)
-    return (acc.name, ld.input, ld.index) if ld is not None else None
+    state, value, body = read
+    ld = next((s for s in body if isinstance(s, Load) and s.name == value), None)
+    return (state, ld.input, ld.index) if ld is not None else None
 
 
 def _sumexp(loop: Loop, maxacc: str, input_buf: str) -> str | None:
-    """The sum ``Accum`` name if ``loop`` is a ``Σ exp(x − maxacc)`` reduce over
-    ``input_buf`` — folds ``add`` over ``exp(subtract(load(input_buf, …), maxacc))``."""
-    body = list(loop.body)
-    sums = [s for s in body if isinstance(s, Accum) and s.op.reduce_canon == "add"]
-    if len(sums) != 1:
+    """The sum state name if ``loop`` reads as a ``Σ exp(x − maxacc)`` fold over ``input_buf`` —
+    an additive fold whose lifted value is ``exp(subtract(load(input_buf, …), maxacc))``."""
+    read = _fold_of(loop, "add")
+    if read is None:
         return None
-    acc2 = sums[0]
-    expa = next((s for s in body if isinstance(s, Assign) and s.name == acc2.value and s.op.name == "exp"), None)
+    state, value, body = read
+    expa = next((s for s in body if isinstance(s, Assign) and s.name == value and s.op.name == "exp"), None)
     if expa is None:
         return None
     suba = next((s for s in body if isinstance(s, Assign) and s.name == expa.args[0] and s.op.name == "subtract"), None)
     if suba is None or maxacc not in suba.args:
         return None
     ld = next((s for s in body if isinstance(s, Load) and s.name == suba.args[0] and s.input == input_buf), None)
-    return acc2.name if ld is not None else None
+    return state if ld is not None else None
 
 
 def _fuse(body: Body) -> tuple[Body, bool]:

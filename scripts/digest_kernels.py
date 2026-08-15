@@ -217,7 +217,7 @@ def _liveness(name, pins, realized):
 
 
 def run_case(name, build, pins):
-    from emmy.commands.run import _pinned_knobs
+    from emmy.compiler.pipeline.search.pins import pinned_knobs as _pinned_knobs
 
     g = build()
 

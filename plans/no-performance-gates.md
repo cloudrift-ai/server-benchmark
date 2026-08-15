@@ -86,6 +86,20 @@ Documented hardcoded exceptions (99% rule): `_softmax` streaming, the stat-fill 
 `_pick_coop` ordering constants, the derived codegen constants (pads, `setmaxnreg` split,
 swizzle picks, the f16-acc promote cadence — precision, not perf), the bit-identical peepholes.
 
+## One algebra recognizer (LANDED on this PR)
+
+Recognition now reads through two shared parsers and nothing else — the λ-fold reading
+(`fold_from_loop`, byte-identity-gated) and the ⊗-lift reading (`_bilinear_reads`, shared by
+`bind_contraction` and `bind_prologue_contraction`). The recognition-side contraction parser
+(`_is_clean_contraction`'s clean/computed/both-computed decision tree) is deleted: candidacy is
+liberal (`_bilinear_candidate` — one additive fold, a distributing two-argument lift, a K-indexed
+load) and the ONE binder arbitrates, with the role geometry hardened there (role-exclusive A/B
+leaves; cone arms require a K-walking load). The online-softmax pairing states its condition on
+λ-fold results (raw loops normalized to the dissolved Accum-axes spelling before the gate). All
+verified emission-neutral by the pinned-kernel digest gate (byte-identical across every step).
+Remaining dispatch (which composition applies) is structural and small; the raw-loop escape and
+symbolic-axis deferral are the recognizer's stated incompleteness, dying with its growth.
+
 ## Follow-ups (separate PRs)
 
 - Replayable golden rows: recorded rows carry placement, exact fail-closed decode keyed on the record's own

@@ -47,8 +47,15 @@ Flash must precede online-softmax which must precede the lift: each later step c
 un-lifted (the scalar ``Tile`` decode needs static extents) — the ``LoopOp`` stays put for
 the dynamic-shape tier.
 
-This is case-by-case recognition today (flash / online-softmax / contraction patterns);
-the intent is to grow it toward ONE algorithmic algebra recognizer.
+Recognition reads through TWO shared algebra parsers and nothing else: the λ-fold reading
+(:func:`~._fromloop.fold_from_loop` — every reduce ``Loop`` interpreted as a ``Fold``, gated by
+byte-identity of the re-derived loop) and the ⊗-lift reading (``_atomize._bilinear_reads`` — every
+bilinear fold's (B, A-value, accumulator) facts, shared by both contraction binders). The
+online-softmax pairing states its condition on λ-fold results; contraction candidacy
+(:func:`_bilinear_candidate`) is deliberately liberal and the ONE binder arbitrates operand
+shapes; the monoid composition binds its per-channel folds through the same lift reading. What
+remains case-by-case is the DISPATCH (which composition applies), not the parsing — no step holds
+a private stmt-pattern reading of the algebra.
 """
 
 from __future__ import annotations
@@ -68,7 +75,7 @@ from emmy.compiler.ir.tile import (
 )
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
@@ -142,48 +149,23 @@ def _reads(stmts) -> set[str]:
     return out
 
 
-def _is_clean_contraction(body: list[Stmt], k_name: str) -> bool:
-    """True iff ``body`` (a reduce loop's body, possibly with a moved-in prologue) is a clean
-    contraction whose lift multiplies the operand loads **directly** — body is exactly the
-    K-indexed operand loads + the ``⊗`` lift ``Assign`` (distributing over the fold) + the
-    additive fold ``Accum``, contracting ≥ 2 operand loads, with NO loop-invariant
-    load or per-operand preprocessing (a pre-scaled ``sum_k (x·s)·(y·s)`` is NOT clean — it
-    becomes a degenerate ``PLANAR`` reduce so the scale survives in the loop body). The two
-    operands may be different affine views of one packed buffer (for example load-time-concatenated
-    QKV); operand identity is the load/index, not the backing allocation."""
+def _bilinear_candidate(body: list[Stmt], k_name: str) -> bool:
+    """Whether a flat reduce MAY read as a bilinear contraction: ONE additive fold, a ⊗ lift that
+    distributes over it with two arguments, and a K-indexed load reachable. Deliberately LIBERAL —
+    this is candidacy, not a parser: the ONE binder (:func:`bind_contraction`) arbitrates every
+    operand shape (direct loads, hoistable k-invariant factor chains, computed cones, the
+    both-computed decode pair), and an unbindable candidate derives ``PLANAR`` at
+    :func:`_nodify_contraction`. Recognition holds no second reading of the algebra — the old
+    clean/computed/both-computed decision tree here was a parallel parser of exactly what the
+    binder parses, kept in sync by hand."""
     accs = [s for s in body if isinstance(s, Accum)]
     if len(accs) != 1:
         return False
     fold = accs[0]
     lift = next((s for s in body if isinstance(s, Assign) and s.name == fold.value), None)
-    if lift is None or not lift.op.distributes_over(fold.op):
+    if lift is None or not lift.op.distributes_over(fold.op) or len(lift.args) != 2:
         return False
-    k_loads = [ld for ld in body if isinstance(ld, Load) and k_name in {v for e in ld.index for v in e.free_vars()}]
-    if len(k_loads) < 2:
-        return False
-    all_loads = [s for s in body if isinstance(s, Load)]
-    if len(body) == len(all_loads) + 2 and len(all_loads) == len(k_loads) and set(lift.args) == {ld.names[0] for ld in k_loads}:
-        return True
-    # COMPUTED-A contraction: the lift multiplies ONE K-indexed operand load by a value this loop
-    # computes (a fused operand cone). Still a contraction — the cone is the A tile — so mark it and
-    # let ``bind_contraction`` bind the cone; the alternative is a PLANAR scalar fold, which is what
-    # took gemma-4's GeGLU->down_proj edge off the mma tier entirely (66x).
-    if len(lift.args) != 2:
-        return False
-
-    def k_indexed_cone(root: str) -> bool:
-        cone = map_cone(list(body), root)
-        return bool(cone) and any(isinstance(st, Load) and k_name in {v for e in st.index for v in e.free_vars()} for st in cone)
-
-    operand = next((ld for ld in k_loads if ld.names[0] in lift.args), None)
-    if operand is None:
-        # BOTH lift args ride computed cones (the W8A8 shape: a storage-decode cone on each
-        # operand). Still a contraction when each cone carries a K-indexed load;
-        # ``bind_contraction`` arbitrates bindability — the shapes it cannot bind (e.g. the
-        # pre-scaled ``sum_k (x·s)·(y·s)``) raise there and derive PLANAR, exactly the fold the
-        # old ``return False`` produced, so nothing schedulable is lost by marking.
-        return all(k_indexed_cone(a) for a in lift.args)
-    return k_indexed_cone(next(a for a in lift.args if a != operand.names[0]))
+    return any(isinstance(s, Load) and k_name in {v for e in s.index for v in e.free_vars()} for s in body)
 
 
 def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
@@ -198,7 +180,7 @@ def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
     body = (*pre_reduce, *rloop.body)
     if rloop.role is not AxisRole.FREE:
         return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=rloop.role)
-    if _is_clean_contraction(list(body), rloop.axis.name):
+    if _bilinear_candidate(list(body), rloop.axis.name):
         return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.CONTRACTION)
     accs = [s for s in body if isinstance(s, Accum)]
     if len(accs) != 1:

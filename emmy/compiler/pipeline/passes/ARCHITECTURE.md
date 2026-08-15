@@ -249,6 +249,15 @@ nest that no schedule can run and recognition cannot certify.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
+Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading
+(`_fromloop.fold_from_loop` — a reduce `Loop` interpreted as a `Fold`, gated by byte-identity of the re-derived
+loop) and the ⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)`
+facts, shared by both contraction binders). The online-softmax pairing states its condition on λ-fold results;
+contraction CANDIDACY (`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates
+every operand shape (direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition
+binds its channels through the same lift reading. What stays case-by-case is the dispatch — which composition
+applies — never the parsing: no recognition step holds a private stmt-pattern reading of the algebra.
+
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
 option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at

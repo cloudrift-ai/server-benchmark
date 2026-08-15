@@ -10,6 +10,7 @@ the cold ``OfflinePrior`` regardless of any prior checkpoint on the host.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -172,7 +173,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     monkeypatch.setattr(audit, "summarize", lambda _results: {"MATCH": 1, "DRIFT": 0, "GAP": 0, audit.COMPILE_FAIL: 0})
     monkeypatch.setattr(audit, "gap_keys", lambda _results: set())
 
-    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     _, gpu_name, compute_cap, records = captured["audit"]
@@ -211,8 +212,127 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
 
     with pytest.raises(SystemExit) as exc:
-        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
     assert exc.value.code == 1
+
+
+def test_serving_config_resolves_consult_baseline(tmp_path):
+    from emmy.serving.release import load_serving_config
+
+    golden = tmp_path / "golden.yaml"
+    baseline = tmp_path / "consult.json"
+    config = tmp_path / "release.env"
+    base = (
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
+    )
+    config.write_text(base)
+    assert load_serving_config(config).consult_baseline is None
+    config.write_text(base + f"SERVE_CONSULT_BASELINE={baseline}\n")
+    assert load_serving_config(config).consult_baseline == baseline
+
+
+def _static_release_audit(monkeypatch, tmp_path, *, records: list[dict], extra_env: str = ""):
+    """The static-release eval-golden harness: one twin (``pre1``) whose audit yields
+    ``records``. Returns ``(eval_cmd, args_namespace)`` ready for ``handle_eval_golden``."""
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.compiler.pipeline.search.audit as audit
+    import emmy.serving.twins as twins
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_STATIC_ONLY=1\nSERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\n"
+        "SERVE_PREFILL_CAPACITY=1\nSERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n" + extra_env
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object()})
+    monkeypatch.setattr(audit, "audit_card", lambda graphs, gpu_name, compute_cap, *, goldens: {"pre1": list(records)})
+    return eval_cmd, SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False)
+
+
+# Two golden-tier consultations on the audited twin; key=None keeps the GAP out of the
+# gap-ratchet failure set so only the consultation count is under test.
+_TWO_CONSULTATIONS = [{"verdict": "MATCH", "key": None}, {"verdict": "GAP", "key": None}]
+
+
+def test_eval_golden_consultation_drop_fails_naming_the_twin(monkeypatch, tmp_path, caplog):
+    """A twin whose golden-consultation count falls below the checked-in baseline — or that
+    vanishes from the audit entirely — is a gate failure naming the twin, even with zero
+    DRIFT: a kernel that stops forking consults no golden, so its MATCHes silently vanish
+    (the regression class the verdicts cannot see)."""
+    import pytest
+
+    baseline = tmp_path / "consult.json"
+    baseline.write_text(json.dumps({"FAST_MATH=false": {"pre1": 3, "gone": 1}}))
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(args)
+    assert exc.value.code == 1
+    assert any("pre1" in r.message and "dropped 3 -> 2" in r.message for r in caplog.records)
+    assert any("gone" in r.message and "vanished" in r.message for r in caplog.records)
+
+
+def test_eval_golden_consultation_baseline_holds_and_flags_staleness(monkeypatch, tmp_path, caplog):
+    """Counts at (or above) baseline pass; a grown count only marks the baseline stale."""
+    baseline = tmp_path / "consult.json"
+    baseline.write_text(json.dumps({"FAST_MATH=false": {"pre1": 1}}))
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+
+    with caplog.at_level(logging.INFO):
+        eval_cmd.handle_eval_golden(args)
+    assert any("stale" in r.message for r in caplog.records)
+
+
+def test_eval_golden_missing_consult_baseline_fails(monkeypatch, tmp_path, caplog):
+    """SERVE_CONSULT_BASELINE naming a nonexistent file is a misconfigured gate, not a skip."""
+    import pytest
+
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={tmp_path / 'consult.json'}\n"
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(args)
+    assert exc.value.code == 1
+    assert any("--update-consult-baseline" in r.message for r in caplog.records)
+
+
+def test_eval_golden_update_records_consult_baseline(monkeypatch, tmp_path):
+    """``--update-consult-baseline`` writes the observed per-lane per-twin counts."""
+    baseline = tmp_path / "consult.json"
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+    args.update_consult_baseline = True
+
+    eval_cmd.handle_eval_golden(args)
+
+    assert json.loads(baseline.read_text()) == {"FAST_MATH=false": {"pre1": 2}}
 
 
 def test_knobs_missing_db(run_cli, tmp_path):

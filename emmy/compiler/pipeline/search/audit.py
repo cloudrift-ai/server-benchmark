@@ -107,6 +107,17 @@ def summarize(records_by_graph: dict[str, list[dict]]) -> Counter:
     return Counter(r["verdict"] for records in records_by_graph.values() for r in records)
 
 
+def consultation_counts(records_by_graph: dict[str, list[dict]]) -> dict[str, int]:
+    """Golden-tier consultations per graph — every MATCH/DRIFT/GAP record (:data:`COMPILE_FAIL`
+    is not a consultation). This count is the signal the verdicts cannot carry: a pass change
+    that removes a kernel's schedule fork entirely (e.g. a merged kernel whose lowering stops
+    enumerating candidates) deploys it single-option with NO golden consultation, so its
+    recorded MATCHes silently vanish instead of turning DRIFT. ``emmy eval golden`` ratchets these counts per twin and
+    lane against the serving config's checked-in baseline (``SERVE_CONSULT_BASELINE``); a drop
+    is a gate failure naming the twin."""
+    return {name: sum(r["verdict"] != COMPILE_FAIL for r in records) for name, records in records_by_graph.items()}
+
+
 def gap_keys(records_by_graph: dict[str, list[dict]]) -> set:
     """Every distinct GAP shape across an :func:`audit_card` result — the full coverage
     view the CI gate ratchets on (goldens must cover ALL kernel forks in the model:

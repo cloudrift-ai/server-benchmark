@@ -29,6 +29,8 @@ _MIGRATED: set[str] = {
     "rtx5090_sm120_olmoe.yaml",
     "rtx4080_sm89.yaml",
     "rtx4090_sm89.yaml",
+    "rtx4090_sm89_gemma4.yaml",
+    "v100_sm70_qwen35_122b.yaml",
 }
 
 _FILES = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))

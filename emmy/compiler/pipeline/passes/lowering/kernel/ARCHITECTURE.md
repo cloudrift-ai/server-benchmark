@@ -125,7 +125,12 @@ fill→drain skeleton — and the atom contributes only leaves, never a loop. Pe
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render.
 - **scalar** (`_ScalarOps`) — atom `(1, 1, 1)`, `lanes == 1`. The UNIT is a **single thread** (so there is no `_lane`
   axis); its leaves are plain `Load`s + an fma cell, the projection `tail` replicated per register cell with its
-  operand loads deduped (the arithmetic-intensity reuse).
+  operand loads deduped (the arithmetic-intensity reuse). One A read per register ROW and one B read per COLUMN is a
+  property of the OPERAND, not of the tier: a computed edge whose cone reads the OTHER output axis (an A broadcast
+  over n — the o_proj shape `out[m, n] = Σ_k B[n, k] · A[m, k, n]`) holds a different value in every cell of its row,
+  so it is read once per register CELL instead, σ-bound to both coordinates. Sharing it would both fold the wrong
+  value into every column past the first and leave the sibling coordinate free — the kernel binds only the split
+  `_b` / `_u` vars, so the per-copy rename would emit an identifier nothing defines.
 
 Each atom is a strategy class in **`_atom.py`** supplying `state` / `store` plus the descriptor reads the shared
 `reduce` consumes — `gmem_leaves` (the four gmem-direct leaf constructors), `staged_drain` (the slab-reading leaf),

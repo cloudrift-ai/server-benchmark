@@ -256,16 +256,13 @@ def test_mpk_megakernel_lane_is_pinned_and_paired(project_root) -> None:
     # Pinned external sources: the mirage mpk-branch revision and the Qwen3-8B checkpoint revision.
     assert "5c28cc68dc621cc9448c5c9882ef9e21fdc85884" in run
     assert "b968826d9c46dd6066d109eabc6255188de91218" in run
-    # The four arms: MPK's own baseline/megakernel demo pair and the stock/emmy vLLM pair.
+    # The MPK baseline/megakernel demo pair and stock vLLM are the only paths.
     assert "demo/qwen3/demo.py" in run
     assert "--use-mirage" in run
     assert "vllm==0.23.0" in run
-    assert "emmy serve" in run
+    assert "emmy serve" not in run
+    assert "EMMY_GEN_DECODE_BUCKET" not in run
     assert "for repeat in 0 1 2 3 4" in run
-    # Isolated Emmy evidence state: the arm is preregistered as a cold deploy.
-    assert "EMMY_TUNE_DB=$task_dir" in run
-    assert "EMMY_ONLINE_FILE=$task_dir" in run
-    assert "EMMY_CUBIN_CACHE=$task_dir" in run
     # The suite's deterministic serving controls on the single-stream decode point.
     assert "--ignore-eos --temperature 0 --seed 0" in run
     assert "--max-concurrency 1" in run

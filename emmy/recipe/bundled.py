@@ -4,7 +4,7 @@
 `recipes/<model>/recipe.yaml` under `emmy/recipes/` (staged at build time by
 `scripts/prepare_dist.py`). A bundled recipe is read-only — it lives in
 site-packages, while `deploy` writes its compose file into the recipe directory
-and `bench` creates run directories there — so referring to one by name
+and `bench` creates a timestamped run directory — so referring to one by name
 materializes a working copy in the current directory first.
 """
 

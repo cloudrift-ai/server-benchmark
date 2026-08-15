@@ -510,7 +510,7 @@ def _verified_index(ctx: Context) -> tuple[dict, dict]:
     live ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an
     underivable row is skipped — the decode tripwire is where that is loud); classification-free:
     no shape key, no matching heuristic, identity or nothing."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, kernel_identity  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, flush_identity_store, kernel_identity  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
     if not gpu_name:
@@ -528,6 +528,7 @@ def _verified_index(ctx: Context) -> tuple[dict, dict]:
             (routing if g.is_routing else sched).setdefault(identity, []).append(g)
         for entries in (*sched.values(), *routing.values()):
             entries.sort(key=lambda g: g.emmy_us or float("inf"))
+        flush_identity_store()
     except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
         return {}, {}
     return sched, routing

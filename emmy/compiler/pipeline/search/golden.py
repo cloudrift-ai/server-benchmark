@@ -21,6 +21,7 @@ import yaml
 
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.structural import digest
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 
 _GOLDENS_DIR = Path(__file__).parent / "goldens"
@@ -493,6 +494,81 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
 _IDENTITY_CACHE: dict[tuple, str | None] = {}
+#: The persisted identity memo: {record fingerprint: identity | None}, valid only under one
+#: compiler fingerprint. Purely derived data — a stale or missing store just re-derives.
+_IDENTITY_STORE: dict | None = None
+_IDENTITY_STORE_DIRTY: bool = False
+_WIRE_DIGESTS: dict[int, str] = {}
+
+
+def _compiler_fingerprint() -> str:
+    """A cheap fingerprint of the compiler tree — (path, mtime, size) of every ``emmy/compiler``
+    source file. Any edit invalidates the persisted identity memo, so a derivation can never be
+    replayed across compiler versions."""
+    import emmy.compiler as _pkg  # noqa: PLC0415
+
+    root = Path(_pkg.__file__).parent
+    parts = []
+    for path in sorted(root.rglob("*.py")):
+        st = path.stat()
+        parts.append(f"{path.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}")
+    return digest("\n".join(parts))
+
+
+def _identity_store() -> dict:
+    global _IDENTITY_STORE
+    if _IDENTITY_STORE is None:
+        import json  # noqa: PLC0415
+
+        from emmy import config  # noqa: PLC0415
+
+        fingerprint = _compiler_fingerprint()
+        entries: dict = {}
+        try:
+            payload = json.loads(config.golden_identity_cache_path().read_text())
+            if payload.get("fingerprint") == fingerprint:
+                entries = payload.get("entries", {})
+        except (OSError, ValueError):
+            pass
+        _IDENTITY_STORE = {"fingerprint": fingerprint, "entries": entries}
+    return _IDENTITY_STORE
+
+
+def flush_identity_store() -> None:
+    """Persist newly derived identities (atomic replace; concurrent writers last-win — a lost
+    write only re-derives later)."""
+    global _IDENTITY_STORE_DIRTY
+    if not _IDENTITY_STORE_DIRTY or _IDENTITY_STORE is None:
+        return
+    import json  # noqa: PLC0415
+
+    from emmy import config  # noqa: PLC0415
+
+    path = config.golden_identity_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as out:
+            json.dump(_IDENTITY_STORE, out)
+            temporary = Path(out.name)
+        temporary.replace(path)
+        _IDENTITY_STORE_DIRTY = False
+    except OSError:
+        pass  # the store is a memo; failing to persist only costs a re-derivation
+
+
+def _record_fingerprint(record: GoldenRecord) -> str:
+    """A stable content digest for one record's TARGET (identity depends on nothing else): the
+    persisted wire payload, the target selector, bindings, card. Wire digests are memoized per
+    payload object — one document's records share their program pool."""
+    import json  # noqa: PLC0415
+
+    wire = record.loop_wire if record.loop_wire is not None else record.program_wire
+    wd = _WIRE_DIGESTS.get(id(wire))
+    if wd is None:
+        wd = _WIRE_DIGESTS.setdefault(id(wire), digest(json.dumps(wire, sort_keys=True, default=str)))
+    return digest(wd, str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
+
+
 #: Enumerated rows per (target, pins) — sibling realizations of one config decode against one
 #: enumeration (the tripwire and the migration validator walk whole files) — and ONE Context per
 #: card, so same-shape targets share the schedule pool cache across configs and files.
@@ -561,13 +637,10 @@ def decode_record(record: GoldenRecord) -> str | None:
     seams on the recognized tree; a SCHEDULE record's spelled row equals EXACTLY ONE enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
     any-of, no classified shape."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     try:
         tile = _recognized_target(record)
@@ -590,23 +663,52 @@ def decode_record(record: GoldenRecord) -> str | None:
             if site is None or site not in seams:
                 return f"routing key {key!r} names no legal cut seam on the recognized tree"
         return None
-    cache_key = (_record_cache_key(record), record.pins)
-    rows = _DECODE_ROWS_CACHE.get(cache_key)
-    if rows is None:
-        ctx_key = (record.compute_cap, record.gpu_name or None)
-        ctx = _DECODE_CTX_CACHE.get(ctx_key)
-        if ctx is None:
-            ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
-        with pinned_knobs(record.pin_map):
-            rows = enumerate_graph(record.target_program.copy(), ctx)
-        _DECODE_ROWS_CACHE[cache_key] = rows
-    want = schedule_row_key(record.knobs)
-    hits = sum(1 for r in rows if schedule_row_key(r) == want)
-    if hits == 1:
+    candidates = _candidate_row_keys(record)
+    if schedule_row_key(record.knobs) in candidates:
         return None
-    if hits == 0:
-        return f"no enumerated row equals the recording ({len(rows)} rows offered)"
-    return f"{hits} enumerated rows equal the recording — the spelled row is not a unique identity"
+    return f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
+
+
+def _candidate_row_keys(record: GoldenRecord) -> frozenset:
+    """Every schedule-row identity the record's target can realize under its pins: the fork
+    leaves' rows, PLUS each resolved kernel's own realized row — a forkless kernel (the schedule
+    space collapsed to one row, often the all-OFF anchor) never opens a fork, so its one row is
+    read off the resolved op instead."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    cache_key = (_record_cache_key(record), record.pins)
+    cached = _DECODE_ROWS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    ctx_key = (record.compute_cap, record.gpu_name or None)
+    ctx = _DECODE_CTX_CACHE.get(ctx_key)
+    if ctx is None:
+        ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
+    keys: set = set()
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        ops = [o for o in leaves if not _is_structural_option(o)]
+        for leaf in ops:
+            row = dict(getattr(leaf, "knobs", None) or {})
+            if row:
+                keys.add(schedule_row_key(row))
+        return ops[0] if ops else leaves[0]
+
+    with pinned_knobs(record.pin_map):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
+    for node in out.nodes.values():
+        if isinstance(node.op, TileOp):
+            keys.add(schedule_row_key(dict(node.op.knobs or {})))
+    result = frozenset(keys)
+    _DECODE_ROWS_CACHE[cache_key] = result
+    return result
 
 
 def kernel_identity(record: GoldenRecord) -> str | None:
@@ -616,9 +718,16 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
     (a schedule row decorates exactly one), or the selector/recognition fails — best-effort here
     (a corpus row must never break a compile); the decode tripwire is where failure is loud."""
+    global _IDENTITY_STORE_DIRTY
     key = _record_cache_key(record)
     if key in _IDENTITY_CACHE:
         return _IDENTITY_CACHE[key]
+    store = _identity_store()
+    fingerprint = _record_fingerprint(record)
+    if fingerprint in store["entries"]:
+        identity = store["entries"][fingerprint]
+        _IDENTITY_CACHE[key] = identity
+        return identity
     try:
         from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
 
@@ -626,6 +735,8 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity
+    store["entries"][fingerprint] = identity
+    _IDENTITY_STORE_DIRTY = True
     return identity
 
 

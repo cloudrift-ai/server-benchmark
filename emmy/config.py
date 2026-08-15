@@ -48,6 +48,7 @@ BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
+KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
@@ -427,6 +428,13 @@ def pack_dir() -> Path | None:
 def nvcc_disabled() -> bool:
     """``EMMY_NO_NVCC`` — force the cupy/NVRTC path instead of offline nvcc."""
     return _bool(NO_NVCC)
+
+
+def kernel_timeout_ms() -> float:
+    """``EMMY_KERNEL_TIMEOUT_MS`` — the per-launch hung-kernel watchdog deadline (default 2000;
+    the deadline-cliff rationale lives at the backend call site)."""
+    raw = os.environ.get(KERNEL_TIMEOUT_MS)
+    return float(raw) if raw else 2000.0
 
 
 def gpu_lock_path() -> str | None:

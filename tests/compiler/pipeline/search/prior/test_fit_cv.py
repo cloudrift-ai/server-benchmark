@@ -1,5 +1,5 @@
 """The ``emmy fit`` cross-validation harness (``search/prior/fit/cv``) and run harness
-(``search/prior/fit/run``): fold partitioning on both axes, the fittability-exclusion
+(``search/prior/fit/run``): shape-grouped fold partitioning, the fittability-exclusion
 guard, dual-rank tie semantics, metrics-file determinism, and the trainer-callable seam
 — all on synthetic cases, no tracing, no GPU."""
 
@@ -9,42 +9,21 @@ import json
 import numpy as np
 import pytest
 
-from emmy.commands.fit import register_fit_command
+from emmy.commands.fit import TRAINERS, register_fit_command
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
+    TREE_FEATURES,
     Group,
     LinearFit,
     LinearTrainer,
     dual_rank,
     feature_view,
-    op_family,
 )
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
-
-# --- op-family derivation ----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "family"),
-    [
-        ("matmul.square.512", "matmul.square"),
-        ("matmul.square.512.fp16", "matmul.square"),
-        ("matmul.mlp_down.h4096.dynM", "matmul.mlp_down"),
-        ("gemma4_12b.q_proj_global.s2048", "gemma4_12b.q_proj_global"),
-        ("gemma4_12b.o_proj", "gemma4_12b.o_proj"),
-        ("reduce.k2048.dynM", "reduce"),
-        ("pointwise.n16384", "pointwise"),
-        ("rms_norm.k3840", "rms_norm"),
-        ("attention.hd128.dynM", "attention"),
-    ],
-)
-def test_op_family_strips_variant_segments(name, family):
-    assert op_family(name) == family
-
 
 # --- feature view ------------------------------------------------------------------
 
@@ -102,13 +81,18 @@ def test_dual_rank_tie_plateau():
 # --- synthetic cases ---------------------------------------------------------------
 
 
-def _case(name, tier, gpu, gidx=1, n_rows=6, key=None):
+def _case(name, tier, gpu, gidx=1, n_rows=6, key=None, shape=None):
     """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. A ``dyn``
     case carries the routing stamp on every row, exactly as the golden case builder writes it —
-    that stamp, not the tier label, is what puts the group on the dynamic weight set."""
+    that stamp, not the tier label, is what puts the group on the dynamic weight set.
+
+    ``shape`` is the fold group. It defaults to the name with any ``.dynM`` suffix stripped, which
+    mirrors what the builder does for real: a dynamic golden enumerates its static twin's pool, so
+    the twins share a group."""
     stamp = {"S_ext_n_symbolic_axis": 1.0} if tier == "dyn" else {}
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
-    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, gidx, feats)
+    shape = shape or name.removesuffix(".dynM")
+    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, gidx, feats)
 
 
 def _cases():
@@ -143,9 +127,52 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
     # under the wrong weight set with nothing reporting it.
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "warp", "gpuA", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
+        Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", 0, [{"D_a": 1.0}])
+        Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
+
+
+def test_matrix_fill_declares_the_absent_semantics():
+    """``Group`` stores absent features as ``NaN`` and each model class projects them to what IT means by
+    absent. Both kinds of absence are covered: a name the pool never stamped, and a key missing from one
+    row whose siblings carry it.
+
+    The ``fill=0.0`` default must stay bit-identical to ``feats.get(k, 0.0)`` — that is the linear model's
+    contract, and the whole dataset is packed once for both trainers."""
+    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    zeros = g.matrix(["D_a", "D_b", "D_never"])
+    assert zeros.tolist() == [[1.0, 2.0, 0.0], [3.0, 0.0, 0.0]]
+
+    nans = g.matrix(["D_a", "D_b", "D_never"], fill=np.nan)
+    assert nans[0].tolist() == [1.0, 2.0] + [pytest.approx(np.nan, nan_ok=True)]
+    assert nans[1][0] == 3.0 and np.isnan(nans[1][1]) and np.isnan(nans[1][2])
+    # A genuine 0.0 is never confused for an absent value under either fill.
+    z = Group.from_dicts("gpuA/z", "z", "warp", "gpuA", "z", 0, [{"D_a": 0.0}])
+    assert z.matrix(["D_a"], fill=np.nan).tolist() == [[0.0]]
+
+
+def test_matrix_is_memoized_and_read_only():
+    """Building the projection is a strided copy of the whole pool, and cross-validation asks for the
+    same one over and over — measured, those copies were 85% of a fit's wall time. So it is built once
+    and shared, which is only safe if it cannot be mutated underneath another holder: a caller that
+    needs to write (the linear fitter z-scores in place) copies inside itself.
+
+    One entry is enough — a fit uses one column list for its whole run — so a different request evicts
+    rather than accumulating."""
+    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    first = g.matrix(["D_a", "D_b"])
+    assert g.matrix(["D_a", "D_b"]) is first, "a repeat request must not rebuild the projection"
+    assert not first.flags.writeable
+    with pytest.raises(ValueError):
+        first[0, 0] = 99.0
+    # ... and copying is what a mutating caller does, exactly as fit_weights now does.
+    mine = g.matrix(["D_a", "D_b"]).copy()
+    mine[0, 0] = 99.0
+    assert g.matrix(["D_a", "D_b"])[0, 0] == 1.0, "the shared projection survived a caller's private copy"
+    # A different (names, fill) evicts, and the evicted request rebuilds correctly rather than
+    # returning the wrong shape.
+    other = g.matrix(["D_a"], fill=np.nan)
+    assert other.shape == (2, 1) and g.matrix(["D_a", "D_b"]).shape == (2, 2)
 
 
 def test_no_feature_view_can_drop_the_routing_stamp():
@@ -155,6 +182,26 @@ def test_no_feature_view_can_drop_the_routing_stamp():
     for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, "D_waves"):
         assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
     assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
+
+
+def test_tree_view_drops_only_what_a_tree_re_derives():
+    """The tree view keeps the raw columns and the terms axis-aligned splits cannot reach, and drops the
+    engineered ones a tree forms for itself. Exclusions never touch the default view."""
+    keep, default = feature_view(TREE_FEATURES), feature_view(DEFAULT_FEATURES)
+    derivable = ("D_l2_threads", "D_near_threads", "D_square", "D_stage_prefetch", "D_splitk_le2", "D_tma_aspect", "D_l2_cells_occ")
+    for name in derivable:
+        assert not keep(name), f"{name} is derivable from a kept column by splits"
+        assert default(name), f"{name} must stay in the linear view, which cannot form it"
+    # Kept: the raw columns, and the terms no split on a kept column can reach — a periodic predicate,
+    # a relation BETWEEN two columns, and the knob x state block whose state operand is not a column.
+    for name in ("D_threads", "D_cells", "D_aspect", "D_stage_depth", "D_splitk", "D_pow2_threads", "D_bn_ge_bm", "D_splitk_excess"):
+        assert keep(name), name
+    assert keep("S_ext_n_symbolic_axis"), "the routing stamp is exempt from every view, exclusions included"
+
+
+def test_feature_view_exclusions_apply_to_names_and_globs():
+    keep = feature_view("D_*,MMA_tier,-D_near_*,-MMA_tier")
+    assert keep("D_threads") and not keep("D_near_area") and not keep("MMA_tier")
 
 
 def test_featurizer_preserves_the_routing_stamp():
@@ -182,30 +229,67 @@ FOLD_TRAINER = LinearTrainer(
 # --- fold partitioning + pooling ---------------------------------------------------
 
 
-def test_run_axis_gpu_pools_every_golden_exactly_once():
-    out = fit_cv.run_axis(_cases(), "gpu", trainer=FOLD_TRAINER)
-    # Every case held out exactly once, tagged with the fold (= its own card) that never trained on it.
+def test_folds_hold_out_every_golden_exactly_once():
+    out = fit_cv.run_folds(_cases(), trainer=FOLD_TRAINER, k=3)
     assert set(out["holdout"]["per_golden"]) == {c.key for c in _cases()}
-    for key, row in out["holdout"]["per_golden"].items():
-        assert row["fold"] == key.split("/")[0]
+    for row in out["holdout"]["per_golden"].values():
         assert isinstance(row["rank"], int) and isinstance(row["rank_optimistic"], int)
         assert row["rank"] >= row["rank_optimistic"]  # pessimistic can only add ties
     # Train side: same keys (every case was in the other folds' training slices).
     assert set(out["train"]["per_golden"]) == {c.key for c in _cases()}
-    # Aggregates are per card only, and the gap is their arithmetic difference.
+    # Aggregates are per card only — a REPORT axis, independent of what the folds group by — and the
+    # gap is their arithmetic difference.
     for gpu in ("gpuA", "gpuB"):
         assert gpu in out["holdout"]["per_card"] and gpu in out["train"]["per_card"]
         assert out["gap"][gpu] == round(out["holdout"]["per_card"][gpu]["median"] - out["train"]["per_card"][gpu]["median"], 2)
-    assert set(out["fold_detail"]["holdout_medians"]) == {"gpuA", "gpuB"}
     assert out["fold_detail"]["excluded"] == {}
 
 
-def test_run_axis_op_family_folds_group_variants():
-    out = fit_cv.run_axis(_cases(), "op_family", trainer=FOLD_TRAINER)
-    # matmul.qkv.h4096 and its .dynM variant share one fold: held out together.
-    qkv = [row for key, row in out["holdout"]["per_golden"].items() if "qkv" in key]
-    assert len(qkv) == 3 and {r["fold"] for r in qkv} == {"matmul.qkv"}
-    assert set(out["fold_detail"]["holdout_medians"]) == {"matmul.square", "matmul.qkv", "reduce"}
+def test_a_shape_group_is_never_split_across_folds():
+    """THE leakage guard, and the reason this fitter folds by shape at all.
+
+    Goldens sharing an extent identity enumerate the same candidate pool. Hold one out while training
+    on another and the fold model has already been shown the answer, so its "holdout" rank is not a
+    holdout rank. The retired ``op_family`` axis keyed on the golden's NAME and missed exactly this:
+    on the real corpus, 178 shape groups spanned more than one family, covering 695 of 1385 goldens.
+
+    The cases below are that situation in miniature — one shape under three unrelated names, on two
+    different cards, which must still land in ONE fold."""
+    cases = [
+        _case("rms_norm.k2048", "reduce", "gpuA", shape="S(free=2048,red=2048)"),
+        _case("gemma4_12b.rms_norm", "reduce", "gpuA", shape="S(free=2048,red=2048)"),
+        _case("olmoe_1b7b.rms_norm.k2048.m1", "reduce", "gpuB", shape="S(free=2048,red=2048)"),
+        _case("matmul.square.512", "thread", "gpuA", shape="S(free=512,red=512)"),
+        _case("matmul.square.1024", "thread", "gpuB", shape="S(free=1024,red=1024)"),
+    ]
+    by_shape = fit_cv.assign_folds(cases, 3)
+    folds = {c.key: by_shape[c.shape] for c in cases}
+    shared = [k for k in folds if "rms_norm" in k]
+    assert len({folds[k] for k in shared}) == 1, "one shape, one fold — on every card"
+
+    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)
+    held = out["holdout"]["per_golden"]
+    assert len({held[k]["fold"] for k in shared}) == 1
+
+
+def test_folds_are_balanced_and_deterministic():
+    """Groups are very uneven on the real corpus (largest 122 cases, 162 singletons), so assignment is
+    largest-first onto the currently-smallest fold; a thin fold's median would be noise. Assignment is
+    a pure function of the case list, so a re-run reproduces it."""
+    cases = [_case(f"m.{i}", "thread", "gpuA", shape=f"s{i // 2}") for i in range(12)]  # 6 groups of 2
+    a = fit_cv.assign_folds(cases, 3)
+    assert a == fit_cv.assign_folds(list(reversed(cases)), 3)
+    counts = {f: sum(1 for c in cases if a[c.shape] == f) for f in set(a.values())}
+    assert set(counts) == {0, 1, 2} and max(counts.values()) - min(counts.values()) <= 1
+
+
+def test_more_folds_than_groups_leaves_no_empty_fold_scored():
+    """k above the group count is not an error — the surplus folds simply hold nothing and are
+    skipped, rather than being scored as empty holdouts."""
+    cases = [_case("m.1", "thread", "gpuA", shape="s1"), _case("m.2", "thread", "gpuA", shape="s2")]
+    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=5)
+    assert set(out["holdout"]["per_golden"]) == {c.key for c in cases}
+    assert all(d["n"] > 0 for d in out["fold_detail"]["holdout_medians"].values())
 
 
 def test_fittability_guard_excludes_fold_loudly():
@@ -218,10 +302,9 @@ def test_fittability_guard_excludes_fold_loudly():
         _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", gidx=3),  # the ONLY dyn case
         _case("matmul.square.512", "thread", "gpuB"),
     ]
-    out = fit_cv.run_axis(cases, "op_family", trainer=FOLD_TRAINER)
-    assert out["fold_detail"]["excluded"] == {"matmul.mlp_down": "dynamic weight set unfittable (0 dyn cases in training)"}
+    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=4)
+    assert list(out["fold_detail"]["excluded"].values()) == ["dynamic weight set unfittable (0 dyn cases in training)"]
     assert "gpuA/matmul.mlp_down.h4096.dynM" not in out["holdout"]["per_golden"]
-    assert "matmul.mlp_down" not in out["fold_detail"]["holdout_medians"]
     # The healthy folds still pool.
     assert "gpuA/matmul.square.512" in out["holdout"]["per_golden"]
 
@@ -232,7 +315,7 @@ def test_fittability_guard_excludes_fold_loudly():
 def _metrics():
     cases = _cases()
     model = LinearFit(LinearModel(weights={"D_a": -1.0, "D_b": 0.25}, weights_dynamic={"D_a": -0.5}, scale=0.1, **SEED_PARAMS), [0], [0])
-    cv = {"gpu": fit_cv.run_axis(cases, "gpu", trainer=FOLD_TRAINER)}
+    cv = {"shape": fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)}
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),
         ("gpuA", "matmul.o_proj.h4096", "golden not in 12 candidates"),
@@ -290,7 +373,7 @@ def _run_stub_fit():
         [("gpuC", "softmax.k2048", fit_cv.OUT_OF_SCOPE)],
         trainer=_StubTrainer(-1.0),
         fold_trainer=_StubTrainer(-0.5),
-        axes=["gpu"],
+        folds=3,
         header={"trainer": "stub", "seed": 0},
     )
 
@@ -300,10 +383,10 @@ def test_run_fit_stub_trainer_deterministic():
     trainer whose models implement only ``score_rows`` yields the full metrics shape, identically on
     every call. It returns the FIT, not an artifact — assembling one is the caller's shipping policy."""
     metrics, fit = _run_stub_fit()
-    assert set(metrics) == {"header", "full_train", "cv"} and set(metrics["cv"]) == {"gpu"}
+    assert set(metrics) == {"header", "full_train", "cv"} and set(metrics["cv"]) == {"shape"}
     assert metrics["header"] == {"trainer": "stub", "seed": 0}
     assert metrics["full_train"]["per_card"]["gpuC"]["out_of_scope"] == 1
-    assert set(metrics["cv"]["gpu"]["holdout"]["per_golden"]) == {c.key for c in _cases()}
+    assert set(metrics["cv"]["shape"]["holdout"]["per_golden"]) == {c.key for c in _cases()}
     assert fit.w == -1.0  # the shippable model came from the full-train trainer, not a fold one
     a, b = _run_stub_fit(), _run_stub_fit()
     assert json.dumps(a[0], sort_keys=True) == json.dumps(b[0], sort_keys=True)
@@ -316,19 +399,21 @@ def test_fit_command_defaults_and_unsupported_cells():
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
     args = parser.parse_args(["fit"])
-    assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, "both")
-    assert args.features == DEFAULT_FEATURES
+    assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, 5)
     # --artifact: absent = no extra write, bare = "" (the shipped offline_weights.json), a value = that path.
     assert args.artifact is None
     assert parser.parse_args(["fit", "--artifact"]).artifact == ""
     assert parser.parse_args(["fit", "--artifact", "/tmp/cand.json"]).artifact == "/tmp/cand.json"
 
-    for bad in (
-        parser.parse_args(["fit", "--trainer", "catboost"]),
-        parser.parse_args(["fit", "--data", "freeze:/tmp/x.jsonl"]),
-    ):
-        with pytest.raises(SystemExit, match="not yet supported"):
-            bad.func(bad)
+    # --features defaults to the TRAINER's view, resolved in the handler rather than by argparse:
+    # the linear model needs the engineered step / fold / interaction features, the tree re-derives them.
+    assert args.features is None
+    assert TRAINERS["linear"][1] == DEFAULT_FEATURES
+    assert TRAINERS["catboost"][1] == TREE_FEATURES
+
+    bad = parser.parse_args(["fit", "--data", "freeze:/tmp/x.jsonl"])
+    with pytest.raises(SystemExit, match="not yet supported"):
+        bad.func(bad)
 
 
 def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch):
@@ -338,14 +423,14 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec: (_cases(), []))  # noqa: ARG005
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
-    args = parser.parse_args(["fit", "--folds", "gpu", "--out", str(tmp_path / "run")])
+    args = parser.parse_args(["fit", "--folds", "3", "--out", str(tmp_path / "run")])
     args.func(args)
 
     metrics = json.loads((tmp_path / "run" / "metrics.json").read_text())
     assert metrics["header"]["trainer_params"]["objective"] == "mean_log_rank"
     # The two seeding policies stay recorded: without them two fits are not comparable.
     assert metrics["header"]["trainer_params"]["fold_seed_weights"] == "zeros"
-    assert set(metrics["cv"]) == {"gpu"}
+    assert set(metrics["cv"]) == {"shape"}
 
     artifact = json.loads((tmp_path / "run" / "weights.json").read_text())
     assert artifact["kind"] == "linear" and artifact["weights"] and artifact["weights_dynamic"]

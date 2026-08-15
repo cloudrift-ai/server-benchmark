@@ -29,6 +29,8 @@ geometry."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
@@ -106,6 +108,126 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     prologue = Fold.projection(body=Body((*sweep, *pro)), operands=() if stat is None else (stat,))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
     return Fold.projection(body=Body(tuple(rest)), operands=src)
+
+
+@dataclass(frozen=True)
+class PackedKBlockB:
+    """A computed B recognized as ``pair-decode(packed bits) x k-block scale``.
+
+    ``bits`` is the packed-pair storage Load (its input tensor's dtype has
+    ``logical_elems == 2``), ``table`` the data-dependent pair-value gather it feeds,
+    ``factor`` the SSA name of the scale factor, and ``block`` the k extent the factor
+    is constant on. The packed byte-slab offer consumes this: the bits stage raw, the
+    drain decodes pairs, and the factor applies on the accumulator once per k block.
+    """
+
+    bits: Load
+    table: Load
+    factor: str
+    block: int
+
+
+def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
+    """Walk ``expr`` for the k-block-invariance proof: ``(k_seen_naked, guards)``.
+
+    A ``k`` occurrence is GUARDED by ``(X + k) / B`` (a literal ``B``) when ``X`` is a
+    provable multiple of ``B`` — only then is the floor constant on aligned k blocks of
+    ``B``. Any shape this walk does not prove declines the match; the operand then stays
+    a generic computed B, never a wrong one.
+    """
+    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var  # noqa: PLC0415
+
+    def multiple_of(e, b: int) -> bool:
+        if isinstance(e, Literal):
+            return isinstance(e.value, int) and e.value % b == 0
+        if isinstance(e, BinaryExpr):
+            if e.op == "*":
+                return multiple_of(e.left, b) or multiple_of(e.right, b)
+            if e.op == "+":
+                return multiple_of(e.left, b) and multiple_of(e.right, b)
+        return False
+
+    def walk(e) -> tuple[bool, set[int]]:
+        if isinstance(e, Var):
+            return e.name == k_name, set()
+        if isinstance(e, Literal) or e is None:
+            return False, set()
+        if isinstance(e, CastExpr):
+            return walk(e.expr)
+        if isinstance(e, BinaryExpr):
+            ln, lg = walk(e.left)
+            rn, rg = walk(e.right)
+            if e.op == "/" and isinstance(e.right, Literal) and isinstance(e.right.value, int) and ln:
+                b = e.right.value
+                # (X + k) / B guards k iff the k-free remainder is a multiple of B.
+                free = _k_free_addends(e.left, k_name)
+                if free is not None and all(multiple_of(f, b) for f in free):
+                    return rn, lg | rg | {b}
+            return ln or rn, lg | rg
+        return True, set()  # an unmodeled expr containing anything: treat as naked — decline upstream
+
+    def _k_free_addends(e, k):
+        # The additive terms of ``e`` that do not reference k; None if the k term is not
+        # a bare ``Var(k)`` addend (a scaled k does not stride unit blocks).
+        if isinstance(e, Var):
+            return [] if e.name == k else None
+        if isinstance(e, BinaryExpr) and e.op == "+":
+            left, right = _k_free_addends(e.left, k), _k_free_addends(e.right, k)
+            if left is None or right is None:
+                return None
+            return left + right
+        naked, _ = walk(e)
+        return None if naked else [e]
+
+    return walk(expr)
+
+
+def match_packed_kblock_b(cone: list, k_name: str, inputs) -> PackedKBlockB | None:
+    """Recognize the packed-pair k-block shape in a computed-B ``map_cone``.
+
+    The shape (the NVFP4 speller's lowered form): a packed-pair bits Load feeds an
+    index copy, a pair-table gather reads it by data-dependent index, and the final
+    multiply combines the gathered value with a factor whose every ``k`` reference is
+    block-guarded (:func:`_k_block_guard`). Everything else returns ``None``.
+    """
+    if not cone or inputs is None:
+        return None
+    loads = [st for st in cone if isinstance(st, Load)]
+    packed = [ld for ld in loads if getattr(inputs.get(ld.input), "dtype", None) is not None and inputs[ld.input].dtype.logical_elems == 2]
+    if len(packed) != 1:
+        return None
+    bits = packed[0]
+    defined = {d for st in cone if isinstance(st, Assign) for d in st.defines()}
+    gathers = [ld for ld in loads if _idx_vars(ld.index) & defined]
+    if len(gathers) != 1:
+        return None
+    table = gathers[0]
+    root = cone[-1]
+    if not isinstance(root, Assign) or root.op.name != "multiply" or len(root.args) != 2:
+        return None
+    # One multiply arg's cone holds the gather; the other is the factor.
+    sides = {}
+    for arg in root.args:
+        sub = map_cone(cone, arg)
+        sides[arg] = sub if sub is not None else []
+    gather_args = [a for a, sub in sides.items() if any(st is table for st in sub) or a in table.names]
+    if len(gather_args) != 1:
+        return None
+    factors = [a for a in root.args if a != gather_args[0]]
+    if len(factors) != 1:
+        return None  # multiply(x, x): the gathered value on both args leaves no factor
+    factor = factors[0]
+    blocks: set[int] = set()
+    for st in sides[factor]:
+        exprs = st.index if isinstance(st, Load) else ()
+        for e in exprs:
+            naked, guards = _k_block_guard(e, k_name)
+            if naked:
+                return None
+            blocks |= guards
+    if len(blocks) != 1:
+        return None
+    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)))
 
 
 def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):

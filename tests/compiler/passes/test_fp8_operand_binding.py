@@ -291,3 +291,105 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     ref = x.astype(np.float32) @ w.T
     denom = max(float(np.abs(ref).max()), 1e-9)
     assert float(np.abs(y - ref).max()) / denom < 2e-3, "fp8-B warp kernel diverges from the dequant reference"
+
+
+# ===================================================================
+# The packed-pair k-block matcher (NVFP4 phase 3c groundwork)
+# ===================================================================
+
+
+def _packed_kblock_body(scale_stride=32, scale_k=None):
+    """The NVFP4 speller's cone, hand-built in the lowering's idiom (flat / and % reshape
+    arithmetic):
+    e4m3 block scale (k under /16), fused-scale multiply, packed byte load, index copy,
+    pair-table gather, final value x factor multiply. ``scale_k`` overrides the scale
+    Load's k expression for the negative cases."""
+    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal
+
+    n, k = Var("a1"), Var("a2")
+    flat = BinaryExpr("+", BinaryExpr("*", n, Literal(scale_stride, "int")), k)
+    sblock = scale_k if scale_k is not None else BinaryExpr("%", BinaryExpr("/", flat, Literal(16, "int")), Literal(2, "int"))
+    byte_idx = BinaryExpr("%", BinaryExpr("/", flat, Literal(2, "int")), Literal(16, "int"))
+    return [
+        Load(name="in1", input="w_scale_bits", index=(n, sblock), dtype=None),
+        Assign(name="v0", op="from_f8e4m3", args=("in1",)),
+        Load(name="in2", input="w_bits", index=(n, byte_idx), dtype=None),
+        Assign(name="v1", op="multiply", args=("in0", "v0")),
+        Assign(name="v2", op="copy", args=("in2",)),
+        Assign(name="v3", op="copy", args=("v1",)),
+        Load(name="in3", input="w_f4_pairs", index=(CastExpr(dtype="int", expr=Var("v2")), Literal(0, "int")), dtype=None),
+        Assign(name="v4", op="multiply", args=("in3", "v3")),
+    ]
+
+
+def _packed_inputs():
+    from emmy.compiler.dtype import F4E2M1x2
+
+    # Shapes cohere with the body's K=32 arithmetic: 2 scale blocks and 16 packed
+    # bytes per row (the matcher itself reads only the dtypes).
+    return {
+        "w_scale_bits": Tensor("w_scale_bits", (4096, 2), F8E4M3),
+        "w_bits": Tensor("w_bits", (4096, 16), F4E2M1x2),
+        "w_f4_pairs": Tensor("w_f4_pairs", (256, 2), F32),
+    }
+
+
+def test_packed_kblock_b_matches_the_spelled_shape():
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    body = _packed_kblock_body()
+    cone = map_cone(body, "v4")
+    got = match_packed_kblock_b(cone, "a2", _packed_inputs())
+    assert got is not None
+    assert got.bits.input == "w_bits" and got.table.input == "w_f4_pairs"
+    assert got.factor == "v3" and got.block == 16
+
+
+def test_packed_kblock_b_declines_misaligned_row_stride():
+    # (n*24 + k)/16 is NOT constant on k blocks of 16 — the k-free addend must be a
+    # multiple of the divisor.
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    body = _packed_kblock_body(scale_stride=24)
+    got = match_packed_kblock_b(map_cone(body, "v4"), "a2", _packed_inputs())
+    assert got is None
+
+
+def test_packed_kblock_b_declines_naked_k_scale():
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    body = _packed_kblock_body(scale_k=Var("a2"))
+    got = match_packed_kblock_b(map_cone(body, "v4"), "a2", _packed_inputs())
+    assert got is None
+
+
+def test_packed_kblock_b_declines_without_a_packed_load():
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    inputs = _packed_inputs()
+    inputs["w_bits"] = Tensor("w_bits", (4096, 16), F8E4M3)
+    got = match_packed_kblock_b(map_cone(_packed_kblock_body(), "v4"), "a2", inputs)
+    assert got is None
+
+
+def test_packed_kblock_b_declines_mixed_guarded_and_naked_k():
+    # One index expr holds a guarded division AND a bare k: the naked flag alone must
+    # decline (the guard set is non-empty, so the single-block check would pass).
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    n, k = Var("a1"), Var("a2")
+    flat = BinaryExpr("+", BinaryExpr("*", n, Literal(32, "int")), k)
+    mixed = BinaryExpr("+", BinaryExpr("/", flat, Literal(16, "int")), k)
+    body = _packed_kblock_body(scale_k=mixed)
+    assert match_packed_kblock_b(map_cone(body, "v4"), "a2", _packed_inputs()) is None
+
+
+def test_packed_kblock_b_declines_squared_gather():
+    # multiply(in3, in3): the gathered value on both args leaves no factor — None, not
+    # an exception.
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_kblock_b
+
+    body = _packed_kblock_body()
+    body[-1] = Assign(name="v4", op="multiply", args=("in3", "in3"))
+    assert match_packed_kblock_b(map_cone(body, "v4"), "a2", _packed_inputs()) is None

@@ -3027,7 +3027,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g8k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w1x8
     measurements:
@@ -3043,7 +3043,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3058,7 +3058,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g4k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3090,7 +3090,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g8k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w1x8
     measurements:
@@ -3106,7 +3106,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3121,7 +3121,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g4k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3287,7 +3287,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3303,7 +3303,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3318,7 +3318,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3350,7 +3350,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3366,7 +3366,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3381,7 +3381,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: ''
       WORK: t512
     measurements:
@@ -3417,7 +3417,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-tma
+      STAGE: d1/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k8
       WORK: w1x1
     measurements:
@@ -3433,7 +3433,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       WORK: w4x2
     measurements:
@@ -3448,7 +3448,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g2k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3480,7 +3480,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-tma
+      STAGE: d1/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k8
       WORK: w1x1
     measurements:
@@ -3496,7 +3496,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       WORK: w4x2
     measurements:
@@ -3511,7 +3511,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g2k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3677,7 +3677,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g8k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w1x8
     measurements:
@@ -3693,7 +3693,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3708,7 +3708,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g2k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3740,7 +3740,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g8k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w1x8
     measurements:
@@ -3756,7 +3756,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:
@@ -3771,7 +3771,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: g2k
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       WORK: w4x2
     measurements:

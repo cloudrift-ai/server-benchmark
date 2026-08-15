@@ -190557,7 +190557,7 @@ configs:
     knobs:
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: mma_m8n8k4_f16_f32/f2x8/k8
       WORK: w16x1
     measurements:
@@ -192054,7 +192054,7 @@ configs:
     knobs:
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: mma_m8n8k4_f16_f32/f2x8/k8
       WORK: w16x1
     measurements:
@@ -193361,7 +193361,7 @@ configs:
     knobs:
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: mma_m8n8k4_f16_f32/f2x8/k8
       WORK: w16x1
     measurements:
@@ -194440,7 +194440,7 @@ configs:
     knobs:
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/sync
       TILE: mma_m8n8k4_f16_f32/f2x8/k8
       WORK: w16x1
     measurements:

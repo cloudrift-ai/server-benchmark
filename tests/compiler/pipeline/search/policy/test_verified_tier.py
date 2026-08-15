@@ -100,6 +100,23 @@ def test_recorded_row_deploys_by_identity_without_a_prior(monkeypatch):
     assert _row_key(deployed) == _row_key(knobs)
 
 
+def test_extent_disjoint_records_key_apart():
+    """Same algebra at different extents keys apart, same extents key together. Without the
+    extent fingerprint in ``deploy_identity`` every same-algebra cone on a card shared one
+    identity, and the fastest record of ANY shape decided them all — an m32 scalar row
+    deploying onto every M of the family."""
+    from emmy.commands.trace import trace_inline_code
+
+    small = _matmul_graph()
+    big = trace_inline_code("torch.matmul(torch.randn(256,128, dtype=torch.float16), torch.randn(128,256, dtype=torch.float16))")["graph"]
+    rec_small = load_golden_records(_document(small, _recorded_row(small)))[0]
+    rec_small_again = load_golden_records(_document(small.copy(), _recorded_row(small), name="probe.m64.again"))[0]
+    rec_big = load_golden_records(_document(big, _recorded_row(big), name="probe.m256"))[0]
+    assert kernel_identity(rec_small) is not None
+    assert kernel_identity(rec_small) == kernel_identity(rec_small_again)
+    assert kernel_identity(rec_small) != kernel_identity(rec_big)
+
+
 def test_drift_is_fail_closed(monkeypatch, caplog):
     """A record whose spelled row equals NO enumerated leaf decides nothing: a loud drift
     warning, then the ordinary fall-through (option-0 on a prior-less resolve)."""
@@ -123,6 +140,19 @@ def test_foreign_pin_regime_is_ignored(monkeypatch):
     knobs = _recorded_row(graph)
     records = load_golden_records(_document(graph, knobs, pins={"FAST_MATH": True}))
     monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
+    deployed = _deployed_row(graph)
+    assert _row_key(deployed) != _row_key(knobs)
+
+
+def test_standard_record_ignored_under_live_precision_pin(monkeypatch):
+    """The reverse scoping direction: a record whose pins OMIT the precision-trading knobs was
+    measured with them OFF, and decides nothing when the live regime turns one on — omission is
+    not a wildcard."""
+    graph = _matmul_graph()
+    knobs = _recorded_row(graph)
+    records = load_golden_records(_document(graph, knobs, pins={"FAST_MATH": False}))
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
+    monkeypatch.setenv("EMMY_FAST_EXP", "1")
     deployed = _deployed_row(graph)
     assert _row_key(deployed) != _row_key(knobs)
 

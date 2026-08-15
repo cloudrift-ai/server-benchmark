@@ -210,6 +210,34 @@ def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
     return tuple(out)
 
 
+def _extent_fingerprint(tile: TileOp) -> tuple[str, ...]:
+    """Every axis extent of the recognized term in walk order — the free grid, then each
+    ``Fold`` axis: a static extent as its integer, a symbolic axis as the bare ``sym`` marker
+    (identity stays hint-free — a symbolic record is the symbolic kernel's identity at every
+    hint). Part of :func:`deploy_identity` because the α-invariant algebra digest canonicalizes
+    sizes away: without extents every same-algebra cone on a card shares one key, and the
+    fastest record of ANY shape decides them all (an m32 scalar row deploying onto every M)."""
+    out: list[str] = []
+
+    def note(ax) -> None:
+        if ax is not None:
+            out.append(str(ax.extent.as_static()) if ax.extent.is_static else "sym")
+
+    def walk(node) -> None:
+        if not isinstance(node, Fold):
+            return
+        note(node.axis)
+        for e in node.operands:
+            walk(e)
+        for s in node.lift.body:
+            walk(s)
+
+    for a in tile.place.free:
+        note(a)
+    walk(tile.op)
+    return tuple(out)
+
+
 def _free_cells(place: Placement) -> int:
     """How many output cells the kernel's free grid covers (hint-resolved)."""
     return prod(_hint_extent(a) for a in place.free) if place.free else 1
@@ -1698,13 +1726,15 @@ def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
 
 def deploy_identity(tile: TileOp) -> str:
     """The verified-tier join key — the recognized term's α/buffer-invariant algebra digest
-    (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint the term
-    deliberately omits. A golden record derives the SAME key from its own persisted program
-    through the shared recognition core (``_lift.recognized_tile``), so the join is exact
-    structural identity — no classified shape, no matching heuristic. Unlike :func:`pool_key`
-    it excludes knobs, symbolic hints and live pins: identity is what the kernel IS; the strict
-    row decode (exact spelled-row equality) is what guarantees a record still realizes."""
-    return digest(tile.structural_key(), _dtype_fingerprint(tile))
+    (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint and the
+    axis-extent fingerprint the term deliberately omits (:func:`_extent_fingerprint` — static
+    sizes and symbolic markers, never hints). A golden record derives the SAME key from its own
+    persisted program through the shared recognition core (``_lift.recognized_tile``), so the
+    join is exact structural identity — no classified shape, no matching heuristic. Unlike
+    :func:`pool_key` it excludes knobs, symbolic hints and live pins: identity is what the
+    kernel IS; the strict row decode (exact spelled-row equality) is what guarantees a record
+    still realizes."""
+    return digest(tile.structural_key(), _dtype_fingerprint(tile), _extent_fingerprint(tile))
 
 
 def pool_key(tile: TileOp) -> str:

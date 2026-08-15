@@ -427,10 +427,15 @@ def validate_golden_file(
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
-                        if family in scoped and any("@" in key for key in scoped):
+                        # A stamped row legitimately carries the primary node's bare key beside
+                        # axis-scoped site decisions (``STAGE: d2/smem`` + ``STAGE@a1: ''``) — that
+                        # IS the canonical codec spelling. The ambiguous shape is a bare OFF next
+                        # to scoped keys: replaying it would fan OFF across every eligible site,
+                        # so ``stamp_schedule_families`` drops it and a recording must not store it.
+                        if family in scoped and any("@" in key for key in scoped) and str(realization["knobs"][family]) == "":
                             raise ValueError(
-                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys; "
-                                "repository goldens must store one schedule spelling per family"
+                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys with a bare OFF; "
+                                "the scoped spelling is the site decision — drop the bare OFF"
                             )
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")
@@ -524,13 +529,15 @@ def _identity_store() -> dict:
 
         fingerprint = _compiler_fingerprint()
         entries: dict = {}
+        verdicts: dict = {}
         try:
             payload = json.loads(config.golden_identity_cache_path().read_text())
             if payload.get("fingerprint") == fingerprint:
                 entries = payload.get("entries", {})
+                verdicts = payload.get("verdicts", {})
         except (OSError, ValueError):
             pass
-        _IDENTITY_STORE = {"fingerprint": fingerprint, "entries": entries}
+        _IDENTITY_STORE = {"fingerprint": fingerprint, "entries": entries, "verdicts": verdicts}
     return _IDENTITY_STORE
 
 
@@ -546,6 +553,18 @@ def flush_identity_store() -> None:
 
     path = config.golden_identity_cache_path()
     try:
+        # MERGE with the on-disk state before writing: concurrent processes (xdist workers each
+        # walking one golden set) flush independently, and overwrite-last-wins silently dropped
+        # every other worker's derivations.
+        try:
+            on_disk = json.loads(path.read_text())
+        except (OSError, ValueError):
+            on_disk = None
+        if on_disk is not None and on_disk.get("fingerprint") == _IDENTITY_STORE["fingerprint"]:
+            for section in ("entries", "verdicts"):
+                merged = dict(on_disk.get(section, {}))
+                merged.update(_IDENTITY_STORE.get(section, {}))
+                _IDENTITY_STORE[section] = merged
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as out:
             json.dump(_IDENTITY_STORE, out)
@@ -647,6 +666,11 @@ def decode_record(record: GoldenRecord) -> str | None:
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
     if record.is_routing:
+        verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
+        store = _identity_store()
+        verdicts = store.setdefault("verdicts", {})
+        if verdict_key in verdicts:
+            return verdicts[verdict_key]
         pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
         route_tree, route_free, route_stores = (
             (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
@@ -655,24 +679,41 @@ def decode_record(record: GoldenRecord) -> str | None:
         all_sites = sites(route_tree)
         for key, value in record.knobs.items():
             if str(value) != "cut":
-                return f"routing value {key}={value!r} is not a cut"
+                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
             if str(key) == "PLACE":
                 # The bare family key IS the codec's "shallowest cuttable seam" spelling
                 # (``route_cut``'s pin semantics) — it decodes iff any seam is legal.
                 if not seams:
-                    return "bare PLACE=cut recorded, but the recognized tree has no legal cut seam"
+                    return _remember_verdict(verdict_key, "bare PLACE=cut recorded, but the recognized tree has no legal cut seam")
                 continue
             try:
                 site = resolve(route_tree, str(key), all_sites=all_sites)
             except ValueError as exc:
-                return f"routing key {key!r} does not resolve: {exc}"
+                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
             if site is None or site not in seams:
-                return f"routing key {key!r} names no legal cut seam on the recognized tree"
-        return None
+                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
+        return _remember_verdict(verdict_key, None)
+    verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
+    store = _identity_store()
+    verdicts = store.setdefault("verdicts", {})
+    if verdict_key in verdicts:
+        return verdicts[verdict_key]
     candidates = _candidate_row_keys(record)
     if schedule_row_key(record.knobs) in candidates:
-        return None
-    return f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
+        reason = None
+    else:
+        reason = f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
+    verdicts[verdict_key] = reason
+    global _IDENTITY_STORE_DIRTY
+    _IDENTITY_STORE_DIRTY = True
+    return reason
+
+
+def _remember_verdict(key: str, reason: str | None) -> str | None:
+    global _IDENTITY_STORE_DIRTY
+    _identity_store().setdefault("verdicts", {})[key] = reason
+    _IDENTITY_STORE_DIRTY = True
+    return reason
 
 
 def _candidate_row_keys(record: GoldenRecord) -> frozenset:

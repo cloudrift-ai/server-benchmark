@@ -1,7 +1,9 @@
 ---
 name: start-remote-server
-description: This skill should be used when the user asks to "start a remote server", "spin up a GPU VM", "provision a cloud GPU", "create a remote server with X GPU", "give me a server with Y GPUs", or otherwise wants a fresh cloud GPU VM provisioned (without immediately deploying a model) so it stays available for later benchmarks or inference work.
-version: 0.2.0
+description: >-
+  Provision a fresh cloud GPU VM without immediately deploying a model, then leave it available for later benchmarks
+  or inference. Use when the user asks to start a remote server, spin up a GPU VM, provision cloud GPU capacity, or
+  create a server with a specified GPU type and count.
 ---
 
 # Start Remote Server

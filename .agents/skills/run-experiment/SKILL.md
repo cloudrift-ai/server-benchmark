@@ -14,7 +14,7 @@ and review them yourself; do not add a result-conversion, plotting, manifest, an
 
 ## Prepare
 
-1. Read the repository `CLAUDE.md`, `experiments/ARCHITECTURE.md`, the selected `recipe.yaml`, and any protocol note in
+1. Read the repository `AGENTS.md`, `experiments/ARCHITECTURE.md`, the selected `recipe.yaml`, and any protocol note in
    the experiment directory.
 2. Confirm the exact experiment directories and hardware source from the request. Use an existing host when supplied;
    otherwise use the normal Emmy cloud allocation.

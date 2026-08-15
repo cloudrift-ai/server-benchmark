@@ -348,8 +348,9 @@ jobs:
         env:
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
         run: |
-          git diff --exit-code -- .github .claude/skills/onboard-model
-          test -z "$(git ls-files --others --exclude-standard -- .github .claude/skills/onboard-model)"
+          git diff --exit-code -- .github .agents/skills/onboard-model .claude/skills/onboard-model
+          test -z "$(git ls-files --others --exclude-standard -- \
+            .github .agents/skills/onboard-model .claude/skills/onboard-model)"
           ./venv/bin/python .github/scripts/onboarding_artifacts.py \
             --summary "$ONBOARD_SUMMARY" \
             --model-id "$MODEL_ID" \

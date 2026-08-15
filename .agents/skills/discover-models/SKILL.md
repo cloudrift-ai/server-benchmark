@@ -113,7 +113,7 @@ skim those; a miss can mean a model you'd otherwise drop actually has a strong E
 
 Obsolete recipes are deliberately not excluded, which lets a renewed model resurface as a reactivation candidate.
 Take the top ~8–12 by `trending` (tie-break `elo`, then `downloads`) into Step 2. The script's full flag list is
-documented in `CLAUDE.md` (scripts section).
+documented in `AGENTS.md` (scripts section).
 
 ## Step 2 — Research news & hype per candidate (web search required)
 

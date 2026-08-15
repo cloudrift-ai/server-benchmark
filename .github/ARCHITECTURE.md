@@ -15,7 +15,7 @@ tracked skills and CloudRift inference endpoint.
 | **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
-from a developer checkout through the tracked `.claude/skills/run-experiment` skill.
+from a developer checkout through the tracked `.agents/skills/run-experiment` skill.
 
 ## Pull-request checks
 
@@ -61,7 +61,8 @@ JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
 provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
-tracked `.claude/skills/` remain the task definitions loaded through OpenCode's native skill tool.
+tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
+expose the same packages through OpenCode's native skill tool.
 
 ### Direct onboarding
 

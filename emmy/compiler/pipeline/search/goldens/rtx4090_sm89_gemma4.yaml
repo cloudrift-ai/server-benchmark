@@ -130,23 +130,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [512, 3840]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 512, 256]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 512, 256]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 512, 256]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]
 - inputs: [x]
   outputs: [rms_norm]
   nodes:
@@ -289,23 +272,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [2048, 3840]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 2048, 256]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 2048, 256]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 2048, 256]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 2048, 256]]]
 - inputs: [x0, x1]
   outputs: [matmul]
   nodes:
@@ -348,23 +314,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [512, 3840]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 512, 512]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 512, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 512, 512]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 512]]]
 - inputs: [x]
   outputs: [rms_norm]
   nodes:
@@ -431,23 +380,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 3840]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 512]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 512]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 512]]]
 - inputs: [x0, x1]
   outputs: [matmul]
   nodes:
@@ -490,57 +422,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [2048, 3840]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 2048, 512]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 2048, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 2048, 512]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 2048, 512]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 4096, 256]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 4096, 256]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 4096, 256]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 4096, 256]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 16, 4096, 512]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 16, 4096, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 16, 4096, 512]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: true, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 16, 4096, 512]]]
 - inputs: [x0, x1]
   outputs: [matmul]
   nodes:
@@ -861,86 +742,6 @@ programs:
     attrs: {eps: 1.0e-06}
     inputs: [x, p_weight]
     outputs: [[rms_norm, f32, [65536, 512]]]
-- inputs: [x, nw, wg, wu]
-  outputs: [mul]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [4096, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: wg
-    op: input
-    outputs: [[wg, f16, [3840, 15360]]]
-  - id: wu
-    op: input
-    outputs: [[wu, f16, [3840, 15360]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [4096, 3840]]]
-  - id: matmul
-    op: torch.matmul
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wg]
-    outputs: [[matmul, f16, [4096, 15360]]]
-  - id: matmul_1
-    op: torch.matmul
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wu]
-    outputs: [[matmul_1, f16, [4096, 15360]]]
-  - id: gelu
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: gelu_tanh}}
-    inputs: [matmul]
-    outputs: [[gelu, f16, [4096, 15360]]]
-  - id: mul
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
-    inputs: [gelu, matmul_1]
-    outputs: [[mul, f16, [4096, 15360]]]
-- inputs: [x, nw, wg, wu]
-  outputs: [mul]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [4096, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: wg
-    op: input
-    outputs: [[wg, f16, [15360, 3840]]]
-  - id: wu
-    op: input
-    outputs: [[wu, f16, [15360, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [4096, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wg]
-    outputs: [[linear, f16, [4096, 15360]]]
-  - id: linear_1
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wu]
-    outputs: [[linear_1, f16, [4096, 15360]]]
-  - id: gelu
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: gelu_tanh}}
-    inputs: [linear]
-    outputs: [[gelu, f16, [4096, 15360]]]
-  - id: mul
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
-    inputs: [gelu, linear_1]
-    outputs: [[mul, f16, [4096, 15360]]]
 - inputs: [x0, x1]
   outputs: [linear]
   nodes:
@@ -1660,134 +1461,6 @@ programs:
     attrs: {op: {__elementwise__: relu}}
     inputs: [x]
     outputs: [[relu, f16, [{sym: seq_len, hint: 512}, 8192]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [4096, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 4096]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [2048, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 2048]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8192, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 8192]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [512, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 512]]]
-- inputs: [x, nw, wg, wu]
-  outputs: [mul]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: wg
-    op: input
-    outputs: [[wg, f16, [15360, 3840]]]
-  - id: wu
-    op: input
-    outputs: [[wu, f16, [15360, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wg]
-    outputs: [[linear, f16, [32, 15360]]]
-  - id: linear_1
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, wu]
-    outputs: [[linear_1, f16, [32, 15360]]]
-  - id: gelu
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: gelu_tanh}}
-    inputs: [linear]
-    outputs: [[gelu, f16, [32, 15360]]]
-  - id: mul
-    op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
-    inputs: [gelu, linear_1]
-    outputs: [[mul, f16, [32, 15360]]]
 - inputs: [x]
   outputs: [sum_1]
   nodes:
@@ -1970,226 +1643,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 15360]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [30720, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 30720]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [256, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [30720, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [256, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [256, 30720]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [30720, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 30720]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [256, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8192, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [256, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [256, 8192]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8192, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8192]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8704, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [256, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8704, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [256, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [256, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8704, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [32, 15360]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [15360]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [3840, 15360]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [32, 15360]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [32, 3840]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [256, 15360]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [15360]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [3840, 15360]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [256, 15360]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [256, 3840]]]
 - inputs: [x0, x1]
   outputs: [linear]
   nodes:
@@ -2237,72 +1690,6 @@ programs:
     attrs: {op: {__elementwise__: relu}}
     inputs: [x]
     outputs: [[relu, f16, [{sym: seq_len, hint: 512}, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [64, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8192, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [64, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [64, 8192]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [64, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8704, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [64, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [64, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [64, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [30720, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [64, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [64, 30720]]]
 - inputs: [x0, x1]
   outputs: [linear]
   nodes:
@@ -2345,50 +1732,6 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [64, 30720]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [4096, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [8704, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [4096, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [4096, 8704]]]
-- inputs: [x, nw, w]
-  outputs: [linear]
-  nodes:
-  - id: x
-    op: input
-    outputs: [[x, f16, [4096, 3840]]]
-  - id: nw
-    op: input
-    outputs: [[nw, f16, [3840]]]
-  - id: w
-    op: input
-    outputs: [[w, f16, [30720, 3840]]]
-  - id: rms_norm
-    op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
-    inputs: [x, nw]
-    outputs: [[rms_norm, f16, [4096, 3840]]]
-  - id: linear
-    op: torch.linear
-    attrs: {has_bias: false}
-    inputs: [rms_norm, w]
-    outputs: [[linear, f16, [4096, 30720]]]
 - inputs: [x0, x1]
   outputs: [linear]
   nodes:
@@ -2530,7 +1873,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 102.3
       reference_us: 104.0
@@ -2544,7 +1887,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 84.5
       reference_us: 104.0
@@ -2563,7 +1906,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 101.9
       reference_us: 103.0
@@ -2577,7 +1920,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 84.0
       reference_us: 103.0
@@ -2596,7 +1939,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 57.2
       reference_us: 49.0
@@ -2610,7 +1953,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 48.0
       reference_us: 49.0
@@ -2629,7 +1972,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 58.4
       reference_us: 49.0
@@ -2643,7 +1986,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 47.8
       reference_us: 49.0
@@ -2662,7 +2005,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 109.3
       reference_us: 115.0
@@ -2676,7 +2019,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 85.8
       reference_us: 115.0
@@ -2690,7 +2033,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 109.0
       reference_us: 115.0
@@ -2709,7 +2052,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 108.8
       reference_us: 115.0
@@ -2723,7 +2066,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 88.8
       reference_us: 115.0
@@ -2742,7 +2085,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x8/k2
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 810.0
       reference_us: 801.0
@@ -2756,7 +2099,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 719.9
       reference_us: 801.0
@@ -2775,7 +2118,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 879.6
       reference_us: 799.0
@@ -2789,7 +2132,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 718.8
       reference_us: 799.0
@@ -2808,7 +2151,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 395.3
       reference_us: 392.0
@@ -2822,69 +2165,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 291.7
       reference_us: 392.0
       reference_backend: cublas
 - program: 9
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd256
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      STAGE: d2/cp
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
-      TILE@pj: mma_m16n8k16_f16_f32/f1x32
-    measurements:
-      emmy_us: 41.1
-      reference_us: 41.0
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd256
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-    measurements:
-      emmy_us: 37.1
-      reference_us: 41.0
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd256
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-      TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
-    measurements:
-      emmy_us: 33.8
-      reference_us: 41.0
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd256
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      STAGE: d2/cp
-      TILE@dd: mma_m16n8k16_f16_f32/f1x4/k16
-      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k2
-    measurements:
-      emmy_us: 38.3
-      reference_us: 41.0
-      reference_backend: torch-eager
-- program: 10
   target:
     origins:
     - rms_norm
@@ -2900,7 +2186,7 @@ configs:
       emmy_us: 6.9
       reference_us: 7.0
       reference_backend: torch-eager
-- program: 11
+- program: 10
   target:
     origins:
     - rms_norm
@@ -2916,7 +2202,7 @@ configs:
       emmy_us: 6.9
       reference_us: 7.0
       reference_backend: torch-eager
-- program: 12
+- program: 11
   target:
     origins:
     - rms_norm
@@ -2932,7 +2218,7 @@ configs:
       emmy_us: 3.6
       reference_us: 4.8
       reference_backend: torch-eager
-- program: 13
+- program: 12
   target:
     origins:
     - matmul
@@ -2947,7 +2233,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 430.1
       reference_us: 398.6
@@ -2962,12 +2248,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 277.7
       reference_us: 398.6
       reference_backend: cublas
-- program: 14
+- program: 13
   target:
     origins:
     - matmul
@@ -2982,7 +2268,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 225.0
       reference_us: 209.3
@@ -2997,12 +2283,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 171.2
       reference_us: 209.3
       reference_backend: cublas
-- program: 15
+- program: 14
   target:
     origins:
     - matmul
@@ -3017,7 +2303,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 455.7
       reference_us: 446.8
@@ -3032,12 +2318,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 325.6
       reference_us: 446.8
       reference_backend: cublas
-- program: 16
+- program: 15
   target:
     origins:
     - matmul
@@ -3052,7 +2338,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4347.0
       reference_us: 2945.0
@@ -3067,12 +2353,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2316.0
       reference_us: 2945.0
       reference_backend: cublas
-- program: 17
+- program: 16
   target:
     origins:
     - matmul
@@ -3087,7 +2373,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1580.0
       reference_us: 1493.7
@@ -3102,45 +2388,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1100.0
       reference_us: 1493.7
       reference_backend: cublas
-- program: 18
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd256.s2048
-    bindings:
-      num_tokens: 2048
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-    measurements:
-      emmy_us: 346.8
-      reference_us: 314.6
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd256.s2048
-    bindings:
-      num_tokens: 2048
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      STAGE: d2/cp
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k16
-      TILE@pj: mma_m16n8k16_f16_f16/f1x32
-    measurements:
-      emmy_us: 288.8
-      reference_us: 314.6
-      reference_backend: torch-eager
-- program: 19
+- program: 17
   target:
     origins:
     - matmul
@@ -3154,7 +2407,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 220.8
       reference_us: 211.7
@@ -3168,12 +2421,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 144.2
       reference_us: 211.7
       reference_backend: cublas
-- program: 20
+- program: 18
   target:
     origins:
     - matmul
@@ -3187,7 +2440,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 19.6
       reference_us: 16.6
@@ -3201,12 +2454,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 17.9
       reference_us: 16.6
       reference_backend: cublas
-- program: 21
+- program: 19
   target:
     origins:
     - matmul
@@ -3220,7 +2473,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 223.5
       reference_us: 227.6
@@ -3234,61 +2487,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 162.1
       reference_us: 227.6
       reference_backend: cublas
-- program: 22
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd512
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: g2k
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 116.1
-      reference_us: 95.6
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd512
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 129.5
-      reference_us: 95.6
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd512
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f16/f1x64
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 104.1
-      reference_us: 95.6
-      reference_backend: torch-eager
-- program: 23
+- program: 20
   target:
     origins:
     - rms_norm
@@ -3304,7 +2508,7 @@ configs:
       emmy_us: 9.9
       reference_us: 10.4
       reference_backend: torch-eager
-- program: 24
+- program: 21
   target:
     origins:
     - matmul
@@ -3318,7 +2522,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 222.9
       reference_us: 195.4
@@ -3332,12 +2536,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 144.5
       reference_us: 195.4
       reference_backend: cublas
-- program: 25
+- program: 22
   target:
     origins:
     - matmul
@@ -3351,7 +2555,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 19.7
       reference_us: 16.6
@@ -3365,12 +2569,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 18.3
       reference_us: 16.6
       reference_backend: cublas
-- program: 26
+- program: 23
   target:
     origins:
     - matmul
@@ -3384,7 +2588,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 233.7
       reference_us: 226.2
@@ -3398,42 +2602,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 168.1
       reference_us: 226.2
       reference_backend: cublas
-- program: 27
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd512.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: g2k
-      STAGE: d1/cp/split
-      TILE: mma_m16n8k16_f16_f32/f1x2/k32
-    measurements:
-      emmy_us: 123.7
-      reference_us: 110.6
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd512.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      STAGE: d1/cp/split
-      TILE: mma_m16n8k16_f16_f32/f1x2/k32
-    measurements:
-      emmy_us: 139.6
-      reference_us: 109.6
-      reference_backend: torch-eager
-- program: 28
+- program: 24
   target:
     origins:
     - matmul
@@ -3448,7 +2622,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 801.8
       reference_us: 751.2
@@ -3463,12 +2637,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 583.2
       reference_us: 751.2
       reference_backend: cublas
-- program: 29
+- program: 25
   target:
     origins:
     - matmul
@@ -3483,7 +2657,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 57.9
       reference_us: 48.7
@@ -3498,12 +2672,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 47.9
       reference_us: 48.7
       reference_backend: cublas
-- program: 30
+- program: 26
   target:
     origins:
     - matmul
@@ -3518,7 +2692,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 831.5
       reference_us: 790.3
@@ -3533,117 +2707,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 589.3
       reference_us: 790.3
       reference_backend: cublas
-- program: 31
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd512.s2048
-    bindings:
-      num_tokens: 2048
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: g2k
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 1069.0
-      reference_us: 926.5
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd512.s2048
-    bindings:
-      num_tokens: 2048
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 1310.8
-      reference_us: 926.5
-      reference_backend: torch-eager
-- program: 32
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd256.s4096
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-      TILE@pj: mma_m16n8k16_f16_f32/f1x32/k4
-    measurements:
-      emmy_us: 1205.2
-      reference_us: 1068.8
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd256.s4096
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k16
-      TILE@pj: mma_m16n8k16_f16_f16/f1x32/k4
-    measurements:
-      emmy_us: 1077.2
-      reference_us: 1068.8
-      reference_backend: torch-eager
-- program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: gemma4_12b.attention.hd512.s4096
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: g2k
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 3514.0
-      reference_us: 3457.0
-      reference_backend: torch-eager
-  - name: gemma4_12b.attention.hd512.s4096
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      REDUCE: ''
-      STAGE: d1/cp/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x2/k32
-      TILE@pj: mma_m16n8k16_f16_f32/f1x64
-    measurements:
-      emmy_us: 4587.5
-      reference_us: 3457.0
-      reference_backend: torch-eager
-- program: 34
+- program: 27
   target:
     origins:
     - matmul
@@ -3658,7 +2727,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 811.0
@@ -3673,12 +2742,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 591.9
       reference_us: 811.0
       reference_backend: cublas
-- program: 35
+- program: 28
   target:
     origins:
     - linear
@@ -3693,7 +2762,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 813.1
@@ -3708,12 +2777,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 580.1
       reference_us: 813.1
       reference_backend: cublas
-- program: 36
+- program: 29
   target:
     origins:
     - matmul
@@ -3728,7 +2797,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 467.5
       reference_us: 414.2
@@ -3743,12 +2812,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 300.4
       reference_us: 414.2
       reference_backend: cublas
-- program: 37
+- program: 30
   target:
     origins:
     - linear
@@ -3763,7 +2832,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 466.9
       reference_us: 413.2
@@ -3778,12 +2847,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 294.6
       reference_us: 413.2
       reference_backend: cublas
-- program: 38
+- program: 31
   target:
     origins:
     - matmul
@@ -3798,7 +2867,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 915.5
       reference_us: 824.3
@@ -3813,12 +2882,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 638.0
       reference_us: 824.3
       reference_backend: cublas
-- program: 39
+- program: 32
   target:
     origins:
     - linear
@@ -3833,7 +2902,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 912.4
       reference_us: 815.1
@@ -3848,12 +2917,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 622.1
       reference_us: 815.1
       reference_backend: cublas
-- program: 40
+- program: 33
   target:
     origins:
     - matmul
@@ -3868,7 +2937,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4230.1
       reference_us: 3006.5
@@ -3883,12 +2952,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2183.2
       reference_us: 3006.5
       reference_backend: cublas
-- program: 41
+- program: 34
   target:
     origins:
     - linear
@@ -3903,7 +2972,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4910.1
       reference_us: 2888.7
@@ -3918,12 +2987,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: gm8
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2103.3
       reference_us: 2888.7
       reference_backend: cublas
-- program: 42
+- program: 35
   target:
     origins:
     - matmul
@@ -3938,7 +3007,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3638.3
       reference_us: 2915.3
@@ -3953,7 +3022,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2221.1
       reference_us: 2915.3
@@ -3968,12 +3037,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3324.9
       reference_us: 2915.3
       reference_backend: cublas
-- program: 43
+- program: 36
   target:
     origins:
     - linear
@@ -3988,7 +3057,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3638.3
       reference_us: 2989.0
@@ -4003,7 +3072,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2154.5
       reference_us: 2922.5
@@ -4018,12 +3087,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 3415.8
       reference_us: 2922.5
       reference_backend: cublas
-- program: 44
+- program: 37
   target:
     origins:
     - matmul
@@ -4038,7 +3107,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1795.1
       reference_us: 1609.8
@@ -4053,12 +3122,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1166.3
       reference_us: 1609.8
       reference_backend: cublas
-- program: 45
+- program: 38
   target:
     origins:
     - linear
@@ -4073,7 +3142,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1798.1
       reference_us: 1610.8
@@ -4088,7 +3157,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1142.8
       reference_us: 1610.8
@@ -4103,7 +3172,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1720.3
       reference_us: 1549.3
@@ -4118,12 +3187,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1147.9
       reference_us: 1549.3
       reference_backend: cublas
-- program: 46
+- program: 39
   target:
     origins:
     - matmul
@@ -4138,7 +3207,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 133.0
       reference_us: 110.0
@@ -4153,12 +3222,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 91.0
       reference_us: 110.0
       reference_backend: cublas
-- program: 47
+- program: 40
   target:
     origins:
     - linear
@@ -4173,7 +3242,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 132.2
       reference_us: 110.9
@@ -4188,12 +3257,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 86.7
       reference_us: 110.9
       reference_backend: cublas
-- program: 48
+- program: 41
   target:
     origins:
     - matmul
@@ -4208,7 +3277,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1801.2
       reference_us: 1613.8
@@ -4223,12 +3292,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1225.7
       reference_us: 1613.8
       reference_backend: cublas
-- program: 49
+- program: 42
   target:
     origins:
     - linear
@@ -4243,7 +3312,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1792.0
       reference_us: 1604.6
@@ -4258,12 +3327,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1191.9
       reference_us: 1604.6
       reference_backend: cublas
-- program: 50
+- program: 43
   target:
     origins:
     - rms_norm
@@ -4283,7 +3352,7 @@ configs:
       emmy_us: 24.4
       reference_us: 23.4
       reference_backend: torch-eager
-- program: 51
+- program: 44
   target:
     origins:
     - rms_norm
@@ -4303,7 +3372,7 @@ configs:
       emmy_us: 34.9
       reference_us: 41.8
       reference_backend: torch-eager
-- program: 52
+- program: 45
   target:
     origins:
     - rms_norm
@@ -4323,7 +3392,7 @@ configs:
       emmy_us: 5.1
       reference_us: 4.8
       reference_backend: torch-eager
-- program: 53
+- program: 46
   target:
     origins:
     - rms_norm
@@ -4343,55 +3412,7 @@ configs:
       emmy_us: 145.8
       reference_us: 146.6
       reference_backend: torch-eager
-- program: 54
-  target:
-    origins:
-    - gelu
-    - matmul
-    - matmul_1
-    - mul
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.mlp_geglu.m4096
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f4x8
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 12131.3
-      reference_us: 6424.6
-      reference_backend: torch-eager
-- program: 55
-  target:
-    origins:
-    - gelu
-    - linear
-    - linear_1
-    - mul
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.mlp_geglu.m4096.lin
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f4x8
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 16152.6
-      reference_us: 6486.0
-      reference_backend: torch-eager
-- program: 56
+- program: 47
   target:
     origins:
     - linear
@@ -4404,7 +3425,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
       RASTER: ''
     measurements:
       emmy_us: 104.7
@@ -4418,13 +3439,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 80.8
       reference_us: 105.4
       reference_backend: cublas
-- program: 57
+- program: 48
   target:
     origins:
     - linear
@@ -4437,7 +3458,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 57.1
@@ -4451,13 +3472,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 44.7
       reference_us: 49.8
       reference_backend: cublas
-- program: 58
+- program: 49
   target:
     origins:
     - linear
@@ -4470,7 +3491,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
-      STAGE: d2/cp/p2
+      STAGE: d2/smem-async/p2
       RASTER: ''
     measurements:
       emmy_us: 111.0
@@ -4484,13 +3505,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 81.9
       reference_us: 107.9
       reference_backend: cublas
-- program: 59
+- program: 50
   target:
     origins:
     - linear
@@ -4503,7 +3524,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 225.5
@@ -4517,13 +3538,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 151.9
       reference_us: 202.6
       reference_backend: cublas
-- program: 60
+- program: 51
   target:
     origins:
     - linear
@@ -4536,7 +3557,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 21.0
@@ -4550,13 +3571,13 @@ configs:
       WORK: w2x4
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 17.8
       reference_us: 17.6
       reference_backend: cublas
-- program: 61
+- program: 52
   target:
     origins:
     - linear
@@ -4569,7 +3590,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 239.1
@@ -4583,13 +3604,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 195.3
       reference_us: 206.0
       reference_backend: cublas
-- program: 62
+- program: 53
   target:
     origins:
     - linear
@@ -4603,7 +3624,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.5
@@ -4618,13 +3639,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.5
       reference_us: 19.4
       reference_backend: cublas
-- program: 63
+- program: 54
   target:
     origins:
     - linear
@@ -4638,7 +3659,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 77.5
@@ -4653,13 +3674,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 58.3
       reference_us: 55.1
       reference_backend: cublas
-- program: 64
+- program: 55
   target:
     origins:
     - linear
@@ -4673,7 +3694,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 8.9
@@ -4688,13 +3709,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 7.8
       reference_us: 11.6
       reference_backend: cublas
-- program: 65
+- program: 56
   target:
     origins:
     - linear
@@ -4708,13 +3729,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 41.3
       reference_us: 31.1
       reference_backend: cublas
-- program: 66
+- program: 57
   target:
     origins:
     - linear
@@ -4728,7 +3749,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.8
@@ -4743,13 +3764,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 12.6
       reference_us: 20.4
       reference_backend: cublas
-- program: 67
+- program: 58
   target:
     origins:
     - linear
@@ -4763,7 +3784,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 80.7
@@ -4778,13 +3799,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 61.2
       reference_us: 52.7
       reference_backend: cublas
-- program: 68
+- program: 59
   target:
     origins:
     - linear
@@ -4798,7 +3819,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f4x1/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 137.9
@@ -4813,13 +3834,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f4x1/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 137.5
       reference_us: 141.7
       reference_backend: cublas
-- program: 69
+- program: 60
   target:
     origins:
     - linear
@@ -4833,7 +3854,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 130.2
@@ -4848,13 +3869,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 130.0
       reference_us: 133.9
       reference_backend: cublas
-- program: 70
+- program: 61
   target:
     origins:
     - linear
@@ -4868,13 +3889,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k4
       REDUCE: g4a
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 141.0
       reference_us: 144.9
       reference_backend: cublas
-- program: 71
+- program: 62
   target:
     origins:
     - linear
@@ -4888,7 +3909,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 310.3
@@ -4903,13 +3924,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 303.0
       reference_us: 217.1
       reference_backend: cublas
-- program: 72
+- program: 63
   target:
     origins:
     - linear
@@ -4923,7 +3944,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 25.9
@@ -4938,13 +3959,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 25.8
       reference_us: 36.1
       reference_backend: cublas
-- program: 73
+- program: 64
   target:
     origins:
     - linear
@@ -4958,13 +3979,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 127.0
       reference_us: 107.1
       reference_backend: cublas
-- program: 74
+- program: 65
   target:
     origins:
     - linear
@@ -4978,7 +3999,7 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 5.9
@@ -4993,13 +4014,13 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f16/f1x4/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 5.5
       reference_us: 5.7
       reference_backend: cublas
-- program: 75
+- program: 66
   target:
     origins:
     - linear
@@ -5013,13 +4034,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 16.9
       reference_us: 11.1
       reference_backend: cublas
-- program: 76
+- program: 67
   target:
     origins:
     - linear
@@ -5033,7 +4054,7 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 22.0
@@ -5048,13 +4069,13 @@ configs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: g8k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 21.9
       reference_us: 47.9
       reference_backend: cublas
-- program: 77
+- program: 68
   target:
     origins:
     - linear
@@ -5068,7 +4089,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 162.1
@@ -5083,13 +4104,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 107.3
       reference_us: 102.0
       reference_backend: cublas
-- program: 78
+- program: 69
   target:
     origins:
     - rms_norm
@@ -5109,7 +4130,7 @@ configs:
       emmy_us: 5.4
       reference_us: 4.6
       reference_backend: torch-eager
-- program: 79
+- program: 70
   target:
     origins:
     - rms_norm
@@ -5129,7 +4150,7 @@ configs:
       emmy_us: 6.1
       reference_us: 5.1
       reference_backend: torch-eager
-- program: 80
+- program: 71
   target:
     origins:
     - rms_norm
@@ -5149,7 +4170,7 @@ configs:
       emmy_us: 1.7
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 81
+- program: 72
   target:
     origins:
     - rms_norm
@@ -5169,7 +4190,7 @@ configs:
       emmy_us: 1.7
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 82
+- program: 73
   target:
     origins:
     - rms_norm
@@ -5189,7 +4210,7 @@ configs:
       emmy_us: 2.7
       reference_us: 4.5
       reference_backend: torch-eager
-- program: 83
+- program: 74
   target:
     origins:
     - rms_norm
@@ -5209,7 +4230,7 @@ configs:
       emmy_us: 2.2
       reference_us: 4.3
       reference_backend: torch-eager
-- program: 84
+- program: 75
   target:
     origins:
     - rms_norm
@@ -5229,7 +4250,7 @@ configs:
       emmy_us: 6.0
       reference_us: 6.7
       reference_backend: torch-eager
-- program: 85
+- program: 76
   target:
     origins:
     - rms_norm
@@ -5249,7 +4270,7 @@ configs:
       emmy_us: 1.6
       reference_us: 4.6
       reference_backend: torch-eager
-- program: 86
+- program: 77
   target:
     origins:
     - rms_norm
@@ -5269,7 +4290,7 @@ configs:
       emmy_us: 2.0
       reference_us: 4.3
       reference_backend: torch-eager
-- program: 87
+- program: 78
   target:
     origins:
     - rms_norm
@@ -5288,7 +4309,7 @@ configs:
       emmy_us: 5.8
       reference_us: 8.4
       reference_backend: torch-eager
-- program: 88
+- program: 79
   target:
     origins:
     - rms_norm
@@ -5307,7 +4328,7 @@ configs:
       emmy_us: 3.7
       reference_us: 5.2
       reference_backend: torch-eager
-- program: 89
+- program: 80
   target:
     origins:
     - rms_norm
@@ -5326,7 +4347,7 @@ configs:
       emmy_us: 10.2
       reference_us: 10.6
       reference_backend: torch-eager
-- program: 90
+- program: 81
   target:
     origins:
     - rms_norm
@@ -5345,7 +4366,7 @@ configs:
       emmy_us: 2.2
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 91
+- program: 82
   target:
     origins:
     - relu
@@ -5365,7 +4386,7 @@ configs:
       emmy_us: 1.0
       reference_us: 4.3
       reference_backend: torch-eager
-- program: 92
+- program: 83
   target:
     origins:
     - relu
@@ -5385,7 +4406,7 @@ configs:
       emmy_us: 1.8
       reference_us: 4.3
       reference_backend: torch-eager
-- program: 93
+- program: 84
   target:
     origins:
     - relu
@@ -5405,7 +4426,7 @@ configs:
       emmy_us: 1.1
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 94
+- program: 85
   target:
     origins:
     - relu
@@ -5425,7 +4446,7 @@ configs:
       emmy_us: 2.8
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 95
+- program: 86
   target:
     origins:
     - relu
@@ -5445,7 +4466,7 @@ configs:
       emmy_us: 0.9
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 96
+- program: 87
   target:
     origins:
     - relu
@@ -5465,7 +4486,7 @@ configs:
       emmy_us: 1.3
       reference_us: 4.6
       reference_backend: torch-eager
-- program: 97
+- program: 88
   target:
     origins:
     - relu
@@ -5484,7 +4505,7 @@ configs:
       emmy_us: 3.0
       reference_us: 4.6
       reference_backend: torch-eager
-- program: 98
+- program: 89
   target:
     origins:
     - relu
@@ -5503,7 +4524,7 @@ configs:
       emmy_us: 4.9
       reference_us: 4.3
       reference_backend: torch-eager
-- program: 99
+- program: 90
   target:
     origins:
     - relu
@@ -5522,160 +4543,7 @@ configs:
       emmy_us: 8.7
       reference_us: 5.5
       reference_backend: torch-eager
-- program: 100
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_q_proj.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
-      REDUCE: g8k
-      RASTER: ''
-      STAGE: d2/sync
-    measurements:
-      emmy_us: 26.4
-      reference_us: 22.3
-      reference_backend: torch-eager
-- program: 101
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_kv_proj.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f1x1/k2
-      REDUCE: g8k
-      RASTER: ''
-      STAGE: d2/sync
-    measurements:
-      emmy_us: 18.2
-      reference_us: 16.4
-      reference_backend: torch-eager
-  - name: gemma4_12b.norm_kv_proj.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f16/f1x1/k2
-      REDUCE: g8k
-      RASTER: ''
-      STAGE: d2/sync
-    measurements:
-      emmy_us: 17.2
-      reference_us: 16.4
-      reference_backend: torch-eager
-- program: 102
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_q_proj_global.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: g4k
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 40.7
-      reference_us: 45.3
-      reference_backend: torch-eager
-  - name: gemma4_12b.norm_q_proj_global.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f16/f2x2/k4
-      REDUCE: g4k
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 36.3
-      reference_us: 45.3
-      reference_backend: torch-eager
-- program: 103
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_kv_proj_global.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f1x1/k2
-      REDUCE: g8k
-      RASTER: ''
-      STAGE: d2/sync
-    measurements:
-      emmy_us: 12.7
-      reference_us: 9.0
-      reference_backend: torch-eager
-  - name: gemma4_12b.norm_kv_proj_global.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f16/f1x1/k2
-      REDUCE: g8k
-      RASTER: ''
-      STAGE: d2/sync
-    measurements:
-      emmy_us: 12.6
-      reference_us: 9.0
-      reference_backend: torch-eager
-- program: 104
-  target:
-    origins:
-    - gelu
-    - linear
-    - linear_1
-    - mul
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.mlp_geglu.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k8
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 285.0
-      reference_us: 281.6
-      reference_backend: torch-eager
-- program: 105
+- program: 91
   target:
     origins:
     - sum_1
@@ -5693,7 +4561,7 @@ configs:
       emmy_us: 1.7
       reference_us: 8.7
       reference_backend: torch-eager
-- program: 106
+- program: 92
   target:
     origins:
     - relu
@@ -5710,7 +4578,7 @@ configs:
       emmy_us: 1.0
       reference_us: 4.4
       reference_backend: torch-eager
-- program: 107
+- program: 93
   target:
     origins:
     - relu
@@ -5727,7 +4595,7 @@ configs:
       emmy_us: 1.6
       reference_us: 4.6
       reference_backend: torch-eager
-- program: 108
+- program: 94
   target:
     origins:
     - matmul
@@ -5741,7 +4609,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f4x8
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 219.7
@@ -5756,13 +4624,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 157.9
       reference_us: 237.8
       reference_backend: cublas
-- program: 109
+- program: 95
   target:
     origins:
     - matmul
@@ -5775,7 +4643,7 @@ configs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 439.8
@@ -5789,13 +4657,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 312.0
       reference_us: 410.9
       reference_backend: cublas
-- program: 110
+- program: 96
   target:
     origins:
     - sum_1
@@ -5816,7 +4684,7 @@ configs:
       emmy_us: 2.2
       reference_us: 6.0
       reference_backend: torch-eager
-- program: 111
+- program: 97
   target:
     origins:
     - sum_1
@@ -5836,7 +4704,7 @@ configs:
       emmy_us: 2.9
       reference_us: 6.4
       reference_backend: torch-eager
-- program: 112
+- program: 98
   target:
     origins:
     - relu
@@ -5856,7 +4724,7 @@ configs:
       emmy_us: 7.9
       reference_us: 9.2
       reference_backend: torch-eager
-- program: 113
+- program: 99
   target:
     origins:
     - relu
@@ -5875,7 +4743,7 @@ configs:
       emmy_us: 15.5
       reference_us: 16.5
       reference_backend: torch-eager
-- program: 114
+- program: 100
   target:
     origins:
     - relu
@@ -5895,7 +4763,7 @@ configs:
       emmy_us: 2.7
       reference_us: 4.5
       reference_backend: torch-eager
-- program: 115
+- program: 101
   target:
     origins:
     - relu
@@ -5914,7 +4782,7 @@ configs:
       emmy_us: 4.7
       reference_us: 5.4
       reference_backend: torch-eager
-- program: 116
+- program: 102
   target:
     origins:
     - linear
@@ -5928,13 +4796,13 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 243.5
       reference_us: 219.6
       reference_backend: cublas
-- program: 117
+- program: 103
   target:
     origins:
     - linear
@@ -5947,7 +4815,7 @@ configs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 515.1
@@ -5961,220 +4829,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 513.0
       reference_us: 389.4
       reference_backend: cublas
-- program: 118
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_gate_up.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 280.1
-      reference_us: 269.3
-      reference_backend: torch-eager
-- program: 119
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_gate_up.m256.lin
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x8
-      TILE: mma_m16n8k16_f16_f32/f4x4/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 628.2
-      reference_us: 443.4
-      reference_backend: torch-eager
-- program: 120
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_gate_up.lin.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x8
-      TILE: mma_m16n8k16_f16_f32/f4x4/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 1212.4
-      reference_us: 774.1
-      reference_backend: torch-eager
-- program: 121
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qkv.m256.lin
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 150.5
-      reference_us: 127.5
-      reference_backend: torch-eager
-- program: 122
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qkv.lin.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 287.1
-      reference_us: 226.8
-      reference_backend: torch-eager
-- program: 123
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qk_global.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 61.4
-      reference_us: 44.9
-      reference_backend: torch-eager
-- program: 124
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qk_global.m256.lin
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 254.5
-      reference_us: 141.3
-      reference_backend: torch-eager
-- program: 125
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qk_global.lin.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x16
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 361.8
-      reference_us: 250.9
-      reference_backend: torch-eager
-- program: 126
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.mlp_down_fused.m32.lin
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: g4k
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 147.4
-      reference_us: 151.0
-      reference_backend: torch-eager
-- program: 127
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.mlp_down_fused.m256.lin
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: g4k
-      STAGE: d1/sync
-      RASTER: ''
-    measurements:
-      emmy_us: 358.5
-      reference_us: 252.8
-      reference_backend: torch-eager
-- program: 128
+- program: 104
   target:
     origins:
     - linear
@@ -6192,7 +4853,7 @@ configs:
       emmy_us: 641.8
       reference_us: 447.5
       reference_backend: cublas
-- program: 129
+- program: 105
   target:
     origins:
     - relu
@@ -6212,7 +4873,7 @@ configs:
       emmy_us: 1.1
       reference_us: 4.5
       reference_backend: torch-eager
-- program: 130
+- program: 106
   target:
     origins:
     - relu
@@ -6232,7 +4893,7 @@ configs:
       emmy_us: 2.9
       reference_us: 4.7
       reference_backend: torch-eager
-- program: 131
+- program: 107
   target:
     origins:
     - relu
@@ -6251,70 +4912,7 @@ configs:
       emmy_us: 4.9
       reference_us: 5.4
       reference_backend: torch-eager
-- program: 132
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qkv.m64.lin
-    bindings:
-      num_tokens: 64
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 70.8
-      reference_us: 50.4
-      reference_backend: torch-eager
-- program: 133
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qk_global.m64.lin
-    bindings:
-      num_tokens: 64
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 78.3
-      reference_us: 58.6
-      reference_backend: torch-eager
-- program: 134
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_gate_up.m64.lin
-    bindings:
-      num_tokens: 64
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 400.8
-      reference_us: 298.0
-      reference_backend: torch-eager
-- program: 135
+- program: 108
   target:
     origins:
     - linear
@@ -6329,12 +4927,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 44.7
       reference_us: 37.5
       reference_backend: cublas
-- program: 136
+- program: 109
   target:
     origins:
     - linear
@@ -6349,12 +4947,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 54.5
       reference_us: 47.4
       reference_backend: cublas
-- program: 137
+- program: 110
   target:
     origins:
     - linear
@@ -6369,7 +4967,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 512.5
       reference_us: 297.0
@@ -6384,69 +4982,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x2/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 492.0
       reference_us: 297.0
       reference_backend: cublas
-- program: 138
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_qk_global.m4096.lin
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 3281.9
-      reference_us: 1694.7
-      reference_backend: torch-eager
-  - name: gemma4_12b.norm_qk_global.m4096.lin
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f16/f4x8/k4
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 2505.7
-      reference_us: 1694.7
-      reference_backend: torch-eager
-- program: 139
-  target:
-    origins:
-    - linear
-    - rms_norm
-  realizations:
-  - name: gemma4_12b.norm_gate_up.m4096.lin
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      REDUCE: ''
-      RASTER: ''
-      STAGE: d1/sync
-    measurements:
-      emmy_us: 17140.7
-      reference_us: 5600.3
-      reference_backend: torch-eager
-- program: 140
+- program: 111
   target:
     origins:
     - linear
@@ -6461,7 +5002,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1837.1
       reference_us: 1639.4
@@ -6476,12 +5017,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 1268.7
       reference_us: 1639.4
       reference_backend: cublas
-- program: 141
+- program: 112
   target:
     origins:
     - linear
@@ -6496,7 +5037,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 15838.3
       reference_us: 5600.3
@@ -6511,12 +5052,12 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 4754.4
       reference_us: 5600.3
       reference_backend: cublas
-- program: 142
+- program: 113
   target:
     origins:
     - linear
@@ -6531,12 +5072,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 23.3
       reference_us: 19.0
       reference_backend: cublas
-- program: 143
+- program: 114
   target:
     origins:
     - linear
@@ -6551,12 +5092,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 39.2
       reference_us: 37.4
       reference_backend: cublas
-- program: 144
+- program: 115
   target:
     origins:
     - linear
@@ -6571,12 +5112,12 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/cp
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 145.4
       reference_us: 146.0
       reference_backend: cublas
-- program: 145
+- program: 116
   target:
     origins:
     - matmul
@@ -6596,7 +5137,7 @@ configs:
       emmy_us: 258.4
       reference_us: 264.2
       reference_backend: cublas
-- program: 146
+- program: 117
   target:
     origins:
     - matmul
@@ -6616,7 +5157,7 @@ configs:
       emmy_us: 17.0
       reference_us: 74.2
       reference_backend: cublas
-- program: 147
+- program: 118
   target:
     origins:
     - matmul
@@ -6636,7 +5177,7 @@ configs:
       emmy_us: 17.3
       reference_us: 78.8
       reference_backend: cublas
-- program: 148
+- program: 119
   target:
     origins:
     - matmul

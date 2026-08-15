@@ -860,11 +860,49 @@ def is_repository_golden_path(path: str | Path) -> bool:
     return resolved == repository or repository in resolved.parents
 
 
+def _file_gpu_name(path: Path) -> str | None:
+    """The document's ``gpu_name`` read off the file HEAD without parsing the body — the dump
+    writes it as the first key, so a card-scoped consumer can skip foreign multi-megabyte files
+    (the whole-corpus parse is the dominant first-evidence cost). ``None`` when the head does not
+    carry it — the caller falls back to the full parse."""
+    try:
+        head = path.open("r").read(256)
+    except OSError:
+        return None
+    for line in head.splitlines():
+        if line.startswith("gpu_name:"):
+            return str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"])
+    return None
+
+
+def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
+    """The repository records for ONE card, loading only that card's files (header sniff) — the
+    deploy tier's loader. ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit consumers;
+    both share the per-path document memo so nothing parses twice."""
+    records: list[GoldenRecord] = []
+    for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
+        head_gpu = _file_gpu_name(path)
+        if head_gpu is not None and head_gpu != gpu_name:
+            continue
+        records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
+    return records
+
+
+_DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}
+
+
+def _records_of(path: Path) -> list[GoldenRecord]:
+    cached = _DOCUMENT_MEMO.get(path)
+    if cached is None:
+        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+        cached = _DOCUMENT_MEMO.setdefault(path, load_golden_records(document))
+    return cached
+
+
 def _load_goldens() -> list[GoldenRecord]:
     records: list[GoldenRecord] = []
     for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
-        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
-        records.extend(load_golden_records(document))
+        records.extend(_records_of(path))
     return records
 
 

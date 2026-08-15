@@ -33,6 +33,7 @@ _MIGRATED: set[str] = {
     "v100_sm70_qwen35_122b.yaml",
     "rtx5090_sm120_laguna_s_2_1_exl3.yaml",
     "v100_sm70_laguna_s_2_1_fp8.yaml",
+    "v100_sm70_deepseek_v4_flash_0731.yaml",
 }
 
 _FILES = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))

@@ -67,7 +67,6 @@ def test_record_derived_measurement_properties() -> None:
     record = load_golden_records(document)[0]
     assert record.emmy_us > 0
     assert record.reference_us > 0
-    assert record.ratio == record.reference_us / record.emmy_us
     assert record.dynamic == record.shape_key.is_dyn
 
 

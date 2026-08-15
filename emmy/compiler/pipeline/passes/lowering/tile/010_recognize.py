@@ -69,10 +69,10 @@ from emmy.compiler.ir.tile import (
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, bind_prologue_contraction, make_cone, map_cone
-from emmy.compiler.pipeline.passes.lowering.tile._cut import realize_cut, route_cut
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
-from emmy.compiler.pipeline.pipeline import LoweringError
+from emmy.compiler.pipeline.pipeline import LoweringError, RuleSkipped
 
 PATTERN = [Pattern("root", LoopOp)]
 
@@ -407,15 +407,37 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     map_tile = TileOp(op=node, name=loop.name, place=Placement(free=free), inputs=dict(loop.inputs), stores=stores)
     pro = bind_prologue_contraction(node, free)
     # (3.5) PLACEMENT — resolved FIRST, before any schedule fork exists: an authoritative
-    # PLACE pin cuts the recognized tree into a fragment of un-mapped LoopOps; each piece
-    # re-recognizes as a fresh root on the pass-scan restart (recursive — a deeper pin key may
-    # cut a piece again). No pin = fuse = the recognized form, by absence. The fused
-    # (computed-A) reading is the reference tree when it binds — its seams (the `a` cone edge)
-    # are the ones a ``PLACE`` pin spells.
+    # PLACE pin cuts the recognized tree into a fragment of un-mapped LoopOps (or keeps it
+    # fused); each piece re-recognizes as a fresh root on the pass-scan restart (recursive — a
+    # deeper pin key may cut a piece again). The fused (computed-A) view is the reference tree
+    # when it binds — its seams (the `a` cone edge) are the ones a ``PLACE`` key spells.
+    #
+    # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form leads (option-0 — a
+    # cold compile never changes kernel sets; ``greedy._pick_structural`` filters Graph options
+    # without a trusted prior) and one cut fragment rides per legal seam, so tune DISCOVERS cuts
+    # and a warm deploy prices them like any kernel-set choice. The chosen fragment's parent
+    # piece carries ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays
+    # as the exact pin.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
-    seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
-    if seam is not None:
+    verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
+    if verdict == "cut":
         return realize_cut(match, root, route_tree, route_free, route_stores, seam)
+    if verdict is None:
+        seams = cuttable_seams(route_tree, route_stores, route_free)
+        cut_options = []
+        for s_ in seams:
+            try:
+                cut_options.append(realize_cut(match, root, route_tree, route_free, route_stores, s_))
+            except RuleSkipped:
+                continue  # the seam's workspace already exists — a piece of an applied cut
+            except ValueError:
+                # The realizer cannot BUILD this seam's fragment (a piece body that fails Loop IR
+                # validation) — the enumeration drops it, exactly the unpinned half of the
+                # ``legal.enforce`` convention; a PLACE pin naming the same seam still raises
+                # loudly through the ``route_cut`` arm above.
+                continue
+        if cut_options:
+            return [map_tile, *cut_options]
     # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer
     # composition (``pro``) is re-derived by the schedule — it is a decision about the SCHEDULE
     # (which of the two readings of this one loop each fork row realizes), not about the structure,

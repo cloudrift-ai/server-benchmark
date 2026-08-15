@@ -106,10 +106,11 @@ never reaches a fork at all.
 Everything above decides *how* a kernel computes. Two mechanisms can change *which kernels exist* during an ordinary
 compile, and both are deliberately harder to trigger.
 
-**A pinned cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
-work into kernels. Keeping it in one kernel is the default. An explicit placement pin cuts at a named place inside
-the kernel (a golden entry can record such a pin, replayed like any other pinned row), and each resulting piece is
-then recognized afresh and works down the same hierarchy for its own schedule.
+**A placement cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
+work into kernels. An explicit placement pin decides it outright; unpinned, the cut is offered as an ordinary
+structural fork (the fused form first, one fragment per legal seam), so a tuning run can discover a profitable
+split and a chosen cut records as the exact pin that replays it. Each resulting piece is recognized afresh and
+works down the same hierarchy for its own schedule.
 
 **A structural fork.** The prior is never asked to rank structural options against each other, because it would be
 comparing predictions across different kinds of kernel, where its errors do not cancel the way they do among siblings

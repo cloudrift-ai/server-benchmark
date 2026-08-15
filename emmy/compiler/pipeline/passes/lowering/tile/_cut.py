@@ -119,32 +119,40 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     return True
 
 
-def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> Site | None:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
-    """The ``PLACE`` pin resolution for a freshly-recognized kernel: the cut seam to realize, or
-    ``None`` (= fuse, the default — spelled as the ABSENCE of a pin). Pins are the codec's
-    exploration mechanism and the only thing that decides a cut here; a key that names no seam
-    (or an uncuttable one) on this tree is skipped (a whole-model pin targets one kernel shape).
-    A bare ``PLACE=cut`` pin takes the shallowest CUTTABLE seam."""
+def cuttable_seams(root, stores: tuple = (), free: tuple = ()) -> list[Site]:
+    """Every legal ``PLACE`` seam on this tree, shallowest first — the placement fork's option
+    list and the pin resolver's candidate set, one derivation."""
+    all_sites = sites(root)
+    return sorted((s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)), key=lambda s: s.depth)
+
+
+def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, Site | None]:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
+    """The ``PLACE`` pin resolution for a freshly-recognized kernel: ``("cut", seam)`` when a pin
+    cuts, ``("fuse", None)`` when a pin names this tree and keeps it fused (authoritative — no
+    placement fork is offered), ``(None, None)`` when no pin decides (the placement FORK owns the
+    choice). A key that names no seam (or an uncuttable one) on this tree is skipped (a
+    whole-model pin targets one kernel shape). A bare ``PLACE=cut`` pin takes the shallowest
+    CUTTABLE seam."""
     pins = _place_pins()
     if not pins:
-        return None
+        return None, None
     all_sites = sites(root)
     seams = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
     if not seams:
-        return None  # a bare fold / flat cell has no in-tree seam (or none is legal)
+        return None, None  # a bare fold / flat cell has no in-tree seam (or none is legal)
     for key, value in pins.items():
         if key == "PLACE":
             if value == _CUT:
-                return min(seams, key=lambda s: s.depth)
-            return None  # bare fuse pin — authoritative
+                return _CUT, min(seams, key=lambda s: s.depth)
+            return "fuse", None  # bare fuse pin — authoritative
         try:
             site = resolve(root, key, all_sites=all_sites)
         except ValueError:
             continue  # the pin names no seam on THIS tree (a whole-model pin targets one kernel)
         if site is None or site not in seams:
             continue
-        return site if value == _CUT else None
-    return None
+        return (_CUT, site) if value == _CUT else ("fuse", None)
+    return None, None
 
 
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
@@ -297,7 +305,11 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     frag.outputs = [out.name]
     for nid in (ws, out.name):
         restamp_structural_features(frag.nodes[nid].op, frag)
+    # The decision rides the parent piece's op knobs, spelled exactly as the pin that replays it —
+    # a tune-measured cut records as ``PLACE@<seam>: cut`` with no side channel.
+    parent = frag.nodes[out.name].op
+    parent.knobs = {**(parent.knobs or {}), spelled: _CUT}
     return frag
 
 
-__all__ = ["realize_cut", "route_cut"]
+__all__ = ["cuttable_seams", "realize_cut", "route_cut"]

@@ -479,16 +479,16 @@ candidates, and the resolve trace (`Decision.score` carries the deciding row's �
 this fork, and did I expect that one?" means correlating those, not flipping one switch.
 
 **Where the kernel gets cut is settled before any of this.** Ahead of the schedule pick, a separate decision splits —
-or does not split — the recognized work into kernels. Cutting happens only from an explicit `PLACE@<label>` pin
-(`lowering/tile/_cut.py`), where the label names an edge inside the recognized kernel — `PLACE@cone = cut` says
-"split at the edge labelled `cone`, so that sub-computation becomes its own kernel". A **routing** golden entry
-(knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with schedule knobs) is the recorded
-form of that pin — replayed like any other pinned row, never consulted by an unpinned compile. Keeping the work in
-one kernel is the default and is what an absent pin means. That makes placement one of exactly two ways a greedy
-compile can change which kernels exist: a `PLACE` pin cuts with no prior involved, while a structural fork (Part 4)
-prices each kernel set through the deploy evidence hierarchy: measurements first, then whichever prior is loaded —
-the offline model on a cold machine, which therefore owns cold kernel-set quality. With no prior at all, option-0
-keeps the default kernel set.
+or does not split — the recognized work into kernels (`lowering/tile/_cut.py`): `PLACE@<label> = cut` says "split at
+the edge labelled `label`, so that sub-computation becomes its own kernel". A `PLACE` pin is authoritative — it cuts
+(or keeps fused) with no prior involved. UNPINNED, placement is an ordinary **structural fork**: recognition offers
+the fused form first (option-0) plus one cut fragment per legal seam, so `tune` discovers cuts and a warm compile
+prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
+whichever prior is loaded; cold, structural options are filtered and the kernel set never changes. A chosen cut's
+parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut records and replays as the exact pin. A
+**routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
+schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
+unpinned compile.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the DB perf index are
 memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar. A generative

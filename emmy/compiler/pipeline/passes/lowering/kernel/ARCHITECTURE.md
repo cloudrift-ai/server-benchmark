@@ -290,6 +290,11 @@ map; halves the staged drains' LSU count, bit-identical; fires on the matmul tie
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
 
+Every codegen-policy peephole records its decision as an on-by-default BOOL policy knob on the `KernelOp`
+(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050` pattern: idempotence via
+the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite that touches emitted code
+is unconditional-and-unrecorded.
+
 Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
 codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
 so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`

@@ -183,6 +183,22 @@ INTERLEAVE_LOADS = Knob(
     off=False,
 )
 
+VECTORIZE_STORES = Knob(
+    "VECTORIZE_STORES",
+    KnobType.BOOL,
+    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
+    help="Fold runs of consecutive scalar Writes into one wide vector Write (float4 / __half2).",
+    off=False,
+)
+
+PAIR_LDMATRIX = Knob(
+    "PAIR_LDMATRIX",
+    KnobType.BOOL,
+    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
+    help="Pair slab-adjacent staged ldmatrix.x2 B-fragment loads into one ldmatrix.x4.",
+    off=False,
+)
+
 #: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
 #: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
 #: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
@@ -407,9 +423,10 @@ def map_tile_moves() -> list[TilePlan]:
     grouped writes, which ``050_vectorize_loads`` / ``080_vectorize_stores`` merge into one
     ``float<r>`` access — matching torch's ``vectorized_elementwise_kernel<r>``. These EXTEND the
     per-cell option-0 (``""``, 1 elem/thread) the scheduler leads with; legality (a static inner
-    free axis divisible by r) is the scheduler's. The ladder stops at ``f4``: ``f8`` regressed both
-    pointwise goldens (register pressure — 22 vs 14 regs — outweighs the wider access)."""
-    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4))]  # (m, n): the strip widens the INNER axis
+    free axis divisible by r) is the scheduler's. The full legal ladder is offered — ``f8`` has
+    measured slower than ``f4`` on past pointwise goldens (register pressure outweighed the wider
+    access), but a domain is not a preference history: evidence ranks it, never the ladder."""
+    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4)), TilePlan(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
 
 
 def stage_moves(*, warp: bool) -> list[Stage]:
@@ -469,13 +486,11 @@ def coop_reduce_moves() -> list[ReducePlan]:
     rms_norm saturates bandwidth only with a full-block coop row (``softmax.k2048`` wants 512 —
     2.6× over 32). The scheduler's coop reduce spec declines a band wider than the row has
     work for, so enumerating them is safe on small K. The TRANSPOSED band is the k-major-B matvec
-    partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix);
-    The reduce-candidate enumeration gates it structurally (plain contraction, 32-divisible inner free axis)
-    AND by layout: the band is offered only on k-major B, and the plain band only on K-contiguous B
-    at the matvec tier. Measurement used to decide the layout, but ShapeKey is layout-blind —
-    cross-orientation golden/evidence rows tie, and a cold/tied pick landed the band on the wrong
-    operand three times in one day (10-100× regressions; the WS5 cold-poison hardening). An env pin
-    bypasses the gate (exploration)."""
+    partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix). The
+    scheduler's reduce spec gates candidates STRUCTURALLY only (plain contraction, 32-divisible
+    inner free axis); B's ``k_contiguous`` orientation orders which candidate leads as option-0
+    and never filters — every orientation stays enumerated and evidence-rankable (the old layout
+    offer-gate was deleted with the perf gates)."""
     return [
         *(ReducePlan.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
         ReducePlan.of(reg=2),

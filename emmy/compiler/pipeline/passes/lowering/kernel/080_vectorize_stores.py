@@ -37,6 +37,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.search.space import VECTORIZE_STORES
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -45,10 +46,14 @@ _TARGET = CudaRenderTarget()
 
 def rewrite(root: Node) -> KernelOp | None:
     top: KernelOp = root.op
+    # Idempotence + override via the recorded VECTORIZE_STORES policy knob — symmetric to
+    # 050_vectorize_loads: only ``True`` is enumerated, ``EMMY_VECTORIZE_STORES=0`` pins ``False``.
+    if VECTORIZE_STORES.name in top.knobs:
+        raise RuleSkipped("VECTORIZE_STORES already decided (idempotence via knob)")
+    if not VECTORIZE_STORES.narrow((True,))[0]:
+        return KernelOp(body=top.body, name=top.name, knobs={**top.knobs, VECTORIZE_STORES.name: False})
     new_body = _vectorize_body(top, top.body)
-    if new_body == top.body:
-        raise RuleSkipped("no vectorizable Write runs found")
-    return KernelOp(body=new_body, name=top.name, knobs=dict(top.knobs))
+    return KernelOp(body=new_body, name=top.name, knobs={**top.knobs, VECTORIZE_STORES.name: True})
 
 
 def _buf_dtype(top: KernelOp, name: str) -> str:

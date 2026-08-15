@@ -625,9 +625,4 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
         kn = getattr(_space, fam, None)
         if kn is not None and kn.off is not _UNSET:
             out[fam] = str(kn.off)
-    # The one structural stamp a RECORDING must keep: the deploy-time classifier re-derives a
-    # stored row's ShapeKey from its knob dict, and only ``S_computed_a`` distinguishes the smem
-    # compute fill from the byte-copy staging that spells the same transport token.
-    if knobs.get("S_computed_a"):
-        out["S_computed_a"] = "1.0"
     return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -115,9 +114,8 @@ def _load_prior_safe():
     ``OfflinePrior`` cold-start fallback), memoized per process on the online
     file's ``(path, mtime)`` — a serve boot compiles ~96 programs and each would
     otherwise ``json.loads`` the 56 MB checkpoint again (the dominant boot-time
-    resolution cost). Best-effort: any load failure → ``None`` → recorded goldens
-    still decide the forks they match, the rest falls to emission order — a
-    bad/missing prior must never break compile."""
+    resolution cost). Best-effort: any load failure → ``None`` → emission order
+    (option-0) — a bad/missing prior must never break compile."""
     try:
         from emmy import config  # noqa: PLC0415
 
@@ -176,21 +174,6 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
         pool_key(fp.root_op),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
-
-
-def _pool_group(fp: ForkPoint) -> list | None:
-    """The schedule fork's enumerated rows, read off the lazy tree's ROOT branch — the pool
-    already materialized them, so the golden tier can consult candidates without building one
-    leaf. ``None`` for any other option shape (several top options, a leaf fork, a concrete op —
-    the flash arm's eagerly-built ``TileOp`` options among them): the caller keeps the flatten
-    path."""
-    if len(fp.options) != 1:
-        return None
-    root = fp.options[0]
-    if not isinstance(root, Fork) or root.is_leaf:
-        return None
-    group = getattr(root, "group", None)
-    return list(group) if group else None
 
 
 def _find_decided_leaf(options: list, want: dict) -> object | None:
@@ -498,219 +481,6 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]
         )
 
 
-def _golden_evidence_index(ctx: Context) -> dict:
-    """The deploy card's recorded goldens — every kind: matmul, attention (flash), rms_norm, softmax,
-    reduce, pointwise, norm_linear / mlp_geglu (the fused RMSNorm→linear / gate⊗up computed-A), and the
-    rope / embedding entries kept only as regression references (they fork nothing, so they never match here) — grouped by
-    :class:`~emmy.compiler.pipeline.search.data.shape.ShapeKey` (whose ``kind``
-    discriminator keeps the sweep kinds apart from extent-coincident contractions)
-    and sorted fastest-first — the verified-evidence tier a greedy compile consults
-    before the reservoir / DB tiers. Scoped to the ctx's ``(gpu_name, compute_cap)``
-    exactly like the live-GPU golden scoping: no card identity (off-GPU
-    pure-logic runs) or an unseeded card ⇒ empty index ⇒ no consultation.
-    Golden files ship with the repo, so this is the only evidence tier that
-    exists on a fresh machine (the reservoir and tune DB are machine-local
-    caches written by local tunes). Goldens are consulted, never inserted into
-    the reservoir or the online prior's training data. Best-effort: any load
-    failure returns an empty index (deploys fall back to the normal hierarchy)."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
-
-    gpu_name = getattr(ctx, "gpu_name", None)
-    if not gpu_name:
-        return {}
-    index: dict = {}
-    try:
-        cap = tuple(ctx.compute_capability)
-        for g in GOLDEN_RECORDS:
-            if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap:
-                continue
-            if g.is_routing:
-                continue  # a ROUTING entry (PLACE-only) decides cuts pre-schedule — never a fork row
-            index.setdefault(g.shape_key, []).append(g)
-        for entries in index.values():
-            entries.sort(key=lambda g: g.emmy_us or float("inf"))  # unmeasured entries rank last
-    except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
-        return {}
-    return index
-
-
-def _golden_matches_row(golden_knobs: dict, row: dict) -> bool:
-    """Prefix-consistency of a golden's recorded tuning knobs against one offered
-    candidate row. Keys compare through
-    :func:`~emmy.compiler.pipeline.knob.pin_key_matches` (a golden key recorded
-    without an axis suffix matches the axis-stamped realization) and values through
-    :func:`~emmy.compiler.pipeline.knob.values_equal` (registry-canonical, so a
-    TILE value written with an alias atom name matches the canonically-stamped
-    row). A family the candidate hasn't decided at this fork is free — a later
-    pass decides it (the ``evidence_pick`` convention: undecided knobs are free).
-
-    An AXIS-KEYED golden key must be satisfied by every candidate key it names — the
-    flash all-or-nothing pin contract: a static attention golden records ``TILE@dd``
-    AND ``TILE@pj``, and a row matching one but not the other is a different form. A
-    BARE golden key on a multi-axis family mirrors the PIN-RESOLUTION semantics
-    instead: it names ONE plan the kernel realizes across its axes (a dynamic
-    attention golden is schema-required to record a single bare ``TILE`` — the
-    dd-plan or, fast-math, the sibling PV plan), so it is satisfied when ANY
-    same-family realization equals it. For single-axis families (every matmul row)
-    any-of and all-of coincide, so matmul matching is unchanged."""
-    from emmy.compiler.pipeline.knob import family_of, pin_key_matches, values_equal  # noqa: PLC0415
-
-    for gk, gv in golden_knobs.items():
-        fam = family_of(gk)
-        hits = [(rk, rv) for rk, rv in row.items() if not rk.startswith(("S_", "H_")) and family_of(rk) == fam and pin_key_matches(gk, rk)]
-        if not hits:
-            continue  # family not decided at this fork — free
-        matched = [values_equal(rk, gv, rv) for rk, rv in hits]
-        if "@" in gk:  # axis-keyed: names exactly one realization — all-or-nothing
-            if not all(matched):
-                return False
-        elif not any(matched):  # bare: one plan, satisfied by any same-family realization
-            return False
-    return True
-
-
-def _fork_shape_key(rows: list[dict], base: dict | None = None):
-    """The deploy-time :class:`ShapeKey` of a fork's candidate rows. ``base`` carries the shared
-    ``S_*`` stamps when ``rows`` are the pool's RAW rows (the golden probe — the stamps live on
-    the offer op, not in a pool row); merged rows carry them on ``rows[0]``. The base case is
-    ``from_s_features`` over the shared ``S_*`` stamps — but one restructured-op fork stamps a
-    histogram the classifier can't kind, so it is rebuilt from an OFFER signature the stamped
-    final op would carry.
-
-    COMPUTED-A CONE (norm→linear / gate⊗up): the fork op is the fused megakernel evaluated on its
-    PRE-SPLIT geometry — the RMSNorm statistic reduce has not yet lifted to a second axis
-    (``S_ext_n_reduce_axis == 1``) and the rsqrt lives in the nested A-cone sub-body, so the
-    histogram can't fire ``kind="fused"`` (which needs ``>= 2`` and a top-level ``S_pw_rsqrt``).
-    Like flash, it is unmistakable from its OFFER: only a computed-A contraction enumerates the
-    mandatory smem compute fill, and the scheduler stamps that fact on every row of the fork as
-    ``S_computed_a`` — the transport token itself cannot carry the signal, because the byte-copy
-    staging spells the same ``smem`` rows on fully materialized edges. (The earlier
-    mixed-dtype sniff — f16/bf16 operands + an f32 statistic constant over an add-reduce — fired on
-    ANY plain-nest kernel with that stamp combination, e.g. a genuine mixed-dtype plain matmul,
-    silently re-keying it out of its ``kind=""`` goldens; the offer signal cannot, and it also
-    covers the all-f16 stat-free cone the dtype sniff missed.) Rebuild to the fused convention:
-    ``is_warp=True`` (a computed-A contraction is a warp mma) and ``kind="fused"``; ``free_max``
-    carries the stamped aspect (both key builders keep it for the fused kind — see the aspect note
-    below); ``reduce_max`` stays the contraction extent (the fused goldens key on it even when
-    dynamic — unlike the flash reduce)."""
-    from emmy.compiler.pipeline.search.data.shape import ShapeKey  # noqa: PLC0415
-
-    stamps = base if base is not None else rows[0]
-    key = ShapeKey.from_s_features(stamps)
-    if (
-        key.kind == ""
-        # A computed-A cone CONTRACTS: its output is 2-D ``(M, N)``. A standalone RMSNorm
-        # STATISTIC kernel produces ONE value per row — without this the cut's own ``__stat``
-        # producer was rebuilt to ``kind="fused"``, which both locked it out of the plain
-        # reduce goldens and left it able to shadow a real cone of equal extents.
-        and stamps.get("S_ext_n_free_axis", 0) >= 2
-        # The OFFER signal (exact): the scheduler stamps ``S_computed_a`` on every row of a
-        # fork that enumerates the mandatory compute fill; a stored golden row carries the
-        # same stamp in its knob dict.
-        and any(row.get("S_computed_a") for row in rows)
-    ):
-        # ``free_max`` carries through: the pre-split key was built ``kind=""``, which
-        # preserves the stamped aspect, and the fused kind keeps it (a computed-A cone is a
-        # plain two-free-axis ``(M, H) @ (H, N)``). Dropping it here collapsed the M=256
-        # global norm→kv cone onto the M=32 local norm→q golden — equal free_prod (131072)
-        # and reduce (3840) — deploying the wrong config at a fabricated µs.
-        key = ShapeKey(
-            free_prod=key.free_prod, reduce_max=key.reduce_max, is_warp=True, is_dyn=key.is_dyn, kind="fused", free_max=key.free_max
-        )
-    return key
-
-
-# Optional per-consultation verdict sink for the golden-tier audit (``search/audit.py``).
-# ``None`` (the default) is zero-cost; ``golden_audit`` installs a list that
-# ``_golden_pick`` appends one record per consulted fork to — the supported hook the
-# drift audit reads, replacing the old monkey-patch interception in ``scripts/diagnostics``.
-_AUDIT_SINK: list[dict] | None = None
-
-
-@contextmanager
-def golden_audit(records: list[dict]):
-    """Collect one ``{node, key, verdict, golden, us, n_rows, unrealized}`` record per
-    golden-tier consultation into ``records`` for the duration of the block. Verdicts:
-    ``MATCH`` (a recorded golden realized on an offered candidate), ``DRIFT`` (goldens
-    keyed to the fork's shape but none realizes — a graph/enumeration change invalidated
-    them), ``GAP`` (no golden recorded for the shape). ``unrealized`` (MATCH/DRIFT only;
-    ``None`` on GAP) lists the shape's recorded golden entries that NO
-    offered candidate realizes — the per-entry "pin-only" signal the ``eval golden``
-    offer audit reads (an entry can be individually unrealizable while a sibling still
-    MATCHes and floors the deploy)."""
-    global _AUDIT_SINK
-    prev = _AUDIT_SINK
-    _AUDIT_SINK = records
-    try:
-        yield records
-    finally:
-        _AUDIT_SINK = prev
-
-
-def _audit_record(
-    node_id: str, key, verdict: str, golden: str | None, us: float | None, n_rows: int, unrealized: list | None = None
-) -> None:
-    if _AUDIT_SINK is not None:
-        # ``key`` stays the ShapeKey object — coverage policy (major-gap classification)
-        # reads its fields; presentation layers stringify at print/JSON time.
-        _AUDIT_SINK.append(
-            {"node": node_id, "key": key, "verdict": verdict, "golden": golden, "us": us, "n_rows": n_rows, "unrealized": unrealized}
-        )
-
-
-def _golden_pick(index: dict, rows: list[dict], node_id: str, base: dict | None = None) -> tuple[int, float] | None:
-    """Verified-golden pick over candidate knob rows: the first candidate
-    prefix-consistent with the fastest recorded golden of the op's shape
-    (:class:`ShapeKey` off the shared ``S_*`` base). Sits ABOVE the reservoir /
-    DB evidence tiers — a golden is an A/B-verified, integrity-gated, reproduced
-    deployable measurement; a reservoir row is a single tune sample. Applies only
-    in the deployable regime (mirroring ``Prior.evidence_pick``'s guard): the
-    recorded µs is -O3 truth and must never arbitrate an -O1 compile. Among a
-    shape's entries (std + fm + parity alternates) the fastest one whose config is
-    actually offered decides — a fast-math golden self-excludes on a default
-    deploy because its atom isn't in the offer when the fm gate is off. A shape
-    match with NO realizable golden logs a loud drift warning (the enumeration no
-    longer offers what the golden recorded) and falls through to the normal
-    hierarchy. Returns ``(candidate_index, recorded_µs)`` or ``None``."""
-    from emmy.compiler.pipeline.knob import canonical_row_key, tuning_knob_items  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
-
-    if not rows or float((base if base is not None else rows[0]).get("H_opt", _O3_OPT)) != _O3_OPT:
-        return None  # deploying a non--O3 regime — golden µs is deployable-regime truth
-    key = _fork_shape_key(rows, base=base)
-    goldens = index.get(key)
-    if not goldens:
-        _audit_record(node_id, key, "GAP", None, None, len(rows))
-        return None
-    # Per-entry realizability, computed only under an active audit sink: the ``eval golden``
-    # offer audit reads which recorded entries the input-regime enumeration never offers
-    # without additional winner pins; the deploy hot path below still stops at the first realizing golden.
-    unrealized = None
-    if _AUDIT_SINK is not None:
-        unrealized = [g for g in goldens if not any(_golden_matches_row(dict(tuning_knob_items(g.knobs)), row) for row in rows)]
-    for g in goldens:  # fastest recorded entry first
-        gold = dict(tuning_knob_items(g.knobs))
-        # Several rows can realize one golden (a golden pins a knob PREFIX); the
-        # canonically-smallest realization wins, never the first-enumerated.
-        matches = [i for i, row in enumerate(rows) if _golden_matches_row(gold, row)]
-        if matches:
-            best = min(matches, key=lambda i: canonical_row_key(rows[i]))
-            _audit_record(node_id, key, "MATCH", g.name, float(g.emmy_us or 0.0), len(rows), unrealized=unrealized)
-            return best, float(g.emmy_us or 0.0)
-    _audit_record(node_id, key, "DRIFT", ", ".join(g.name for g in goldens), None, len(rows), unrealized=unrealized)
-    logger.warning(
-        "deploy: node %r matches golden shape %s (%d recorded entr%s), but no offered candidate realizes any of "
-        "them — the golden(s) no longer realize under the current enumeration; falling through to the normal "
-        "evidence hierarchy. Investigate enumeration drift for: %s",
-        node_id,
-        goldens[0].shape_key,
-        len(goldens),
-        "y" if len(goldens) == 1 else "ies",
-        ", ".join(g.name for g in goldens),
-    )
-    return None
-
-
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
@@ -724,10 +494,8 @@ def greedy_decide(
     argmin — the ``OnlinePrior`` once trained, the ``OfflinePrior``
     cold-start heuristic otherwise (both behind ``load_prior``'s
     ``FallbackPrior``). With no prior at all (a failed load, or the explicit
-    ``prior=None`` emission-order resolve) the card's recorded goldens still
-    decide the forks they match — golden evidence needs no prior — and only
-    a fork without a realizable golden falls to emission order (option-0,
-    first leaf). Stamps the pick's predicted µs on
+    ``prior=None`` emission-order resolve) every fork falls to emission order
+    (option-0, first leaf). Stamps the pick's predicted µs on
     ``fp.score``, so the resolve trace carries the per-fork price (the
     structural pricing probe reads a kernel's cost off the partition fork's
     trace entry).
@@ -761,9 +529,6 @@ def greedy_decide(
     # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the
     # context keys); ``None`` sentinel = not built yet, ``{}`` = built and empty.
     db_state: list = [None]
-    # Lazily-built per-compile golden evidence index (needs a fork point's ctx
-    # for the card scoping) — same sentinel convention.
-    golden_state: list = [None]
 
     def db_index() -> dict:
         return db_state[0] or {}
@@ -782,70 +547,11 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
-        # The golden PROBE — the covered path never flattens: a schedule fork's enumerated rows
-        # already sit on the lazy tree's root branch (the pool), so the golden tier consults them
-        # directly and a MATCH descends to its ONE leaf. The verdict (MATCH / DRIFT / GAP) is
-        # recorded here exactly once; the fall-through paths below skip their own golden consult.
-        golden_consulted = False
-        if dkey is not None:
-            if golden_state[0] is None:
-                golden_state[0] = _golden_evidence_index(fp.ctx)
-            group = _pool_group(fp) if golden_state[0] else None
-            if group is not None:
-                node_blocked = blocked.get(fp.node_id) if blocked else None
-                if node_blocked is not None:
-                    group = [r for r in group if not _tile_blocked(r, node_blocked)]
-                base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
-                got = _golden_pick(golden_state[0], group, fp.node_id, base=base) if group else None
-                golden_consulted = bool(group)
-                if got is not None:
-                    best_i, price = got
-                    found = _find_decided_leaf(fp.options, dict(group[best_i]))
-                    if found is not None:
-                        if the_prior is None:
-                            logger.warning(
-                                "deploy: node %r resolved WITHOUT a prior (load failure or emission-order fallback), "
-                                "but the golden floor holds — deploying the recorded golden realization (%.1f us) "
-                                "over option-0.",
-                                fp.node_id,
-                                price,
-                            )
-                        fp.score = price
-                        decisions[dkey] = (dict(group[best_i]), price)
-                        return found
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
-            # (``prior=None``). The card's recorded goldens are tier (1) of the
-            # evidence hierarchy and depend on no prior, so they still apply:
-            # a fork whose golden realizes on an offered candidate deploys the
-            # golden, and only the rest falls to emission order. (A blocklisted
-            # tile — one that failed ``validate(ctx)`` earlier — stays excluded, so
-            # this path can never re-pick a tile the retry loop already rejected.)
-            if golden_state[0] is None:
-                golden_state[0] = _golden_evidence_index(fp.ctx)
-            if golden_state[0] and not golden_consulted:
-                leaves = [o for o in flatten_leaves(fp.options) if not _is_structural_option(o)]
-                live = [(o, _leaf_knobs(o)) for o in leaves]
-                node_blocked = blocked.get(fp.node_id) if blocked else None
-                if node_blocked is not None:
-                    live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
-                base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
-                rows = [{**base, **k} for _, k in live]
-                got = _golden_pick(golden_state[0], rows, fp.node_id) if rows else None
-                if got is not None:
-                    best_i, price = got
-                    logger.warning(
-                        "deploy: node %r resolved WITHOUT a prior (load failure or emission-order fallback), but the "
-                        "golden floor holds — deploying the recorded golden realization (%.1f us) over option-0.",
-                        fp.node_id,
-                        price,
-                    )
-                    fp.score = price
-                    if dkey is not None:
-                        decisions[dkey] = (dict(live[best_i][1]), price)
-                    return live[best_i][0]
-            return _first_leaf(fp.options[0])  # no realizable golden → emission order
+            # (``prior=None``): emission order (option-0, first leaf).
+            return _first_leaf(fp.options[0])
         # Flatten: greedy benches nothing, so it must pick the globally best
         # COMPLETE tile, not a partial branch — see ``flatten_leaves`` (the
         # prior is blind at a partial ``BM/BN`` branch: ``knob_features``
@@ -886,31 +592,22 @@ def greedy_decide(
         if not live:  # every leaf blocklisted → no valid alternative left
             return leaves[0]
         rows = [{**base, **k} for _, k in live]
-        # The deploy evidence hierarchy, top first: (1) the card's recorded
-        # GOLDENS — A/B-verified deployable measurements that ship with the
-        # repo, the only evidence a fresh machine has (consulted, never
-        # trained on); (2) measured -O3 reservoir evidence
-        # (``Prior.evidence_pick`` — deployable-regime truth); (3) the tune
-        # DB's measured best on an exact ``S_*`` match (a config the tune
+        # The deploy evidence hierarchy, top first: (1) measured -O3 reservoir
+        # evidence (``Prior.evidence_pick`` — deployable-regime truth); (2) the
+        # tune DB's measured best on an exact ``S_*`` match (a config the tune
         # measured must not lose the deploy to an unmeasured extrapolation —
-        # eighth-sweep finding 2); (4) the model argmin only when no
-        # candidate has evidence at all.
-        if golden_state[0] is None:
-            golden_state[0] = _golden_evidence_index(fp.ctx)
-        got = _golden_pick(golden_state[0], rows, fp.node_id) if golden_state[0] and not golden_consulted else None
-
+        # eighth-sweep finding 2); (3) the model argmin only when no candidate
+        # has evidence at all. An env pin overrides everything upstream of the
+        # fork (a pinned family never reaches a decide).
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
             ev = getattr(the_prior, "evidence_pick", None)
-            if got is None and ev is not None:
-                got = ev(rows)
+            got = ev(rows) if ev is not None else None
             if got is None and db_index():
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
             best_i, price = got if got is not None else picker(rows)
-        elif got is not None:  # golden decides even for bare-mean_scores priors
-            best_i, price = got
         else:  # bare-mean_scores prior object (tests / custom callers)
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 

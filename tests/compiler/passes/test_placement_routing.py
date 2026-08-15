@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import replace
-from types import SimpleNamespace
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -26,7 +25,6 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.golden import GoldenRecord
 
 
@@ -101,31 +99,6 @@ def test_is_routing_reads_place_only_knob_dicts() -> None:
     sched = replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"})
     assert routing.is_routing and not sched.is_routing
     assert not replace(base, knobs={}).is_routing
-
-
-def _routing_record(*, gpu_name: str, emmy_us: float = 3.8):
-    return SimpleNamespace(
-        name="rms.routing",
-        knobs={"PLACE": "cut"},
-        is_routing=True,
-        gpu_name=gpu_name,
-        compute_cap=(12, 0),
-        emmy_us=emmy_us,
-        shape_key=ShapeKey(free_prod=64 * 4096, reduce_max=4096, is_warp=False, kind="rms_norm"),
-    )
-
-
-def test_routing_entries_never_join_the_schedule_golden_tier(monkeypatch) -> None:
-    """A PLACE-only entry has no schedule keys, so ``_golden_matches_row`` would read every
-    family as FREE and 'match' any row at the routing total — the schedule-tier index must skip
-    routing entries entirely."""
-    from emmy.compiler.pipeline.search import golden as golden_mod
-    from emmy.compiler.pipeline.search.policy import greedy
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090", emmy_us=1.0)
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-    assert greedy._golden_evidence_index(ctx) == {}
 
 
 # --- the PLACE path family ------------------------------------------------------------------------
@@ -209,30 +182,3 @@ def test_pin_naming_no_seam_is_skipped(monkeypatch) -> None:
 
 
 # --- routing entries drive the same realizer -------------------------------------------------------
-
-
-def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
-    """Any live schedule-family pin marks a pinned re-record / ``--ab`` compile, and pins are
-    authoritative over every golden tier — the recorded routing entry must not reroute it. This
-    is the 2026-07-31 fused re-record dead end: with a same-shape ``.cut`` row recorded, every
-    pinned fused golden replay silently compiled the cut's pieces and gated ``realized (off)``."""
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    monkeypatch.setenv("EMMY_STAGE", "")  # the OFF spelling — any schedule-family pin, PLACE excluded
-    with config.nvcc_flags_override(""):
-        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert len(_kernel_ids(out)) == 1, "a live schedule pin is authoritative — the routing entry must not cut"
-
-
-def test_routing_golden_ignored_off_its_card(monkeypatch) -> None:
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 4090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
-    out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert len(_kernel_ids(out)) == 1

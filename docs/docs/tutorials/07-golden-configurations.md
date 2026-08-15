@@ -1,8 +1,8 @@
 ---
 sidebar_position: 7
 title: "7. Golden Configurations"
-description: The reviewed, per-GPU measurements that ship with the repository — how they are recorded, what makes one unusable, and the audits that catch it.
-keywords: [Emmy, golden configuration, evidence, audit, benchmark, pin, realize]
+description: The reviewed, per-GPU measurements that ship with the repository — how they are recorded, and how a recording replays exactly.
+keywords: [Emmy, golden configuration, evidence, benchmark, pin, replay]
 ---
 
 # 7. Golden Configurations
@@ -15,7 +15,9 @@ deploying on a guess.
 
 They do three jobs at once:
 
-1. **The first tier** of the deploy evidence hierarchy.
+1. **An exactly replayable recording.** A record's pins and knobs pin the compile to the measured kernel
+   (`run --golden NAME`, `--ab`) — the schedule codec fully encodes how the row replays. An *unpinned* compile never
+   consults a golden; [the hierarchy page](./06-deploy-evidence-hierarchy.md) explains what decides instead.
 2. **The training data** for the offline prior, which is fitted on them.
 3. **A regression reference** — if today's compiler produces something slower than the recording, that is a defect
    with a number attached.
@@ -38,7 +40,7 @@ configs:
       - name: gemma4_12b.norm_q_proj.m32
         bindings: {num_tokens: 32}
         pins: {FAST_MATH: false}
-        knobs: {WORK: w1x16, TILE: mma_m16n8k16_f16_f32/f2x2/k2, REDUCE: g8k, RASTER: '', STAGE: d2/sync}
+        knobs: {WORK: w1x16, TILE: mma_m16n8k16_f16_f32/f2x2/k2, REDUCE: g8k, RASTER: '', STAGE: d2/smem}
         measurements: {emmy_us: 26.7, reference_us: 19.8, reference_backend: cublas}
 ```
 
@@ -51,8 +53,8 @@ all realizations below one target makes it explicit which input dimension change
 same program from drifting apart.
 
 Names repeat across files — every GPU has its own `matmul.square.512` — with different shapes, different data types
-and different measured times. So a compile only ever consults the file for the GPU it is targeting. Pooling them would
-mean deploying one card's configuration on another.
+and different measured times. So `--golden NAME` replay prefers the live card's file. Pooling them would mean
+replaying one card's configuration on another.
 
 ## Recording one
 
@@ -100,21 +102,11 @@ Three checks guard the measurement before it is believed:
 Every row is measured in a separate worker process that can be killed, so one configuration that hangs takes down its
 own process, is reported as a failure, and the remaining rows continue.
 
-## The failure that matters most
-
-A recorded configuration is only useful if the compiler still offers it. The word for that is **realize**: a recording
-realizes at a fork when the options the compiler offers there include one that matches it.
-
-**A golden that realizes nowhere is worse than no golden at all.** When a shape matches but none of its entries
-matches anything on offer, the compile warns loudly and falls through to the tiers below — and those tiers, for a
-shape somebody bothered to record, can be hundreds of times slower than the entry claims. The recording promises a
-number the deployment cannot produce.
-
-Two ways to record one by accident, both worth knowing:
+## Recording rules worth knowing
 
 - **A recorded cut and a tile choice cannot go in the same entry.** A cut is decided before schedules are chosen, so
-  no single offered option carries both, and an entry containing both matches nothing. Record one or the other. Here
-  is a real cut entry, recorded for the same shape as the fused one above:
+  one entry records either the placement pin or a schedule row, never both. Here is a real cut entry, recorded for
+  the same shape as the fused one above:
 
   ```yaml
   - name: gemma4_12b.norm_q_proj.m32.cut
@@ -124,50 +116,32 @@ Two ways to record one by accident, both worth knowing:
     measurements: {emmy_us: 16.0, reference_us: 19.0, reference_backend: cublas}
   ```
 
-  It stores the split and nothing else. Each resulting piece is recognized on its own afterwards and finds its own
-  schedule through the hierarchy. In this case the split is 1.8 times faster than keeping the work fused, which is
-  exactly the kind of finding that has to be recorded to be usable — a cold compile keeps work fused unless told
-  otherwise.
+  It stores the split and nothing else. Replayed, the placement pin cuts the kernel and each resulting piece is
+  recognized on its own afterwards, finding its own schedule through the hierarchy. In this case the split is 1.8
+  times faster than keeping the work fused.
 
-- **A row must be verified to deploy, not merely to reproduce.** Pinning reproduces configurations the compiler would
-  never offer on its own, so a recording that only works when pinned still looks healthy in an isolated check. Only
-  the in-model audit catches it.
+- **A recording is a pinned measurement, and replay is exact.** The knobs are decoded against the kernel's recognized
+  structure — there is no fuzzy matching between a recording and a live compile, so a row either replays into
+  exactly the measured kernel or fails loudly.
 
-## The release audit
+## Validating a file
 
-One command checks the own-program and served-model views together:
+One command checks a corpus against its pinned serving envelope:
 
 ```bash
 emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
 ```
 
 The serving config names that exact file and supplies the model, revision, GPU, and reachable realization matrix.
-The command must run on that GPU. It validates the schema and provenance, proves every structural target contains
-every expected static/symbolic precision realization, reproduces the recorded rows, runs the pin-only offer check in
-each input pin regime, and then rebuilds the model as a weight-free stand-in to audit the exact serving widths. Every
-consultation yields:
-
-| Verdict | Meaning |
-| --- | --- |
-| `MATCH` | a recorded configuration matched an option the compiler offered |
-| `DRIFT` | the shape matched but none of its entries did — always a defect, since the recording claims a time the deployment can no longer produce |
-| `GAP` | there is no recording for this shape |
-
-The two views genuinely differ, which is why the command runs both. Isolated checks have passed 68 out of 68 while
-the same configurations drifted inside the model, where fusion changed the offered set. For release, any missing
-realization, all-pin-only target, DRIFT, GAP, or compile failure is fatal.
-
-Coverage is gated in continuous integration so that it can only improve: each GPU's set of gaps is pinned exactly, a
-new gap fails until a configuration is recorded, and a gap that has been closed fails until its line is removed from
-the baseline. The stand-in models deliberately follow the installed modeling library, so an upgrade that changes the
-forward pass changes the audit exactly as it changes serving.
+The command must run on that GPU. It validates the schema and provenance and proves every structural target contains
+every expected static/symbolic precision realization. A recorded row's health beyond that is its exact pinned
+replay — `run --golden NAME --bench` reproduces it under the A/B integrity gates above.
 
 ## Two smaller rules
 
 **Fast math never loses.** Entries recorded with faster, less precise arithmetic are only kept when they are faster
-than the best ordinary sibling. A slower one could never be used anyway — the ordinary entry is picked first, whether
-fast math is enabled or not — so such rows are dropped, and a missing one simply means a fast-math deployment uses the
-ordinary configuration there.
+than the best ordinary sibling — a slower one documents a configuration nobody should replay, so such rows are
+dropped.
 
 **The two halves of the prior treat goldens differently.** The online prior never trains on them: a recorded
 configuration enters no training data anywhere, which leaves the goldens as a clean acceptance set — data the model is
@@ -183,8 +157,8 @@ ls emmy/compiler/pipeline/search/goldens/
 grep -n -A9 "kernel: norm_linear" emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml | head -30
 ```
 
-Then run the file-scoped audit on the GPU named by the serving config. It needs model configuration and allocation
-metadata, but no weight payload:
+Then run the file-scoped validation on the GPU named by the serving config. It needs model configuration and
+allocation metadata, but no weight payload:
 
 ```bash
 emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \

@@ -4089,7 +4089,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 12131.3
       reference_us: 6424.6
@@ -4114,7 +4113,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 16152.6
       reference_us: 6486.0
@@ -5267,7 +5265,6 @@ configs:
       REDUCE: g8k
       RASTER: ''
       STAGE: d2/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 26.4
       reference_us: 22.3
@@ -5289,7 +5286,6 @@ configs:
       REDUCE: g8k
       RASTER: ''
       STAGE: d2/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 18.2
       reference_us: 16.4
@@ -5305,7 +5301,6 @@ configs:
       REDUCE: g8k
       RASTER: ''
       STAGE: d2/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 17.2
       reference_us: 16.4
@@ -5327,7 +5322,6 @@ configs:
       REDUCE: g4k
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 40.7
       reference_us: 45.3
@@ -5343,7 +5337,6 @@ configs:
       REDUCE: g4k
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 36.3
       reference_us: 45.3
@@ -5365,7 +5358,6 @@ configs:
       REDUCE: g8k
       RASTER: ''
       STAGE: d2/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 12.7
       reference_us: 9.0
@@ -5381,7 +5373,6 @@ configs:
       REDUCE: g8k
       RASTER: ''
       STAGE: d2/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 12.6
       reference_us: 9.0
@@ -5406,7 +5397,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 285.0
       reference_us: 281.6
@@ -5719,7 +5709,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 280.1
@@ -5741,7 +5730,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 628.2
@@ -5762,7 +5750,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 1212.4
@@ -5784,7 +5771,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 150.5
@@ -5805,7 +5791,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 287.1
@@ -5827,7 +5812,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 61.4
@@ -5849,7 +5833,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 254.5
@@ -5870,7 +5853,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 361.8
@@ -5892,7 +5874,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 147.4
@@ -5914,7 +5895,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       STAGE: d1/smem
-      S_computed_a: 1.0
       RASTER: ''
     measurements:
       emmy_us: 358.5
@@ -6014,7 +5994,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 70.8
       reference_us: 50.4
@@ -6036,7 +6015,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 78.3
       reference_us: 58.6
@@ -6058,7 +6036,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 400.8
       reference_us: 298.0
@@ -6155,7 +6132,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 3281.9
       reference_us: 1694.7
@@ -6171,7 +6147,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 2505.7
       reference_us: 1694.7
@@ -6193,7 +6168,6 @@ configs:
       REDUCE: ''
       RASTER: ''
       STAGE: d1/smem
-      S_computed_a: 1.0
     measurements:
       emmy_us: 17140.7
       reference_us: 5600.3

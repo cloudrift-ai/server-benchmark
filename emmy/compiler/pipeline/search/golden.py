@@ -11,7 +11,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -137,27 +137,6 @@ def precision_trading_pins(pins: Mapping) -> bool:
     return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
-def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
-    """Derive a record key through the same offer-aware classifier as deployment.
-
-    Most targets classify completely from their stamped ``S_*`` histogram. Flash and
-    pre-split computed-A forks are the exceptions: deployment recognizes them from an
-    unmistakable schedule offer, stamped on every fork row as ``S_computed_a``. A reviewed
-    record keeps that stamp in its knob dict, so the same signal re-derives the key without
-    serializing a ShapeKey.
-    """
-    from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
-
-    base = dict(structural_features)
-    key = _fork_shape_key([{**base, **knobs}], base=base)
-    # ``PLACE@a`` names the computed-A subtree of a contraction. A statistic-bearing cone's
-    # histogram already classifies as fused, but a stat-free activation cone otherwise persists
-    # a plain key that cannot join the live tree's structural computed-A convention.
-    if key.kind == "" and "PLACE@a" in knobs:
-        key = replace(key, kind="fused", is_warp=True)
-    return key
-
-
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -240,8 +219,10 @@ class GoldenRecord:
 
     @cached_property
     def shape_key(self) -> ShapeKey:
-        """Deployment join key derived by lowering the stable frontend target."""
-        return _golden_shape_key(self.structural_features, self.knobs)
+        """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
+        lowered target's stamped histogram. Not a deploy join key — deploy consults no goldens;
+        replay is by name and pins."""
+        return ShapeKey.from_s_features(self.structural_features)
 
     @cached_property
     def structural_features(self) -> dict[str, float]:

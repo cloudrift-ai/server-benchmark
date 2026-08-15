@@ -13,7 +13,12 @@ worth deploying — fused, or split into smaller kernels — is decided by the d
 hierarchy (tuned goldens, measurements, the prior); this rule never weighs shapes, hardware, or
 downstream pattern knowledge. Its refusals are semantic — structural region ownership, a real
 splicer rejection, the fence around an already-realized ``__cut_`` workspace (which keeps a
-placement decision from being re-fused) — plus one boundedness bound: ``_total_work`` sums the
+placement decision from being re-fused), and two readable-seam refusals judged on the MERGED
+form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, and must not
+entangle a multi-statistic compound (the online-softmax pair) beyond its flat same-extent
+normalize tail — both shapes fall to the raw-loop escape downstream (no schedule tier, no
+``PLACE`` seam), so evidence could never price the split back — plus one boundedness bound:
+``_total_work`` sums the
 enclosing free×reduce iteration count of every compute leaf, and a merge that grows it by more
 than ``_BLOWUP_FACTOR`` is refused. That bound is what keeps the downstream problem finite, not a
 performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest
@@ -55,6 +60,51 @@ def _walk_leaf_costs(loop_op: LoopOp):
     yield from walk(loop_op.body, 1, 1)
 
 
+def _nests_reduce(loop_op: LoopOp) -> bool:
+    """Whether the body carries a reduce ``Loop`` (transitively) inside another reduce ``Loop``.
+    That shape is unreadable downstream: ``_lift_cell`` keeps only the raw-loop escape for a
+    cell with more than one top-level reduce or a reduce nested in a reduce, so no schedule
+    tier beyond option-0 exists and no ``PLACE`` seam can split it back apart."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def walk(stmts: Body, inside: bool) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, Loop):
+                is_reduce = stmt.axis.name in reduce_names
+                if is_reduce and inside:
+                    return True
+                if walk(stmt.body, inside or is_reduce):
+                    return True
+        return False
+
+    return walk(loop_op.body, False)
+
+
+def _entangled_multi_stat(loop_op: LoopOp) -> bool:
+    """Whether a body holds ≥2 sibling reduce ``Loop``s (a multi-statistic compound — the
+    online-softmax pair) entangled with anything beyond a flat same-extent tail. The pair plus a
+    flat normalize sweep over the same extent is the readable standalone form (the online-softmax
+    pairing consumes exactly it); a sibling loop over a FOREIGN extent, or any nested loop in the
+    tail, replays or expands the statistics into a cell recognition can only keep as the raw-loop
+    escape — no schedule tier, no ``PLACE`` seam."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def walk(stmts: Body) -> bool:
+        loops = [s for s in stmts if isinstance(s, Loop)]
+        reds = [lp for lp in loops if lp.axis.name in reduce_names]
+        if len(reds) >= 2:
+            first = reds[0].axis.extent
+            if any(r.axis.extent != first for r in reds[1:]):
+                return True
+            for lp in loops:
+                if lp.axis.extent != first or any(isinstance(s, Loop) for s in lp.body):
+                    return True
+            return False
+        return any(walk(lp.body) for lp in loops)
+
+    return walk(loop_op.body)
+
+
 def _total_work(loop_op: LoopOp) -> int:
     """Sum enclosing-loop iterations over arithmetic leaves.
 
@@ -79,6 +129,14 @@ def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
+    if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region):
+        raise RuleSkipped("merge nests a reduce loop inside a reduce loop — an unreadable seam (raw-loop escape only)")
+    if _entangled_multi_stat(merged) and not any(_entangled_multi_stat(graph.nodes[node_id].op) for node_id in region):
+        # The single-statistic computed-A shape is readable (the fused norm→linear kind); a
+        # multi-statistic compound (the online-softmax pair) stays readable only standing alone
+        # with its flat same-extent normalize tail. A merge that entangles the pair with a
+        # reducing or expanding tail produces a cell recognition keeps as the raw-loop escape.
+        raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:

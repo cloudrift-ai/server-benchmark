@@ -243,8 +243,11 @@ Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It n
 downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
 deploy evidence hierarchy's decision (measured evidence or pins for a deployed model, the prior for a cold compile).
 Fusion's
-refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace)
-plus one boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
+refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace,
+and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
+entangling a multi-statistic compound beyond its flat same-extent normalize tail; both shapes fall to the raw-loop
+escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
+boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level

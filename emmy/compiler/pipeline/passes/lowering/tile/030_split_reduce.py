@@ -245,7 +245,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     p_op = _partial(())
     partial_tile = _mapped(
-        p_op, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, schedule=_partial_sched(p_op), stores=ws_stores
+        p_op, (split, *grid), name=f"{tile.name or out.name}__partial", knobs=tile.knobs, schedule=_partial_sched(p_op), stores=ws_stores
     )
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
@@ -266,7 +266,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
     fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, stores=fin_stores)
+    fin_tile = _mapped(fin_op, grid, name=tile.name or out.name, stores=fin_stores)
 
     frag = Graph()
     for inp in root.inputs:
@@ -370,18 +370,28 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
     # additive workspace stays ``ws[cta, *free]``). A multi-component (twisted flash) carrier
     # writes its ``(m, l, O)`` state to the three ``comp`` slices, no multi-output kernel.
+    # The workspace shape MUST match the rank of ``ws_index`` — sized by the GRID extents, never
+    # ``out.shape`` (whose extent-1 batch dims the grid never carries): a rank mismatch makes
+    # ``render_index``'s fallback flatten WITHOUT strides, colliding the partitions' states (the
+    # statistic-with-projection split wrote ``ws[ksplit + cell]``). And it is **f32**: it holds
+    # raw pre-projection accumulator states — the same rule as the contraction arm above (the
+    # flash split-KV / 020 channel-workspace rule).
     ws_name = f"{out.name}__partial"
-    ws_shape = (Dim(n_comp), Dim(cta), *out.shape) if n_comp > 1 else (Dim(cta), *out.shape)
+    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in grid)) if n_comp > 1 else (Dim(cta), *(a.extent for a in grid))
+    ws_cell = tuple(Var(ax.name) for ax in grid)  # grid-rank by construction; ``cell`` (the output
+    # Write's index, possibly full-rank with batch literals) stays the OUTPUT store's index only.
 
     def ws_index(i: int) -> tuple:
         lead = (Literal(i, "int"), Var(_SPLIT)) if n_comp > 1 else (Var(_SPLIT),)
-        return (*lead, *cell)
+        return (*lead, *ws_cell)
 
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace -----
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     partial_op = Fold.projection(body=Body((*before, sliced_loop)))
     res_op, res_sched = _residual(partial_op, plan, fold_node)
-    partial_tile = _mapped(res_op, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, schedule=res_sched, stores=ws_stores)
+    partial_tile = _mapped(
+        res_op, (split, *grid), name=f"{tile.name or out.name}__partial", knobs=tile.knobs, schedule=res_sched, stores=ws_stores
+    )
 
     # --- finalize kernel: seed the carrier state, then fold each partition's state from the
     # workspace over the split axis via the fold's cross-partition combine (``Reduction.state_merge`` —
@@ -401,13 +411,13 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
     fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, stores=fin_stores)
+    fin_tile = _mapped(fin_op, grid, name=tile.name or out.name, stores=fin_stores)
 
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

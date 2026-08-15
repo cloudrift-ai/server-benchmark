@@ -511,74 +511,6 @@ programs:
     attrs: {op: {__elementwise__: relu}}
     inputs: [x]
     outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, 512, 64]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, 512, 64]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, 512, 64]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, 512, 128]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, 512, 128]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, 512, 128]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
 configs:
 - program: 0
   target:
@@ -595,7 +527,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g2k
       RASTER: ''
-      STAGE: d3/tma
+      STAGE: d3/smem-tma
       TILE: f4x8
       VECTORIZE_LOADS: true
     measurements:
@@ -617,7 +549,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g2k
       RASTER: ''
-      STAGE: d3/tma
+      STAGE: d3/smem-tma
       TILE: mma_m16n8k16_f16_f32/f4x1/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -633,7 +565,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x1/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d3/tma
+      STAGE: d3/smem-tma
     measurements:
       emmy_us: 3.9
       reference_us: 6.14
@@ -653,7 +585,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       VECTORIZE_LOADS: true
     measurements:
@@ -674,7 +606,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 88.5
       reference_us: 98.36
@@ -688,7 +620,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 61.3
       reference_us: 98.36
@@ -708,7 +640,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d4/tma
+      STAGE: d4/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x4
       VECTORIZE_LOADS: true
     measurements:
@@ -725,7 +657,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/tma
+      STAGE: d1/smem-tma
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -741,7 +673,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 481.1
       reference_us: 640.93
@@ -761,7 +693,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g2k
       RASTER: ''
-      STAGE: d4/tma
+      STAGE: d4/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -778,7 +710,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f16/f2x2/k8
       VECTORIZE_LOADS: true
     measurements:
@@ -800,7 +732,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d4/tma
+      STAGE: d4/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x4
       VECTORIZE_LOADS: true
     measurements:
@@ -817,7 +749,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/tma
+      STAGE: d1/smem-tma
       TILE: mma_m16n8k16_f16_f16/f2x4/k8
       VECTORIZE_LOADS: true
     measurements:
@@ -838,7 +770,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       REDUCE: g4k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 90.1
       reference_us: 95.22
@@ -852,7 +784,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 64.8
       reference_us: 95.22
@@ -872,7 +804,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d4/tma
+      STAGE: d4/smem-tma
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
       VECTORIZE_LOADS: true
     measurements:
@@ -888,7 +820,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 594.9
       reference_us: 557.94
@@ -902,7 +834,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 369.7
       reference_us: 557.94
@@ -922,7 +854,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -938,7 +870,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 201.3
       reference_us: 296.95
@@ -958,7 +890,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       VECTORIZE_LOADS: true
     measurements:
@@ -974,7 +906,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f2x4/k8
       REDUCE: ''
       RASTER: ''
-      STAGE: d1/tma
+      STAGE: d1/smem-tma
     measurements:
       emmy_us: 240.6
       reference_us: 249.82
@@ -994,7 +926,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g4k
       RASTER: ''
-      STAGE: d1/tma
+      STAGE: d1/smem-tma
       TILE: mma_m16n8k16_f16_f32/f4x2/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -1010,7 +942,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 64.9
       reference_us: 95.08
@@ -1030,7 +962,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       VECTORIZE_LOADS: true
     measurements:
@@ -1046,7 +978,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 595.6
       reference_us: 553.7
@@ -1060,7 +992,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 370.1
       reference_us: 553.7
@@ -1080,7 +1012,7 @@ configs:
       INTERLEAVE_LOADS: true
       REDUCE: g8k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       VECTORIZE_LOADS: true
     measurements:
@@ -1096,7 +1028,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: g2k
       RASTER: ''
-      STAGE: d2/tma
+      STAGE: d2/smem-tma
     measurements:
       emmy_us: 201.8
       reference_us: 295.03
@@ -1446,186 +1378,4 @@ configs:
     measurements:
       emmy_us: 11.1
       reference_us: 12.52
-      reference_backend: torch-eager
-- program: 32
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: attention.hd64
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      FAST_EXP: false
-      INTERLEAVE_LOADS: true
-      STAGE: d2/tma
-      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@pj: mma_m16n8k16_f16_f32/f1x8/k8
-      VECTORIZE_LOADS: true
-    measurements:
-      emmy_us: 8.6
-      reference_us: 10.24
-      reference_backend: torch-eager
-  - name: attention.hd64
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      STAGE: d2/tma
-      TILE@dd: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@pj: mma_m16n8k16_f16_f16/f1x8/k8
-    measurements:
-      emmy_us: 7.2
-      reference_us: 10.24
-      reference_backend: torch-eager
-- program: 33
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: attention.hd128
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x1
-      FAST_EXP: false
-      INTERLEAVE_LOADS: true
-      STAGE: d2/tma
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
-      VECTORIZE_LOADS: true
-    measurements:
-      emmy_us: 16.5
-      reference_us: 18.42
-      reference_backend: torch-eager
-  - name: attention.hd128
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x1
-      STAGE: d1/tma/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@pj: mma_m16n8k16_f16_f32/f1x16/k4
-    measurements:
-      emmy_us: 15.7
-      reference_us: 18.42
-      reference_backend: torch-eager
-  - name: attention.hd128
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x1
-      STAGE: d2/tma
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-    measurements:
-      emmy_us: 14.6
-      reference_us: 18.42
-      reference_backend: torch-eager
-  - name: attention.hd128
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x1
-      STAGE: d1/tma/split
-      TILE@dd: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@pj: mma_m16n8k16_f16_f16/f1x16/k4
-    measurements:
-      emmy_us: 13.5
-      reference_us: 18.42
-      reference_backend: torch-eager
-- program: 34
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: attention.hd64.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      FAST_EXP: false
-      INTERLEAVE_LOADS: true
-      STAGE: d2/tma
-      TILE: mma_m16n8k16_f16_f32/f1x16/k4
-      VECTORIZE_LOADS: true
-    measurements:
-      emmy_us: 8.6
-      reference_us: 10.23
-      reference_backend: torch-eager
-  - name: attention.hd64.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x1
-      STAGE: d2/tma
-      TILE: mma_m16n8k16_f16_f16/f1x8/k8
-    measurements:
-      emmy_us: 7.5
-      reference_us: 10.23
-      reference_backend: torch-eager
-- program: 35
-  target:
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: attention.hd128.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x1
-      FAST_EXP: false
-      INTERLEAVE_LOADS: true
-      STAGE: d2/tma
-      TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      VECTORIZE_LOADS: true
-    measurements:
-      emmy_us: 16.4
-      reference_us: 18.4
-      reference_backend: torch-eager
-  - name: attention.hd128.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x1
-      STAGE: d2/tma
-      TILE: mma_m16n8k16_f16_f16/f1x16/k4
-    measurements:
-      emmy_us: 15.3
-      reference_us: 18.4
-      reference_backend: torch-eager
-  - name: attention.hd128.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x1
-      STAGE: d1/tma/split
-      TILE: mma_m16n8k16_f16_f32/f1x8/k8
-    measurements:
-      emmy_us: 16.0
-      reference_us: 18.4
-      reference_backend: torch-eager
-  - name: attention.hd128.dynM
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x1
-      STAGE: d1/tma/split
-      TILE: mma_m16n8k16_f16_f16/f1x16/k4
-    measurements:
-      emmy_us: 13.5
-      reference_us: 18.4
       reference_backend: torch-eager

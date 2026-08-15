@@ -493,6 +493,11 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
 _IDENTITY_CACHE: dict[tuple, str | None] = {}
+#: Enumerated rows per (target, pins) — sibling realizations of one config decode against one
+#: enumeration (the tripwire and the migration validator walk whole files) — and ONE Context per
+#: card, so same-shape targets share the schedule pool cache across configs and files.
+_DECODE_ROWS_CACHE: dict[tuple, list[dict]] = {}
+_DECODE_CTX_CACHE: dict[tuple, object] = {}
 
 
 def _record_cache_key(record: GoldenRecord) -> tuple:
@@ -585,9 +590,16 @@ def decode_record(record: GoldenRecord) -> str | None:
             if site is None or site not in seams:
                 return f"routing key {key!r} names no legal cut seam on the recognized tree"
         return None
-    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    with pinned_knobs(record.pin_map):
-        rows = enumerate_graph(record.target_program.copy(), ctx)
+    cache_key = (_record_cache_key(record), record.pins)
+    rows = _DECODE_ROWS_CACHE.get(cache_key)
+    if rows is None:
+        ctx_key = (record.compute_cap, record.gpu_name or None)
+        ctx = _DECODE_CTX_CACHE.get(ctx_key)
+        if ctx is None:
+            ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
+        with pinned_knobs(record.pin_map):
+            rows = enumerate_graph(record.target_program.copy(), ctx)
+        _DECODE_ROWS_CACHE[cache_key] = rows
     want = canonical_row_key(stamp_schedule_families(record.knobs))
     hits = sum(1 for r in rows if canonical_row_key(stamp_schedule_families(r)) == want)
     if hits == 1:

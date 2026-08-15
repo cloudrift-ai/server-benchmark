@@ -224,11 +224,6 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    strict=False,
-    reason="replays the repo golden corpus, which is restored verbatim from main and spells the pre-rename "
-    "STAGE tokens — inert data until the strict-decode corpus migration lands",
-)
 def test_run_golden_bench_shows_benched_golden_row(run_cli):
     """A selected working-golden target compiles and benches its recorded knobs,
     then prints it as a ``golden NAME``-labeled row in the kernel table, plus the
@@ -675,11 +670,6 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    strict=False,
-    reason="replays the repo golden corpus, which is restored verbatim from main and spells the pre-rename "
-    "STAGE tokens — inert data until the strict-decode corpus migration lands",
-)
 def test_run_golden_bench_json_record(run_cli, tmp_path):
     """A working-golden benchmark writes the machine-readable A/B record:
     backends, the greedy kernel rows, and one pinned entry per recorded golden config with

@@ -510,7 +510,7 @@ def _verified_index(ctx: Context) -> tuple[dict, dict]:
     live ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an
     underivable row is skipped — the decode tripwire is where that is loud); classification-free:
     no shape key, no matching heuristic, identity or nothing."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, flush_identity_store, kernel_identity  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import flush_identity_store, kernel_identity, records_for_card  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
     if not gpu_name:
@@ -519,8 +519,8 @@ def _verified_index(ctx: Context) -> tuple[dict, dict]:
     routing: dict = {}
     try:
         cap = tuple(ctx.compute_capability)
-        for g in GOLDEN_RECORDS:
-            if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap or not g.knobs or not _pins_live(g.pin_map):
+        for g in records_for_card(gpu_name, cap):
+            if not g.knobs or not _pins_live(g.pin_map):
                 continue
             identity = kernel_identity(g)
             if identity is None:

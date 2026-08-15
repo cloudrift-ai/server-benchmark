@@ -1300,7 +1300,24 @@ def _atom_ops(
     lead: tuple = (),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
-    stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from."""
+    stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from.
+
+    A CONVERTING materialized ``a`` — an ``smem`` stage on a load whose dtype differs from the
+    atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
+    fill then evaluates the load per slab cell and the typed slab store performs the conversion
+    (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
+    if (
+        stage is not None
+        and stage.transport == "smem"
+        and isinstance(tile.atom, AtomKind)
+        and isinstance(c.a, Load)
+        and inputs is not None
+        and (t := inputs.get(c.a.input)) is not None
+        and t.dtype != tile.atom.operand_dtype("a")
+    ):
+        from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone  # noqa: PLC0415 — decode-boundary import
+
+        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels)
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam)
 

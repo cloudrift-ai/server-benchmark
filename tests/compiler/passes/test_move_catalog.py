@@ -327,9 +327,8 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, keys, _idents, origin = sch._enumerate([term])
+    rows, keys = sch._enumerate([term])
     assert rows, "the two-site term enumerated nothing"
-    assert {reading for reading, _ in origin} == {0}, "a single-reading term has one owner"
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
@@ -401,16 +400,15 @@ def test_two_site_rows_are_distinct_and_materialize_both_sites():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, idents, origin = sch._enumerate([term])
+    rows, _keys = sch._enumerate([term])
 
     seen = [canonical_row_key(r) for r in rows]
     assert len(seen) == len(set(seen)), f"{len(seen) - len(set(seen))} rows spell identically"
-    owner = {ident: (term, resolved) for ident, (_, resolved) in zip(idents, origin, strict=True)}
 
     decided = [r for r in rows if r.get("REDUCE@j")]
     assert decided, "the fixture must decide its nested site on some row"
     for row in decided:
-        op = sch._materialize(*owner[canonical_row_key(row)], row, "k", {})
+        op = sch._materialize(term, row, "k", {})
         assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
         assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])
 
@@ -472,7 +470,7 @@ def _first_row(tile) -> dict:
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _idents, _origin = sch._enumerate([term])
+    rows, _keys = sch._enumerate([term])
     assert rows, "the term enumerated nothing"
     return rows[0]
 

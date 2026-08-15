@@ -566,8 +566,9 @@ class Fold(Stmt):
         flattens the inline node at lowering, so the derived loop is byte-identical to the hoisted
         spelling's (the demotion is a spelling change, never a semantics change).
 
-        This is the COLLAPSE term reading: it REMOVES the edge's schedule site, which is why it is
-        a reading rather than a value (``passes/lowering/tile/_schedule._readings``)."""
+        This is the COLLAPSE view: it REMOVES the edge's schedule site, which is why it is a
+        derived view rather than a value (``passes/lowering/tile/_schedule._views`` — the per-cell
+        view a scalar-tier row decodes through)."""
         assert self.axis is not None, "demoted: an iterating fold only — the lift's leading param is the iteration var"
         lam = self.lift
         body = list(lam.body)

@@ -7,12 +7,11 @@ softmax reduce. This file pins every tier of it:
   readable-seam split (Q·K^T | softmax pieces | P·V, plus cut glue) and matches torch, static AND
   dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. The kernel count belongs to
   the fusion pass; these tests assert numerics over the whole kernel set.
-- **tensor-core flash** — RECOVERED through the one emitter: ``_schedule._twisted_warp_option`` stamps
-  the mma ``TilePlan``\ s on the Q@K / P@V bilinear ``Fold``\ s and the tree realizes at fragment
-  residence (``_twist``) — no private emitter. The ``test_generated_tensorcore_flash_*`` /
-  ``test_warp_chain_*`` cases assert that warp chain.
-- **cooperative-KV flash** (``BR``) — the KV axis split across threads, partial ``(m, l, O)`` states
-  merged via the monoid combine. Xfailed pending the rebuild.
+- **fused tensor-core flash** — NOT currently generatable: the flash pattern compiler (its private
+  recognition, the ``_twist`` fragment emitter, the streaming-pair schedule tiers) was deleted with
+  the perf gates. The generic-path successor is the TWISTED computed-A arm of the one recognizer
+  (``bind_prologue_contraction`` accepting the ``(m, d)`` exp-family statistic source) — until it
+  lands, the split above is the supported SDPA lowering.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →

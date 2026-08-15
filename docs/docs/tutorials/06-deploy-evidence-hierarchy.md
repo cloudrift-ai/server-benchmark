@@ -1,7 +1,7 @@
 ---
 sidebar_position: 6
 title: "6. The Deploy Evidence Hierarchy"
-description: The fixed order an ordinary compile works down to answer a fork — reviewed measurements, then local measurements, then prediction, then the rule's own first option.
+description: The fixed order an ordinary compile works down to answer a fork — local measurements, then prediction, then the rule's own first option.
 keywords: [Emmy, deploy evidence hierarchy, evidence, greedy selection, golden configuration, prior, fork]
 ---
 
@@ -13,21 +13,23 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 ## The order
 
-1. **Golden configurations recorded for this GPU.** Reviewed measurements that ship with the repository. The compile
-   takes the first offered option that agrees with the fastest recorded entry for this kernel's shape.
-2. **Measured evidence from the reservoir.** The option that agrees with the fastest measurement of this same kernel
+1. **Measured evidence from the reservoir.** The option that agrees with the fastest measurement of this same kernel
    that was itself taken at the deployable setting.
-3. **Measured rows from the tuning database.** Measurements of this exact kernel. Within the tier, a row measured at
+2. **Measured rows from the tuning database.** Measurements of this exact kernel. Within the tier, a row measured at
    the deployable setting decides outright; a row measured at the ranking setting decides only when no option has a
    deployable-setting measurement.
-4. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
+3. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
    predicted latency.
-5. **The rule's own first option**, if there is no prior to ask. Rules order their options so that the first one is
+4. **The rule's own first option**, if there is no prior to ask. Rules order their options so that the first one is
    always safe.
 
-The shape of that list is the whole design in miniature. A reviewed measurement beats a local one; any measurement of
-this exact kernel beats a prediction; a prediction beats an arbitrary choice. Nothing further down ever overrules
-something further up.
+The shape of that list is the whole design in miniature. Any measurement of this exact kernel beats a prediction; a
+prediction beats an arbitrary choice. Nothing further down ever overrules something further up.
+
+One thing deliberately *not* in the list: the [golden configurations](./07-golden-configurations.md) recorded for the
+GPU. A golden is a named, reviewed, pinned measurement, and it is replayed **exactly** — its recorded pins settle the
+knobs before any fork needs deciding. An unpinned compile never consults one; there is no matching heuristic between
+a live fork and a recorded row.
 
 ## How one fork is actually decided
 
@@ -41,16 +43,13 @@ The tile-lowering rule matches it and returns its options.
    only — still no kernel is built.
 3. **Each leaf becomes one row**: the hardware and regime this compile is running under, the summary of the kernel's
    body and extents that the stamping pass wrote onto it, and the leaf's complete knob values.
-4. **Tier 1.** The kernel's shape is looked up among the golden configurations recorded for this GPU. If a shape
-   matches, the fastest of its entries is taken and the first leaf agreeing with it wins.
-5. **Tier 2.** Otherwise, the fastest reservoir measurement of this same kernel that was taken at the deployable
-   setting, and the leaf that agrees with it.
-6. **Tier 3.** Otherwise, the measurements table, deployable-setting rows preferred over ranking-setting ones.
-7. **Tier 4.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
-8. **Only now is the winning leaf built for real**, and the compile moves to the next fork.
+4. **Tier 1.** The fastest reservoir measurement of this same kernel that was taken at the deployable setting, and
+   the leaf that agrees with it.
+5. **Tier 2.** Otherwise, the measurements table, deployable-setting rows preferred over ranking-setting ones.
+6. **Tier 3.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
+7. **Only now is the winning leaf built for real**, and the compile moves to the next fork.
 
-With no measurements and no prior at all, step 4 still runs — the golden tier needs no model — and every fork it does
-not answer falls to the rule's first option.
+With no measurements and no prior at all, every fork falls to the rule's first option.
 
 ## What "agrees with" means
 
@@ -76,9 +75,8 @@ so the agreement test is stricter, and the same row keeps steering the compile t
 
 Regime gating is not symmetric between the tiers, and the asymmetry is deliberate.
 
-- **Golden configurations and reservoir evidence apply only to a compile at the deployable setting.** Their numbers
-  are true of that setting and no other. This is why the test suite, which compiles at the fast ranking setting for
-  speed, never consults golden configurations at all.
+- **Reservoir evidence applies only to a compile at the deployable setting.** Its numbers are true of that setting
+  and no other.
 - **The measurements table applies under any setting**, keeping its internal preference for deployable-setting rows.
   A measurement of this exact kernel is real information even under a different setting, and it still beats the
   model's extrapolation.
@@ -98,24 +96,20 @@ shuffled option orders and require the same answer, plus a check that two separa
 
 ## When there is no prior
 
-The prior can be missing: a corrupted checkpoint, or weights that fail to load. In that case tiers 2, 3 and 4 are all
-gone at once — the reservoir travels inside the prior's checkpoint, and the database tier is only consulted on the
-path where a prior exists.
-
-What survives is tier 1. The golden configurations still decide every fork they match, and the compile logs loudly
-when a golden overrides what would otherwise have been the rule's first option. A broken checkpoint can never
-silently cost a fork its reviewed measurement.
+The prior can be missing: a corrupted checkpoint, or weights that fail to load. In that case every tier is gone at
+once — the reservoir travels inside the prior's checkpoint, and the database tier is only consulted on the path
+where a prior exists — and every fork falls to the rule's first option. Pinned knobs still apply: a pinned family
+never reaches a fork at all.
 
 ## Changing which kernels exist
 
 Everything above decides *how* a kernel computes. Two mechanisms can change *which kernels exist* during an ordinary
 compile, and both are deliberately harder to trigger.
 
-**A recorded cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
-work into kernels. Keeping it in one kernel is the default and is what the absence of a recording means. A golden
-entry can instead record a cut at a named place inside the kernel, and that entry is consulted at recognition time,
-matched against this GPU and restricted to the deployable setting like any other golden. Each resulting piece is then
-recognized afresh and works down the same hierarchy for its own schedule.
+**A pinned cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
+work into kernels. Keeping it in one kernel is the default. An explicit placement pin cuts at a named place inside
+the kernel (a golden entry can record such a pin, replayed like any other pinned row), and each resulting piece is
+then recognized afresh and works down the same hierarchy for its own schedule.
 
 **A structural fork.** The prior is never asked to rank structural options against each other, because it would be
 comparing predictions across different kinds of kernel, where its errors do not cancel the way they do among siblings
@@ -126,7 +120,7 @@ time, local measurements and model predictions across its kernels.
 
 That costing is only allowed when the online prior is trained and trusted. Without it — on a machine with no
 measurements, or where one side cannot be costed at all — the structural option is dropped and the default kernel set
-is kept. **A cold compile never changes which kernels exist**, unless a recorded cut tells it to.
+is kept. **A cold compile never changes which kernels exist**, unless a placement pin tells it to.
 
 ## When the chosen option does not fit
 

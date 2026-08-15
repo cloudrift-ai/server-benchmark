@@ -385,10 +385,6 @@ class _Term:
         #: Set when any site offers a tensor-core row — a structural fact about the KERNEL, stamped
         #: on EVERY row so the priors can price "a scalar tile where tensor cores were on offer".
         self.warp_eligible = False
-        #: Set when any contraction site offers the mandatory smem compute fill (a computed
-        #: operand cone) — the structural fact the deploy-time classifier keys the fused
-        #: convention on, stamped on every row as ``S_computed_a``.
-        self.computed_fill = False
 
     def key(self, family: str, node) -> str | None:
         """The canonical key ``family`` spells ``node`` with in the UNION's namespace — the
@@ -894,7 +890,6 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         return [None]  # per-cell / unbindable — no operand slab to stage
     tile = plan.placed_on(term.place)
     if plan.is_warp and _has_computed_operand(node):
-        term.computed_fill = True
         return _fill_values(term, node, tile)
 
     def resolve(st: Stage) -> Stage | None:
@@ -1336,13 +1331,6 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str], list[tuple], 
         # prices "a scalar tile where tensor cores were on offer".
         for row in rows:
             row["S_warp_eligible"] = 1.0
-    if any(term.computed_fill for term in terms):
-        # The fork enumerates the mandatory smem compute fill — a computed-A contraction (or
-        # its mixed-A promotion sibling). The deploy classifier and the golden keying read this
-        # stamp; a transport token cannot carry it, because the byte-copy staging spells the
-        # same ``smem`` rows on fully materialized edges.
-        for row in rows:
-            row["S_computed_a"] = 1.0
     return rows, keys, idents, origin
 
 

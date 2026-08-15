@@ -298,10 +298,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.rope_parameters` into `_build_rotary`/`get_rope` unchanged — one nuance: stock vLLM builds the gpt-oss
   rope at fp32 while the plugin's rotary follows the model dtype (fp16); q/k re-cast to the trunk dtype either
   way, a known small numeric drift.
-  **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
-  evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
-  not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does
-  not). So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
+  **Tuning what serving actually runs.** The deploy pick reads box-local `perf`/reservoir evidence — and only
+  evidence recorded against the *serving graph* carries serving. An isolated snippet does not: fusion inside a real
+  block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not). So the evidence path
+  is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
   matrix. `emmy tune --golden-file` specializes and tunes each binding and precision regime. Capture a **global**
   (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's

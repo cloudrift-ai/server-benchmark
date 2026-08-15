@@ -36,7 +36,7 @@ emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/workin
 emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
 # Run every working-golden target (add --target NAME to select one)
 emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
-# Capture one symbolic serving inventory with every release realization, then audit it on the pinned GPU
+# Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
 emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \

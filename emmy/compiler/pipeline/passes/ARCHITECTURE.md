@@ -15,8 +15,8 @@ Passes enumerate; they do not prefer. Every semantically legal alternative is ex
 option, an enumerated row, or a knob value — and the choice among alternatives is made in exactly two places,
 neither of which is a pass:
 
-- a **deployed model** answers every choice from its tuned per-GPU golden file — warm evidence produced by
-  `emmy tune` and promoted after verification;
+- a **deployed model** answers every choice from measured evidence — the box-local reservoir / tune-DB rows a
+  local `emmy tune` produced, or a recorded golden row replayed exactly through its pins;
 - a **cold compile** of an arbitrary kernel answers through the deploy evidence hierarchy, whose last learned tier
   is the prior — on a fresh machine, the offline model. Cold-deploy quality is the offline prior's responsibility.
 
@@ -238,7 +238,8 @@ How to comply:
 
 Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It never weighs shapes, hardware,
 downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
-deploy evidence hierarchy's decision (tuned goldens for a deployed model, the prior for a cold compile). Fusion's
+deploy evidence hierarchy's decision (measured evidence or pins for a deployed model, the prior for a cold compile).
+Fusion's
 refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace)
 plus one boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.

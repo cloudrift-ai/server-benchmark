@@ -3,9 +3,9 @@
 Working plan for branch `feature/replayable-golden-rows` (PR #513). This PR is **pure removal** on top of main:
 no new machinery. The invariant it enforces — stated in
 `passes/ARCHITECTURE.md` — is that a pass never refuses, caps, or truncates a semantically legal alternative for
-speed. Deployed models answer every choice from their tuned per-GPU golden
-file; cold compiles answer through the deploy evidence hierarchy ending at the offline prior, which owns
-cold-deploy quality.
+speed. Compiles answer every choice through the deploy evidence hierarchy (measured evidence → prior → option-0)
+or an explicit pin; the offline prior owns cold-deploy quality. Recorded goldens are exactly replayable pinned
+rows, never consulted by an unpinned compile.
 
 ## Removed in this PR
 
@@ -57,9 +57,16 @@ Remaining dissolution steps:
   and the provably-no-op "`S_*` stamp" doctrine text are deleted — replay exactness holds by
   construction rather than by label.
 
-Landed with the rename: `S_computed_a` stamped at enumeration (replaces greedy's transport-token
-sniff, which the `copy`/`reg` merge made ambiguous; stored compute-fill golden rows carry the
-stamp in their knob dicts). Still adopted:
+Superseding the rename's classifier bridge (Dmitry: "drop everything, strongly prioritize clean
+design; pinned kernel performance is the only thing we care about"): the classified-ShapeKey
+golden DEPLOY TIER is deleted wholesale — greedy's golden consult (`_golden_pick`,
+`_fork_shape_key`, `_golden_matches_row`, the audit sink), `_golden_shape_key` with its
+offer-signal and `PLACE@a` special cases, the `S_computed_a` stamp (code + YAML), `search/audit.py`
+and the `eval golden` deploy/offer audits. Goldens remain as data: named pinned rows replayed
+exactly (`run --golden NAME`, `--ab`), offline-fit training data, eval datasets. The deploy
+hierarchy is now measured reservoir/DB evidence → prior → option-0; deployed-model parity is
+restored later by the strict structural-identity decode (below), never by re-adding fuzzy
+matching. Still adopted:
 the scalar tier's slab K-chunk on TILE's existing `/k<bk>` token; `ZERO_DELEGATE` +
 `VECTORIZE_STORES` knobs; `f8` restored to `map_tile_moves`. Sequenced with the placement PR:
 per-edge `STAGE@a`/`STAGE@b` keys and the `PLACE` fork level + a ShapeKey layout term.
@@ -69,9 +76,10 @@ swizzle picks, the f16-acc promote cadence — precision, not perf), the bit-ide
 
 ## Follow-ups (separate PRs)
 
-- Replayable golden rows: recorded rows carry placement, exact fail-closed decode, deletion of the fuzzy golden
-  matching (`_golden_matches_row`, offer sniffs, any-of/bare-wildcard semantics), per-card corpus migration. Needs
-  the kernel-set persistence foundation, reviewed on its own.
+- Replayable golden rows: recorded rows carry placement, exact fail-closed decode keyed on the record's own
+  persisted program (the strict structural identity that restores a verified deploy tier), per-card corpus
+  migration. The fuzzy matching is already deleted; this PR builds its replacement. Needs the kernel-set
+  persistence foundation, reviewed on its own.
 - Delegation as a knob (`ZERO_DELEGATE`) and the other declared-but-unsearched policy BOOLs becoming search
   dimensions; the below-codec constants on the guardrail allowlist (slab pads, `setmaxnreg` split,
   `_F16ACC_STEPS`) gaining codec spellings.

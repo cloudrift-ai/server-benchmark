@@ -1,6 +1,8 @@
 compute_cap:
 - 12
 - 0
+gpu_name: NVIDIA GeForce RTX 5090
+model: riftstack/Laguna-S-2.1-exl3@45c1f34a8c3ae3025a8bce2b1decea4991a6a239
 programs:
 - inputs: [x, w_gate, w_up, w_down, w_gate_suh, w_gate_svh, w_up_suh, w_up_svh, w_down_suh, w_down_svh]
   outputs: [mul_1]
@@ -26237,187 +26239,6 @@ programs:
     attrs: {shape: {__tuple__: [1, 1024]}}
     inputs: [mul_5]
     outputs: [[reshape_1, f16, [1, 1024]]]
-configs:
-- program: 0
-  target:
-    loop: 0
-  realizations:
-  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_0c3c76.83607e6bb51b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t512
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 13.877633591772804
-      reference_us: 534.4560146331787
-      reference_backend: emmy-greedy
-- program: 0
-  target:
-    loop: 1
-  realizations:
-  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_18ce98.81c97f2528b1
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 12.10634155971248
-      reference_us: 119.79600042104721
-      reference_backend: emmy-greedy
-- program: 1
-  target:
-    loop: 2
-  realizations:
-  - name: post1-dense-full@b2.k_linear_mean_reduce_9229c0.3bf128783f17
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t512
-    measurements:
-      emmy_us: 97.56640195846558
-      reference_us: 5294.159889221191
-      reference_backend: emmy-greedy
-- program: 1
-  target:
-    loop: 3
-  realizations:
-  - name: post1-dense-full@b2.k_matmul_reduce_a91b88.6f1209ddb350
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: g32k/coop-t
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 22.153191724565872
-      reference_us: 346.9280004501343
-      reference_backend: emmy-greedy
-- program: 1
-  target:
-    loop: 4
-  realizations:
-  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_1dc203.0d413667064b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t128
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 129.62599843740463
-      reference_us: 567.8079724311829
-      reference_backend: emmy-greedy
-- program: 1
-  target:
-    loop: 5
-  realizations:
-  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_8d07da.e6171cbf04fe
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t512
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 101.54240131378174
-      reference_us: 1405.4400324821472
-      reference_backend: emmy-greedy
-- program: 2
-  target:
-    loop: 6
-  realizations:
-  - name: post1-sparse-sliding@b2.k_linear_mean_reduce_b09d37.300a02a8ed2f
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t512
-    measurements:
-      emmy_us: 86.82787869915816
-      reference_us: 7887.919902801514
-      reference_backend: emmy-greedy
-- program: 2
-  target:
-    loop: 7
-  realizations:
-  - name: post1-sparse-sliding@b2.k_matmul_reduce_f7578b.5519f1ed440e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: g32k/coop-t
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 31.549626843591852
-      reference_us: 519.4399952888489
-      reference_backend: emmy-greedy
-- program: 3
-  target:
-    loop: 8
-  realizations:
-  - name: pre1-dense-full@b2.k_matmul_bitcast_reduce_f73101.3f726aa4f625
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 67.09333260854086
-      reference_us: 567.7280128002167
-      reference_backend: emmy-greedy
-- program: 4
-  target:
-    loop: 9
-  realizations:
-  - name: pre1-sparse-sliding@b2.k_matmul_bitcast_reduce_713714.7177937cd34b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 98.7392008304596
-      reference_us: 567.6720142364502
-      reference_backend: emmy-greedy
 loops:
 - inputs: [linear_left_flat, w_gate]
   outputs: [linear_core_reduce]
@@ -28259,159 +28080,6 @@ loops:
       name: k_matmul_bitcast_reduce_18ce98
     inputs: [w_down_decoded_cb_kadd_bits, w_down_decoded_tile_step, w_down_decoded_cb_prod, linear_2_left_flat]
     outputs: [[linear_2_core_reduce, f32, [1, 1, 3072]]]
-- inputs: [to]
-  outputs: [to_2]
-  nodes:
-  - id: add_c1
-    op: constant
-    attrs:
-      name: add_c1
-      value: 1.0e-06
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[add_c1, f32, [1]]]
-  - id: linear_wt
-    op: constant
-    attrs:
-      name: p_g_proj_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
-      source_path: g_proj.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [48, 3072]}
-      source_dtype: float16
-      source_graph: null
-    outputs: [[linear_wt, f16, [3072, 48]]]
-  - id: p_gate_input_layernorm_weight
-    op: constant
-    attrs:
-      name: p_gate_input_layernorm_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: gate_input_layernorm.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [3072]}
-      source_dtype: float16
-      source_graph: null
-    outputs: [[p_gate_input_layernorm_weight, f16, [3072]]]
-  - id: mean_count
-    op: constant
-    attrs:
-      name: mean_count
-      value: 3072.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[mean_count, f32, [1]]]
-  - id: to
-    op: input
-    outputs: [[to, f32, [1, 3072]]]
-  - id: to_2
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: mean_count
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 3072}, window: null}}
-            body:
-              body:
-              - class: Load
-                fields:
-                  names: {tuple: [in1]}
-                  input: to
-                  index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}]}
-                  dtype: null
-              - class: Assign
-                fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in1]}, dtype: null}
-              - class: Accum
-                fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a0]}, base: null}
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-        - class: Assign
-          fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in0]}, dtype: null}
-        - class: Load
-          fields:
-            names: {tuple: [in2]}
-            input: add_c1
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Assign
-          fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
-        - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 48}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in3]}
-                        input: to
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a2}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: {dtype: f16}}
-                    - class: Load
-                      fields:
-                        names: {tuple: [in4]}
-                        input: p_gate_input_layernorm_weight
-                        index: {tuple: [{expr: {var: a2}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
-                    - class: Load
-                      fields:
-                        names: {tuple: [in5]}
-                        input: linear_wt
-                        index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, v5]}, dtype: null}
-                    - class: Accum
-                      fields: {name: acc1, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-              - class: Assign
-                fields: {name: v7, op: {elementwise: copy}, args: {tuple: [acc1]}, dtype: {dtype: f32}}
-              - class: Write
-                fields:
-                  output: to_2
-                  index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}]}
-                  values: {tuple: [v7]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_linear_mean_reduce_9229c0
-    inputs: [mean_count, to, add_c1, p_gate_input_layernorm_weight, linear_wt]
-    outputs: [[to_2, f32, [1, 48]]]
 - inputs: [p_o_proj_weight_tiles_row_major, linear_1_left_flat]
   outputs: [linear_1_core_reduce]
   nodes:
@@ -30365,159 +30033,6 @@ loops:
       name: k_matmul_bitcast_reduce_8d07da
     inputs: [p_mlp_down_proj_weight_cb_kadd_bits, p_mlp_down_proj_weight_tile_step, p_mlp_down_proj_weight_cb_prod, linear_4_left_flat]
     outputs: [[linear_4_core_reduce, f32, [1, 1, 3072]]]
-- inputs: [to]
-  outputs: [to_2]
-  nodes:
-  - id: add_c1
-    op: constant
-    attrs:
-      name: add_c1
-      value: 1.0e-06
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[add_c1, f32, [1]]]
-  - id: linear_wt
-    op: constant
-    attrs:
-      name: p_g_proj_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
-      source_path: g_proj.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [72, 3072]}
-      source_dtype: float16
-      source_graph: null
-    outputs: [[linear_wt, f16, [3072, 72]]]
-  - id: p_gate_input_layernorm_weight
-    op: constant
-    attrs:
-      name: p_gate_input_layernorm_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: gate_input_layernorm.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [3072]}
-      source_dtype: float16
-      source_graph: null
-    outputs: [[p_gate_input_layernorm_weight, f16, [3072]]]
-  - id: mean_count
-    op: constant
-    attrs:
-      name: mean_count
-      value: 3072.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[mean_count, f32, [1]]]
-  - id: to
-    op: input
-    outputs: [[to, f32, [1, 3072]]]
-  - id: to_2
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: mean_count
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 3072}, window: null}}
-            body:
-              body:
-              - class: Load
-                fields:
-                  names: {tuple: [in1]}
-                  input: to
-                  index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}]}
-                  dtype: null
-              - class: Assign
-                fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in1]}, dtype: null}
-              - class: Accum
-                fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a0]}, base: null}
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-        - class: Assign
-          fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in0]}, dtype: null}
-        - class: Load
-          fields:
-            names: {tuple: [in2]}
-            input: add_c1
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Assign
-          fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
-        - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 72}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in3]}
-                        input: to
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a2}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: {dtype: f16}}
-                    - class: Load
-                      fields:
-                        names: {tuple: [in4]}
-                        input: p_gate_input_layernorm_weight
-                        index: {tuple: [{expr: {var: a2}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
-                    - class: Load
-                      fields:
-                        names: {tuple: [in5]}
-                        input: linear_wt
-                        index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, v5]}, dtype: null}
-                    - class: Accum
-                      fields: {name: acc1, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-              - class: Assign
-                fields: {name: v7, op: {elementwise: copy}, args: {tuple: [acc1]}, dtype: {dtype: f32}}
-              - class: Write
-                fields:
-                  output: to_2
-                  index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}]}
-                  values: {tuple: [v7]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_linear_mean_reduce_b09d37
-    inputs: [mean_count, to, add_c1, p_gate_input_layernorm_weight, linear_wt]
-    outputs: [[to_2, f32, [1, 72]]]
 - inputs: [p_o_proj_weight_tiles_row_major, linear_1_left_flat]
   outputs: [linear_1_core_reduce]
   nodes:
@@ -33125,5 +32640,156 @@ loops:
       p_q_proj_weight_cb_kmul_bits, p_q_proj_weight_cb_kadd_bits, p_q_proj_weight_tile_step, p_q_proj_weight_shift_step, p_q_proj_weight_trellis,
       linear_left_flat]
     outputs: [[linear_core_reduce, f32, [1, 1, 9216]]]
-gpu_name: NVIDIA GeForce RTX 5090
-model: riftstack/Laguna-S-2.1-exl3@45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+configs:
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_0c3c76.83607e6bb51b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 13.877633591772804
+      reference_us: 534.4560146331787
+      reference_backend: emmy-greedy
+- program: 0
+  target:
+    loop: 1
+  realizations:
+  - name: expert1-sparse-full@b2.k_matmul_bitcast_reduce_18ce98.81c97f2528b1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 12.10634155971248
+      reference_us: 119.79600042104721
+      reference_backend: emmy-greedy
+- program: 1
+  target:
+    loop: 2
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_reduce_a91b88.6f1209ddb350
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 22.153191724565872
+      reference_us: 346.9280004501343
+      reference_backend: emmy-greedy
+- program: 1
+  target:
+    loop: 3
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_1dc203.0d413667064b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 129.62599843740463
+      reference_us: 567.8079724311829
+      reference_backend: emmy-greedy
+- program: 1
+  target:
+    loop: 4
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_bitcast_reduce_8d07da.e6171cbf04fe
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 101.54240131378174
+      reference_us: 1405.4400324821472
+      reference_backend: emmy-greedy
+- program: 2
+  target:
+    loop: 5
+  realizations:
+  - name: post1-sparse-sliding@b2.k_matmul_reduce_f7578b.5519f1ed440e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 31.549626843591852
+      reference_us: 519.4399952888489
+      reference_backend: emmy-greedy
+- program: 3
+  target:
+    loop: 6
+  realizations:
+  - name: pre1-dense-full@b2.k_matmul_bitcast_reduce_f73101.3f726aa4f625
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 67.09333260854086
+      reference_us: 567.7280128002167
+      reference_backend: emmy-greedy
+- program: 4
+  target:
+    loop: 7
+  realizations:
+  - name: pre1-sparse-sliding@b2.k_matmul_bitcast_reduce_713714.7177937cd34b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 98.7392008304596
+      reference_us: 567.6720142364502
+      reference_backend: emmy-greedy

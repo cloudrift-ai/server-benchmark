@@ -7828,9 +7828,9 @@ configs:
     knobs:
       PLACE@a: cut
     measurements:
-      emmy_us: 27673.599243164062
+      emmy_us: 16866.304397583008
       reference_backend: emmy-greedy
-      reference_us: 120564.73541259766
+      reference_us: 18608.1
   - name: k_linear_mean_reduce_dc3b68.24cc82ef1455
     bindings: {}
     pins:
@@ -7862,9 +7862,9 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 106612.73574829102
+      emmy_us: 81710.10650634766
       reference_backend: emmy-greedy
-      reference_us: 109689.34440612793
+      reference_us: 97809.4
 - program: 0
   target:
     loop: 2
@@ -8014,9 +8014,9 @@ configs:
     knobs:
       PLACE@a: cut
     measurements:
-      emmy_us: 13870.07999420166
+      emmy_us: 4535.343978881836
       reference_backend: emmy-greedy
-      reference_us: 59826.175689697266
+      reference_us: 5259.3
   - name: k_linear_mean_reduce_a5d185.4573767f412f
     bindings: {}
     pins:

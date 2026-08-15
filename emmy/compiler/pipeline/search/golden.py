@@ -220,8 +220,8 @@ class GoldenRecord:
     @cached_property
     def shape_key(self) -> ShapeKey:
         """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
-        lowered target's stamped histogram. Not a deploy join key — deploy consults no goldens;
-        replay is by name and pins."""
+        lowered target's stamped histogram. NOT the deploy join key — that is
+        :func:`kernel_identity` (strict structural identity); this key only groups eval rows."""
         return ShapeKey.from_s_features(self.structural_features)
 
     @cached_property

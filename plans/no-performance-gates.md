@@ -100,12 +100,17 @@ verified emission-neutral by the pinned-kernel digest gate (byte-identical acros
 Remaining dispatch (which composition applies) is structural and small; the raw-loop escape and
 symbolic-axis deferral are the recognizer's stated incompleteness, dying with its growth.
 
-## Follow-ups (separate PRs)
+## Strict structural-identity decode (LANDED on this PR)
 
-- Replayable golden rows: recorded rows carry placement, exact fail-closed decode keyed on the record's own
-  persisted program (the strict structural identity that restores a verified deploy tier), per-card corpus
-  migration. The fuzzy matching is already deleted; this PR builds its replacement. Needs the kernel-set
-  persistence foundation, reviewed on its own.
+The verified tier is restored on exact identity: `deploy_identity` (algebra digest + dtype fingerprint) joins a
+fork to records whose identity derives from their OWN persisted program through the shared recognition core;
+`schedule_row_key` (the recording canonicalizer restricted to the schedule families) decodes fail-closed —
+identity-match without an equal enumerated row warns and decides nothing. Routing records decide the placement
+fork by parent-piece PLACE stamps; fused records hold the fused side. The corpus is migrated set by set (tokens +
+strict decode + prune, tripwired per file in `test_golden_decode`); flash-era attention rows prune (SDPA is two
+kernels now — re-seed as per-kernel loop targets in the next campaign).
+
+## Follow-ups (separate PRs)
 - Delegation as a knob (`ZERO_DELEGATE`) and the other declared-but-unsearched policy BOOLs becoming search
   dimensions; the below-codec constants on the guardrail allowlist (slab pads, `setmaxnreg` split,
   `_F16ACC_STEPS`) gaining codec spellings.

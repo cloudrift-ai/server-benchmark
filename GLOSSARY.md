@@ -232,10 +232,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
-- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice:
-  measurements recorded on the machine first, then the prior's prediction, and last the rule's own first option.
-  Each step in that order is called a tier. Recorded golden configurations are not a tier — they are replayed
-  exactly through their pins, never consulted by an unpinned compile.
+- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the
+  verified golden configurations for that GPU first (joined by exact structural identity and decoded by exact row
+  equality), then measurements recorded on the machine, then the prior's prediction, and last the rule's own first
+  option. Each step in that order is called a tier.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Quarantine** — The state in which an online model may continue learning but is not trusted to choose deployed

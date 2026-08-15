@@ -165,6 +165,13 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
+def golden_identity_cache_path() -> Path:
+    """The derived golden-identity store — ``~/.cache/emmy/golden_identity.json``. Purely a
+    memo of ``kernel_identity`` derivations (keyed by a compiler fingerprint + per-record
+    content digests); safe to delete at any time."""
+    return _CACHE_ROOT / "golden_identity.json"
+
+
 def online_path() -> Path:
     """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
     ``~/.cache/emmy/online.json``. A single JSON file (not

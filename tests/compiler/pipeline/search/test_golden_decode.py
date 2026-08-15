@@ -22,7 +22,7 @@ from emmy.compiler.pipeline.search.golden import decode_record, load_golden_file
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
 
-_MIGRATED: set[str] = {"rtx5090_sm120.yaml"}
+_MIGRATED: set[str] = {"rtx5090_sm120.yaml", "rtx5090_sm120_gemma4_base.yaml"}
 
 _FILES = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))
 assert _FILES, f"no golden YAMLs under {_GOLDEN_DIR}"

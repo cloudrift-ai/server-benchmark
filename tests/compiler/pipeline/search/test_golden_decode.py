@@ -7,9 +7,11 @@ record's own pins (``decode_record``). A structural change that invalidates a st
 HERE, loudly, with the reason — the row is then re-recorded or removed by hand, never silently
 carried.
 
-``_MIGRATED`` lists the golden sets already strict-replayed onto the current codec; it grows one
-file per corpus-migration commit and the listing (with this comment) is DELETED once every set is
-migrated — from then on the gate is unconditional over the whole corpus."""
+The gate is unconditional over the whole corpus: every checked-in set has been strict-replayed
+onto the current codec. Verdicts memo to the fingerprinted identity store
+(``~/.cache/emmy/golden_identity.json``): an unchanged compiler tree revalidates in seconds; any
+compiler edit invalidates the memo and the next run re-pays the full decode — exactly when the
+corpus must actually be re-proven."""
 
 from __future__ import annotations
 
@@ -18,23 +20,9 @@ import os
 
 import pytest
 
-from emmy.compiler.pipeline.search.golden import decode_record, load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.golden import decode_record, flush_identity_store, load_golden_file, load_golden_records
 
 _GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "../../../../emmy/compiler/pipeline/search/goldens")
-
-_MIGRATED: set[str] = {
-    "rtx5090_sm120.yaml",
-    "rtx5090_sm120_gemma4_base.yaml",
-    "rtxpro6000_sm120.yaml",
-    "rtx5090_sm120_olmoe.yaml",
-    "rtx4080_sm89.yaml",
-    "rtx4090_sm89.yaml",
-    "rtx4090_sm89_gemma4.yaml",
-    "v100_sm70_qwen35_122b.yaml",
-    "rtx5090_sm120_laguna_s_2_1_exl3.yaml",
-    "v100_sm70_laguna_s_2_1_fp8.yaml",
-    "v100_sm70_deepseek_v4_flash_0731.yaml",
-}
 
 _FILES = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))
 assert _FILES, f"no golden YAMLs under {_GOLDEN_DIR}"
@@ -43,8 +31,6 @@ assert _FILES, f"no golden YAMLs under {_GOLDEN_DIR}"
 @pytest.mark.parametrize("path", _FILES, ids=[os.path.basename(f) for f in _FILES])
 def test_every_migrated_record_decodes_strictly(path):
     fname = os.path.basename(path)
-    if fname not in _MIGRATED:
-        pytest.skip(f"{fname}: not yet strict-replayed onto the current codec (see _MIGRATED)")
     failures = []
     records = load_golden_records(load_golden_file(path))
     assert records, f"{fname}: no records — an empty migrated set should have been deleted"
@@ -52,4 +38,5 @@ def test_every_migrated_record_decodes_strictly(path):
         reason = decode_record(record)
         if reason is not None:
             failures.append(f"{record.name}: {reason}")
+    flush_identity_store()
     assert not failures, f"{fname}: records that no longer decode:\n" + "\n".join(failures)

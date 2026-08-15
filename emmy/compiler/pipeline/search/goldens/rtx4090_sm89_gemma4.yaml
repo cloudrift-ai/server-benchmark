@@ -1858,6 +1858,544 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [1, 3840]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [4096, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 4096]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [2048, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 2048]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8192, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 8192]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [512, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 512]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 15360]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [15360]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [3840, 15360]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 15360]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 3840]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [256, 15360]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [15360]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [3840, 15360]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [256, 15360]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [256, 3840]]]
+- inputs: [x, nw, wg, wu]
+  outputs: [mul]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [4096, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [3840, 15360]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [3840, 15360]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [4096, 3840]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wg]
+    outputs: [[matmul, f16, [4096, 15360]]]
+  - id: matmul_1
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wu]
+    outputs: [[matmul_1, f16, [4096, 15360]]]
+  - id: gelu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: gelu_tanh}}
+    inputs: [matmul]
+    outputs: [[gelu, f16, [4096, 15360]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [gelu, matmul_1]
+    outputs: [[mul, f16, [4096, 15360]]]
+- inputs: [x, nw, wg, wu]
+  outputs: [mul]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [4096, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [15360, 3840]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [15360, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [4096, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wg]
+    outputs: [[linear, f16, [4096, 15360]]]
+  - id: linear_1
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wu]
+    outputs: [[linear_1, f16, [4096, 15360]]]
+  - id: gelu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: gelu_tanh}}
+    inputs: [linear]
+    outputs: [[gelu, f16, [4096, 15360]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [gelu, linear_1]
+    outputs: [[mul, f16, [4096, 15360]]]
+- inputs: [x, nw, wg, wu]
+  outputs: [mul]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [15360, 3840]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [15360, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wg]
+    outputs: [[linear, f16, [32, 15360]]]
+  - id: linear_1
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, wu]
+    outputs: [[linear_1, f16, [32, 15360]]]
+  - id: gelu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: gelu_tanh}}
+    inputs: [linear]
+    outputs: [[gelu, f16, [32, 15360]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [gelu, linear_1]
+    outputs: [[mul, f16, [32, 15360]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [30720, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 30720]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [256, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [30720, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [256, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [256, 30720]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [30720, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 30720]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [256, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8192, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [256, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [256, 8192]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8192, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [32, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8704, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [32, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [32, 8704]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [256, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8704, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [256, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [256, 8704]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8704, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8704]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [64, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8192, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [64, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [64, 8192]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [64, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8704, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [64, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [64, 8704]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [64, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [30720, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [64, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [64, 30720]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [4096, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [8704, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [4096, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [4096, 8704]]]
+- inputs: [x, nw, w]
+  outputs: [linear]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f16, [4096, 3840]]]
+  - id: nw
+    op: input
+    outputs: [[nw, f16, [3840]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [30720, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, nw]
+    outputs: [[rms_norm, f16, [4096, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [rms_norm, w]
+    outputs: [[linear, f16, [4096, 30720]]]
 configs:
 - program: 0
   target:
@@ -5197,3 +5735,566 @@ configs:
       emmy_us: 129.0
       reference_us: 138.2
       reference_backend: cublas
+- program: 120
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_q_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: g8k
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 26.4
+      reference_us: 22.3
+      reference_backend: torch-eager
+- program: 121
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f1x1/k2
+      REDUCE: g8k
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 18.2
+      reference_us: 16.4
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_kv_proj.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f1x1/k2
+      REDUCE: g8k
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 17.2
+      reference_us: 16.4
+      reference_backend: torch-eager
+- program: 122
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 40.7
+      reference_us: 45.3
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_q_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 36.3
+      reference_us: 45.3
+      reference_backend: torch-eager
+- program: 123
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_kv_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f1x1/k2
+      REDUCE: g8k
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 12.7
+      reference_us: 9.0
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_kv_proj_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f1x1/k2
+      REDUCE: g8k
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 12.6
+      reference_us: 9.0
+      reference_backend: torch-eager
+- program: 124
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_down_fused.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 147.4
+      reference_us: 151.0
+      reference_backend: torch-eager
+- program: 125
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_down_fused.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 358.5
+      reference_us: 252.8
+      reference_backend: torch-eager
+- program: 126
+  target:
+    origins:
+    - gelu
+    - matmul
+    - matmul_1
+    - mul
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 12131.3
+      reference_us: 6424.6
+      reference_backend: torch-eager
+- program: 127
+  target:
+    origins:
+    - gelu
+    - linear
+    - linear_1
+    - mul
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 16152.6
+      reference_us: 6486.0
+      reference_backend: torch-eager
+- program: 128
+  target:
+    origins:
+    - gelu
+    - linear
+    - linear_1
+    - mul
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.mlp_geglu.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k8
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 285.0
+      reference_us: 281.6
+      reference_backend: torch-eager
+- program: 129
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 280.1
+      reference_us: 269.3
+      reference_backend: torch-eager
+- program: 130
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f32/f4x4/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 628.2
+      reference_us: 443.4
+      reference_backend: torch-eager
+- program: 131
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f32/f4x4/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 1212.4
+      reference_us: 774.1
+      reference_backend: torch-eager
+- program: 132
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qkv.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 150.5
+      reference_us: 127.5
+      reference_backend: torch-eager
+- program: 133
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qkv.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 287.1
+      reference_us: 226.8
+      reference_backend: torch-eager
+- program: 134
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m32.lin
+    bindings:
+      num_tokens: 32
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 61.4
+      reference_us: 44.9
+      reference_backend: torch-eager
+- program: 135
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m256.lin
+    bindings:
+      num_tokens: 256
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 254.5
+      reference_us: 141.3
+      reference_backend: torch-eager
+- program: 136
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qk_global.lin.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 361.8
+      reference_us: 250.9
+      reference_backend: torch-eager
+- program: 137
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qkv.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 70.8
+      reference_us: 50.4
+      reference_backend: torch-eager
+- program: 138
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 78.3
+      reference_us: 58.6
+      reference_backend: torch-eager
+- program: 139
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m64.lin
+    bindings:
+      num_tokens: 64
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 400.8
+      reference_us: 298.0
+      reference_backend: torch-eager
+- program: 140
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_qk_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 3281.9
+      reference_us: 1694.7
+      reference_backend: torch-eager
+  - name: gemma4_12b.norm_qk_global.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 2505.7
+      reference_us: 1694.7
+      reference_backend: torch-eager
+- program: 141
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.norm_gate_up.m4096.lin
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@a1: ''
+      STAGE@a1: ''
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 17140.7
+      reference_us: 5600.3
+      reference_backend: torch-eager

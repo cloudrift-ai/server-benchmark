@@ -763,6 +763,8 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     if not inputs or legal.fragment_epilogue(Body(tuple(projection_tail(term.tile)))) is not None:
         return ()
     ab = _a_dtype(node, inputs)
+    if ab is not None and ab.logical_elems != 1:
+        return ()  # a packed-pair storage dtype has no scalar byte semantics; no warp atom takes it
     if ab is not None and ab.nbytes == 1:
         # The native fp8 tier (M3): offered only under the precision gate, on a MATERIALIZED f8
         # ``a`` whose channels all carry the SAME f8 dtype (the byte-gather loaders move raw

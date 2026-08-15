@@ -382,9 +382,11 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
                 continue
             if sync_copy:
                 return None  # the Volta shared gather consumes f16 slabs; synchronous copies do not convert
-            if role == "b" and t.dtype.nbytes == 1 and b_nbytes == 2:
+            if role == "b" and t.dtype.nbytes == 1 and t.dtype.logical_elems == 1 and b_nbytes == 2:
                 b_nbytes = 1  # fp8-B under a 16-bit atom: byte slab, convert at the drain
                 continue
+            # A packed-pair byte (f4e2m1x2) is NOT an fp8 byte: one stored element is two
+            # logical K elements, so the fp8 slab geometry would halve K. No slab takes it.
             return None
     for eb, inner, row_axis in (
         (a_nbytes, bk_elems, None),

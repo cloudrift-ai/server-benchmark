@@ -185,6 +185,17 @@ def test_resolve_warp_stage_offers_the_byte_staged_b():
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
 
 
+def test_resolve_warp_stage_declines_packed_pair_b():
+    """A packed-pair byte (f4e2m1x2) is not an fp8 byte: one stored element is two logical
+    K elements, so granting the fp8 byte slab would halve K. Every copy transport refuses."""
+    from emmy.compiler.dtype import F4E2M1x2
+
+    node, tile = _warp_contraction()
+    inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 2048), F4E2M1x2)}
+    for spec in ("d2/cp", "d2/tma"):
+        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None
+
+
 def test_resolve_warp_stage_admits_matched_dtypes():
     node, tile = _warp_contraction()
     inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 4096), F16)}

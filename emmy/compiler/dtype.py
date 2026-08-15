@@ -35,6 +35,11 @@ class DataType:
     name: str
     np: np.dtype
     nbytes: int
+    # Logical elements per stored element. 1 for every scalar dtype. A packed pair
+    # (``f4e2m1x2``, ``f16x2``) carries 2: a tensor's stored last-axis extent is
+    # then HALF its logical extent, and any size arithmetic keyed on ``nbytes``
+    # alone (slab budgets, k-step spans) must also consult this factor.
+    logical_elems: int = 1
 
     def __str__(self) -> str:
         return self.name
@@ -84,12 +89,12 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # like F16x2 — one element is not one scalar. The format's block scales (one
 # e4m3 per 16 values + one f32 per tensor) are separate plain tensors — a
 # loader concern, not dtype information.
-F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1)
+F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1, logical_elems=2)
 # Two ``__half`` values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
 # the canonical IR token "f16x2" is what the renderer keys on.
-F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
+F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4, logical_elems=2)
 
 
 # Integer types — they appear on ``input_ids`` placeholders from HF whole-model

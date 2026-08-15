@@ -87,6 +87,14 @@ def test_decode_f4x2_rejects_non_uint8():
         decode_f4x2(np.zeros((2, 2), dtype=np.int64))
 
 
+def test_logical_elems_per_stored_element():
+    # Packed pairs carry two logical elements per stored element; scalars carry one.
+    assert F4E2M1x2.logical_elems == 2
+    assert F16x2.logical_elems == 2
+    for dt in (F32, F16, BF16, F8E4M3, F8E5M2, I16):
+        assert dt.logical_elems == 1
+
+
 def test_decode_f4_single_codes():
     # The unpacked-code sibling: LUT order matches decode_f4x2's low-nibble decode.
     codes = np.arange(16, dtype=np.int32)

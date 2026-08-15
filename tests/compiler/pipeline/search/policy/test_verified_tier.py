@@ -195,6 +195,19 @@ def test_routing_record_decides_the_placement_fork(monkeypatch):
     assert any((op.knobs or {}).get(seam_key) == "cut" for op in tiles.values())
 
 
+def test_bare_place_record_cuts_the_shallowest_seam(monkeypatch):
+    """The bare ``PLACE: cut`` spelling (the codec's shallowest-seam pin semantics, and the form
+    the recorded corpus uses) decodes and deploys the first cut option."""
+    graph = _norm_linear_graph()
+    records = load_golden_records(_document(graph, {"PLACE": "cut"}, name="probe.cut.bare", us=16.0))
+    assert records[0].is_routing
+    assert decode_record(records[0]) is None, decode_record(records[0])
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: records)
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_ctx()).resolve(graph.copy(), greedy_decide(prior=None))
+    tiles = {nid: n.op for nid, n in out.nodes.items() if isinstance(n.op, TileOp)}
+    assert len(tiles) == 2, f"the bare routing record must cut the kernel: {sorted(tiles)}"
+
+
 def test_fused_record_holds_the_placement_fork(monkeypatch):
     """A SCHEDULE record for the fused identity keeps the fused side of the placement fork — a
     verified fused µs must not lose the kernel set to a prediction."""

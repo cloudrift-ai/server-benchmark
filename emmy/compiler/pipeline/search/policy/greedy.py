@@ -561,6 +561,10 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
         identity = deploy_identity(tile)
         for rec in routing_idx.get(identity, ()):
             place = {k: str(v) for k, v in rec.knobs.items()}
+            if set(place) == {"PLACE"}:
+                # The bare spelling names the SHALLOWEST legal seam — the first cut option
+                # (recognition offers them in ``cuttable_seams`` order).
+                return structural[0], float(rec.emmy_us or 0.0), None
             for opt in structural:
                 graph = _leaf_graph(opt)
                 ops = [n.op for n in graph.nodes.values()]

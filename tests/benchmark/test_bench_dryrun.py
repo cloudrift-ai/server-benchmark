@@ -1,7 +1,7 @@
 """Dry-run tests for the bench command."""
 
-import glob
 import os
+import re
 from pathlib import Path
 
 
@@ -104,7 +104,6 @@ def test_bench_network_flag_with_null_cloudrift_config(run_cli, recipes_dir, tmp
 
     config = {
         "benchmark": {
-            "local_results_dir": os.path.join(str(tmp_path), "results"),
             "model_dir": "/hf_models",
         },
         "providers": {"cloudrift": None},
@@ -146,8 +145,8 @@ def test_bench_no_teardown_dry_run(run_cli, make_bench_config, recipes_dir, tmp_
     assert "Skipping VM deletion (--no-teardown)" in stdout
 
 
-def test_bench_results_in_recipe_dir(run_cli, make_bench_config, recipes_dir, tmp_path):
-    """Results are stored directly in the recipe directory."""
+def test_bench_reports_timestamped_run_directory(run_cli, make_bench_config, recipes_dir, tmp_path):
+    """Every run targets a timestamped directory under the recipe."""
     config_path = make_bench_config(tmp_path)
     recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
     rc, stdout, stderr = run_cli(
@@ -158,9 +157,9 @@ def test_bench_results_in_recipe_dir(run_cli, make_bench_config, recipes_dir, tm
         "--dry-run",
     )
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
-    # Run directory should be inside {recipe_dir}/
-    expected_parent = str(Path(recipe).resolve())
-    assert expected_parent in stdout
+    assert str(Path(recipe).resolve()) in stdout
+    assert "Run directory:" in stdout
+    assert re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", stdout)
 
 
 def test_bench_experiment_dry_run(run_cli, make_bench_config, project_root, tmp_path):
@@ -182,15 +181,11 @@ def test_bench_experiment_dry_run(run_cli, make_bench_config, project_root, tmp_
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
     # Should have multiple benchmark tasks from the sweep
     assert stdout.count("bench serve") >= 2
-    # Results should go directly into the experiment dir
-    expected_parent = str(Path(experiment).resolve())
-    assert expected_parent in stdout
+    assert str(Path(experiment).resolve()) in stdout
 
 
-def test_bench_group_log_captures_provisioning(run_cli, make_bench_config, tmp_path):
-    """Per-group log files should contain provisioning and deploy logs."""
-    import shutil
-
+def test_bench_dry_run_preserves_prior_run_directory(run_cli, make_bench_config, tmp_path):
+    """A dry run must not change a prior local run directory."""
     import yaml
 
     # Create a minimal recipe in tmp_path so we don't pollute the repo
@@ -218,6 +213,10 @@ def test_bench_group_log_captures_provisioning(run_cli, make_bench_config, tmp_p
         ],
     }
     (recipe_dir / "recipe.yaml").write_text(yaml.dump(recipe))
+    prior_run_dir = recipe_dir / "2026-08-13_12-00-00"
+    prior_run_dir.mkdir()
+    marker = prior_run_dir / "last-run.log"
+    marker.write_text("keep\n")
 
     config_path = make_bench_config(tmp_path)
     rc, stdout, stderr = run_cli(
@@ -228,42 +227,8 @@ def test_bench_group_log_captures_provisioning(run_cli, make_bench_config, tmp_p
         "--dry-run",
     )
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
-
-    # Find the per-group log file (benchmark_rtx5090_x_1.log)
-    group_logs = glob.glob(str(recipe_dir / "*/benchmark_rtx5090_x_1.log"))
-    assert group_logs, f"No per-group log file found under {recipe_dir}"
-
-    log = Path(group_logs[0]).read_text()
-
-    # Group logger messages (rtx5090_x_1.*)
-    assert "Starting group:" in log, f"Group start missing.\nLog:\n{log}"
-    assert "Deploying model..." in log, f"Deploy start missing.\nLog:\n{log}"
-    assert "Running benchmark..." in log, f"Benchmark start missing.\nLog:\n{log}"
-    assert "Tearing down..." in log, f"Teardown missing.\nLog:\n{log}"
-
-    # Cloud provisioning (emmy.provisioning.cloudrift)
-    assert "Creating CloudRift instance" in log, f"CloudRift provisioning missing.\nLog:\n{log}"
-
-    # Remote provisioning (emmy.provisioning.remote)
-    assert "install docker" in log, f"Remote provisioning missing.\nLog:\n{log}"
-    assert "install nvidia-container-toolkit" in log, f"NVIDIA toolkit provisioning missing.\nLog:\n{log}"
-
-    # Deploy orchestration (emmy.deploy.orchestrate)
-    assert "Pulling images" in log, f"Image pull missing.\nLog:\n{log}"
-    assert "Downloading model" in log, f"Model download missing.\nLog:\n{log}"
-    assert "Cleaning up old containers" in log, f"Container cleanup missing.\nLog:\n{log}"
-    assert "Starting services" in log, f"Service start missing.\nLog:\n{log}"
-    assert "Waiting for health check" in log, f"Health check missing.\nLog:\n{log}"
-    assert "Teardown complete." in log, f"Teardown complete missing.\nLog:\n{log}"
-
-    # SSH transport (emmy.provisioning.ssh_transport)
-    assert "docker compose pull" in log, f"SSH docker compose pull missing.\nLog:\n{log}"
-    assert "docker compose up" in log, f"SSH docker compose up missing.\nLog:\n{log}"
-
-    # Clean up run dirs created in tmp_path
-    for d in recipe_dir.iterdir():
-        if d.is_dir() and d.name != "recipe.yaml":
-            shutil.rmtree(d)
+    assert marker.read_text() == "keep\n"
+    assert list(prior_run_dir.iterdir()) == [marker]
 
 
 def test_bench_command_recipe_dry_run(run_cli, make_bench_config, tmp_path):
@@ -321,5 +286,5 @@ def test_bench_help(run_cli):
 def test_teardown_help(run_cli):
     rc, stdout, _ = run_cli("teardown", "--help")
     assert rc == 0
-    assert "run_dir" in stdout
+    assert "experiment_dir" in stdout
     assert "--ssh-key" in stdout

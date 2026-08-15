@@ -880,12 +880,9 @@ def attribution_report(prior, nodes, *, kernel_filter: str | None = None, blame:
 
 
 def _mask_exact(prior) -> bool:
-    """Whether masking a feature is exact for the prior that owns decisions —
-    true for the linear offline prior (a deleted key is exact term removal), false
-    for a online model that never trained on masked rows."""
-    from emmy.compiler.pipeline.search.prior.offline import OfflinePrior  # noqa: PLC0415
-
-    active = prior
-    if hasattr(prior, "online") and hasattr(prior, "offline"):  # FallbackPrior composition
-        active = prior.online if prior.trustworthy else prior.offline
-    return isinstance(active, OfflinePrior)
+    """Whether masking a feature is exact for the prior that owns decisions — the
+    prior's own answer (``Prior.masking_exact``), which the composite forwards from
+    whichever half its blend has answering. True only for the linear offline model,
+    where a deleted key is exact term removal; a tree re-routes its splits instead,
+    and an online model never trained on masked rows at all."""
+    return bool(getattr(prior, "masking_exact", False))

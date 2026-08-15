@@ -1,7 +1,7 @@
 # GitHub Actions architecture
 
-GitHub Actions owns pull-request checks, package publication, cloud experiment execution, and automated model
-discovery and onboarding. Workflows that only inspect or build the repository use GitHub-hosted runners. Agent-driven
+GitHub Actions owns pull-request checks, package publication, and automated model discovery and onboarding. Workflows
+that only inspect or build the repository use GitHub-hosted runners. Agent-driven
 model work uses the self-hosted `agents` runner because it can exceed ordinary hosted-runner limits and needs the
 tracked skills and CloudRift inference endpoint.
 
@@ -11,9 +11,11 @@ tracked skills and CloudRift inference endpoint.
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff and the complete test suite. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
-| **Run Experiment** | Authorized `/run-experiment` PR comment | GitHub-hosted | Runs selected cloud experiments and commits results to the PR branch. |
 | **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
 | **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
+
+There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
+from a developer checkout through the tracked `.claude/skills/run-experiment` skill.
 
 ## Pull-request checks
 
@@ -36,23 +38,6 @@ repository-relative README links for PyPI. The build artifact moves between jobs
 trusted publishing through the `pypi` environment and an OIDC token, so the repository stores no PyPI password. The
 manual path creates its GitHub release only after a successful upload, preventing a failed publication from leaving a
 release behind.
-
-## Cloud experiment execution
-
-**Run Experiment** responds only to `/run-experiment` comments on pull requests. The gate requires the commenter to
-have repository write or admin access, resolves the PR head, detects the requested experiment changes, and verifies
-the benchmark command with `--dry-run` before provisioning anything. It acknowledges an accepted run on the PR.
-
-The benchmark job creates an ephemeral SSH key, configures optional GCP access, and runs the selected `emmy bench`
-command with result commits enabled. CloudRift and Hugging Face credentials are present only for the benchmark step.
-Long runs use renewable GitHub App credentials when committing results, so the one-hour lifetime of a token cannot
-strand a six-hour experiment. The job force-adds any remaining timestamped result directories, uploads them as a
-workflow artifact, and posts a formatted result comment even when benchmarking fails. A separate failure job reports
-gate or benchmark failures on the PR.
-
-Experiment selection and result formatting are owned by `.github/scripts/detect-experiments.py` and
-`.github/scripts/format-results.py`. The workflow does not accept an arbitrary shell command from a PR comment; the
-detector constructs the supported Emmy command from validated experiment paths and filters.
 
 ## Model discovery and onboarding
 
@@ -152,10 +137,9 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 
 ## Repository configuration
 
-Agent and experiment workflows use these repository secrets as applicable:
+Agent workflows use these repository secrets as applicable:
 
-- `CLOUDRIFT_API_KEY` for model discovery, CloudRift provisioning, and cloud experiments;
-- `EXPERIMENT_APP_ID` and `EXPERIMENT_APP_PRIVATE_KEY` for renewable Git and pull-request credentials;
+- `CLOUDRIFT_API_KEY` for model discovery and CloudRift provisioning;
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image;
 - optional `GCP_SERVICE_ACCOUNT_KEY` and `GCP_SERVICE_ACCOUNT` for GCP capacity.

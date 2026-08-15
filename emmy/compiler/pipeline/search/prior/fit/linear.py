@@ -112,7 +112,10 @@ def fit_weights(
     z-space. The params are NOT z-scored — they are raw quality units, and ``matz @ w_z`` equals the
     raw quality up to a per-pool constant that ranking drops, so the two add consistently. Returns
     ``(best_w, best_params, best_ranks, mu, sd)`` with ``best_w`` in this pool's z-space."""
-    mats = [g.matrix(names) for g in groups]
+    # A PRIVATE copy: the z-scoring below is in place, and ``Group.matrix`` hands back a shared read-only
+    # projection. Copying here is what it has always done — the difference is that the projection it copies
+    # from is now built once for the whole run instead of once per fold.
+    mats = [g.matrix(names).copy() for g in groups]
     gidx = [g.pinned_idx for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
@@ -212,6 +215,18 @@ class LinearTrainer:
     random_state: int = 0
     warm_start: bool = True
     objective: Callable[[list[int]], float] = mean_log_rank
+
+    @staticmethod
+    def unfittable(train: list[Group], hold: list[Group]) -> str | None:
+        """Why a cross-validation fold cannot be fit under this model class, or ``None``. Both reasons are about
+        the two weight sets: the dynamic stage seeds from the static one, so a slice with no static cases fits
+        nothing at all, and a holdout needing the dynamic set cannot be scored by a model that never fit one.
+        The fold harness (:func:`~.cv._unfittable`) asks; a model class without weight sets answers nothing."""
+        if not any(not c.dynamic for c in train):
+            return "static weight set unfittable (0 static cases in training)"
+        if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
+            return "dynamic weight set unfittable (0 dyn cases in training)"
+        return None
 
     def fit(self, groups: list[Group]) -> LinearFit:
         """Fit both weight sets over ``groups``: a static fit over the non-dynamic groups, then the

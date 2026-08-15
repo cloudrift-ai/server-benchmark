@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.compiler.pipeline.search.db import PerfStats
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
 from emmy.compiler.pipeline.search.prior import OnlinePrior, prior_from_json
@@ -79,16 +81,30 @@ def test_partial_knob_dicts_fit_and_score():
 
 def test_score_is_zero_before_fit():
     p = OnlinePrior(seed=0)
-    assert p.score({"BM": 64}) == 0.0
     assert p.mean_score({"BM": 64}) == 0.0
     assert not p.fitted
+    # An unfit model has no opinion on any sibling, so PUCT gets a uniform policy.
+    assert p.policy([{"BM": 64}, {"BM": 32}]) == [1.0, 1.0]
 
 
-def test_score_equals_mean_and_is_deterministic():
-    """The CatBoost prior is deterministic — ``score`` (PUCT) and ``mean_score``
-    (greedy) coincide and repeat exactly (no Thompson draw)."""
+def test_mean_score_is_deterministic():
+    """The CatBoost prior is deterministic — repeated scoring of one config repeats exactly
+    (no Thompson draw)."""
     p = _fit(_bm_rows())
-    assert p.score({"BM": 32}) == p.mean_score({"BM": 32}) == p.mean_score({"BM": 32})
+    assert p.mean_score({"BM": 32}) == p.mean_score({"BM": 32})
+
+
+def test_policy_is_the_sibling_relative_speed():
+    """``policy`` prices each sibling against the best of them: the fastest predicted config
+    scores exactly 1.0 and the rest their predicted speed ratio, all within (0, 1]."""
+    p = _fit(_bm_rows())
+    rows = [{"BM": bm} for bm in (2, 16, 64)]
+    pol = p.policy(rows)
+    scores = p.mean_scores(rows)
+    assert max(pol) == 1.0
+    assert all(0.0 < v <= 1.0 for v in pol)
+    best = min(scores)
+    assert pol == pytest.approx([best / s for s in scores])
 
 
 # --- bounded reservoir dataset + batched refit -----------------------------
@@ -254,7 +270,7 @@ def test_fallback_prior_quarantines_miscalibrated_learned():
     online.calibration = 0.1  # below CALIBRATION_MIN → quarantined
     assert fb.fitted and not fb.trustworthy
     assert fb.mean_score({"BM": 32}) == fb.offline.mean_score({"BM": 32})
-    assert fb.score({"BM": 32}) == fb.offline.score({"BM": 32})
+    assert fb.policy([{"BM": 32}, {"BM": 64}]) == fb.offline.policy([{"BM": 32}, {"BM": 64}])
 
 
 def test_diagnostics_report_reachability():
@@ -599,10 +615,10 @@ def test_node_knobs_includes_base_structural_knobs():
     assert s._node_knobs(leaf) == {"S_n_loop": 3.0, "S_ext_reduce_max": 64.0, "BR": 2}
 
 
-def test_prior_score_zero_when_no_model():
+def test_prior_policy_uniform_when_no_model():
     tree = SearchTree()
-    child = _node({"BM": 64}, tree.root)
-    assert TuningSearch(tree=tree)._prior_score(child) == 0.0
+    children = [_node({"BM": 64}, tree.root), _node({"BM": 32}, tree.root)]
+    assert TuningSearch(tree=tree)._prior_policy(children) == [1.0, 1.0]
 
 
 # --- PUCT selection (the only rule) ----------------------------------------

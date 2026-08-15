@@ -396,7 +396,6 @@ def make_bench_config(recipes_dir):
     def _make(tmp_dir):
         config = {
             "benchmark": {
-                "local_results_dir": os.path.join(str(tmp_dir), "results"),
                 "model_dir": "/hf_models",
             },
         }

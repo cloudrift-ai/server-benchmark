@@ -904,12 +904,10 @@ def test_run_code_sdpa_k_chunked(run_cli):
 
 @requires_cuda
 def test_run_code_sdpa_tinyllama_per_head(run_cli):
-    """Per-head SDPA at TinyLlama-block-seq=512 dimensions, mirroring the
-    ``k_scaled_dot_product_attention_reduce_reduce.json`` kernel in
-    ``experiments/kernel_dataset/tinyllama_block_seq512`` (M=512, K=512,
-    N=64). The K=512 reduction does not fit a full smem slab once
-    register-tile + double-buffer apply, so this exercises the chunked
-    blockify + staging path on the per-head shape."""
+    """Per-head SDPA at TinyLlama-block-seq=512 dimensions (M=512, K=512,
+    N=64). The K=512 reduction does not fit a full smem slab once register-tile
+    + double-buffer apply, so this exercises the chunked blockify + staging
+    path on the per-head shape."""
     rc, _, stderr = run_cli(
         "run",
         "--code",
@@ -1242,6 +1240,43 @@ def test_accuracy_check_fails_scrambled_output_passes_outliers():
     assert not verdicts(noisy.astype(np.float16)), "outliers with a near-zero mean must pass (escape hatch)"
     # Correct low-noise: must PASS.
     assert not verdicts((base + rng.standard_normal(base.shape) * 0.001).astype(np.float16))
+
+
+def test_accuracy_check_rejects_missing_or_misordered_output_shape():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.zeros(8, dtype=np.float32),
+    }
+    eager = (torch.zeros(8), torch.zeros(4))
+
+    error = _check_accuracy(outputs, eager)
+
+    assert error is not None
+    assert "size 4 does not match eager 8" in error
+
+
+def test_accuracy_check_pairs_named_outputs_independent_of_mapping_order():
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy, _strict_correctness_proof
+
+    outputs = {
+        "small": np.zeros(4, dtype=np.float32),
+        "large": np.ones(8, dtype=np.float32),
+    }
+    eager = {
+        "large": torch.ones(8),
+        "small": torch.zeros(4),
+    }
+
+    assert _check_accuracy(outputs, eager) is None
+    assert _strict_correctness_proof(outputs, eager)["status"] == "pass"
 
 
 def test_accuracy_check_gaussian_fp16_budget_not_free():

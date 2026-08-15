@@ -97,7 +97,7 @@ def test_bench_fixed_host_dry_run_cli(run_cli, make_bench_config, recipes_dir, t
     # No cloud provisioning happened
     assert "Creating CloudRift instance" not in stdout
     assert "VM provisioned" not in stdout
-    # No instances.json prompt
+    # No saved-infrastructure prompt
     assert "Instance info saved" not in stdout
     # provision_remote runs even for pre-allocated hosts (idempotent)
     assert "would install docker" in stdout

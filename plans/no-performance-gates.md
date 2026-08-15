@@ -25,7 +25,9 @@ rows, never consulted by an unpinned compile.
   codec's dead `split` token, the flash golden rows). SDPA lowers through the generic path —
   verified: plain/causal/GQA/transposed-output each match torch at ~4e-7 in one generic kernel.
   `_softmax`'s streaming fusion stays (algebra, no model vocabulary).
-- Placement cuts are pin-only (the routing-evidence consult is gone; no pass reads goldens).
+- Placement cuts: the routing-evidence consult is gone (no pass reads goldens); pins are authoritative, and
+  unpinned placement is now an enumerated STRUCTURAL fork (fused option-0 + one fragment per legal seam), so tune
+  discovers cuts and a chosen cut records as `PLACE@<seam>: cut` on the parent piece — replayable as the exact pin.
 - The sibling-axis σ fix landed for the scalar gmem-direct leaves (#507's named adjacent gap) —
   repairs the block-accuracy tests and the whole-model serving lane on the generic attention path.
 
@@ -69,9 +71,17 @@ exactly (`run --golden NAME`, `--ab`), offline-fit training data, eval datasets.
 hierarchy is now measured reservoir/DB evidence → prior → option-0; deployed-model parity is
 restored later by the strict structural-identity decode (below), never by re-adding fuzzy
 matching. Still adopted:
-the scalar tier's slab K-chunk on TILE's existing `/k<bk>` token; `ZERO_DELEGATE` +
-`VECTORIZE_STORES` knobs; `f8` restored to `map_tile_moves`. Sequenced with the placement PR:
-per-edge `STAGE@a`/`STAGE@b` keys and the `PLACE` fork level + a ShapeKey layout term.
+the scalar tier's slab K-chunk on TILE's existing `/k<bk>` token (an added tuning dimension, not a
+correction — deferred); per-edge `STAGE@a`/`STAGE@b` keys (same verdict: the single key is coherent —
+the term decides each edge's fill — so the split only widens the space; deferred); `ZERO_DELEGATE` +
+`VECTORIZE_STORES` knobs; `f8` restored to `map_tile_moves`. The `PLACE` fork level is LANDED
+(placement is an enumerated structural fork; pins authoritative). Verdicts from the baseline sweep:
+`Stage.smem` / `bk_elems` are documented resolution-derived fields on the resolved slice, not codec
+pollution — keep; `ShapeKey` stays as the eval-side histogram descriptor (the deploy-join classifier
+and its offer-signal special cases are what was junk, and they are gone); `evidence_row_vouches` is
+principled prefix consistency for multi-pass decisions — keep; the `goldens_for_live_gpu` union
+fallback serves explicit cross-card `--golden` replay (re-benched live) — keep; QuantSpec retirement
+verified already landed (quant is in-graph algebra from birth, no IR metadata).
 Documented hardcoded exceptions (99% rule): `_softmax` streaming, the stat-fill partition,
 `_pick_coop` ordering constants, the derived codegen constants (pads, `setmaxnreg` split,
 swizzle picks, the f16-acc promote cadence — precision, not perf), the bit-identical peepholes.

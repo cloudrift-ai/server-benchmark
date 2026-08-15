@@ -251,7 +251,11 @@ def test_bare_reduce_forks_the_coop_catalog():
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
         leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         for leaf in leaves:
             rows.append(dict(getattr(leaf, "knobs", {}) or {}))
         return leaves[0]

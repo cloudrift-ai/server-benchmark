@@ -480,13 +480,15 @@ The fragment idiom's re-entry semantics are the rule's own: `030` opts its halve
 that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
 is what lets such rules compose without knowing about each other.
 
-**Placement routing (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
+**Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
 through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
-PIN-ONLY and RECURSIVE, decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after
-the lift / prologue bind): an authoritative `PLACE` pin — the codec's exploration mechanism, `--ab` and tune
-trajectories — picks a cut seam; the realizer consults no deploy evidence, and a `PLACE`-only golden entry (a
-recorded cut set) is never a fork row — the schedule evidence index skips it. The
+decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
+bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
+STRUCTURAL fork — the fused form leads (option-0; a cold compile never changes kernel sets) and one cut fragment
+rides per legal seam, so tune discovers cuts and a warm compile prices them like any kernel-set choice. A chosen
+cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, recording the decision as the exact pin that
+replays it; the realizer itself consults no deploy evidence. The
 realizer (`lowering/tile/_cut.py`) splits the tree there: the child
 subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
 index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
@@ -497,11 +499,8 @@ consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal
 roots on the pass-scan restart —
 recursively: a deeper `PLACE` key can cut the cone piece again, yielding the cascade statistic + scale + plain
 matmul, every piece joining an EXISTING golden kind's evidence at its own schedule forks.
-Computed-A record keying uses the fused-key convention on both sides: the live tree supplies the computed-A fact
-before a
-schedule offer exists, while a persisted `PLACE@a` supplies it for a stat-free activation cone with no second reduce
-axis. Keeping one key prevents a recorded cut entry from matching its own materialized producer.
-**Fuse is the default by ABSENCE** — no pin leaves recognition byte-untouched (digest-verified).
+**Fuse is option-0** — an unpinned greedy compile with no structural pricing keeps the recognized form
+byte-untouched.
 Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — combine-derived material that captures carrier state is simply not cuttable), and
 the pure-copy degenerate

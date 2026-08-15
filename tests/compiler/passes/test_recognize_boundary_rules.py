@@ -211,7 +211,13 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
         leaves = flatten_leaves(fp.options)
+        # The placement fork (fused option-0 + cut fragments) precedes the schedule fork;
+        # these tests assert on the SCHEDULE rows, so take the fused side and harvest nothing.
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         if pick is not None:
             for leaf in leaves:

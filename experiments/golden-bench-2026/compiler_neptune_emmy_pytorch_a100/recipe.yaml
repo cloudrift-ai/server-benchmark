@@ -32,7 +32,7 @@ command:
         final_status=1
       fi
       printf 'status=%s\n' "$$final_status" > $task_dir/status.txt
-      archive_tmp=$${task_dir}.artifacts.tar.gz
+      archive_tmp=$task_dir.artifacts.tar.gz
       tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
       mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
       exit "$$final_status"

@@ -5,7 +5,7 @@ source /workspace/venv/bin/activate
 cd /workspace/neptune
 
 printf "%s  %s\n" \
-  261e9e887af53d38c2987362b3caf6f0ad1e74524796d6e322c700c245a4edb4 \
+  4802b1560054db1cdf367813528fcaf2d5262c6706444e8852ef8cb4b1f30c5d \
   scripts/neptune_bench/__main__.py | sha256sum -c -
 printf "%s  %s\n" \
   c0ad2e584d9e802f87027ad43dfb7627d827178259d8d5403d4d2906e8332163 \

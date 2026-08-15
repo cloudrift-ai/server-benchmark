@@ -53,9 +53,10 @@ predicts kernel latency from a variant's features (Part 5).
 knowledge recorded earlier, in a fixed order — best evidence first:
 
 1. **The verified goldens** recorded for this GPU — reviewed measurements that ship with the repository, joined by
-   STRICT structural identity (the recognized term's algebra digest + dtype fingerprint, derived record-side from
-   the record's own persisted program) and decoded by EXACT spelled-row equality (Part 7). Fail-closed: a record
-   that matches the identity but equals no enumerated row is drift — a loud warning, never a fuzzy acceptance.
+   STRICT structural identity (the recognized term's algebra digest + dtype fingerprint + axis-extent fingerprint,
+   derived record-side from the record's own persisted program) and decoded by EXACT spelled-row equality (Part 7).
+   Fail-closed: a record that matches the identity but equals no enumerated row is drift — a loud warning, never a
+   fuzzy acceptance.
 2. **Measured evidence** — first the measurements stored inside the online prior's checkpoint (its **reservoir**)
    that were taken at deployable flags, then rows from the tune database (Part 3).
 3. **The prior** — the online model when trained and calibrated, the offline model otherwise (Part 3).
@@ -418,7 +419,9 @@ the authoritative order** — the summaries elsewhere in this file defer to it.
 
 1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
    `deploy_identity` — the recognized term's α/buffer-invariant algebra digest folded with the operand/output dtype
-   fingerprint, derived record-side through the shared recognition core (`_lift.recognized_tile`) — equals the
+   fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
+   digest canonicalizes sizes away, and without extents every same-algebra cone on a card would share one key),
+   derived record-side through the shared recognition core (`_lift.recognized_tile`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
    but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A ROUTING record (`PLACE`-only
@@ -1101,10 +1104,12 @@ explicit knob mapping (possibly empty for a forkless anchor) and paired positive
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
-An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
-entry. Bare pins fan out across eligible axes, so storing both spellings can make a replayed row self-contradictory.
-`stamp_schedule_families` drops an earlier bare OFF when a later axis-scoped decision exists but preserves a non-OFF
-primary-site decision for inspection; promotion rejects or explicitly re-keys any remaining ambiguity.
+An axis-scoped schedule family (`REDUCE@a1`, for example) may coexist with a non-OFF bare spelling of the same
+family in one promoted entry — that IS the canonical stamped spelling (the bare key is the primary node's decision,
+the scoped keys are the other tree sites' decisions, a `''` scoped value recording a site that declined). The one
+rejected shape is a bare OFF beside scoped keys of the same family: a bare OFF pin fans out across eligible axes on
+replay and contradicts the scoped decisions, so `stamp_schedule_families` drops it when stamping and promotion
+rejects any that remain.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
@@ -1495,7 +1500,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/010_recognize._nodify_contraction` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` resolves dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
-| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch, symbolic-shaped accumulators, and accumulators past the one-CTA break-even cap (`_MAX_DELEGATED_WORDS`, 64 KB — CTA 0 zeroes serially, so a large buffer costs more than the MEMSET node it replaces) keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
 ## Dump hooks (`dump.py`)
 

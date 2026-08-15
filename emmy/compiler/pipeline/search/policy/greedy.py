@@ -481,13 +481,21 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]
         )
 
 
+#: The precision-trading pin universe the regime check must cover in BOTH directions — a record
+#: that omits one of these was measured with it OFF, and must not decide when it is live-ON.
+_PRECISION_PINS = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")
+
+
 def _pins_live(pins: dict) -> bool:
     """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
     against the live env pin (unset = the knob's off state), anything else against the raw env
-    string. Strict by design: a record measured under FAST_MATH decides nothing on a standard
-    deploy, and vice versa."""
+    string. Strict BOTH ways: a record measured under FAST_MATH decides nothing on a standard
+    deploy, and a standard record decides nothing under a live precision-trading pin — the
+    precision universe (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``)
+    is compared even for pins the record omits (omitted = measured OFF)."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
 
     knobs = registry()
     for name, value in pins.items():
@@ -498,6 +506,13 @@ def _pins_live(pins: dict) -> bool:
             if bool(value) != live:
                 return False
         elif (raw or "") != str(value):
+            return False
+    umbrella = bool(pins.get("FAST_MATH", False))
+    for name in _PRECISION_PINS:
+        recorded = bool(pins.get(name, umbrella))
+        kn = knobs.get(name)
+        live = bool(precision_pin(kn)) if kn is not None else False
+        if recorded != live:
             return False
     return True
 

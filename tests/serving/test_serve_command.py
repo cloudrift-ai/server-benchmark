@@ -198,36 +198,18 @@ def test_serve_cmd_generate_chunk_capture_respects_user_attention_backend():
     assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"  # vLLM downgrades it if the backend can't
 
 
-def test_serve_cmd_generate_wide_head_model_caps_the_rungs(monkeypatch):
-    """On a model with an attention head wider than 256 (gemma-4's 512-wide global layers),
-    vLLM 0.23's TRITON_ATTN faults capturing mixed batches wider than the validated cap
-    (illegal access at 4128 tokens, clean through 2112 — 5090-measured), so the head-dim
-    probe caps the rung list there; wider steps stay eager."""
-
-    class _Cfg:
-        head_dim = 256
-        global_head_dim = 512
-
-    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
+def test_serve_cmd_generate_rider_top_rung_above_model_len_survives(monkeypatch):
+    """The rider-top rung (chunk quantum + decode bucket) may exceed --max-model-len — the
+    plugin's dummy-run seq-lens clamp (``serving/vllm_patches.py``) makes such a capture
+    size safe on vLLM 0.23, so the rung list is NOT capped by head width or model len."""
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "32")
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     cfg = _capture_cfg(cmd)
     assert cfg["cudagraph_mode"] == "FULL"
     sizes = cfg["cudagraph_capture_sizes"]
-    assert max(sizes) <= 2112
-    assert 2048 in sizes  # the c4/c8 chunk-quantum lane's exact chunk width stays covered
+    assert 4128 in sizes  # rider top = 4096 chunk quantum + 32 bucket, past model len 4096
+    assert 4096 in sizes  # the exact chunk width
     assert 272 in sizes  # the short-prompt rungs stay dense (a 257-token prefill pads to 272)
-    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
-
-
-def test_serve_cmd_generate_narrow_head_model_keeps_full_rungs(monkeypatch):
-    class _Cfg:
-        head_dim = 128
-
-    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: _Cfg())
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
-    cfg = _capture_cfg(cmd)
-    assert cfg["cudagraph_mode"] == "FULL"
-    assert {4096, 4112} <= set(cfg["cudagraph_capture_sizes"])
     assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
 
 

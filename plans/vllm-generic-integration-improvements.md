@@ -75,9 +75,22 @@ Measured cells (capture ON / capture OFF / stock):
 
 The c64 "TPOT at or below stock" target is NOT met on this lane (33.1 vs 27.3, but the arms are not
 shape-comparable — see the asterisk) and the projected ~5 ms/step host-idle recovery applies to the 4096-chunk
-lane, which the TRITON width fault keeps eager. Remaining follow-ups: the vLLM-side triton wide-head fix (then
-lift the cap and re-run the 4096-lane c64 cell), and re-benching against a stock arm at a comparable admission
-shape.
+lane, which the TRITON width fault keeps eager.
+
+**2026-08-15 root cause (standalone kernel repro on the dev 4080, `compute-sanitizer`-attributed):** the fault
+is NOT a head-width or batch-width limit. vLLM 0.23's `_dummy_run` fills every dummy request's seq_len with the
+step's token count, so a capture size above `--max-model-len` (only the rider-top rung can be: 4128 > 4096)
+claims more block-table pages than a row holds (258 vs 256); the unified-attention kernel's unmasked
+block-table load then reads past the tensor and the garbage page ids send K/V loads out of bounds. Clean at
+4096, faults from 4097, at head_dim 256 AND 512; FLEX_ATTENTION's 258-vs-256 block-mask error is the same
+arithmetic failing loudly. Fixed by clamping dummy seq lens to max-model-len from the plugin
+(`serving/vllm_patches.py`); `WIDE_HEAD_MIXED_RUNG_CAP`, the head-dim probe, and the wide-head boot guard are
+removed. Only vLLM 0.23's DEFAULT model runner has the defect (its newer opt-in runner — stock
+Llama/Mistral/Qwen3 only — builds dummy batches with legal per-request seq lens), and `EmmyGenModel` always
+rides the default runner. Engine-level validation on the 4080 (default runner forced): the 4128 capture's two
+over-model-len dummy runs were clamped 4128 → 4096, capture completed, greedy output correct. Remaining
+follow-ups: re-run the 4096-chunk-lane c64 cell on a 5090 with the clamp (the ~5 ms/step host-idle recovery),
+re-bench against a stock arm at a comparable admission shape, and upstream the report.
 
 ## Target architecture
 

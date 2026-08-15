@@ -183,31 +183,6 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
 
-def _max_head_dim(model: str, vllm_args: list[str]) -> int | None:
-    """The widest attention head the checkpoint's LOCAL config declares, or ``None`` when the
-    probe cannot tell (uncached model, unreadable config — same best-effort contract as
-    :func:`_is_moe_model`; the authoritative guard lives in ``EmmyGenModel.__init__``).
-    Gemma-4 declares ``head_dim`` for its sliding layers and a wider ``global_head_dim`` for
-    its full-attention layers, so both attributes count."""
-    cfg = _local_config(model, vllm_args)
-    if cfg is None:
-        return None
-    cfg = getattr(cfg, "text_config", cfg)
-    dims = []
-    for attr in ("head_dim", "global_head_dim"):
-        try:
-            value = getattr(cfg, attr, None)
-        except Exception:  # noqa: BLE001 — transformers' heterogeneous-config API raises on ambiguous global access
-            value = None
-        if isinstance(value, int):
-            dims.append(value)
-    if not dims:
-        hidden, heads = getattr(cfg, "hidden_size", None), getattr(cfg, "num_attention_heads", None)
-        if isinstance(hidden, int) and isinstance(heads, int) and heads > 0:
-            dims.append(hidden // heads)
-    return max(dims) if dims else None
-
-
 def _chunk_capture_rungs(vllm_args: list[str], bucket: int) -> set[int]:
     """Token-count capture sizes for the chunk/prefill and mixed prefill+decode steps
     (``EMMY_GEN_CHUNK_CAPTURE``). vLLM pads a step UP to the first rung at or above its
@@ -329,26 +304,11 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         # their per-step staging D2D were the measured c64 TPOT loss, and the eager
         # symbolic-prefill burst the short-prompt TTFT loss. FULL also retires the
         # uniform-decode dispatch routine: every step dispatches by padded token count.
-        # A model with an attention head wider than 256 (the probe below) takes a CAPPED rung
-        # list instead of the full one: past that width the mixed-capture-capable vLLM 0.23
-        # backends are only partially usable — TRITON_ATTN's unified-attention kernel raises
-        # an illegal memory access capturing WIDE mixed batches (measured at 4128 tokens on
-        # gemma-4-12B / RTX 5090; clean through 2112, benched end to end with greedy chat
-        # parity), and FLEX_ATTENTION mis-shapes its sliding-window block mask outright.
-        # Steps wider than the capped top rung stay eager. The authoritative guard for a
-        # probe miss is in ``EmmyGenModel.__init__``.
+        # Capture sizes above --max-model-len (the rider-top rung) are legal only because the
+        # plugin patches vLLM 0.23's dummy-run seq lens (``serving/vllm_patches.py``) —
+        # unpatched, the warmup overruns the block table and dies with an illegal access.
         mode = "FULL"
         sizes = sorted(set(sizes) | _chunk_capture_rungs(vllm_args, bucket))
-        head_dim = _max_head_dim(model, vllm_args) if model is not None else None
-        if head_dim is not None and head_dim > 256:
-            cap = emmy_config.WIDE_HEAD_MIXED_RUNG_CAP
-            sizes = [s for s in sizes if s <= cap]
-            logger.info(
-                "chunk capture capped at %d-token rungs: this model's widest attention head (%d) exceeds 256, "
-                "where vLLM 0.23's TRITON_ATTN faults capturing wider mixed batches; wider steps stay eager",
-                cap,
-                head_dim,
-            )
         if not _has_flag(vllm_args, "--attention-backend"):
             backend_args = ["--attention-backend", "TRITON_ATTN"]
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph

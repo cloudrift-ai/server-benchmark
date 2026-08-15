@@ -19,9 +19,12 @@ All recognition lives in THIS one rule (no separate softmax pass), in order (eac
 step unconditional — no knobs):
 
 1. **Online softmax** — an adjacent ``(rowmax, Σ exp)`` reduce pair over the same input fuses
-   into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the ``(m, d)``
-   exp-family merge dissolved in the body. The ``_softmax`` helper
-   (``_fuse``).
+   into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the
+   exp-family merge dissolved in the body. The carrier is N-channel: a further sibling additive
+   fold whose lifted value is the pair's weight × a value cone joins the same loop as an
+   EXPECTATION channel (loop-invariant factors split off, multiplied back after the loop), and
+   a pair whose channels sit inside a following free output sweep (fused softmax·V) sinks into
+   that sweep first. The ``_softmax`` helper (``_fuse``).
 3. **Lift** — peel the free (parallel) axes off the kernel and lift the per-cell compute into a
    zero-axis ``Fold`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
    flat zero-axis fold; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)

@@ -245,7 +245,9 @@ deploy evidence hierarchy's decision (measured evidence or pins for a deployed m
 Fusion's
 refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace,
 and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
-entangling a multi-statistic compound beyond its flat same-extent normalize tail; both shapes fall to the raw-loop
+entangling a multi-statistic compound beyond its readable tails: the flat same-extent normalize sweep, or a free
+sweep of flat same-extent additive folds — the expectation channels of a fused softmax·V region, which the
+online-softmax pairing sinks into and joins; other shapes fall to the raw-loop
 escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.
@@ -416,8 +418,9 @@ twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
 value name = expectation). The COMPOSED evaluations derive too (step 7): a twisted fold with a `Load`-bound
 expectation operand derives its blocked evaluation with the expectation contraction SYNTHESIZED — and memoized, one
-identity per stored fold — (`ir._twisted_derived_step`; no recognizer builds such a fold today — the online-softmax
-carrier is the `(m, d)` pair); split-K's outer reduce is the
+identity per stored fold — (`ir._twisted_derived_step`; no recognizer builds the operand-edge form today — the
+online-softmax pairing's `(m, d, o…)` expectation channels keep their value loads inline in the lift body); split-K's
+outer reduce is the
 IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
 verbatim — no outer `Accum`s; `Fold.composed` is the one read of the composition, shared by `Fold.role` and
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer

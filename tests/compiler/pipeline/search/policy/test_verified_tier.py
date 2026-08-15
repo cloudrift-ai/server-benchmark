@@ -95,7 +95,7 @@ def test_recorded_row_deploys_by_identity_without_a_prior(monkeypatch):
     records = load_golden_records(_document(graph, knobs))
     assert kernel_identity(records[0]) is not None
     assert decode_record(records[0]) is None
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
     deployed = _deployed_row(graph)
     assert _row_key(deployed) == _row_key(knobs)
 
@@ -109,7 +109,7 @@ def test_drift_is_fail_closed(monkeypatch, caplog):
     records = load_golden_records(_document(graph, drifted))
     reason = decode_record(records[0])
     assert reason is not None and "no enumerated row equals" in reason
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
     with caplog.at_level(logging.WARNING):
         deployed = _deployed_row(graph)
     assert _row_key(deployed) != _row_key(drifted)
@@ -122,7 +122,7 @@ def test_foreign_pin_regime_is_ignored(monkeypatch):
     graph = _matmul_graph()
     knobs = _recorded_row(graph)
     records = load_golden_records(_document(graph, knobs, pins={"FAST_MATH": True}))
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
     deployed = _deployed_row(graph)
     assert _row_key(deployed) != _row_key(knobs)
 
@@ -131,7 +131,7 @@ def test_ranking_regime_never_consults(monkeypatch):
     """A recorded µs is -O3 truth: under the -O1 ranking flags the tier is not consulted."""
     graph = _matmul_graph()
     knobs = _recorded_row(graph)
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", load_golden_records(_document(graph, knobs)))
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap, _r=load_golden_records(_document(graph, knobs)): _r)
     with config.nvcc_flags_override("-Xcicc -O1"):
         ctx = Context.from_target(_CAP, gpu_name=_GPU)
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph.copy(), greedy_decide(prior=None))
@@ -187,7 +187,7 @@ def test_routing_record_decides_the_placement_fork(monkeypatch):
     records = load_golden_records(routed)
     assert records[0].is_routing
     assert decode_record(records[0]) is None, decode_record(records[0])
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_ctx()).resolve(graph.copy(), greedy_decide(prior=None))
     tiles = {nid: n.op for nid, n in out.nodes.items() if isinstance(n.op, TileOp)}
     assert len(tiles) == 2, f"the routing record must cut the kernel: {sorted(tiles)}"
@@ -202,7 +202,7 @@ def test_fused_record_holds_the_placement_fork(monkeypatch):
     fused_row = stamp_schedule_families(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
     records = load_golden_records(_document(graph, fused_row, name="probe.fused"))
     assert decode_record(records[0]) is None, decode_record(records[0])
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: [r for r in records if r.gpu_name == gpu])
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_ctx()).resolve(graph.copy(), greedy_decide(prior=None))
     tiles = [n.op for n in out.nodes.values() if isinstance(n.op, TileOp)]
     assert len(tiles) == 1, "the fused record must keep one kernel"

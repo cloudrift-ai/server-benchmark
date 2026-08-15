@@ -696,13 +696,13 @@ configs:
       WORK: w4x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k2
       REDUCE: g2a
-      STAGE: ''
+      STAGE: d1/sync
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 7615.488
-      reference_us: 668.16
-      reference_backend: cublas
+      emmy_us: 1850.4
+      reference_us: 665.6
+      reference_backend: torch-eager
 - program: 4
   target:
     origins:

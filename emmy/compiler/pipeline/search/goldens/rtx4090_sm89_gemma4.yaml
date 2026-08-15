@@ -2515,6 +2515,34 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [1, 3840]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 3840]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [30720, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [512, 30720]]]
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 3840]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [30720, 3840]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [2048, 30720]]]
 configs:
 - program: 0
   target:
@@ -3048,15 +3076,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
       REDUCE: ''
-      RASTER: ''
+      RASTER: gm8
       STAGE: d2/cp
     measurements:
-      emmy_us: 4347.0
-      reference_us: 2945.0
-      reference_backend: cublas
+      emmy_us: 3001.3
+      reference_us: 2833.3
+      reference_backend: torch-eager
   - name: gemma4_12b.mlp_gate_up.s2048
     bindings:
       num_tokens: 2048
@@ -3899,15 +3927,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
       REDUCE: ''
-      RASTER: ''
+      RASTER: gm8
       STAGE: d2/cp
     measurements:
-      emmy_us: 4910.1
-      reference_us: 2888.7
-      reference_backend: cublas
+      emmy_us: 3080.4
+      reference_us: 2796.7
+      reference_backend: torch-eager
   - name: gemma4_12b.mlp_gate_up_split.m4096.lin
     bindings:
       num_tokens: 4096
@@ -6482,7 +6510,7 @@ configs:
       reference_us: 1639.4
       reference_backend: cublas
 - program: 141
-  target:
+  target: &id001
     origins:
     - linear
   realizations:
@@ -6656,3 +6684,39 @@ configs:
       emmy_us: 129.0
       reference_us: 138.2
       reference_backend: cublas
+- target: *id001
+  program: 149
+  realizations:
+  - name: gemma4_12b.gate_up_cat.m512.lin
+    bindings:
+      num_tokens: 512
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 850.0
+      reference_us: 726.5
+      reference_backend: torch-eager
+- target: *id001
+  program: 150
+  realizations:
+  - name: gemma4_12b.gate_up_cat.m2048.lin
+    bindings:
+      num_tokens: 2048
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/cp
+    measurements:
+      emmy_us: 3073.5
+      reference_us: 2791.9
+      reference_backend: torch-eager

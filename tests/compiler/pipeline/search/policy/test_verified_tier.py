@@ -131,7 +131,8 @@ def test_ranking_regime_never_consults(monkeypatch):
     """A recorded µs is -O3 truth: under the -O1 ranking flags the tier is not consulted."""
     graph = _matmul_graph()
     knobs = _recorded_row(graph)
-    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap, _r=load_golden_records(_document(graph, knobs)): _r)
+    records = load_golden_records(_document(graph, knobs))
+    monkeypatch.setattr(golden_mod, "records_for_card", lambda gpu, cap: records)
     with config.nvcc_flags_override("-Xcicc -O1"):
         ctx = Context.from_target(_CAP, gpu_name=_GPU)
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph.copy(), greedy_decide(prior=None))

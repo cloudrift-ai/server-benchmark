@@ -764,10 +764,22 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
 
 def _guard_writes(stmts: list[Stmt], cond) -> list[Stmt]:
     """Wrap each output ``Write`` in ``Cond(cond, …)`` — the masked tail cell computes (with
-    clamp-read operands) but only stores when in bounds. Non-``Write`` stmts pass through."""
+    clamp-read operands) but only stores when in bounds. Recurses into nested bodies: a projection
+    tail carrying an output-sweep ``Loop`` (e.g. a decode epilogue) holds its ``Write`` inside that
+    loop, and an unguarded overhang store would alias a valid row through the σ ``% extent`` wrap.
+    Other stmts pass through."""
     if cond is None:
         return stmts
-    return [Cond(cond=cond, body=(s,)) if isinstance(s, Write) else s for s in stmts]
+    out: list[Stmt] = []
+    for s in stmts:
+        if isinstance(s, Write):
+            out.append(Cond(cond=cond, body=(s,)))
+            continue
+        bodies = s.nested()
+        if bodies:
+            s = s.with_bodies(tuple(Body(tuple(_guard_writes(list(b), cond))) for b in bodies))
+        out.append(s)
+    return out
 
 
 def _scalar_sigma(mn, offset, i: int, j: int) -> Sigma:

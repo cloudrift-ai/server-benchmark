@@ -135,6 +135,15 @@ def _annotate_reduce(rloop: Loop, pre_reduce: tuple[Stmt, ...]) -> Loop | None:
     return Loop(axis=rloop.axis, body=Body(body), unroll=rloop.unroll, role=AxisRole.PLANAR)
 
 
+def _rewrite_deep(stmt: Stmt, rename) -> Stmt:
+    """Apply an SSA rename through a stmt, recursing into ``Loop`` bodies."""
+    if isinstance(stmt, Loop):
+        from dataclasses import replace  # noqa: PLC0415
+
+        return replace(stmt, body=Body(tuple(_rewrite_deep(s, rename) for s in stmt.body)))
+    return stmt.rewrite(rename)
+
+
 def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
     """Lift the per-cell stmts into a zero-axis ``Fold`` whose body is the annotated loop nest, returning
     ``(node, stores)`` — the 1q boundary split: a projected reduce's root ``Write`` (and the
@@ -166,12 +175,22 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
     epilogue_need = _reads(after)
     reduce_idx: set[int] = set()
     epilogue_idx: set[int] = set()
+    dup_renames: dict[str, str] = {}
     for i in range(len(before) - 1, -1, -1):
         stmt = before[i]
         defs = set(stmt.defines())
         feeds_reduce = bool(defs & reduce_need)
         feeds_epilogue = bool(defs & epilogue_need)
         if feeds_reduce and feeds_epilogue:
+            if isinstance(stmt, Load) and not stmt.deps() and not any(e.free_vars() for e in stmt.index or ()):
+                # An axis-invariant scalar ``Load`` demanded by BOTH sides (a shared mask / eps
+                # constant the splicer hoisted to cell scope): pure, so a renamed copy rides the
+                # reduce side while the original stays with the epilogue — no reordering needed.
+                for name in defs:
+                    dup_renames[name] = f"{name}__stat"
+                reduce_idx.add(i)
+                epilogue_idx.add(i)
+                continue
             return _flat_cell(cell)
         if feeds_reduce:
             reduce_idx.add(i)
@@ -183,10 +202,15 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
             epilogue_idx.add(i)
             if feeds_epilogue:
                 epilogue_need.update(stmt.deps())
-    if reduce_idx & epilogue_idx:
+    dup_idx = reduce_idx & epilogue_idx
+    if any(not dup_renames.keys() & set(before[i].defines()) for i in dup_idx):
         return _flat_cell(cell)
     pre_reduce = tuple(s for i, s in enumerate(before) if i in reduce_idx)
     pre_epilogue = tuple(s for i, s in enumerate(before) if i in epilogue_idx)
+    if dup_renames:
+        rename = lambda n: dup_renames.get(n, n)  # noqa: E731
+        pre_reduce = tuple(_rewrite_deep(s, rename) for s in pre_reduce)
+        rloop = _rewrite_deep(rloop, rename)
     annotated = _annotate_reduce(rloop, pre_reduce)
     if annotated is None:
         return _flat_cell(cell)

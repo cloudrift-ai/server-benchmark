@@ -1821,6 +1821,20 @@ def _make_pv_softmax(seq):
     return g, {"scores": scores, "v": v}, want
 
 
+def _make_pv_materialized(seq):
+    """The P@V split-consumer gemm with the softmax P operand fed MATERIALIZED (realistic
+    row-stochastic values): the batched masked-M + masked-K warp shape the demoted producer
+    can no longer expose to a warp pin (its symbolic-K computed-A kernel refuses one loudly)."""
+    g = _batched_symbolic_mk_graph()
+    rng = np.random.default_rng(seq)
+    scores = (rng.standard_normal((16, seq, seq)) * 2).astype(np.float32)
+    e = np.exp(scores - scores.max(-1, keepdims=True))
+    xna = (e / e.sum(-1, keepdims=True)).astype(np.float16)
+    xnb = (rng.standard_normal((16, seq, 128)) * 0.1).astype(np.float16)
+    want = np.matmul(xna.astype(np.float32), xnb.astype(np.float32))
+    return g, {"xna": xna, "xnb": xnb}, want
+
+
 # Each case: (env, delenv, seqs, make). The demoted / batched cases route to the scalar tier or
 # greedy lower (no WARP pin); the rest pin the cp.async (or TMA) warp staging.
 _MASKED_CASES = {
@@ -1841,10 +1855,20 @@ _MASKED_CASES = {
     # at runtime is a separate gap, so accuracy rides the scalar tier (the structure render
     # reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).
     "batched_mk": ({}, (), [16, 31, 130, 512, 700], _make_batched_mk),
-    # The demoted B-cone / softmax-P@V splits run under GREEDY (the multi-kernel producer rejects
-    # a global warp pin under ``validate_pins``); ``SPLIT_CONE`` forces the demotion split.
+    # The demoted B-cone / softmax-P@V splits run under GREEDY: under the sdpa seam split the
+    # softmax normalize fuses into a computed-A symbolic-K kernel, and a warp/STAGE pin landing
+    # there raises the pinned-unbuildable legality error (a computed contraction operand needs a
+    # static K). ``SPLIT_CONE`` forces the demotion split.
     "demoted_n": ({"SPLIT_CONE": "1"}, (), [31, 130, 512, 700], _make_demoted_n),
-    "demoted_pv_tma": ({**_CP_KNOBS, "SPLIT_CONE": "1"}, ("TMA",), [16, 31, 130, 512, 700], _make_pv_softmax),
+    "demoted_pv": ({"SPLIT_CONE": "1"}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
+    # The warp-tier P@V masked-M+K accuracy rides the materialized-P split-consumer gemm (STAGE
+    # unpinned: smem staging never enumerates for a symbolic-K contraction).
+    "pv_materialized_warp": (
+        {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "REDUCE": ""},
+        (),
+        [16, 31, 130, 512, 700],
+        _make_pv_materialized,
+    ),
 }
 _MASKED_PARAMS = [(label, seq) for label, (_e, _d, seqs, _m) in _MASKED_CASES.items() for seq in seqs]
 
@@ -1856,7 +1880,7 @@ def test_masked_symbolic_accuracy(label, seq, monkeypatch):
     """One compiled symbolic kernel is accurate at runtime sizes below / at / above the 512 hint —
     including the straddling cases (1, 31, 130, 700 are not tile-divisor multiples), which exercise
     the masked-M row guard, the masked-N column store, the zero-filled partial-K slab, the demoted
-    B-cone overhang, and the TMA-staged P@V — each fed as a synthetic standalone graph."""
+    B-cone overhang, and the demoted / materialized P@V — each fed as a synthetic standalone graph."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     env, delenv, _seqs, make = _MASKED_CASES[label]

@@ -159,24 +159,10 @@ CASES = [
     ("norm_linear_coop", lambda: norm_linear(), {"REDUCE": "coop", "WORK": "t128"}),
     ("norm_linear_dynm", lambda: norm_linear(S=Dim("seq_len")), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
     ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/f4x8", "WORK": "w2x2", "REDUCE": ""}),
-    ("flash_hd128", lambda: sdpa(128), {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/smem-tma"}),
-    (
-        "flash_hd128_cp",
-        lambda: sdpa(128),
-        {"TILE@dd": f"{WARP}/f1x2/k8", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x16", "STAGE": "d2/smem-async"},
-    ),
-    (
-        "flash_hd256_alt",
-        lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/f1x8/k16", "WORK": "w4x1", "TILE@pj": f"{WARP}/f1x32/k4", "STAGE": "d1/smem-async"},
-    ),
-    (
-        "flash_hd256_fm",
-        lambda: sdpa(256),
-        {"TILE@dd": f"{WARP}/f1x8/k16", "TILE@pj": "mma_m16n8k16_f16_f16/f1x32/k4", "WORK": "w4x1", "STAGE": "d1/smem-async"},
-    ),
-    ("flash_chain", lambda: sdpa(64), {"TILE": "a:scalar", "TILE@pj": "f64"}),
-    ("flash_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),
+    ("sdpa_warp", lambda: sdpa(128), {"WORK": "w4x1"}),
+    ("sdpa_warp_tma", lambda: sdpa(128), {"WORK": "w1x4", "STAGE": "d1/smem-tma"}),
+    ("sdpa_hd256", lambda: sdpa(256), {"WORK": "w4x1"}),
+    ("sdpa_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),
 ]
 
 

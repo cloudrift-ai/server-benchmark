@@ -811,13 +811,17 @@ def _make_projection_norm():
     return g
 
 
-def test_projection_feeding_rms_value_and_statistic_fuses_maximally():
-    """RMSNorm reads its input for both x² and x. Fusion is algebra-only and merges the upstream
-    projection anyway — whether the duplicated contraction is worth materializing away is decided
-    by tuned evidence, not by a fusion refusal."""
+def test_projection_feeding_rms_stays_a_readable_seam():
+    """RMSNorm reads its input for both x² and x. Splicing the upstream projection into the rms
+    statistic would nest the contraction's reduce loop inside the statistic reduce — a shape
+    recognition keeps only as the raw-loop escape (no schedule tier, no ``PLACE`` seam), so the
+    merge is refused. The rms cone itself must still fuse maximally into one kernel beside the
+    standalone contraction."""
     result = _decompose_and_fuse(_make_projection_norm())
     kernels = _kernel_nodes(result)
-    assert len(kernels) == 1, f"expected one maximal region, got {[node.id for node in kernels]}"
+    assert [node.id for node in kernels] == ["projection", "out"], (
+        f"expected the contraction + one fused rms cone, got {[node.id for node in kernels]}"
+    )
 
 
 def test_projection_norm_materialization_is_correct():

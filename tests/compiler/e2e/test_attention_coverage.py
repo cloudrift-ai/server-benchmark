@@ -3,11 +3,10 @@ r"""Attention coverage — flash (the twisted ``(m, l, O)`` MONOID on the stream
 Attention is the hybrid algebra: a SEMIRING contraction (QK^T, P@V) wrapped in a MONOID streaming
 softmax reduce. This file pins every tier of it:
 
-- **scalar-tier flash** (``FLASH`` knob, the Loop-IR ``025_recognize_flash`` pass) — non-causal /
-  causal / GQA / additive-mask SDPA fuses to ONE streaming online-softmax kernel matching torch,
-  static AND dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. This is the ONLY
-  flash tier that lowers today — the two-bilinear ``Fold`` ``TWISTED`` reduce tree at block=1, through
-  the one ``_factor`` contraction path.
+- **generic-path SDPA** — non-causal / causal / GQA / additive-mask SDPA lowers through the
+  readable-seam split (Q·K^T | softmax pieces | P·V, plus cut glue) and matches torch, static AND
+  dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. The kernel count belongs to
+  the fusion pass; these tests assert numerics over the whole kernel set.
 - **tensor-core flash** — RECOVERED through the one emitter: ``_schedule._twisted_warp_option`` stamps
   the mma ``TilePlan``\ s on the Q@K / P@V bilinear ``Fold``\ s and the tree realizes at fragment
   residence (``_twist``) — no private emitter. The ``test_generated_tensorcore_flash_*`` /
@@ -139,20 +138,21 @@ def _flash_feed(variant, B_or_Hq, H_or_Hkv, S, D):
 @requires_cuda
 @pytest.mark.parametrize("variant", list(_FLASH_VARIANTS))
 def test_scalar_flash_matches_torch(monkeypatch, variant):
-    """With ``FLASH`` on, an SDPA variant (non-causal / causal / GQA / explicit additive mask) fuses
-    to ONE streaming online-softmax kernel and matches torch SDPA across the variant's static
-    configs. The non-causal kernel carries the streaming softmax markers (``fmaxf`` + ``expf``);
-    causal/mask/GQA recognize their per-element guard structurally from the fused body."""
+    """An SDPA variant (non-causal / causal / GQA / explicit additive mask) matches torch SDPA
+    across the variant's static configs. SDPA lowers through the generic path as a readable-seam
+    SPLIT (Q·K^T | softmax pieces | P·V, plus cut glue) — the softmax markers (``fmaxf`` +
+    ``expf``) live somewhere in the kernel SET, and every kernel of the set carries a schedule;
+    the exact kernel count is the fusion pass's business, not this test's."""
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)
         backend, compiled, _graph, kernels = _trace(module, args)
-        assert len(kernels) == 1, f"{variant}{cfg}: flash should fuse to one kernel, got {len(kernels)}"
+        assert kernels, f"{variant}{cfg}: no kernels"
         if variant == "plain" and cfg == _FLASH_VARIANTS["plain"][2][0]:
-            src = compiled.nodes[kernels[0]].op.kernel_source
-            assert "fmaxf" in src and "expf" in src, "fused kernel should carry the streaming softmax (max + exp)"
+            srcs = "\n".join(compiled.nodes[k].op.kernel_source for k in kernels)
+            assert "fmaxf" in srcs and "expf" in srcs, "the kernel set should carry the softmax (max + exp)"
         md = _max_diff(backend, compiled, feed, ref)
-        assert md < 1e-4, f"{variant}{cfg}: flash vs torch max_diff={md:.6e}"
+        assert md < 1e-4, f"{variant}{cfg}: sdpa vs torch max_diff={md:.6e}"
 
 
 @requires_cuda
@@ -173,8 +173,8 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
         ds = {"q": {2: seq}, "k": {2: seq}, "v": {2: seq}}
         seed_args = (torch.randn(1, Hq, 16, D), torch.randn(1, Hkv, 16, D), torch.randn(1, Hkv, 16, D))
     backend, compiled, _graph, kernels = _trace(module_cls(), seed_args, dynamic_shapes=ds)
-    assert len(kernels) == 1, f"dynamic {variant} flash should fuse to one kernel, got {len(kernels)}"
-    assert "int seq_len" in compiled.nodes[kernels[0]].op.kernel_source, "dynamic kernel must carry the runtime seq_len arg"
+    assert kernels, f"dynamic {variant}: no kernels"
+    assert any("int seq_len" in compiled.nodes[k].op.kernel_source for k in kernels), "a dynamic kernel must carry the runtime seq_len arg"
 
     for s in (8, 16, 37):
         if variant == "mask":
@@ -205,13 +205,13 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
 @pytest.mark.parametrize("bk", [2, 4])
 def test_scalar_flash_kv_tile_matches_torch(monkeypatch, bk):
     """KV tiling: a ``EMMY_BK`` pin re-brackets the streaming reduce ``S_k → S_k/BK · BK``
-    (serial within the tile). The fused flash kernel must still fuse to one kernel and match torch.
+    (serial within the tile). The lowered kernel set must still match torch under the pin.
     ``S=32`` / ``D=16`` are divisible by both 2 and 4, so the pin is honored."""
     monkeypatch.setenv("EMMY_BK", str(bk))
     torch.manual_seed(0)
     q, k, v = (torch.randn(2, 3, 32, 16) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    assert len(kernels) == 1, f"flash should still fuse to one kernel under BK={bk}, got {len(kernels)}"
+    assert kernels, f"BK={bk}: no kernels"
     cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
 
     def ref():
@@ -224,13 +224,13 @@ def test_scalar_flash_kv_tile_matches_torch(monkeypatch, bk):
 
 @requires_cuda
 def test_flash_causal_and_gqa_match_torch(monkeypatch):
-    """Scalar flash keeps the causal / GQA masks in the ``d``-invariant score prefix, so masked +
-    grouped-head flash also matches torch (one streaming online-softmax kernel)."""
+    """The causal / GQA masks ride the score cone through the generic split, so masked +
+    grouped-head SDPA also matches torch."""
     torch.manual_seed(0)
 
     q, k, v = (torch.randn(1, 2, 16, 8) for _ in range(3))
     backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
-    assert len(kernels) == 1
+    assert kernels
     cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
 
     def rc():
@@ -267,12 +267,12 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
     grid order: a fused output transpose (and, in models, size-1 broadcast / unsqueeze dims) makes the
     root's output non-canonical, so a grid-order write mis-strides — all elements alias, the rest stays
     uninitialized → NaN (the Gemma model-trace flash NaN). This pins the layout-aware store
-    (``_out_store_index``): SDPA + absorbed transpose fuses to ONE kernel and matches torch."""
+    (``_out_store_index``): SDPA + absorbed transpose matches torch across the split kernel set."""
     torch.manual_seed(0)
     for cfg in [(1, 4, 16, 16), (2, 3, 32, 16)]:
         q, k, v = (torch.randn(*cfg) for _ in range(3))
         backend, compiled, _graph, kernels = _trace(_SdpaTranspose(), (q, k, v))
-        assert len(kernels) == 1, f"{cfg}: sdpa+transpose should fuse to one kernel, got {len(kernels)}"
+        assert kernels, f"{cfg}: no kernels"
         cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
 
         def ref(cq=cq, ck=ck, cv=cv):

@@ -143,7 +143,7 @@ configs:
       WORK: t16x8
       TILE: f2x6
       RASTER: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
     measurements:
       emmy_us: 11.0
       reference_us: 12.6
@@ -161,7 +161,7 @@ configs:
       WORK: t16x16
       TILE: f4x6
       RASTER: ''
-      STAGE: d4/smem-tma
+      STAGE: d4/tma
     measurements:
       emmy_us: 49.2
       reference_us: 55.6
@@ -179,7 +179,7 @@ configs:
       WORK: t32x16
       TILE: f4x12
       RASTER: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
     measurements:
       emmy_us: 357.6
       reference_us: 324.8
@@ -197,7 +197,7 @@ configs:
       WORK: t32x16
       TILE: f4x6
       RASTER: ''
-      STAGE: d3/smem-tma
+      STAGE: d3/tma
     measurements:
       emmy_us: 3021.4
       reference_us: 2426.0
@@ -215,7 +215,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       RASTER: ''
-      STAGE: d3/smem-tma
+      STAGE: d3/tma
     measurements:
       emmy_us: 3.8
       reference_us: 6.1
@@ -228,7 +228,7 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       RASTER: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
     measurements:
       emmy_us: 3.7
       reference_us: 6.1
@@ -246,7 +246,7 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f4x2/k2
       RASTER: ''
-      STAGE: d4/smem-tma
+      STAGE: d4/tma
     measurements:
       emmy_us: 13.9
       reference_us: 12.5
@@ -264,7 +264,7 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
       RASTER: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
     measurements:
       emmy_us: 78.6
       reference_us: 69.9
@@ -282,7 +282,7 @@ configs:
       WORK: w8x2
       TILE: mma_m16n8k16_f16_f32/f2x8/k4
       RASTER: ''
-      STAGE: d2/smem-tma
+      STAGE: d2/tma
     measurements:
       emmy_us: 515.9
       reference_us: 467.2
@@ -301,7 +301,7 @@ configs:
       TILE: f2x6
       REDUCE: g2a
       RASTER: ''
-      STAGE: d4/smem-tma
+      STAGE: d4/tma
     measurements:
       emmy_us: 10.2
       reference_us: 12.6

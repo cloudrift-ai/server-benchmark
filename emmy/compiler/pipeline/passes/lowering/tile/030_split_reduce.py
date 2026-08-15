@@ -26,13 +26,12 @@ the finalize is a fresh ``ReducePlan``); ``lowering/kernel`` only ever sees sing
 kernels (``assert not needs_split``).
 
 This cut handles **additive** carriers — a degenerate ``PLANAR`` reduce (``sum``) and a
-``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and the twisted
-multi-component carrier: **flash split-KV** (:func:`_split_twisted_warp`), where a WARP-tiled
-``TWISTED`` streaming tree keeps its fragment residence in the partial (the ``Fold`` axis
-shrinks to the slice and its absolute base rides that axis's ``Window``), stores the raw
-``(m, l, O)`` state to an f32 workspace, and the finalize folds the partitions through the
-exp-family LSE combine before projecting. Pays where the un-split grid starves the SMs (few
-heads / short query axis); pin ``REDUCE=g<n>k``.
+``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and, through the
+residual path's carrier-generic deferred-kernel finalize, a multi-component ``TWISTED`` carrier
+(the streaming softmax's ``(m, d)`` state packs into the workspace's leading ``comp`` axis and the
+finalize folds partitions through the exp-family combine). The WARP-tiled fragment-residence
+split-KV arm was deleted with the flash pattern compiler; it returns with the TWISTED computed-A
+recognizer arm. Pays where the un-split grid starves the SMs; pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Fold(axis=ksplit,
 source=Fold.contraction(k_axis=kslice))`` (built schedule-side) has its K axis already

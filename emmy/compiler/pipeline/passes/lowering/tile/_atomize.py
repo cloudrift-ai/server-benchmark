@@ -4,7 +4,7 @@ The warp matmul materializer needs to know which operand is the mma ``a`` vs ``b
 axis-in-index), the fold accumulator, and the projection epilogue.
 :func:`bind_contraction` reads them **structurally** off the annotated ``CONTRACTION`` reduce loop
 — the operand ``Load``\\ s indexed over the K axis, the fold ``Accum`` target — and returns them as
-the ``(a_load, b_load, acc, epilogue)`` facts ``010_recognize._nodify_contraction`` stamps onto the
+the ``(a_load, b_load, acc, epilogue)`` facts ``_lift._nodify_contraction`` stamps onto the
 contraction structural node at RECOGNIZE time (the node
 is then the single source of truth — it re-derives ``b_trans`` off ``b`` itself). Reading the
 binding **structurally** off the annotated loop — not a stored node kind — is what keeps the ⊗/⊕

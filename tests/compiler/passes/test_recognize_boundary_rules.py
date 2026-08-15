@@ -64,9 +64,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     inside K, while the linear bias feeds only the accumulator epilogue. Grouping the
     whole preamble together demotes the contraction to a scalar ``Map``.
     """
-    from importlib import import_module
-
-    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
 
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 64), ("k", 128)))
     body = Body(
@@ -104,7 +102,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
         )
     )
 
-    node, free, stores = recognize._lift(list(body), "out")
+    node, free, stores = lift_mod._lift(list(body), "out")
 
     assert [axis.name for axis in free] == ["m", "n"]
     # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
@@ -123,9 +121,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
 
 def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
     """Q and K can occupy different affine regions of one load-time-packed QKV buffer."""
-    from importlib import import_module
-
-    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
 
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 32), ("k", 64)))
     body = Body(
@@ -163,7 +159,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
         )
     )
 
-    node, free, stores = recognize._lift(list(body), "score")
+    node, free, stores = lift_mod._lift(list(body), "score")
 
     assert [axis.name for axis in free] == ["m", "n"]
     # Both views of the packed buffer hoist as materialized operand edges of the stored node.

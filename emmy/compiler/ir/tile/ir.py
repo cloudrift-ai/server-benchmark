@@ -948,7 +948,7 @@ class TileOp(Op):
     untouched. The contraction operand→role binding is not a
     ``TileOp`` field either — a tiled contraction carries its A operand / channels on
     its stored fold (``op``), the single source of truth, resolved recognize-side
-    (``010_recognize._nodify_contraction``); the placed reading only PLACES that node."""
+    (``_lift._nodify_contraction``); the placed reading only PLACES that node."""
 
     op: object = None
     name: str = ""

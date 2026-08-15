@@ -141,11 +141,17 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **CLI (command-line interface)** — The commands and options used from a terminal, such as `emmy compile`.
 - **YAML** — A human-readable configuration format. Emmy recipes are written in YAML.
 - **Recipe** — A version-controlled plan describing what model or command to run, how to deploy it, which hardware
-  and benchmark settings to use, which variants to compare, and how to aggregate results. Commands such as
-  `emmy deploy` and `emmy bench` consume recipes; a recipe does not execute by itself.
+  and benchmark settings to use, and which variants to compare. Commands such as `emmy deploy` and `emmy bench`
+  consume recipes; a recipe does not execute by itself.
 - **Variant** — One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
 - **Matrix** — A recipe section that describes several values to test. `cross` creates every combination; `zip`
   pairs values by position.
+- **Experiment row** — One executed variant of an experiment recipe.
+- **Experiment record** — The typed, versioned YAML record for one experiment row. It contains timestamps, status,
+  row identity and matrix parameters, Git revision and dirty flag, execution lifecycle, and generic system
+  information. It never contains interpreted or parsed experiment measurements.
+- **Raw experiment results** — Logs and declared measurement files preserved in an ignored timestamped local run
+  directory. The last run is committed as an LFS-backed `results.tar.gz`, not as a second structured result format.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is
@@ -202,8 +208,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   online prior learns from collected measurements.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
   to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
-  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy's offline-prior
-  trainer is `LinearTrainer`, and the model it produces is a `LinearModel`.
+  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy has two
+  offline-prior trainers, chosen by `emmy fit --trainer`: `LinearTrainer` produces a `LinearModel` (fixed weights
+  over the features), and `CatBoostTrainer` produces a `CatBoostModel` (a ranker built from decision trees).
+- **Blend** — How Emmy's two priors are combined into one answer: which of them decides a compile's schedule, and how
+  the two are weighed against each other when the tuner chooses what to try next. Emmy has several, selected by
+  `EMMY_PRIOR_BLEND`, including single-prior ones used to measure one prior on its own.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,

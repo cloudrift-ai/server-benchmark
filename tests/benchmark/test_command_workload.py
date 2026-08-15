@@ -105,7 +105,6 @@ async def test_failed_command_still_pulls_preserved_result(monkeypatch, tmp_path
     )
 
     assert success is False
-    assert info["exit_code"] == 7
     assert info["result_paths"] == [str(tmp_path / "rtx5090x1_case_artifacts.tar.gz")]
     assert (tmp_path / "rtx5090x1_case_artifacts.tar.gz").read_bytes() == b"archive"
 

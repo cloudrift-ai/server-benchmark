@@ -29,12 +29,6 @@ def validate_config(config: dict) -> None:
         logger.error("Error: Missing 'benchmark' section in config.")
         sys.exit(1)
 
-    required_benchmark_fields = ["local_results_dir"]
-    for field in required_benchmark_fields:
-        if field not in config["benchmark"]:
-            logger.error(f"Error: Missing '{field}' in 'benchmark' section.")
-            sys.exit(1)
-
 
 def _expand_path(path: str) -> str:
     """Expand user home directory and environment variables in path."""

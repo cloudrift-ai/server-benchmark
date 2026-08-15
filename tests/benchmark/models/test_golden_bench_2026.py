@@ -242,6 +242,33 @@ def test_search_ablation_is_executable(project_root) -> None:
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
 
+def test_mpk_megakernel_lane_is_pinned_and_paired(project_root) -> None:
+    directory = _experiment(project_root, "serving_mpk_qwen3_8b_a100")
+    tasks = enumerate_tasks([directory])
+    assert len(tasks) == 1
+    task = tasks[0]
+    recipe = load_recipe(directory)
+    assert recipe.kind == "command"
+    assert task.recipe.deploy.gpu == "NVIDIA A100 80GB"
+    assert task.recipe.deploy.gpu_count == 1
+
+    run = recipe.command.run
+    # Pinned external sources: the mirage mpk-branch revision and the Qwen3-8B checkpoint revision.
+    assert "5c28cc68dc621cc9448c5c9882ef9e21fdc85884" in run
+    assert "b968826d9c46dd6066d109eabc6255188de91218" in run
+    # The MPK baseline/megakernel demo pair and stock vLLM are the only paths.
+    assert "demo/qwen3/demo.py" in run
+    assert "--use-mirage" in run
+    assert "vllm==0.23.0" in run
+    assert "emmy serve" not in run
+    assert "EMMY_GEN_DECODE_BUCKET" not in run
+    assert "for repeat in 0 1 2 3 4" in run
+    # The suite's deterministic serving controls on the single-stream decode point.
+    assert "--ignore-eos --temperature 0 --seed 0" in run
+    assert "--max-concurrency 1" in run
+    assert "--no-enable-prefix-caching" in run
+
+
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
@@ -260,7 +287,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 42
+    assert rendered == 43
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

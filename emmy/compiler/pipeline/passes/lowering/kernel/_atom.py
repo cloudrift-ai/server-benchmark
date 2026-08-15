@@ -365,12 +365,31 @@ def _clamp_last(idx: Expr, ext: Expr) -> Expr:
     return TernaryExpr(cond=BinaryExpr("<", idx, ext), if_true=idx, if_false=BinaryExpr("-", ext, Literal(1, "int")))
 
 
-def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool):
+def _side_base(side: Side) -> Expr:
+    """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
+    count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
+    return BinaryExpr("*", Var(side.block), Literal(side.tile, "int"))
+
+
+def _sibling_sigma(sibling: Side | None) -> dict[str, Expr]:
+    """The σ entry for the operand's OTHER tiled output axis. A staged slab is CTA-shared across
+    the sibling axis, so the drain contract already requires the operand's gmem address be
+    sibling-invariant in VALUE — but the sibling var can still appear SYNTACTICALLY, through a
+    flat-index reshape residue (a merged / reshaped weight row like ``(m·N + n) % N``, whose ``m``
+    contribution is a multiple of the modulus and folds away). After the tile split the kernel
+    decodes only the ``_b`` / ``_u`` split vars, never the bare axis name, so leaving the sibling
+    unsubstituted emits an undefined identifier. Bind it to the CTA's block base — an in-bounds
+    representative under which a value-dead residue evaluates unchanged."""
+    return {} if sibling is None else {sibling.axis.name: _side_base(sibling)}
+
+
+def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bool, sibling: Side | None = None):
     """The **one** cp.async slab gmem-index factory, for either operand and either tier. The slab's
     inner (contiguous) dim maps to the contraction ``k_axis``, its outer dim to the stationary ``tile``
     axis (``m`` for A, ``n`` for B). For A the tile axis is the slab ROW (K the col); for B they swap
     (``slot[row][col] = A[row_base + row][k0 + col]`` / ``B[k0 + row][col_base + col]``). A masked tile
     coordinate is clamped in-bounds — the overhanging cell reads a duplicate and its store is guarded.
+    A residual reference to the ``sibling`` output axis binds to its block base (:func:`_sibling_sigma`).
     Returns a ``k0 -> ((row, col) -> gmem index)`` map — one K-chunk offset per :func:`staged_kloop`
     fill."""
 
@@ -378,7 +397,13 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
         def gmem(row, col):
             tc, kc = (row, col) if tile_is_row else (col, row)
             t = BinaryExpr("+", tile_base, tc)
-            sig = Sigma({tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t, k_axis.name: BinaryExpr("+", k0, kc)})
+            sig = Sigma(
+                {
+                    tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t,
+                    k_axis.name: BinaryExpr("+", k0, kc),
+                    **_sibling_sigma(sibling),
+                }
+            )
             return tuple(sig.apply(e) for e in operand_index)
 
         return gmem
@@ -388,17 +413,18 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
 
 def _tile_base(mn: tuple[Side, Side]) -> tuple[Expr, Expr]:
     """The CTA tile's ``(row_base, col_base)`` top-left origin — ``(m_b·tile_m, n_b·tile_n)``."""
-    return tuple(BinaryExpr("*", Var(s.block), Literal(s.tile, "int")) for s in mn)
+    return tuple(_side_base(s) for s in mn)
 
 
-def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis):
+def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis, sibling: Side | None = None):
     """The TMA box origin at K-chunk ``k0`` — the operand's OWN gmem index evaluated (σ) at the
     tile base and ``k0``, so an offset operand (a split-K partial's ``ksplit·(K/w) + k``) lands
     the box at its absolute coordinates. For a canonical operand this is exactly ``(tile_base,
-    k0)`` (A, tile axis the slab row) / ``(k0, tile_base)`` (B)."""
+    k0)`` (A, tile axis the slab row) / ``(k0, tile_base)`` (B). A residual reference to the
+    ``sibling`` output axis binds to its block base (:func:`_sibling_sigma`)."""
 
     def at(k0):
-        sig = Sigma({tile.axis.name: tile_base, k_axis.name: k0})
+        sig = Sigma({tile.axis.name: tile_base, k_axis.name: k0, **_sibling_sigma(sibling)})
         return tuple(sig.apply(e) for e in operand_index)
 
     return at
@@ -433,7 +459,7 @@ def _slab_operands(
     cp.async-staged byte slab; 0 everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
-        tile, tile_base = mn[i], base[i]
+        tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
@@ -447,8 +473,8 @@ def _slab_operands(
                 buf=bufs[i],
                 shape=shape,
                 box=box,
-                coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis),
-                index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row),
+                coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, sibling=sibling),
+                index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling),
                 swizzle=swizzles[i],
                 dtype=cuda_name(elem) if elem is not None else None,
                 elem_bytes=elem.nbytes if elem is not None else None,
@@ -547,8 +573,8 @@ def _sync_operands(
             tag="a",
             buf=c.a.input,
             shape=(mn[0].tile, bk_elems),
-            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis),
-            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True),
+            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
+            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
             swizzle=swizzles[0],
         )
         async_ops.append(a_op)
@@ -578,8 +604,8 @@ def _sync_operands(
             tag=tag,
             buf=bl.input,
             shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans),
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, sibling=mn[0]),
+            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans, sibling=mn[0]),
             swizzle=swizzles[1],
             trans=c.b_trans,
         )
@@ -711,6 +737,21 @@ def _unroll_inner(axis) -> bool:
     (≤ 64 trips, or the ``EMMY_UNROLL`` budget) — register-resident operand reuse + ILP, the
     scalar-SGEMM lever."""
     return unroll_ok(axis.extent, 64)
+
+
+def _cell_varying(body, side: Side | None) -> bool:
+    """Whether an operand's producing ``body`` varies along ``side`` — the OTHER output axis of the
+    register tile (n for A, m for B).
+
+    A gmem ``Load`` edge indexes its own axes only, so this is False and the tile's reuse holds: one
+    A read per register row, one B read per column. A COMPUTED edge is free to read the sibling
+    coordinate — the o_proj shape whose A cone is broadcast over n (``out[m, n] = Σ_k B[n, k] ·
+    A[m, k, n]``) — and then the row read is BOTH the wrong value for every column but the first and
+    a reference to a coordinate the kernel does not define: after the tile split only the ``_b`` /
+    ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
+    axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
+    whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
+    return side is not None and Body(body).depends_on(body, side.name)
 
 
 def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
@@ -1181,26 +1222,45 @@ class _ScalarOps(_AtomOps):
         gmem ``Load`` — or the computed register-resident body, e.g. flash PV's ``P``), each COL its
         B ``Load`` once, each ``(i, j)`` cell folds ``acc__c{i}_{j} += b·a``, and the K-loop is a unit
         ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
-        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`)."""
+        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`).
+
+        An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
+        CELL instead — the row / column reuse is a property of the operand, not of the tier."""
         c = self.c
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp sync compute-fill"
         k_axis = c.axis
         m, n = mn
         prot = _scalar_protected(c, self.tile, self.lead)
         b_name, a_name = operand_name(c.b), operand_name(c.a)
+        a_body, b_body = operand_body(c.a), operand_body(c.b)
+        a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
+
+        def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
+            return {} if m is None else {m.name: _wrap(m, offset[0].base(i))}
+
+        def at_n(j):  # register column ``j``'s n coordinate
+            return {n.name: _wrap(n, offset[1].base(j))}
 
         def read_row(i):
-            if m is None:
-                return copy_cell(operand_body(c.a), Sigma({}), f"__ar{i}", prot)
-            return copy_cell(operand_body(c.a), Sigma({m.name: _wrap(m, offset[0].base(i))}), f"__ar{i}", prot)
+            return [] if a_cell else copy_cell(a_body, Sigma(at_m(i)), f"__ar{i}", prot)
 
         def read_col(j):
-            return copy_cell(operand_body(c.b), Sigma({n.name: _wrap(n, offset[1].base(j))}), f"__bc{j}", prot)
+            return [] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot)
 
         def contract(i, j):
+            # A cell-varying operand's read lands here, σ-bound to BOTH coordinates and suffixed with
+            # the full cell, so every coordinate it mentions is substituted and each cell owns its copy.
+            cell = Sigma({**at_m(i), **at_n(j)})
+            a_sfx = f"__ar{i}_{j}" if a_cell else f"__ar{i}"
+            b_sfx = f"__bc{i}_{j}" if b_cell else f"__bc{j}"
+            reads = [
+                *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
+                *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
+            ]
             v = f"{c.acc}__v__c{i}_{j}"
             return [
-                Assign(name=v, op=_MUL, args=(f"{b_name}__bc{j}", f"{a_name}__ar{i}")),
+                *reads,
+                Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
                 Accum(name=f"{c.acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
             ]
 

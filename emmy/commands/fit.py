@@ -2,15 +2,16 @@
 metrics file.
 
 The fitter entry point: one pipeline, two orthogonal switches — ``--trainer``
-(model class) × ``--data`` (training data). Only the ``linear`` × ``golden`` combination exists
-today (the incumbent trainer on the golden dataset); the other combinations arrive with the
-measurement-freeze training work and until then are rejected loudly.
+(model class: the incumbent ``linear`` weights or a ``catboost`` ranker) × ``--data`` (training data).
+Only ``--data golden`` exists today; the freeze cells arrive with the measurement-freeze training work
+and until then are rejected loudly. Both trainers write the same artifact shape, distinguished by its
+``kind`` field, so either can be pointed at with ``EMMY_OFFLINE_FILE`` and A/B'd against the other.
 
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and ``<out>/weights.json``, the full-train artifact in the
 shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
-``cv.<axis>`` holdout/train/gap blocks) is documented on
+a ``cv.shape`` holdout/train/gap block) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
 module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
@@ -32,14 +33,14 @@ from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.prior.fit import Group
+from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
+from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
-from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, feature_view
+from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, TREE_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
 logger = logging.getLogger(__name__)
-
-FOLD_AXES = ("op_family", "gpu")
 
 
 def register_fit_command(subparsers) -> None:
@@ -53,20 +54,41 @@ def register_fit_command(subparsers) -> None:
         "--samples",
         type=int,
         default=0,
-        help="Random weight vectors before coordinate descent (default 0: descent-from-seed, the incumbent practice).",
+        help="linear only: random weight vectors before coordinate descent (default 0: descent-from-seed, the incumbent practice).",
     )
     parser.add_argument(
         "--l2",
         type=float,
         default=fit_linear.DEFAULT_L2,
-        help="Raw-space L2 penalty strength in the fit loss (default: the declared tie-breaker strength; 0 disables).",
+        help="linear only: raw-space L2 penalty strength in the fit loss (default: the declared tie-breaker strength; 0 disables).",
+    )
+    parser.add_argument("--iterations", type=int, default=500, help="catboost only: boosting iterations.")
+    parser.add_argument(
+        "--negatives",
+        type=int,
+        default=fit_catboost.DEFAULT_NEGATIVES,
+        help="catboost only: sampled negatives per pool per round (the golden is the group's single positive).",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=fit_catboost.DEFAULT_ROUNDS,
+        help="catboost only: fit rounds — the first draws negatives uniformly, each further one mines hard negatives.",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--folds", choices=(*FOLD_AXES, "both", "none"), default="both", help="Cross-validation fold axes (default: both).")
+    parser.add_argument(
+        "--folds",
+        type=int,
+        default=fit_cv.DEFAULT_FOLDS,
+        help="Cross-validation folds, grouped by shape so goldens sharing a candidate pool are held out together "
+        f"(default {fit_cv.DEFAULT_FOLDS}; 0 skips cross-validation).",
+    )
     parser.add_argument(
         "--features",
-        default=DEFAULT_FEATURES,
-        help="Feature view: comma-separated names, trailing '*' = prefix glob (recorded in metrics + provenance).",
+        default=None,
+        help="Feature view: comma-separated names, trailing '*' = prefix glob, leading '-' excludes (recorded in "
+        "metrics + provenance). Default: the trainer's own view — the full D_* set for 'linear', and for "
+        "'catboost' that set minus the features a tree re-derives from the columns it keeps.",
     )
     parser.add_argument(
         "--artifact",
@@ -77,6 +99,20 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>-<data>/).")
     parser.set_defaults(func=handle_fit)
+
+
+def _shape_group(g) -> str:
+    """The golden's cross-validation fold group: its ``ShapeKey`` with the two fields normalized away that
+    separate goldens sharing a candidate pool.
+
+    ``is_dyn`` because a ``.dynM`` golden *enumerates its static counterpart's pool* (see
+    :func:`build_golden_groups`) — split them across folds and the fold model is scored on rows it trained on.
+    ``is_warp`` because the fp16/fp32 twins of one geometry are the same physical shape; their pools are
+    disjoint, so this one is conservatism rather than necessity, and it costs 21 groups out of 435.
+
+    ``kind`` and the extents stay: ``flash`` / ``softmax`` / ``rms_norm`` / ``fused`` are different kernels, not
+    variants of one shape. The result is a string so it lands in the metrics file as-is."""
+    return str(replace(g.shape_key, is_dyn=False, is_warp=False))
 
 
 def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Group], list[tuple[str, str, str]]]:
@@ -152,8 +188,25 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         key_counts[key] = key_counts.get(key, 0) + 1
         if key_counts[key] > 1:
             key = f"{key}#{key_counts[key]}"
-        cases.append(Group.from_dicts(key, g.name, tier, g.gpu_name, gidx, feats))
+        cases.append(Group.from_dicts(key, g.name, tier, g.gpu_name, _shape_group(g), gidx, feats))
     return cases, skipped
+
+
+def _write_artifact(path: Path, model, provenance: dict) -> None:
+    """Write one weights artifact — the JSON, plus the model's binary sidecar when it has one.
+
+    The sidecar is named after the JSON (``weights.json`` → ``weights.cbm``) and recorded RELATIVE in the JSON,
+    so the pair travels together: copied into a run directory, rsynced to a tuning box, or checked in beside the
+    shipped weights. Naming it after its own JSON is what lets two artifacts share a directory without one
+    silently overwriting the other's model.
+
+    Which classes have a sidecar is the MODEL's business, not this function's: it asks for ``model_file`` in the
+    artifact and writes ``blob`` only if the model put the key there. A linear artifact is self-contained and
+    simply does not."""
+    artifact = model.to_artifact(provenance=provenance, model_file=f"{path.stem}.cbm")
+    storage.write_json(path, artifact, indent=2)
+    if "model_file" in artifact:
+        (path.parent / artifact["model_file"]).write_bytes(model.blob)
 
 
 def _repo_commit() -> str:
@@ -164,24 +217,14 @@ def _repo_commit() -> str:
         return "unknown"
 
 
-def handle_fit(args) -> None:
+def _linear_trainers(args, names: list[str]):
+    """The linear cell's trainer pair and the hyperparameters its metrics header records.
+
+    Full-train seeds from the incumbent artifact's weights; fold models seed from ZEROS
+    (``warm_start=False``) — the incumbent's weights were fit on every golden, so warm-starting a fold from
+    them would leak each held-out golden into its own holdout model. The scalar params seed from the incumbent
+    either way: two numbers a fold fit re-derives, not a per-golden memory."""
     from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
-
-    if args.trainer != "linear" or args.data != "golden":
-        raise SystemExit(
-            f"--trainer {args.trainer} x --data {args.data} is not yet supported — only 'linear' x 'golden' exists "
-            "(the freeze/catboost cells land with the training-data work)"
-        )
-    axes = list(FOLD_AXES) if args.folds == "both" else [] if args.folds == "none" else [args.folds]
-
-    out_dir = Path(args.out) if args.out else Path("_tune/fits") / f"{time.strftime('%Y%m%d-%H%M%S')}-{args.trainer}-{args.data}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Building golden dataset (each golden under its own card's context) ...")
-    cases, skipped = build_golden_groups(args.features)
-    names = sorted({n for c in cases for n in c.feat_names})
-    n_dyn = sum(1 for c in cases if c.dynamic)
-    logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
 
     raw = storage.read_json(config.offline_path() or _DEFAULT_FILE)
     if not isinstance(raw, dict) or "scale" not in (raw.get("params") or {}):
@@ -194,61 +237,109 @@ def handle_fit(args) -> None:
     # artifact whose params block still lists the retired gate weights simply loses them here — they
     # are linear terms now. ``scale`` rides along on the model, rank-neutral and never fitted.
     incumbent = LinearModel.from_artifact(raw)
-
-    # Full-train seeds from the incumbent's weights; fold models seed from ZEROS
-    # (``warm_start=False``) — the incumbent's weights were fit on every golden, so warm-starting a
-    # fold from them would leak each held-out golden into its own holdout model. The scalar params
-    # seed from the incumbent either way: two numbers a fold fit re-derives, not a per-golden memory.
-    # Both policies are recorded in the header below.
     trainer = fit_linear.LinearTrainer(feature_names=tuple(names), init=incumbent, samples=args.samples, l2=args.l2, random_state=args.seed)
     fold_trainer = replace(trainer, warm_start=False)
+    params = {
+        "samples": args.samples,
+        "l2": args.l2,
+        "objective": getattr(trainer.objective, "__name__", repr(trainer.objective)),
+        "full_train_seed_weights": "incumbent" if trainer.warm_start else "zeros",
+        "fold_seed_weights": "incumbent" if fold_trainer.warm_start else "zeros",
+    }
+    return trainer, fold_trainer, params, incumbent
 
+
+def _catboost_trainers(args, names: list[str]):
+    """The tree cell's trainer and its recorded hyperparameters. ONE trainer serves both the shippable model and
+    every fold: a tree ensemble has no warm start, so there is no seeding policy to differ on and no way for a
+    fold model to inherit anything from the held-out golden."""
+    trainer = fit_catboost.CatBoostTrainer(
+        feature_names=tuple(names),
+        iterations=args.iterations,
+        negatives=args.negatives,
+        rounds=args.rounds,
+        random_state=args.seed,
+    )
+    params = {
+        "iterations": args.iterations,
+        "negatives": args.negatives,
+        "rounds": args.rounds,
+        "depth": trainer.depth,
+        "learning_rate": trainer.learning_rate,
+        "objective": "QuerySoftMax",
+    }
+    return trainer, trainer, params, None
+
+
+# Each trainer's factory and its default feature view. The views differ because the model classes do: the
+# linear one needs the engineered step / fold / interaction features, having no way to form them, and the
+# tree re-derives every one of them from the columns :data:`TREE_FEATURES` keeps. ``--features`` overrides
+# either, which is how the two views are compared on one model class.
+TRAINERS = {
+    "linear": (_linear_trainers, DEFAULT_FEATURES),
+    "catboost": (_catboost_trainers, TREE_FEATURES),
+}
+
+
+def handle_fit(args) -> None:
+    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
+
+    if args.data != "golden":
+        raise SystemExit(
+            f"--data {args.data} is not yet supported — only 'golden' exists (the freeze cells land with the training-data work)"
+        )
+
+    out_dir = Path(args.out) if args.out else Path("_tune/fits") / f"{time.strftime('%Y%m%d-%H%M%S')}-{args.trainer}-{args.data}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    make_trainers, default_view = TRAINERS[args.trainer]
+    view = args.features or default_view
+
+    logger.info("Building golden dataset (each golden under its own card's context) ...")
+    cases, skipped = build_golden_groups(view)
+    names = sorted({n for c in cases for n in c.feat_names})
+    n_dyn = sum(1 for c in cases if c.dynamic)
+    logger.info("  %d static + %d dynamic golden cases, %d D_* features, %d skipped", len(cases) - n_dyn, n_dyn, len(names), len(skipped))
+
+    trainer, fold_trainer, trainer_params, incumbent = make_trainers(args, names)
     header = {
         "trainer": args.trainer,
         "data": args.data,
         "seed": args.seed,
         "feat_ver": features.FEATURIZER_VERSION,
-        "features": args.features,
-        "fold_axes": axes,
+        "features": view,
+        "folds": args.folds,
         "repo_commit": _repo_commit(),
-        "trainer_params": {
-            "samples": args.samples,
-            "l2": args.l2,
-            "objective": getattr(trainer.objective, "__name__", repr(trainer.objective)),
-            "full_train_seed_weights": "incumbent" if trainer.warm_start else "zeros",
-            "fold_seed_weights": "incumbent" if fold_trainer.warm_start else "zeros",
-        },
+        "trainer_params": trainer_params,
     }
     import datetime  # noqa: PLC0415
 
-    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, axes=axes, header=header)
+    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, folds=args.folds, header=header)
 
-    # Shipping policy, and the reason ``run_fit`` hands back a fit rather than an artifact: a fit
-    # with no dynamic cases would otherwise ship with no dynamic weight set at all, so carry the
-    # incumbent's forward — loudly, in the provenance notes, never silently.
     model, notes = fit.model, fit.notes
-    if model.weights_dynamic is None:
+    # Shipping policy, and the reason ``run_fit`` hands back a fit rather than an artifact: a LINEAR fit with no
+    # dynamic cases would otherwise ship with no dynamic weight set at all, so carry the incumbent's forward —
+    # loudly, in the provenance notes, never silently. The tree model has no second weight set to be missing.
+    if isinstance(model, LinearModel) and model.weights_dynamic is None:
         # ``is not None``, not truthiness: an incumbent that legitimately pruned every dynamic
         # coordinate carries an EMPTY set, and that is still its answer, not a missing one.
         carried = incumbent.weights_dynamic if incumbent.weights_dynamic is not None else model.weights
         source = "incumbent" if incumbent.weights_dynamic is not None else "the static fit"
         model = replace(model, weights_dynamic=carried)
         notes = f"{notes}; dynamic set carried from {source}"
-    artifact = model.to_artifact(
-        provenance={
-            "fitted": datetime.date.today().isoformat(),
-            "script": "emmy fit",
-            "args": {"samples": args.samples, "l2": args.l2, "seed": args.seed},
-            "features": args.features,
-            "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
-            "notes": notes,
-        }
-    )
+    provenance = {
+        "fitted": datetime.date.today().isoformat(),
+        "script": "emmy fit",
+        "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
+        "features": view,
+        "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
+        "notes": notes,
+    }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-    storage.write_json(out_dir / "weights.json", artifact, indent=2)
+    _write_artifact(out_dir / "weights.json", model, provenance)
     if args.artifact is not None:
         artifact_path = Path(args.artifact) if args.artifact else _DEFAULT_FILE
-        storage.write_json(artifact_path, artifact, indent=2)
+        _write_artifact(artifact_path, model, provenance)
         logger.info("wrote %s", artifact_path)
 
     for gpu, card in metrics["full_train"]["per_card"].items():

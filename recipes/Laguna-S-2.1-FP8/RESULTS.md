@@ -68,8 +68,7 @@ existing Emmy CLI, discard its first two client warmups, and report repeats thre
 emmy bench experiments/Laguna-S-2.1-FP8/serving_v100_sxm3 --ssh riftuser@66.172.10.131
 ```
 
-The command writes ignored local output. Do not use `--commit-results`; `RESULTS.md` is the only retained benchmark
-artifact.
+Use `$run-experiment` to retain the latest raw results, system-only experiment records, and factual artifact index.
 
 ## Limits
 

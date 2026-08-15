@@ -1,8 +1,9 @@
 # Golden bench 2026
 
-This experiment suite supports the Emmy compiler submission. Raw measurements remain in benchmark run directories;
-the repository holds only recipes, frozen inputs, and the scientific protocol. A recipe is not evidence until its
-required artifacts exist and an intelligent reviewer accepts them against the checklist below.
+This experiment suite supports the Emmy compiler submission. Each executed experiment retains its latest raw-results
+archive, available per-row experiment records, and `RESULTS.md` beside the recipe and frozen protocol inputs. The
+ignored raw directory may be removed after the archive is verified. A recipe is not evidence until its required
+artifacts exist and an intelligent reviewer accepts them against the checklist below.
 
 ## Evidence sets
 
@@ -13,6 +14,7 @@ required artifacts exist and an intelligent reviewer accepts them against the ch
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
+| Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -49,10 +51,10 @@ exact full-layer trace and re-resolved in that fusion context; they are not stan
 that cannot retain a runnable eager/Inductor reference fails the task and makes the supplement incomplete.
 
 Each search has an isolated tuning database, online checkpoint, and cubin cache. The positional trace input and model
-provenance use the same full revision. `emmy bench` requires a clean staged source tree and records its Git revision,
-content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA compiler, command status, online
-checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
-evidence and does not prevent later rows from running.
+provenance use the same full revision. `emmy bench` requires a clean staged source tree. Its experiment record captures
+the Git revision, content-addressed source manifest, GPU UUID/state, driver, GPU compiler, command status, and
+raw-artifact paths; the command retains its package freeze, online checkpoint, and tuning evidence. Every matrix row
+is a separate task, so a failed case preserves its partial evidence and does not prevent later rows from running.
 
 The directly searched winner must match its measured knob map exactly. The recipe invokes
 `emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.
@@ -132,6 +134,7 @@ measure Emmy compiler speedup and are not inputs to the protocol-only kernel lan
 | 8x A100 | DeepSeek-V4-Flash-0731 EXL3 3.04 bpw, TP8 | New checkpoint on an older serving platform | Stretch compatibility/refusal study; requires an Emmy arm |
 | 8x H200 | GLM-5.2 FP8, TP8 | Primary datacenter serving system | Stock qualification until an Emmy arm and TP8 manifest exist |
 | 8x B200 | GLM-5.2 NVFP4, TP8 with expert parallelism | Same architecture on Blackwell | Optional stock qualification until matched evidence exists |
+| 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
 All serving points disable prefix caching and use seed 0, temperature 0, and ignored EOS. Each point expands to five
 tasks with `benchmark.repeats: 1`, so every observation receives a fresh deployed server instead of five clients
@@ -166,13 +169,35 @@ lower endpoint exceeds one. The equal-weight four-point summary is the geometric
 10,000-draw seed-0 bootstrap that resamples the five pairs within each point. "Faster across the matrix" requires
 all four points and the summary to meet the same lower-bound rule.
 
-For every serving task, intelligent review must confirm `successful_requests == num_prompts`, `failed_requests == 0`,
-the complete preregistered matrix, the intended backend from the raw logs, and plausible outputs and metrics. `emmy
-bench` records these facts but does not accept or reject them. No performance outlier is removed. A machine-readable
-deployment, client, or network failure before a complete metric may trigger one rerun of the entire stock/Emmy pair
-for that workload/repeat; retain and disclose both failed originals. A second failure makes the point incomplete. A
-semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration fix, restart
-the entire 40-task matrix under a new source ID.
+For every serving task, intelligent review of the raw output must confirm `successful_requests == num_prompts`,
+`failed_requests == 0`, the complete preregistered matrix, the intended backend from the raw logs, and plausible
+outputs and metrics. `emmy bench` preserves the raw output but does not parse, accept, or reject measurements. No
+performance outlier is removed. A machine-readable deployment, client, or network failure before a complete metric
+may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
+originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
+never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source ID.
+
+## Megakernel comparison lane
+
+`serving_mpk_qwen3_8b_a100` runs vLLM and MPK (Mirage Persistent Kernel, arXiv 2512.22219). MPK compiles a tensor
+program into one persistent kernel whose in-kernel scheduler runs every operator inside a single launch. Three paths
+run on one A100 80GB with the same pinned Qwen/Qwen3-8B checkpoint and five fresh-process repeats each: MPK's own
+kernel-per-operator demo harness, the same harness with `--use-mirage`, and stock vLLM driven by one single-stream
+128-in/512-out decode point with the suite's deterministic controls. The mirage source and model revisions are pinned
+in the recipe.
+
+The MPK paths use MPK's demo harness while the vLLM path includes its serving stack, so the recipe preserves their raw
+outputs without interpreting or comparing them. The lane is not an input to any kernel-corpus geometric mean. MPK
+targets Ampere/Hopper datacenter GPUs, so this lane cannot extend to the suite's older or consumer platforms.
+
+Every path is additionally positioned against a device-calibrated roofline, reusing the boot audit's calibrations
+(`emmy/serving/roofline.py`: measured device-to-device copy bandwidth and measured f16 dense-matmul throughput —
+no specification-sheet peaks). The decode-step floor is the checkpoint's streamed weight bytes (all parameters
+except the embedding matrix, of which decode reads one row) over measured copy bandwidth; the compute floor is
+negligible at single-token decode. The same calibrations define the per-kernel headroom metric — measured kernel
+latency over max(weight-streaming floor, compute floor) for that kernel's weight bytes and token width — which
+decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
+This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
 
 ## Intelligent publication review
 

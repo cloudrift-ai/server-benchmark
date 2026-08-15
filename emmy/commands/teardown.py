@@ -1,16 +1,37 @@
-"""Teardown command: clean up VMs left running by --no-teardown."""
+"""Clean up VMs retained by experiment records."""
 
 import asyncio
-import json
 import logging
 import sys
+from collections import defaultdict
 from pathlib import Path
 
+from emmy.benchmark.experiment_record import ExperimentRecord
 from emmy.deploy.orchestrate import run_teardown
 from emmy.provisioning.cloud import delete_cloud_vm
 from emmy.provisioning.ssh_transport import make_run_cmd
 
 logger = logging.getLogger(__name__)
+
+
+def _load_active_instances(directory: Path) -> dict[tuple, list[tuple[Path, ExperimentRecord]]]:
+    """Group active infrastructure handles from row records."""
+    paths = [*directory.glob("*.experiment.yaml"), *directory.glob("????-??-??_??-??-??/*.experiment.yaml")]
+    instances: dict[tuple, list[tuple[Path, ExperimentRecord]]] = defaultdict(list)
+    for path in sorted(set(paths)):
+        record = ExperimentRecord.read(path)
+        infrastructure = record.execution.infrastructure
+        if infrastructure is None or infrastructure.state != "active":
+            continue
+        key = (
+            infrastructure.provider,
+            infrastructure.instance_id,
+            infrastructure.zone,
+            infrastructure.address,
+            infrastructure.ssh_port,
+        )
+        instances[key].append((path, record))
+    return instances
 
 
 def handle_teardown(args):
@@ -19,75 +40,64 @@ def handle_teardown(args):
 
 
 async def _handle_teardown(args):
-    run_dir = Path(args.run_dir)
-    instances_path = run_dir / "instances.json"
+    experiment_dir = Path(args.experiment_dir)
     ssh_key = args.ssh_key
-
-    if not instances_path.exists():
-        logger.error(f"No instances.json found in {run_dir}")
+    instances = _load_active_instances(experiment_dir)
+    if not instances:
+        logger.error(f"No active instances found in experiment records under {experiment_dir}")
         sys.exit(1)
 
-    instances = json.loads(instances_path.read_text())
-    if not instances:
-        logger.info("instances.json is empty — nothing to tear down.")
-        return
-
-    logger.info(f"Tearing down {len(instances)} instance(s) from {run_dir}")
-    logger.info("")
-
+    logger.info(f"Tearing down {len(instances)} instance(s) from {experiment_dir}")
     errors = []
-    for inst in instances:
-        label = inst.get("group_label", "unknown")
-        address = inst.get("address", "")
-        ssh_port = inst.get("ssh_port", 22)
-        provider = inst.get("provider")
-        instance_id = inst.get("instance_id")
-
+    for key, records in instances.items():
+        provider, instance_id, zone, address, ssh_port = key
+        infrastructure = records[0][1].execution.infrastructure
+        label = infrastructure.group
         logger.info(f"[{label}] {address} ({provider}: {instance_id})")
 
-        # Docker compose down
         if address:
             logger.info(f"  Stopping containers on {address}...")
             run_cmd = make_run_cmd(address, ssh_key, ssh_port)
             await run_teardown(run_cmd)
 
-        # Delete VM
         if provider and instance_id:
             logger.info(f"  Deleting VM ({provider}: {instance_id})...")
             try:
                 if provider == "gcp":
-                    zone = inst.get("zone")
                     if not zone:
-                        logger.error(f"  WARNING: missing zone for GCP instance {instance_id}")
-                        errors.append(label)
-                        continue
+                        raise ValueError(f"missing zone for GCP instance {instance_id}")
                     delete_info = (provider, instance_id, zone)
                 else:
                     delete_info = (provider, instance_id)
-                await delete_cloud_vm(delete_info)
-                logger.info("  VM deleted.")
-            except Exception as e:
-                logger.error(f"  ERROR deleting VM: {e}")
+                deleted = await delete_cloud_vm(delete_info)
+                if deleted is False:
+                    raise RuntimeError("provider reported that VM deletion failed")
+            except Exception as exc:
+                logger.error(f"  ERROR deleting VM: {exc}")
                 errors.append(label)
                 continue
+            logger.info("  VM deleted.")
+
+        for path, record in records:
+            record.execution.infrastructure.state = "deleted"
+            record.execution.infrastructure.deleted_at = ExperimentRecord.utc_timestamp()
+            record.write(path)
 
     if errors:
-        logger.info(f"\nFailed to clean up {len(errors)} instance(s): {', '.join(errors)}")
+        logger.info(f"Failed to clean up {len(errors)} instance(s): {', '.join(errors)}")
         sys.exit(1)
-    else:
-        instances_path.unlink()
-        logger.info(f"\nAll instances cleaned up. Removed {instances_path}")
+    logger.info("All retained instances cleaned up; experiment records updated.")
 
 
 def register_teardown_command(subparsers):
     """Register the teardown subcommand."""
     parser = subparsers.add_parser(
         "teardown",
-        help="Tear down VMs left running by 'bench --no-teardown'",
+        help="Tear down VMs retained by 'bench --no-teardown'",
     )
     parser.add_argument(
-        "run_dir",
-        help="Run directory containing instances.json",
+        "experiment_dir",
+        help="Experiment directory containing active experiment records",
     )
     parser.add_argument(
         "--ssh-key",

@@ -55,7 +55,7 @@ def evaluate_record(record, ctx: Context, scorer: Callable[[dict], float] | None
         base = {**ctx.features(), **record.structural_features}
 
         def scorer(row):
-            return -prior.score({**base, **row})
+            return -prior.mean_score({**base, **row})
 
     want = tile_signature(record.knobs) if record.knobs else None
     golden_index = next((i for i, row in enumerate(rows) if tile_signature(row) == want), None) if want else None

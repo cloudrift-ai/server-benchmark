@@ -1625,6 +1625,32 @@ class _AsyncBenchWorker:
                 await asyncio.wait_for(self._stderr_task, timeout=2.0)
             self._stderr_task = None
 
+    @staticmethod
+    async def _death_reason(proc) -> str:
+        """How the child died, for the EOF diagnostics.
+
+        A worker that raises returns the exception to the parent (the request loop catches
+        ``BaseException`` and answers with a traceback), so an EOF means the process went down
+        WITHOUT answering — a signal, or a silent ``return`` out of the request loop. Those write
+        nothing to stderr, which is why the tail is routinely empty and the exit status is the only
+        evidence there is. Reap briefly rather than reading ``returncode`` directly: at the moment
+        the pipe breaks the child is usually dead but not yet awaited, so the attribute is still
+        ``None``."""
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except (TimeoutError, ProcessLookupError):
+            return "child still unreaped"
+        if rc is None:
+            return "no exit status"
+        if rc < 0:
+            import signal as _signal  # noqa: PLC0415 — only needed on this failure path
+
+            try:
+                return f"killed by {_signal.Signals(-rc).name}"
+            except ValueError:
+                return f"killed by signal {-rc}"
+        return f"child exited rc={rc}"
+
     async def _stderr_snapshot(self) -> str:
         """The drained stderr tail, letting the drain task flush briefly first (after a
         kill it ends at EOF almost immediately)."""
@@ -1683,9 +1709,10 @@ class _AsyncBenchWorker:
                 ) from exc
             except asyncio.IncompleteReadError as exc:
                 stderr_tail = await self._stderr_snapshot()
+                death = await self._death_reason(proc)
                 await self.aclose()
                 if attempt == 1:
-                    raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
+                    raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
                 # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
                 # atexit deadlock, so a mid-job EOF usually means THIS config hangs — the retry
                 # will EOF again and fail loudly, costing one extra watchdog interval. But right
@@ -1695,7 +1722,7 @@ class _AsyncBenchWorker:
                 # sweeps kept hitting on the row right after a hang. One respawn + retry after a
                 # short drain grace tells the two apart (the same row replays clean once the
                 # zombie context is gone).
-                logger.info("[bench-worker] child EOF'd mid-job — draining the device and retrying once%s", self._tail_suffix())
+                logger.info("[bench-worker] child EOF'd mid-job (%s) — draining the device and retrying once%s", death, self._tail_suffix())
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 

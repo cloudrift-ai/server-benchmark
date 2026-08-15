@@ -216,7 +216,13 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
     from emmy.commands.run import _build_torch_fns
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
-    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    def wrong_compile(_module, *, fullgraph, mode):
+        assert fullgraph is True
+        assert mode == "max-autotune-no-cudagraphs"
+        return lambda: torch.tensor([2.0])
+
+    monkeypatch.setattr(torch, "compile", wrong_compile)
 
     fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
 

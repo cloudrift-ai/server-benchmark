@@ -1,0 +1,79 @@
+# Neptune's published A100 matrix plus a current-PyTorch/Emmy native-SDPA subset in one durable experiment.
+# The artifact stays unmodified in its pinned container; the paired host lane pins PyTorch 2.13.0.
+#
+# Repro on a pre-allocated A100 80GB (no cloud provisioning):
+#   emmy bench experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100 --local
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - README.md
+    - LICENSE
+    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
+    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
+    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh
+  strict: true
+  run: |
+    set -euo pipefail
+    IMAGE=evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca
+    NEPTUNE_REV=3aa55c12ac822337e630b809b0d9eabb11eee5d3
+    NEPTUNE_RUNNER=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
+    NEPTUNE_ENTRY=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
+    EMMY_RUNNER=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh
+    EVIDENCE=$task_dir/evidence
+    mkdir -p "$$EVIDENCE"
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > "$$EVIDENCE/emmy-requirements.freeze.txt" || final_status=1
+      else
+        echo "venv pip unavailable" > "$$EVIDENCE/emmy-requirements.freeze.txt"
+        final_status=1
+      fi
+      printf 'status=%s\n' "$$final_status" > $task_dir/status.txt
+      archive_tmp=$${task_dir}.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    docker pull "$$IMAGE" 2>&1 | tee "$$EVIDENCE/docker-pull.log"
+    docker image inspect "$$IMAGE" > "$$EVIDENCE/image-inspect.json"
+    docker run --rm --gpus all --ipc=host \
+      -e CUDA_VISIBLE_DEVICES=$gpu_device_ids \
+      -e NEPTUNE_REV="$$NEPTUNE_REV" \
+      -v "$$EVIDENCE:/results" \
+      -v "$$NEPTUNE_RUNNER:/experiment/run.sh:ro" \
+      -v "$$NEPTUNE_ENTRY:/experiment/run_neptune.py:ro" \
+      "$$IMAGE" bash /experiment/run.sh 2>&1 | tee "$$EVIDENCE/container.log"
+
+    export PATH=/usr/local/cuda/bin:$$PATH
+    if [ ! -x ./venv/bin/python ]; then
+      python3.12 -m venv venv --prompt emmy
+    fi
+    ./venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/emmy-install.log"
+    test "$$(./venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    ./venv/bin/python - <<'PY' > "$$EVIDENCE/emmy-torch-environment.txt"
+    import torch
+
+    print(f"torch={torch.__version__}")
+    print(f"cuda={torch.version.cuda}")
+    print(f"gpu={torch.cuda.get_device_name(0)}")
+    PY
+    nvidia-smi -q > "$$EVIDENCE/emmy-nvidia-smi.txt"
+    nvcc --version > "$$EVIDENCE/emmy-nvcc-version.txt"
+    sha256sum "$$EMMY_RUNNER" > "$$EVIDENCE/emmy-experiment-input.sha256"
+    "$$EMMY_RUNNER" ./venv/bin/emmy "$$EVIDENCE/emmy-tcompile"
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1

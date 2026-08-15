@@ -588,6 +588,16 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tuning_knob_items(knobs))
 
 
+def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """The verified tier's EXACT row identity: the recording-canonical view
+    (:func:`stamp_schedule_families`) restricted to the :data:`SCHEDULE_FAMILIES` keys — what the
+    schedule fork decides. A recorded row legitimately carries later forks' knobs too (the
+    kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
+    never part of THIS fork's identity."""
+    stamped = stamp_schedule_families(knobs)
+    return canonical_row_key({k: v for k, v in stamped.items() if family_of(k) in SCHEDULE_FAMILIES})
+
+
 def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent

@@ -563,7 +563,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     any-of, no classified shape."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import canonical_row_key, stamp_schedule_families  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
@@ -600,8 +600,8 @@ def decode_record(record: GoldenRecord) -> str | None:
         with pinned_knobs(record.pin_map):
             rows = enumerate_graph(record.target_program.copy(), ctx)
         _DECODE_ROWS_CACHE[cache_key] = rows
-    want = canonical_row_key(stamp_schedule_families(record.knobs))
-    hits = sum(1 for r in rows if canonical_row_key(stamp_schedule_families(r)) == want)
+    want = schedule_row_key(record.knobs)
+    hits = sum(1 for r in rows if schedule_row_key(r) == want)
     if hits == 1:
         return None
     if hits == 0:

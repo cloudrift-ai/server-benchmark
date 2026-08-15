@@ -16,7 +16,7 @@ from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.knob import canonical_row_key, stamp_schedule_families
+from emmy.compiler.pipeline.knob import schedule_row_key, stamp_schedule_families
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search import golden as golden_mod
 from emmy.compiler.pipeline.search.golden import decode_record, kernel_identity, load_golden_records
@@ -28,9 +28,9 @@ _CAP = (12, 0)
 
 
 def _row_key(knobs: dict):
-    """Both sides of every comparison normalize through the ONE recording canonicalizer — the
-    same rule the tier's decode uses."""
-    return canonical_row_key(stamp_schedule_families(knobs))
+    """Both sides of every comparison normalize through the ONE schedule-row identity — the same
+    rule the tier's decode uses."""
+    return schedule_row_key(knobs)
 
 
 def _matmul_graph():

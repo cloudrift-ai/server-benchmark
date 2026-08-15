@@ -547,7 +547,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     record for the fused identity keeps the fused side (the verified µs is fused truth, so the
     prior must not cut against it)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import canonical_row_key, stamp_schedule_families  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
@@ -585,12 +585,12 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     live = [(o, _leaf_knobs(o)) for o in leaves if not _is_structural_option(o)]
     if node_blocked is not None:
         live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
-    # Both sides normalize through the ONE recording canonicalizer (``stamp_schedule_families``:
-    # scoped-vs-bare OFF reconciliation, family OFF fills) — equality after it is exact realized
-    # identity, never a prefix or any-of acceptance.
-    by_key = {canonical_row_key(stamp_schedule_families(k)): (o, k) for o, k in live}
+    # Both sides normalize through the ONE schedule-row identity (``schedule_row_key``: the
+    # recording canonicalizer restricted to what THIS fork decides) — equality after it is exact
+    # realized identity, never a prefix or any-of acceptance.
+    by_key = {schedule_row_key(k): (o, k) for o, k in live}
     for rec in recs:
-        hit = by_key.get(canonical_row_key(stamp_schedule_families(rec.knobs)))
+        hit = by_key.get(schedule_row_key(rec.knobs))
         if hit is not None:
             return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
     logger.warning(

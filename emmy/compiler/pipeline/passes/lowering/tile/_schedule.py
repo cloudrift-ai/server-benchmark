@@ -1696,6 +1696,17 @@ def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
     return (*out, "->", *(str(t.dtype) for t in tile.outputs.values()))
 
 
+def deploy_identity(tile: TileOp) -> str:
+    """The verified-tier join key — the recognized term's α/buffer-invariant algebra digest
+    (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint the term
+    deliberately omits. A golden record derives the SAME key from its own persisted program
+    through the shared recognition core (``_lift.recognized_tile``), so the join is exact
+    structural identity — no classified shape, no matching heuristic. Unlike :func:`pool_key`
+    it excludes knobs, symbolic hints and live pins: identity is what the kernel IS; the strict
+    row decode (exact spelled-row equality) is what guarantees a record still realizes."""
+    return digest(tile.structural_key(), _dtype_fingerprint(tile))
+
+
 def pool_key(tile: TileOp) -> str:
     """The pool cache key — everything the enumeration reads that the Context does not pin.
     ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs; the
@@ -1750,4 +1761,4 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     return build_fork_tree(params=list(pool.rows), levels=levels, materialize=materialize)
 
 
-__all__ = ["FAMILIES", "MAX_ROWS", "pool_key", "schedule"]
+__all__ = ["FAMILIES", "MAX_ROWS", "deploy_identity", "pool_key", "schedule"]

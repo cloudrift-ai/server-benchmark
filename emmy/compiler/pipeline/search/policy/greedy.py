@@ -481,6 +481,129 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]
         )
 
 
+def _pins_live(pins: dict) -> bool:
+    """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
+    against the live env pin (unset = the knob's off state), anything else against the raw env
+    string. Strict by design: a record measured under FAST_MATH decides nothing on a standard
+    deploy, and vice versa."""
+    from emmy import config  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
+
+    knobs = registry()
+    for name, value in pins.items():
+        kn = knobs.get(str(name))
+        raw = kn.raw() if kn is not None else config.knob_raw(str(name))
+        if kn is not None and kn.type is KnobType.BOOL:
+            live = kn.parse(raw) if raw is not None else False
+            if bool(value) != live:
+                return False
+        elif (raw or "") != str(value):
+            return False
+    return True
+
+
+def _verified_index(ctx: Context) -> tuple[dict, dict]:
+    """The card's recorded goldens keyed by STRICT structural identity — the recognized term's
+    algebra digest + dtype fingerprint (``_schedule.deploy_identity``), derived record-side from
+    each record's own persisted program through the shared recognition core. Returns
+    ``(schedule rows, routing rows)`` as ``{identity: [records fastest-first]}``, scoped to the
+    live ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an
+    underivable row is skipped — the decode tripwire is where that is loud); classification-free:
+    no shape key, no matching heuristic, identity or nothing."""
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, kernel_identity  # noqa: PLC0415
+
+    gpu_name = getattr(ctx, "gpu_name", None)
+    if not gpu_name:
+        return {}, {}
+    sched: dict = {}
+    routing: dict = {}
+    try:
+        cap = tuple(ctx.compute_capability)
+        for g in GOLDEN_RECORDS:
+            if g.gpu_name != gpu_name or tuple(g.compute_cap) != cap or not g.knobs or not _pins_live(g.pin_map):
+                continue
+            identity = kernel_identity(g)
+            if identity is None:
+                continue
+            (routing if g.is_routing else sched).setdefault(identity, []).append(g)
+        for entries in (*sched.values(), *routing.values()):
+            entries.sort(key=lambda g: g.emmy_us or float("inf"))
+    except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
+        return {}, {}
+    return sched, routing
+
+
+def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
+    """The strict verified-tier decision for one fork, or ``None``.
+
+    A SCHEDULE fork (the recognized ``TileOp`` root): the fork's ``deploy_identity`` selects the
+    records; the fastest record whose spelled row is EXACTLY one enumerated leaf
+    (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
+    identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
+    acceptance this tier replaced is what deployed wrong kernels).
+
+    A PLACEMENT fork (``Graph`` cut options beside the fused ``TileOp``): a ROUTING record picks
+    the cut fragment whose parent piece stamps the record's ``PLACE`` keys; otherwise a schedule
+    record for the fused identity keeps the fused side (the verified µs is fused truth, so the
+    prior must not cut against it)."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, stamp_schedule_families  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+
+    leaves = flatten_leaves(fp.options)
+    structural = [o for o in leaves if _is_structural_option(o)]
+    if structural:
+        tile = next((o for o in leaves if isinstance(o, TileOp)), None)
+        if tile is None:
+            return None
+        identity = deploy_identity(tile)
+        for rec in routing_idx.get(identity, ()):
+            place = {k: str(v) for k, v in rec.knobs.items()}
+            for opt in structural:
+                graph = _leaf_graph(opt)
+                ops = [n.op for n in graph.nodes.values()]
+                stamps = {k: str(v) for op in ops for k, v in (getattr(op, "knobs", {}) or {}).items() if k.startswith("PLACE")}
+                if stamps == place:
+                    return opt, float(rec.emmy_us or 0.0), None
+            logger.warning(
+                "deploy: node %r matches routing golden %s by identity, but no cut option stamps %s — placement drift; falling through.",
+                fp.node_id,
+                rec.name,
+                place,
+            )
+        if identity in sched_idx:
+            return tile, float(sched_idx[identity][0].emmy_us or 0.0), None
+        return None
+    root = fp.root_op
+    if not isinstance(root, TileOp) or root.op is None:
+        return None
+    recs = sched_idx.get(deploy_identity(root))
+    if not recs:
+        return None
+    node_blocked = blocked.get(fp.node_id) if blocked else None
+    live = [(o, _leaf_knobs(o)) for o in leaves if not _is_structural_option(o)]
+    if node_blocked is not None:
+        live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
+    # Both sides normalize through the ONE recording canonicalizer (``stamp_schedule_families``:
+    # scoped-vs-bare OFF reconciliation, family OFF fills) — equality after it is exact realized
+    # identity, never a prefix or any-of acceptance.
+    by_key = {canonical_row_key(stamp_schedule_families(k)): (o, k) for o, k in live}
+    for rec in recs:
+        hit = by_key.get(canonical_row_key(stamp_schedule_families(rec.knobs)))
+        if hit is not None:
+            return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
+    logger.warning(
+        "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "
+        "the recording no longer realizes under the current enumeration (drift); falling through to measured "
+        "evidence / the prior. Records: %s",
+        fp.node_id,
+        len(recs),
+        ", ".join(g.name for g in recs),
+    )
+    return None
+
+
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
@@ -529,6 +652,8 @@ def greedy_decide(
     # Lazily-built per-compile DB evidence index (needs a fork point's ctx for the
     # context keys); ``None`` sentinel = not built yet, ``{}`` = built and empty.
     db_state: list = [None]
+    # Lazily-built per-compile verified-golden identity index — same sentinel convention.
+    verified_state: list = [None]
 
     def db_index() -> dict:
         return db_state[0] or {}
@@ -547,6 +672,23 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
+        # The VERIFIED tier: the card's recorded goldens, joined by strict structural identity
+        # and decoded by exact spelled-row equality. Needs no prior, and applies only in the
+        # deployable regime — a recorded µs is -O3 truth and must never arbitrate an -O1 compile.
+        from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
+
+        if float(fp.ctx.features().get("H_opt", _O3_OPT)) == _O3_OPT:
+            if verified_state[0] is None:
+                verified_state[0] = _verified_index(fp.ctx)
+            sched_idx, routing_idx = verified_state[0]
+            if sched_idx or routing_idx:
+                got_verified = _verified_pick(fp, sched_idx, routing_idx, blocked)
+                if got_verified is not None:
+                    leaf, price, row = got_verified
+                    fp.score = price
+                    if dkey is not None and row is not None:
+                        decisions[dkey] = (row, price)
+                    return leaf
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback

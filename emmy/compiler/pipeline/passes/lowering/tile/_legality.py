@@ -412,7 +412,7 @@ def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     return (
         f"warp TILE: atom {tile.atom.name} takes a {tile.atom.operand_dtype('a')} A operand but this "
         f"contraction's A is {a_dtype} — a copy transport cannot convert it. The mma tier is reachable "
-        f"through the converting smem compute fill (the mixed-A cone), or drop the atom for the scalar tier."
+        f"through the converting smem compute fill, or drop the atom for the scalar tier."
     )
 
 
@@ -439,17 +439,17 @@ def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
     return None
 
 
-def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
-    """A materialized edge beside a compute-filled operand must already have the atom dtype.
+def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting_a: bool = False) -> str | None:
+    """Every BYTE-COPIED edge of a compute-filled contraction must already have the atom dtype.
 
-    The ``smem`` stage evaluates computed cones into their typed shared-memory slabs, but it
-    *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore cannot feed an
-    f16 ``ldmatrix`` fragment merely because another edge is computed; it must take the demoted
-    scalar reading (or an explicitly converting producer cone).  Computed edges are exempt because
-    their slab store performs the normal typed conversion.
+    The ``smem`` stage evaluates computed (and converting) operands into their typed shared-memory
+    slabs, but it *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore
+    cannot feed an f16 ``ldmatrix`` fragment merely because another edge is filled. Filled edges
+    are exempt because their slab store performs the normal typed conversion — ``converting_a``
+    marks a materialized ``a`` that rides the converting fill rather than the copy.
     """
     for edge, role in ((c.a, "a"), *((ch.b, "b") for ch in c.channels)):
-        if not isinstance(edge, Load):
+        if not isinstance(edge, Load) or (role == "a" and converting_a):
             continue
         tensor = inputs.get(edge.input) if inputs else None
         # Structural scheduler fixtures (and a few pre-stamp inventory callers) intentionally do
@@ -463,13 +463,13 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
         got = tensor.dtype
         return (
             f"smem compute fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
-            f"atom {tile.atom.name} copies it into a {want} slab without conversion; use the "
-            "demoted scalar reading or an explicitly converting producer cone"
+            f"atom {tile.atom.name} copies it into a {want} slab without conversion; only the "
+            "``a`` role has a converting fill"
         )
     return None
 
 
-def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
+def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1, inputs=None) -> Stage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
     cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
@@ -497,7 +497,11 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     stat_bytes = len(stats) * tile.m.tile * 4
     sync_bytes = stat_bytes
     async_bytes = 0
-    if isinstance(c.a, Load):
+    # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
+    # per-cell load + typed slab store — never the byte copy (which cannot convert).
+    a_tensor = inputs.get(c.a.input) if inputs and isinstance(c.a, Load) else None
+    a_converts = a_tensor is not None and a_tensor.dtype != atom.operand_dtype("a")
+    if isinstance(c.a, Load) and not a_converts:
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
@@ -509,7 +513,7 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     if sync_bytes + async_bytes > budget:
         return None
     depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
-    computed = [] if isinstance(c.a, Load) else [operand_name(c.a)]
+    computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
     return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)
 

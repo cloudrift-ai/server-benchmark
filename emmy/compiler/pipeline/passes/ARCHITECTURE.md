@@ -61,9 +61,9 @@ across every SITE of the term. The kernel's ONE worker inventory is chosen FIRST
 that fixed context:
 
 ```
-enumerate(term) = [ r for reading in readings(term)                  # collapse / mixed-A — the two tree rewrites
+enumerate(term) = [ r for view in views(term)                        # the derived views (collapse / monoid)
                       for work in inventories(term)                  # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
-                      for r in rows(root_site(reading), work) ]
+                      for r in rows(root_site(view), work) ]
 rows(site, work) = [ merge(v, *child_rows)                           # spelled through ops.Sched.key, site-local
                      for v in values(site, work)                     # the domain: search/space.py, RESOLVED vs work
                      for child_rows in product(rows(c, work) for c in children(site))
@@ -80,11 +80,12 @@ candidate is simply not in `values(site, work)`".
 **The enumeration is memoized per term** (`_schedule._Pool` in `ctx.session_cache`): the rows are a pure function of
 `(term, ctx, pins, hints)`, so N same-shape kernels in a graph — and every tune trajectory after the first, since the
 pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
-MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the readings re-bind per op,
+MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the views re-bind per op,
 so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
 identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
-cache's home: one `Context`, one fact set. Pool rows are read-only mappings and cached slices are asserted
-placement-free at build, so a shared pool cannot be corrupted by one consumer for another.
+cache's home: one `Context`, one fact set. Pool rows are read-only mappings; they carry no resolved slices and no
+view ownership, so a shared pool cannot be corrupted by one consumer for another — materialization re-resolves
+every slice from the row's own spellings.
 
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its
@@ -138,31 +139,33 @@ raise-vs-drop from whether the family is PINNED (an unpinned warp move with an i
 the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
 single-home rule exists to prevent.
 
-**Term READINGS — the one mechanism ABOVE the product.** Four moves rewrite the term rather than decorating it, and
-the criterion that separates a reading from a value is whether the rewrite changes the SITE SET, because that is what
-a product cannot absorb. The register strip and split-K do not (`r` and `cta` are spelled TILE / REDUCE values,
-applied at materialization); three do, and they are mutually exclusive by shape, so a term has at most TWO readings
-(`_schedule._readings`):
+**Derived VIEWS — the one mechanism ABOVE the product.** The stored `TileOp` is the ONE canonical tree per kernel; a
+VIEW is a pure, deterministic derivation of it, and the criterion that separates a view from a value is whether the
+derivation changes the SITE SET, because that is what a product cannot absorb. The register strip and split-K do not
+(`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); two do, mutually exclusive by shape, so
+a term has at most TWO views (`_schedule._views`):
 
 - the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
   the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
-  contraction's K fold, so the map reading spells its statistic at `REDUCE@<axis>` too;
+  contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too;
 - the COLLAPSE (`Fold.demoted`) — a computed `a` edge spliced back INLINE, REMOVING its site. With no edges the
   bilinear reading declines, so the fold derives `PLANAR` and takes the reduce tiers; this is what carries a stat-free
-  cone (`f(x) @ w`) and what a computed-A term with no legal warp row falls back to;
-- the mixed-A PROMOTION — a materialized **f32** `a` re-expressed as a one-`Load` cone, so it rides the converting
-  compute fill (a copy transport moves raw bytes; only the fill converts, on the slab store). It ADDS one site.
+  cone (`f(x) @ w`) on the per-cell tiers.
 
-The union carries three obligations: uniform key sets with `""` as a decided empty; NO cross-reading suppression (each
-gate is a local predicate on its own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against);
-and reading identity surviving into the prior's key space, which `_enumerate` enforces by keying the row → reading map
-on `canonical_row_key` and RAISING on a collision (the fix would be an `S_*` stamp, never a new knob key).
+(The old mixed-A promotion "reading" is gone: a materialized edge whose dtype the atom cannot bind directly takes the
+CONVERTING smem compute fill on the one tree — a stage resolution, not a derivation.)
+
+A row carries NO view ownership: the derived contraction view offers only warp tiles (a computed operand's scalar
+list is empty) and the per-cell view only scalar / per-cell ones, so the row's `WORK` tier decodes its view by
+construction — replay is a function of `(stored op, row)` and nothing else. The union carries two obligations:
+uniform key sets with `""` as a decided empty, and NO cross-view suppression (each gate is a local predicate on its
+own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against).
 
 **Coverage, as it stands.** The recursion carries the single-site terms — the pointwise cell plus the register-strip
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
 warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
-the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `sync`
+the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `smem`
 compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
 statistic site is a nested site under the same inventory — the nested site is why the enumerator recurses. SDPA

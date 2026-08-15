@@ -27,8 +27,8 @@ relevant `ARCHITECTURE.md` before answering.
   resolve forks through the deploy evidence hierarchy — measured reservoir/DB evidence first, then the global
   `Prior` (the online prior with its offline cold-start fallback). Recorded goldens are named pinned rows replayed
   exactly (`run --golden NAME`, `--ab`); an unpinned compile never consults them. The online prior
-  is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
-  accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
+  is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`) that `tune` writes and
+  `compile` / `run` read. Use the README architecture index for the prior and
   two-level autotune design.
 
 All `EMMY_*` config env vars are read and written through one module — `emmy/config.py`, the sole owner of

@@ -254,8 +254,11 @@ class GoldenRecord:
 
     @property
     def is_matmul(self) -> bool:
-        """Whether this target is a plain frontend contraction."""
-        return self.shape_key.kind == "" and any(op in {"torch.matmul", "torch.linear"} for op in self.origin_ops)
+        """Whether this target is a plain frontend contraction — read off the STORED origin
+        operations alone (a fused norm→linear names its norm origin too, so the subset test
+        separates them), never by lowering the target: an eval listing must classify a record
+        the current compiler can no longer lower."""
+        return bool(self.origin_ops) and set(self.origin_ops) <= {"torch.matmul", "torch.linear"}
 
     @property
     def emmy_us(self) -> float:
@@ -268,14 +271,6 @@ class GoldenRecord:
     @property
     def reference_backend(self) -> str | None:
         return str(self.measurements["reference_backend"]) if self.measurements else None
-
-    @property
-    def ratio(self) -> float:
-        return self.reference_us / self.emmy_us if self.emmy_us else 0.0
-
-    @property
-    def golden(self) -> bool:
-        return self.ratio >= 0.95
 
     @property
     def is_routing(self) -> bool:

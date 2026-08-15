@@ -26,7 +26,6 @@ the parse primitives here but keeps its own descriptor logic.
 from __future__ import annotations
 
 import os
-import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -62,28 +61,6 @@ READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
-
-# The 2026-07 prior rename (analytic → offline, learned → online) respelled three
-# env vars. The old spellings keep working with a one-time DeprecationWarning —
-# they live in shell profiles and remote-run scripts, unlike the Python names.
-_LEGACY_VARS = {
-    ONLINE_FILE: "EMMY_PRIOR_FILE",
-    OFFLINE_FILE: "EMMY_ANALYTIC_FILE",
-    OFFLINE_TILT: "EMMY_ANALYTIC_TILT",
-}
-
-
-def _env_aliased(name: str) -> str | None:
-    """Live ``os.environ`` read that also honors the var's pre-rename legacy
-    spelling (the new name wins when both are set; a legacy hit warns)."""
-    raw = os.environ.get(name)
-    if raw is not None:
-        return raw
-    legacy = _LEGACY_VARS.get(name)
-    raw = os.environ.get(legacy) if legacy else None
-    if raw is not None:
-        warnings.warn(f"{legacy} is deprecated — use {name}", DeprecationWarning, stacklevel=3)
-    return raw
 
 
 def knob_var(name: str) -> str:
@@ -189,29 +166,25 @@ def tune_db_path() -> Path:
 
 
 def online_path() -> Path:
-    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` (legacy
-    ``EMMY_PRIOR_FILE``) → ``~/.cache/emmy/online.json``. A single JSON file (not
+    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
+    ``~/.cache/emmy/online.json``. A single JSON file (not
     the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
-    ``run`` read it. A pre-rename ``prior.json`` already in the cache keeps being
-    used (and written) so existing checkpoints survive the rename."""
-    override = _env_aliased(ONLINE_FILE)
+    ``run`` read it."""
+    override = os.environ.get(ONLINE_FILE)
     if override:
         return Path(override)
-    path = _CACHE_ROOT / "online.json"
-    legacy = _CACHE_ROOT / "prior.json"
-    return legacy if legacy.exists() and not path.exists() else path
+    return _CACHE_ROOT / "online.json"
 
 
 def offline_path() -> Path | None:
-    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
-    ``EMMY_ANALYTIC_FILE``) → ``None``.
+    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
     ``None`` means the repo-checked default (``offline_weights.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a
     silent fallback."""
-    override = _env_aliased(OFFLINE_FILE)
+    override = os.environ.get(OFFLINE_FILE)
     return Path(override) if override else None
 
 
@@ -296,13 +269,13 @@ def o3_tol(default: float = 0.15) -> float:
 
 
 def offline_tilt(default: float = 0.3) -> float:
-    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` of
+    """``EMMY_OFFLINE_TILT`` — exponent ``W`` of
     the cold ``OfflinePrior`` multiplier in :meth:`FallbackPrior.score` (selection
     only): the online µs are tilted by ``offline**W`` so the heuristic's ranking
     nudges PUCT exploration toward configs it favors without overriding the online
     scale (``W=0`` = pure online, large ``W`` = offline dominates). See the method
     docstring."""
-    raw = _env_aliased(OFFLINE_TILT)
+    raw = os.environ.get(OFFLINE_TILT)
     if not raw:
         return default
     try:

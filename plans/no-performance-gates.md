@@ -42,20 +42,22 @@ evaluating a computed edge into its slab; the term picks which), `smem-async` (c
 operand, register-to-register on a computed one. Old spellings `copy`/`reg` merged into `smem`;
 `cp` → `smem-async`, `tma` → `smem-tma`; goldens, tests and docs migrated.
 
-Remaining dissolution steps:
+Dissolution verdict (EXECUTED):
 
-- The mixed-A PROMOTION reading dies first: a materialized f32 edge under `smem` IS the
-  converting evaluation — no tree rewrite.
-- The COLLAPSE (`demoted`) reading dies next: the canonical tree keeps the cone nested; a
-  per-cell row spells an empty `STAGE` on the computed edge (register-to-register) and
-  materialization lowers it in place (the per-cell evaluation code already exists — it moves out
-  of the reading into the row's decode).
-- The MONOID-producer composition is the one reading not yet proven reducible; it goes last and
-  the attempt is the verdict. If it resists, a one-value `READING` key is the fallback for that
-  case alone.
-- With the readings gone, the `owner` row→tree side table, the cross-reading collision raise,
-  and the provably-no-op "`S_*` stamp" doctrine text are deleted — replay exactness holds by
-  construction rather than by label.
+- The mixed-A PROMOTION is dead: a materialized edge the atom cannot bind directly takes the
+  CONVERTING smem compute fill on the one tree (`_needs_fill` / `_converting_a`, the fill
+  resolver's sync-side classification, the one-`Load` cone normalization at the materializer's
+  decode boundary). No tree rewrite; row-count parity verified against the old two-reading fork.
+- The COLLAPSE and the MONOID composition are honest DERIVED VIEWS, not transports: each changes
+  the loop structure (the splice re-evaluates the cone per cell; the composition re-associates the
+  monoid), so they cannot be spelled as a `STAGE` value. They remain as the two documented pure
+  derivations of the one stored canonical tree (`_views`), and the row DECODES its view by `WORK`
+  tier — the derived contraction view is warp-only by construction, the per-cell view never is.
+- The identity machinery is deleted outright: the `owner` row→tree side table, the reading-index
+  `origin`, the cross-reading collision raise, the pool `n_readings` assert, and the cached
+  resolved slices. A pool is keys + rows; materialization re-resolves every slice from the row's
+  spellings through the same dispatches enumeration used — replay is a function of
+  `(stored op, row)` and nothing else.
 
 Superseding the rename's classifier bridge (Dmitry: "drop everything, strongly prioritize clean
 design; pinned kernel performance is the only thing we care about"): the classified-ShapeKey

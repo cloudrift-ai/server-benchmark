@@ -1,0 +1,90 @@
+schema_version: 2
+timestamp: '2026-08-16T00:41:38Z'
+status: succeeded
+experiment:
+  task_id: compiler_neptune_emmy_pytorch_a100_recovery/a100x1
+  row_id: e246bb6279fd
+  directory: experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100_recovery
+  kind: command
+  variant: a100x1
+  parameters:
+    deploy.gpu: NVIDIA A100 80GB
+    deploy.gpu_count: 1
+provenance:
+  git_revision: 2550211d9c93e522ea4f9eb81e39735f4ab64d07
+  git_dirty: false
+system:
+  hostname: riftvm
+  os:
+    name: Ubuntu 24.04.1 LTS
+    id: ubuntu
+    version: '24.04'
+    kernel: 6.8.0-51-generic
+  cpu:
+    model: AMD EPYC 7742 64-Core Processor
+    architecture: x86_64
+    logical_count: 15
+    sockets: 15
+    cores_per_socket: 1
+    threads_per_core: 1
+    numa_nodes: 1
+  memory:
+    total_bytes: 221634367488
+  gpus:
+  - index: 0
+    name: NVIDIA A100-SXM4-80GB
+    vendor: NVIDIA
+    uuid: GPU-b0354a1a-37c2-086d-f6fe-953b6fac5c3e
+    pci_bus_id: '00000000:01:00.0'
+    memory_total_mib: 81920
+    driver_version: 580.65.06
+    performance_state: P0
+    temperature_c: 36.0
+    utilization_percent: 18.0
+    sm_clock_mhz: 1380.0
+    memory_clock_mhz: 1593.0
+    power_draw_w: 69.26
+    power_limit_w: 550.0
+  gpu_pci_devices:
+  - pci_bus_id: '0000:01:00.0'
+    vendor_id: 10de
+    device_id: 20b2
+    vendor: NVIDIA
+    name: NVIDIA A100 80GB
+  software:
+    nvcc_version: 12.9.86
+    cublas_version: 12.9.1.4
+    docker_client: 28.5.1
+    docker_server: 28.5.1
+    docker_os: Ubuntu 24.04.1 LTS
+  root_filesystem:
+    device: /dev/vda1
+    type: ext4
+    total_bytes: 830970236928
+    used_bytes: 146235191296
+    available_bytes: 684718268416
+    mount: /
+  uptime_seconds: 168976.11
+  amd_smi: null
+execution:
+  run_id: 20260816T004138Z
+  stage: complete
+  started_at: '2026-08-16T00:41:38Z'
+  completed_at: '2026-08-16T01:20:56Z'
+  timing_seconds:
+    remote_provision: 2.98
+    command: 2350.13
+    total: 2353.12
+  infrastructure:
+    group: a100_x_1
+    requested_gpu: NVIDIA A100 80GB
+    requested_gpu_count: 1
+    address: riftuser@66.172.10.143
+    ssh_port: 22
+    provider: null
+    instance_id: null
+    zone: null
+    state: external
+    deleted_at: null
+  error: null
+  cleanup_error: null

@@ -33,6 +33,9 @@ source lives outside the package:
 | `scripts/` | tests for executable helpers under the repository's `scripts/` directory |
 | `architecture/` | repository-wide dependency and layering invariants |
 
+The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
+as loading discovery and onboarding control code from the exact workflow commit while editing the rolling branch.
+
 Three small organizing directories are also intentional:
 
 | Directory | Purpose |

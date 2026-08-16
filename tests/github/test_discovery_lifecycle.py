@@ -55,6 +55,32 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 
+def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    job = document["jobs"]["discover"]
+    steps = job["steps"]
+    install_index = next(index for index, step in enumerate(steps) if step.get("name") == "Install Emmy")
+    load_index = next(index for index, step in enumerate(steps) if step.get("name") == "Load exact workflow source")
+    agent_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run discover-models agent")
+    validation_index = next(index for index, step in enumerate(steps) if step.get("name") == "Validate and apply model lifecycle")
+    load_script = steps[load_index]["run"]
+    agent_script = steps[agent_index]["run"]
+    validation_script = steps[validation_index]["run"]
+    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup discovery credentials and output")
+
+    assert install_index < load_index < agent_index < validation_index
+    assert 'git archive "$WORKFLOW_SHA"' in load_script
+    assert "GIT_LFS_SKIP_SMUDGE" in steps[load_index]["env"]
+    assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
+    assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
+    assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
+    assert "older skill copy in the rolling lifecycle worktree" in agent_script
+    assert '--file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md"' in agent_script
+    assert "sed 's/^/discover-models: /' \"$AGENT_MANIFEST\"" in agent_script
+    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_lifecycle.py"' in validation_script
+    assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
+
+
 @pytest.mark.parametrize(
     ("workflow", "primary_job", "workflow_kind", "notification_name"),
     [

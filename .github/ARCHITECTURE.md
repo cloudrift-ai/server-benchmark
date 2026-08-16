@@ -54,15 +54,18 @@ deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; there is 
 remain in the manifest and must retain their task and deployment matrix while discovery refreshes their heat and
 rationale. `emmy recipe list --json` supplies the versioned compact agent inventory under its `recipes` field, and
 recipe queries enforce the maintained count after application.
-The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
-validates and applies its lifecycle manifest. The helper
-tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
-before validating their contents. The named OpenCode discovery agent denies repository edits, permits only the
-tracked discovery skill, public-web tools, repository reads, read-only Git inspection, and the three named read-only
-source subagents, and caps parent work at 64 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena
-investigators run as independent bounded sources; Reddit can surface a candidate before an exact Hugging Face identity
-is known. The parent agent alone reconciles identities, assigns heat, and writes the lifecycle manifest. The last
-complete lifecycle object in OpenCode's final completed text event becomes the temporary manifest; the repository
+The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
+artifact worktree remains on the rolling lifecycle branch, while the catalog, lifecycle helper, OpenCode agent and
+plugin directory, and attached discovery skill come from the exact `github.sha` that started the run. This lets a
+manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or silently
+using an older manifest contract. The helper tolerates a model reasoning wrapper around the JSON object, but requires
+exactly the four expected top-level fields before validating their contents. The named OpenCode discovery agent denies
+repository edits, permits only the tracked discovery skill, public-web tools, repository reads, read-only Git
+inspection, and the three named read-only source subagents, and caps parent work at 64 agentic steps. The Reddit,
+Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit can surface a candidate
+before an exact Hugging Face identity is known. The parent agent alone reconciles identities, assigns heat, and writes
+the lifecycle manifest. The last complete lifecycle object in OpenCode's final completed text event becomes the
+temporary manifest and is logged before validation so a rejected decision remains inspectable; the repository
 validator remains the authoritative completion gate. The project provider configuration selects the configurable
 CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking
 mode for the concise JSON result. Discovery never provisions hardware.

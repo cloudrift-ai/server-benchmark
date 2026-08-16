@@ -270,8 +270,8 @@ workflow validates exact model IDs, the maintained count, the complete lifecycle
 obsolete recipes, canonical hardware, deployment counts, duplicates, and rationales before making any change. It
 demotes a superseded obsolete decision to best-effort unless the replacement is active, serves the same task, and its
 smallest known qualified deployment uses no more total physical GPU memory than the old recipe's smallest deployment.
-If the agent omits a complete recipe, the workflow also assigns it to best-effort rather than guessing that it is
-obsolete.
+If the agent omits a complete recipe, the workflow rejects the manifest because that recipe did not receive a heat
+score or lifecycle decision.
 
 ## Step 7 — Hand off in survey mode
 

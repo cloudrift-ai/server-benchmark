@@ -400,17 +400,34 @@ def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     )
 
 
-def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
+def computed_operand_cover(c: Fold, tile: TilePlan, *, converting_a: bool = False) -> str | None:
     """Geometry required by a smem compute-filled contraction operand.
 
-    Every compute-filled edge needs static K because the staged driver unrolls fixed K chunks. A
-    computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
+    A computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
     partial inner row element-by-element, so N must be exact. A computed B leaves materialized A
     as the async operand; M is its *outer* slab row and can be safely clamped as a whole. Computed
     B's own per-cell fill clamps N before evaluating the generic producer cone.
+
+    A SYMBOLIC K rides the fill's own K mask: the cone's reads clamp in-bounds and every slab lane
+    whose k index reaches past the runtime extent stores the fold identity 0 (the bilinear reading
+    pins ⊕ = add, so a zero A contributes nothing and the drain may read the whole chunk
+    unconditionally). What that mask cannot cover is a BYTE-COPIED peer whose slab row is K-MAJOR —
+    a materialized A, and a transposed B, both stage K as the slab's contiguous inner dim, so their
+    cp.async chunk runs ALONG K and a clamped chunk START still copies past the extent. Those keep
+    the refusal; a converting materialized A does not, since it rides the fill as a cone.
     """
     if not c.axis.extent.is_static:
-        return "a computed contraction operand needs a static K — the smem compute fill has no K mask"
+        if isinstance(c.a, Load) and not converting_a:
+            return (
+                "a materialized A stages K-major (K is the slab's contiguous row), so its cp.async "
+                "chunk runs along K and cannot clamp a symbolic K's partial tail; the masked fill "
+                "covers a COMPUTED (or converting) A only"
+            )
+        if c.b_trans:
+            return (
+                "a transposed B stages N-major (K contiguous), so its cp.async chunk runs along K "
+                "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"
+            )
     materialized_b = [isinstance(ch.b, Load) for ch in c.channels]
     if any(materialized_b) and not all(materialized_b):
         return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"

@@ -540,7 +540,7 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     placed = plan.placed_on(term.place)
     if placed.axes is None:
         return False  # no (m, n) pair on the grid — nothing to place a compute-filled tile on
-    return legal.enforce(legal.computed_operand_cover(node, placed), pinned=False) and legal.enforce(
+    return legal.enforce(legal.computed_operand_cover(node, placed, converting_a=conv), pinned=False) and legal.enforce(
         legal.computed_operand_copy_dtype(node, placed, term.tile.inputs, converting_a=conv), pinned=False
     )
 
@@ -918,7 +918,7 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
                 if _has_computed_operand(node) or conv:
-                    legal.enforce(legal.computed_operand_cover(node, plan.placed_on(term.place)), pinned=True)
+                    legal.enforce(legal.computed_operand_cover(node, plan.placed_on(term.place), converting_a=conv), pinned=True)
                     legal.enforce(
                         legal.computed_operand_copy_dtype(node, plan.placed_on(term.place), term.tile.inputs, converting_a=conv),
                         pinned=True,

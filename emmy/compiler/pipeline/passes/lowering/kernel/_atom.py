@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
+from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis
@@ -38,7 +39,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
@@ -396,13 +397,15 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
         def gmem(row, col):
             tc, kc = (row, col) if tile_is_row else (col, row)
             t = BinaryExpr("+", tile_base, tc)
-            sig = Sigma(
-                {
-                    tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t,
-                    k_axis.name: BinaryExpr("+", k0, kc),
-                    **_sibling_sigma(sibling),
-                }
-            )
+            k = BinaryExpr("+", k0, kc)
+            # A SYMBOLIC K's last chunk overhangs the extent. Here K is the slab's OUTER dim (the
+            # contiguous copy chunk runs along the tile axis), so the overhanging row clamps to the
+            # last valid one exactly as a masked tile row does — a duplicate row is copied and the
+            # compute fill zeroes the matching A lanes, so it folds to nothing. The K-major
+            # orientations have no such row and stay refused (``computed_operand_cover``).
+            if not tile_is_row and not k_axis.extent.is_static:
+                k = _clamp_last(k, k_axis.extent_expr())
+            sig = Sigma({tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
             return tuple(sig.apply(e) for e in operand_index)
 
         return gmem
@@ -500,6 +503,37 @@ def _stat_slab(name: str) -> str:
     return f"_a_stat_{name}"
 
 
+def _k_masked(stmts: list[Stmt], value: str, k: Expr, k_ext: Expr | None) -> tuple[list[Stmt], str]:
+    """The smem compute fill's **K MASK** — the clamp-to-identity discipline the copy transports
+    already follow, applied to the contraction axis.
+
+    A SYMBOLIC K lets the last slab chunk overhang the runtime extent (a static K reaches the fill
+    only through ``warp_k_step``, which already demands the chunk divide it). The drain reads the
+    whole chunk unconditionally, so the overhang must be a REAL identity, not a skipped store: bind
+    the fold identity and ``Select`` it whenever ``k >= K``. The identity is 0
+    because the bilinear reading a compute fill exists for pins ⊕ = ``add`` (``Fold._contraction``),
+    so a zero operand contributes nothing to the accumulator.
+
+    Predicating the STORED value rather than the read is what makes it honest — the caller has
+    already clamped the cone's own coordinate in-bounds so nothing loads out of range, but a clamped
+    read produces a real (duplicate) value, and only this ``Select`` keeps it out of the fold.
+    EVERY compute-filled edge takes it, not just ``a``: a zero A would already absorb a finite
+    overhanging B, but ``0 · inf`` is a NaN, so a peer cone whose clamped evaluation is not finite
+    needs its own identity. ``k_ext is None`` (a static K) returns the stmts untouched, so every
+    static row stays bit-identical."""
+    if k_ext is None:
+        return stmts, value
+    ident, masked = f"{value}__kid", f"{value}__km"
+    return (
+        [
+            *stmts,
+            Init(name=ident, identity=_ADD.identity, dtype=F32),
+            Select(name=masked, branches=(SelectBranch(value, BinaryExpr("<", k, k_ext)), SelectBranch(ident, Literal(1, "int")))),
+        ],
+        masked,
+    )
+
+
 def _sync_operands(
     c: Fold,
     bk_elems: int,
@@ -524,23 +558,30 @@ def _sync_operands(
     K seam (``ops.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
     the same read): the prologue runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
     prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
-    schedule's eligibility guarantees exact cover on N and K only; a masked / symbolic **M**
+    schedule's eligibility guarantees exact cover on N; a masked / symbolic **M**
     clamp-reads the overhanging rows in-bounds (the A fill σ and the stat prologue σ — a duplicate
     of the last valid row is computed and its store discarded by the ``RegStore`` guard, the same
-    contract the copy transports follow)."""
+    contract the copy transports follow). A symbolic **K** is the same discipline applied to the
+    contraction axis: :func:`_k_masked` clamps the cone's own reads and stores the fold identity
+    into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
     m_name, n_name, k_name = mn[0].axis.name, mn[1].axis.name, c.axis.name
     row_base, col_base = _tile_base(mn)
     pro, cell, stats = seam
+    k_ext = c.axis.extent_expr() if not c.axis.extent.is_static else None
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
         return _clamp_last(t, mn[0].ext) if mn[0].mask else t
 
+    def k_coord(k) -> Expr:
+        return _clamp_last(k, k_ext) if k_ext is not None else k
+
     def a_value(k0, row, col):
-        sigma = Sigma({m_name: m_coord(row), k_name: BinaryExpr("+", k0, col)})
+        k = BinaryExpr("+", k0, col)
+        sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
-        return stmts, operand_name(c.a)
+        return _k_masked(stmts, operand_name(c.a), k, k_ext)
 
     def n_coord(col) -> Expr:
         t = BinaryExpr("+", col_base, col)
@@ -588,8 +629,9 @@ def _sync_operands(
             b_body = operand_body(bl)
 
             def b_value(k0, row, col, *, body=b_body, edge=bl):
-                sigma = Sigma({k_name: BinaryExpr("+", k0, row), n_name: n_coord(col)})
-                return [s.rewrite(lambda nm: nm, sigma) for s in body], operand_name(edge)
+                k = BinaryExpr("+", k0, row)
+                sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
+                return _k_masked([s.rewrite(lambda nm: nm, sigma) for s in body], operand_name(edge), k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -627,7 +669,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
     k_axis = c.axis
-    K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
+    # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
+    # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
+    # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
+    bk, static_k = stage.bk_elems, k_axis.extent.is_static
+    K = k_axis.extent.as_static() if static_k else k_axis.extent
+    n_chunks = K // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", K.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     if stage.transport == "smem":
@@ -681,8 +728,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         transport=transport,
         drain=drain,
         depth=stage.depth,
-        bk_elems=stage.bk_elems,
-        n_chunks=K // stage.bk_elems,
+        bk_elems=bk,
+        n_chunks=n_chunks,
         k_extent=K,
         workers=ops.workers,
         block_threads=tile.launch_threads,

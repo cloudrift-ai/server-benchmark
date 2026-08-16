@@ -173,9 +173,9 @@ a materialized operand, register-to-register on a computed one) — and spells t
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
-**pure perf transform** — an ineligible kernel (masked N, symbolic / non-divisible K; a
-transposed B stages N-major on every transport since the serving-layout work) silently falls back
-to gmem-direct, and a staged kernel is
+**pure perf transform** — an ineligible kernel (masked N, or a symbolic / non-divisible K on a BYTE-COPIED
+operand, whose chunk runs along K; a transposed B stages N-major on every transport since the serving-layout work)
+silently falls back to gmem-direct, and a staged kernel is
 **bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation and barriers, but the
 fill runs on the consumer threads and therefore cannot overlap the current drain; `/p<n>` remains the independent
 smem→register fragment pipeline. The Volta m8n8k4 atom enables only the synchronous byte-copy fill for materialized
@@ -214,9 +214,16 @@ the per-cell compute fill reads the bridged values back from the stat rows. A co
 score contraction, read by the cone's `exp(s − m)`) is per-cell instead: it splices into the fill's cell and is
 evaluated inline, from lowered loop IR, so it takes no schedule slice of its own (a scalar dot per slab cell —
 computing that tile on the warp tier, and keeping it resident across the statistic and the weight, is what a
-single-kernel flash still needs). Geometry: exact cover on N/K only — a
+single-kernel flash still needs). Geometry: exact cover on N only. A
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
-the `RegStore` guard). A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
+the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on
+the contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime
+extent stores the additive fold identity 0 (`_atom._k_masked`; the bilinear reading pins ⊕ = add, so a zero operand
+folds to nothing and the drain still reads whole chunks), while a canonical materialized peer clamps its overhanging
+slab ROW so its `cp.async` chunk stays contiguous. The K-MAJOR orientations keep the refusal, and the reason names
+why: a materialized A and a transposed B both stage K as the slab's contiguous inner dim, so their copy chunk runs
+ALONG K and clamping only its start still copies past the extent.
+A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
 shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per channel, drains N
 mma chains off the ONE ldmatrix'd A fragment
 into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the

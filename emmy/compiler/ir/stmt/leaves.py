@@ -656,12 +656,12 @@ class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
-    Currently UNPRODUCED — a fold's seed now rides on its ``Accum`` and is derived by
-    ``Loop.render`` from ``op.identity``, so no pass emits an explicit ``Init``. Kept as a primitive
-    (with its render / rewrite / validation handlers) for an explicit cross-scope seed
-    the cooperative / split-K reduce tier may want — e.g. a chunked-K accumulator that
-    must seed above the outer loop and NOT reset per chunk. ``identity`` is the neutral
-    element (one scalar — 0 / 1 / -inf), held directly.
+    A fold's OWN seed does not ride here — it lives on its ``Accum`` and is derived by
+    ``Loop.render`` from ``op.identity``. What produces an ``Init`` is the CLAMP-TO-IDENTITY
+    masking: a masked tail's ``Select`` needs the identity as an SSA name to select, so the
+    masked ILP copy (``lowering/kernel/_factor``) and the compute fill's K mask
+    (``lowering/kernel/_atom._k_masked``) each bind one. ``identity`` is the neutral element
+    (one scalar — 0 / 1 / -inf), held directly.
     """
 
     name: str

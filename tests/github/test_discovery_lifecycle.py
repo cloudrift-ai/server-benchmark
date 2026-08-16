@@ -31,6 +31,20 @@ def test_opencode_message_precedes_variadic_file_option(workflow, message):
     assert script.index(message) < script.index('--file "$AGENT_PROMPT"')
 
 
+def test_onboarding_loads_control_code_from_exact_workflow_commit():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    steps = document["jobs"]["onboard"]["steps"]
+    load_index = next(index for index, step in enumerate(steps) if step.get("name") == "Load exact workflow source")
+    selection_index = next(index for index, step in enumerate(steps) if step.get("name") == "Select one available deployment")
+    load_script = steps[load_index]["run"]
+    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup local credentials and output")
+
+    assert load_index < selection_index
+    assert 'git archive "$WORKFLOW_SHA"' in load_script
+    assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
+    assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
+
+
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")

@@ -95,6 +95,10 @@ retain 30 minutes. Raw benchmark output, experiment reports, dated run snapshots
 repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes. Nightly image
 publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
+The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
+`github.sha` whose workflow definition started the job. This keeps normal scheduled runs reproducible and lets a
+manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
+
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
 The validator also checks the requested mode, exact recipe model, and expected lifecycle tag. The workflow then

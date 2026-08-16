@@ -61,6 +61,7 @@ jobs:
       PR_SUMMARY: /tmp/emmy-onboard-pr-${{ github.run_id }}-${{ github.run_attempt }}.md
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
+      WORKFLOW_SOURCE: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
@@ -165,6 +166,17 @@ jobs:
 
       - name: Install Emmy
         run: make setup-agent
+
+      - name: Load exact workflow source
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
+            git fetch --depth=1 origin "$WORKFLOW_SHA"
+          fi
+          mkdir -p "$WORKFLOW_SOURCE"
+          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+          echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
 
       - name: Select one available deployment
         id: selection
@@ -598,4 +610,8 @@ jobs:
             "$VM_LEASE" \
             "$SSH_KEY" \
             "$SSH_KEY.pub"
+          case "$WORKFLOW_SOURCE" in
+            /tmp/emmy-onboard-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
+            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
+          esac
           git config --unset-all credential.helper || true

@@ -65,11 +65,12 @@ GPU name and count, and the checkout is on a feature branch. Model and GPU selec
 pull-request operations belong to the caller, not this skill.
 
 In `onboarding` mode, use the existing `onboarding`/`untested` recipe shell when present; a direct caller may instead
-authorize a new recipe. Replace those pending tags with `best-effort` only after qualification and artifact completion.
-In `verification` mode, begin with the existing active recipe, refresh its measurements and durable artifacts, and
-preserve its supplied lifecycle tag. The mode explicitly authorizes updates to that recipe; never use verification to
-silently change its model checkpoint, target GPU/count, or lifecycle. For any other existing recipe update, require
-explicit caller authorization or fail instead of overwriting it.
+authorize a new recipe. Preserve the discovery-managed `model.heat` value and replace the pending tags with
+`best-effort` only after qualification and artifact completion. In `verification` mode, begin with the existing active
+recipe, refresh its measurements and durable artifacts, and preserve its supplied lifecycle tag and `model.heat`.
+The mode explicitly authorizes updates to that recipe; never use verification to silently change its model checkpoint,
+target GPU/count, lifecycle, or heat. For any other existing recipe update, require explicit caller authorization or
+fail instead of overwriting it.
 
 ## 1. Research the serving path
 

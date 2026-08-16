@@ -61,9 +61,9 @@ def test_discovery_success_payload_groups_only_modified_models():
         "WORKFLOW_RESULT": "success",
         "MODIFIED_MODELS": json.dumps(
             [
-                {"model_id": "org/maintained", "lifecycle": "maintained"},
-                {"model_id": "org/best-effort", "lifecycle": "best-effort"},
-                {"model_id": "org/new", "lifecycle": "onboarding"},
+                {"model_id": "org/maintained", "lifecycle": "maintained", "heat": 70},
+                {"model_id": "org/best-effort", "lifecycle": "best-effort", "heat": 40},
+                {"model_id": "org/new", "lifecycle": "onboarding", "heat": 95},
             ]
         ),
     }
@@ -71,9 +71,9 @@ def test_discovery_success_payload_groups_only_modified_models():
     payload = discord_notification.build_payload(environment)
 
     assert payload["embeds"][0]["fields"] == [
-        {"name": "Maintained", "value": "• `org/maintained`", "inline": False},
-        {"name": "Best effort", "value": "• `org/best-effort`", "inline": False},
-        {"name": "Onboarding", "value": "• `org/new`", "inline": False},
+        {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
+        {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
+        {"name": "Onboarding", "value": "• `org/new` · heat **95**", "inline": False},
     ]
 
 

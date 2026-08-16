@@ -227,6 +227,7 @@ jobs:
             recipe query
             --root recipes
             --filter 'provider.cloudrift.team_access == true'
+            --filter 'deployment.availability.cloudrift == true'
             --limit 1
             --json
           )
@@ -234,20 +235,33 @@ jobs:
             query+=(
               --candidate "$REQUESTED_MODEL_ID" "$REQUESTED_GPU" "$REQUESTED_GPU_COUNT"
               --filter 'lifecycle != "obsolete"'
-              --filter 'deployment.availability.cloudrift == true'
             )
+            selection=$(./venv/bin/emmy "${query[@]}")
           else
             query+=(
-              --filter 'lifecycle in ["onboarding", "maintained"]'
-              --filter 'deployment.availability.cloudrift == true'
-              --sort 'lifecycle order ["onboarding", "maintained"]'
-              --sort 'results.last_run_at asc nulls-first'
+              --filter 'lifecycle == "onboarding"'
+              --sort 'heat desc nulls-last'
               --sort 'model_id asc'
               --sort 'deployment.index asc'
             )
+            selection=$(./venv/bin/emmy "${query[@]}")
+            if [ "$(jq '.rows | length' <<< "$selection")" -eq 0 ]; then
+              query=(
+                recipe query
+                --root recipes
+                --filter 'provider.cloudrift.team_access == true'
+                --filter 'deployment.availability.cloudrift == true'
+                --filter 'lifecycle == "maintained"'
+                --sort 'results.last_run_at asc nulls-first'
+                --sort 'model_id asc'
+                --sort 'deployment.index asc'
+                --limit 1
+                --json
+              )
+              selection=$(./venv/bin/emmy "${query[@]}")
+            fi
           fi
 
-          selection=$(./venv/bin/emmy "${query[@]}")
           if [ "$(jq -r '.schema_version' <<< "$selection")" != "1" ]; then
             echo "Unsupported emmy recipe query schema" >&2
             exit 1
@@ -268,6 +282,7 @@ jobs:
           gpu_count=$(jq -r '.deployment.gpu_count' <<< "$row")
           mode=$(jq -r '.operation' <<< "$row")
           lifecycle=$(jq -r '.expected_lifecycle' <<< "$row")
+          heat=$(jq -r '.heat // empty' <<< "$row")
           {
             echo "selected=true"
             echo "model_id=$model_id"
@@ -275,6 +290,7 @@ jobs:
             echo "gpu_count=$gpu_count"
             echo "mode=$mode"
             echo "lifecycle=$lifecycle"
+            echo "heat=$heat"
           } >> "$GITHUB_OUTPUT"
           {
             echo "MODEL_ID=$model_id"
@@ -282,6 +298,7 @@ jobs:
             echo "TARGET_GPU_COUNT=$gpu_count"
             echo "ONBOARD_MODE=$mode"
             echo "EXPECTED_LIFECYCLE=$lifecycle"
+            echo "MODEL_HEAT=$heat"
           } >> "$GITHUB_ENV"
 
       - name: Prepare artifact branch
@@ -430,12 +447,13 @@ jobs:
           if mode == "onboarding":
               task = (
                   "Use the existing onboarding/untested recipe shell when present, or create the recipe for a direct "
-                  "manual request. Replace onboarding and untested with best-effort after qualification."
+                  "manual request. Preserve model.heat and replace onboarding and untested with best-effort after "
+                  "qualification."
               )
           else:
               task = (
                   "Reverify the existing recipe from its current configuration, refresh its measured artifacts, and "
-                  f"preserve its {os.environ['EXPECTED_LIFECYCLE']} lifecycle tag."
+                  f"preserve its {os.environ['EXPECTED_LIFECYCLE']} lifecycle tag and model.heat."
               )
           prompt = f"""Use the onboard-model skill non-interactively.
 
@@ -651,6 +669,10 @@ jobs:
           git diff --exit-code -- .github .agents/skills/onboard-model .claude/skills/onboard-model
           test -z "$(git ls-files --others --exclude-standard -- \
             .github .agents/skills/onboard-model .claude/skills/onboard-model)"
+          heat_args=()
+          if [ -n "$MODEL_HEAT" ]; then
+            heat_args=(--expected-heat "$MODEL_HEAT")
+          fi
           ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/onboarding_artifacts.py" \
             --summary "$ONBOARD_SUMMARY" \
             --model-id "$MODEL_ID" \
@@ -659,6 +681,7 @@ jobs:
             --ssh-target "$SSH_TARGET" \
             --mode "$ONBOARD_MODE" \
             --expected-tag "$EXPECTED_LIFECYCLE" \
+            "${heat_args[@]}" \
             --stage
           {
             echo "deployment_summary=$(jq -r .deployment_summary "$ONBOARD_SUMMARY")"

@@ -76,7 +76,9 @@ def _modified_model_fields(raw_changes: str) -> list[dict[str, Any]]:
         model_id = change.get("model_id")
         lifecycle = change.get("lifecycle")
         if isinstance(model_id, str) and lifecycle in grouped:
-            grouped[lifecycle].append(f"• `{model_id}`")
+            heat = change.get("heat")
+            heat_suffix = f" · heat **{heat}**" if isinstance(heat, int) and not isinstance(heat, bool) else ""
+            grouped[lifecycle].append(f"• `{model_id}`{heat_suffix}")
 
     fields = []
     for lifecycle, label in LIFECYCLE_LABELS.items():

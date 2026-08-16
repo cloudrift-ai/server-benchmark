@@ -25,7 +25,9 @@ def test_recipe_create(run_cli, tmp_path):
     assert returncode == 0, stderr
     recipe_path = root / "new-model" / "recipe.yaml"
     assert stdout.strip() == str(recipe_path)
-    assert yaml.safe_load(recipe_path.read_text())["matrices"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
+    recipe = yaml.safe_load(recipe_path.read_text())
+    assert recipe["matrices"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
+    assert recipe["model"]["heat"] == 0
 
 
 def test_recipe_list_json_contains_complete_catalog(run_cli):

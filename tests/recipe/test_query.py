@@ -14,7 +14,7 @@ from emmy.recipe.query import (
 )
 
 
-def _record(model_id, tags, deployments, path=None):
+def _record(model_id, tags, deployments, path=None, heat=None):
     name = model_id.split("/", 1)[1]
     return {
         "name": name,
@@ -25,6 +25,7 @@ def _record(model_id, tags, deployments, path=None):
         "runnable": "onboarding" not in tags,
         "deployments": deployments,
         "rationale": f"Qualify {model_id}.",
+        "heat": heat,
     }
 
 
@@ -88,6 +89,26 @@ def test_query_filters_and_sorts_lifecycle_then_oldest_results_then_model():
 
     assert [row["model_id"] for row in selected] == ["org/onboarding-a"]
     assert selected[0]["deployment"]["index"] == 1
+
+
+def test_query_sorts_onboarding_models_by_heat():
+    rows = build_query_rows(
+        [
+            _record("org/cool", ["onboarding", "untested"], [_deployment("GPU")], heat=20),
+            _record("org/hot", ["onboarding", "untested"], [_deployment("GPU")], heat=95),
+        ],
+        expand_deployments=True,
+    )
+
+    selected = query_rows(
+        rows,
+        filters=[parse_predicate('lifecycle == "onboarding"')],
+        sorts=[parse_sort("heat desc nulls-last")],
+        limit=1,
+    )
+
+    assert selected[0]["model_id"] == "org/hot"
+    assert selected[0]["heat"] == 95
 
 
 def test_query_manual_missing_model_is_onboarding_candidate():

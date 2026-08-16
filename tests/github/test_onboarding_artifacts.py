@@ -25,7 +25,7 @@ def _write_artifacts(workspace):
         path = workspace / raw_path
         path.parent.mkdir(parents=True, exist_ok=True)
         if raw_path == paths[0]:
-            path.write_text("tags: [best-effort]\nmodel:\n  huggingface: org/Model\n")
+            path.write_text("tags: [best-effort]\nmodel:\n  huggingface: org/Model\n  heat: 77\n")
         elif path.suffixes == [".tar", ".gz"]:
             path.write_bytes(b"compressed results")
         else:
@@ -84,6 +84,7 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
         "user@host",
         "onboarding",
         "best-effort",
+        77,
     )
 
     assert artifacts == [Path(path) for path in paths]

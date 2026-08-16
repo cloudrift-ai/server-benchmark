@@ -181,11 +181,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   ordinary fork chooses settings within one kernel (tile size, staging, …); these are the forks the prior decides —
   it ranks the options directly whenever no measurement already answers the choice.
 - **Structural fork** — A fork whose alternatives change which kernels exist — for example, keeping operations fused
-  in one kernel versus splitting them apart. The prior is never asked to rank these options. Instead, the compiler
-  compares the total estimated cost of each resulting kernel set; the prior contributes only per-kernel cost
-  estimates inside that comparison, with recorded measurements taking precedence wherever they exist. Any loaded
-  prior may supply the estimates — on a cold machine that is the offline prior, which therefore owns the quality of
-  cold kernel-set choices.
+  in one kernel versus splitting them apart. Ranking these by the prior's per-candidate score would be meaningless,
+  because an alternative that becomes several kernels has no single schedule to score. So the compiler compares the
+  total estimated cost of each resulting kernel set instead; the prior contributes only per-kernel cost estimates
+  inside that comparison, with recorded measurements taking precedence wherever they exist. Any loaded prior may
+  supply the estimates — on a machine with nothing measured that is the offline prior, which therefore owns the
+  quality of those kernel-set choices. When some alternative cannot be costed at all, the comparison decides
+  nothing and all the alternatives go back into the ordinary ranking; none of them is withheld to keep the set of
+  kernels unchanged.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
   variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the

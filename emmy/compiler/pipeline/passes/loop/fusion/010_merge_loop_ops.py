@@ -15,8 +15,10 @@ downstream pattern knowledge. Its refusals are semantic — structural region ow
 splicer rejection, the fence around an already-realized ``__cut_`` workspace (which keeps a
 placement decision from being re-fused), and two readable-seam refusals judged on the MERGED
 form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, and must not
-entangle a multi-statistic compound (the online-softmax pair) beyond its flat same-extent
-normalize tail — both shapes fall to the raw-loop escape downstream (no schedule tier, no
+entangle a multi-statistic compound (the online-softmax pair) beyond its readable tails — the
+flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
+expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
+one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
 ``PLACE`` seam), so evidence could never price the split back — plus one boundedness bound:
 ``_total_work`` sums the
 enclosing free×reduce iteration count of every compute leaf, and a merge that grows it by more
@@ -82,12 +84,31 @@ def _nests_reduce(loop_op: LoopOp) -> bool:
 
 def _entangled_multi_stat(loop_op: LoopOp) -> bool:
     """Whether a body holds ≥2 sibling reduce ``Loop``s (a multi-statistic compound — the
-    online-softmax pair) entangled with anything beyond a flat same-extent tail. The pair plus a
-    flat normalize sweep over the same extent is the readable standalone form (the online-softmax
-    pairing consumes exactly it); a sibling loop over a FOREIGN extent, or any nested loop in the
-    tail, replays or expands the statistics into a cell recognition can only keep as the raw-loop
-    escape — no schedule tier, no ``PLACE`` seam."""
+    online-softmax pair) entangled with anything beyond its readable tails. Two tail shapes are
+    readable: a flat sibling loop over the same extent (the normalize sweep the online-softmax
+    pairing consumes), and a free sibling sweep whose directly nested loops are all flat
+    same-extent single-``Accum`` additive reduce loops with pure companions — the expectation
+    channels the pairing sinks into and joins (a fused softmax·V region: one additive fold per
+    output cell). A sibling loop over a FOREIGN extent outside these shapes, or any deeper
+    nesting, replays or expands the statistics into a cell recognition can only keep as the
+    raw-loop escape — no schedule tier, no ``PLACE`` seam."""
     reduce_names = loop_op.reduce_axis_names
+
+    def additive_folds(lp: Loop, extent) -> bool:
+        inner = [s for s in lp.body if isinstance(s, Loop)]
+        if not inner:
+            return False
+        for t in inner:
+            if t.axis.name not in reduce_names or t.axis.extent != extent:
+                return False
+            if any(isinstance(s, Loop) for s in t.body):
+                return False
+            accs = [s for s in t.body if isinstance(s, Accum)]
+            if len(accs) != 1 or accs[0].op.reduce_canon != "add":
+                return False
+            if any(not s.pure for s in t.body if not isinstance(s, Accum)):
+                return False
+        return True
 
     def walk(stmts: Body) -> bool:
         loops = [s for s in stmts if isinstance(s, Loop)]
@@ -97,8 +118,11 @@ def _entangled_multi_stat(loop_op: LoopOp) -> bool:
             if any(r.axis.extent != first for r in reds[1:]):
                 return True
             for lp in loops:
-                if lp.axis.extent != first or any(isinstance(s, Loop) for s in lp.body):
-                    return True
+                if lp.axis.extent == first and not any(isinstance(s, Loop) for s in lp.body):
+                    continue  # the flat same-extent tail (a further statistic / the normalize sweep)
+                if lp.axis.name not in reduce_names and additive_folds(lp, first):
+                    continue  # a free sweep of same-extent additive folds (expectation channels)
+                return True
             return False
         return any(walk(lp.body) for lp in loops)
 
@@ -133,9 +157,10 @@ def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
         raise RuleSkipped("merge nests a reduce loop inside a reduce loop — an unreadable seam (raw-loop escape only)")
     if _entangled_multi_stat(merged) and not any(_entangled_multi_stat(graph.nodes[node_id].op) for node_id in region):
         # The single-statistic computed-A shape is readable (the fused norm→linear kind); a
-        # multi-statistic compound (the online-softmax pair) stays readable only standing alone
-        # with its flat same-extent normalize tail. A merge that entangles the pair with a
-        # reducing or expanding tail produces a cell recognition keeps as the raw-loop escape.
+        # multi-statistic compound (the online-softmax pair) stays readable only with its flat
+        # same-extent normalize tail or a free sweep of same-extent additive folds (the
+        # expectation channels the pairing joins). A merge that entangles the pair with any
+        # other tail produces a cell recognition keeps as the raw-loop escape.
         raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)

@@ -254,7 +254,8 @@ exponentials, fold identities, DCE/CSE) and a structural certificate asserts eve
 `exp_combine_states` for the stored combine) — a twisted `Fold`'s combine IS the generator's
 program (the formation invariant `Fold.__post_init__` asserts), and the component ROLES are shape-derived off
 the terms: component 0 the pivot (score), a literal-`1.0` term a denominator, a value term an
-expectation (no recognizer builds an expectation-bearing carrier today). **Example** — the
+expectation (the online-softmax pairing builds an expectation channel per joined value fold — a fused
+softmax·V region carries `(m, d, o…)`). **Example** — the
 online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
 `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 

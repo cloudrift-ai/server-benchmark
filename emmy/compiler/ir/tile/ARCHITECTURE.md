@@ -57,8 +57,9 @@ There is no `step` sequence. The composed evaluations DERIVE:
 
 - a twisted fold with a `Load`-bound expectation operand derives its blocked evaluation with the expectation
   contraction synthesized and memoized (`_twisted_derived_step`) — `Fold.step_stmts()` is the one consumer read; no
-  recognizer builds the operand-edge form today (the online-softmax pairing's `(m, d, o…)` expectation channels
-  keep their value loads inline in the lift body);
+  recognizer builds the operand-edge form today (the online-softmax pairing's `(m, d, o…)` expectation channels keep
+  their value loads inline in the lift body, and a fused `softmax·V` region reaches the contraction catalog as a
+  computed-A contraction over the pair instead — `_atomize.bind_prologue_contraction`);
 - split-K's outer reduce is the identity-lift composition — `Fold.composed` is the one read.
 
 `Fold.from_loop` reconstructs the algebra from the loop BODY alone (degenerate facts off its `Accum`s; a twisted merge

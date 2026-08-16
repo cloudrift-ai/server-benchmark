@@ -148,7 +148,9 @@ a term has at most TWO views (`_schedule._views`):
 - the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
   the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
-  contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too;
+  contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too. The statistic's CARRIER is not
+  part of the shape: a TWISTED `(m, d)` pair binds exactly like a `PLANAR` mean/rsqrt, which is what puts a fused
+  `softmax(S)·V` region on the contraction catalog (cone `exp(S − m)·(1/d)`, B the value matrix);
 - the COLLAPSE (`Fold.demoted`) — a computed `a` edge spliced back INLINE, REMOVING its site. With no edges the
   bilinear reading declines, so the fold derives `PLANAR` and takes the reduce tiers; this is what carries a stat-free
   cone (`f(x) @ w`) on the per-cell tiers.
@@ -246,8 +248,8 @@ Fusion's
 refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace,
 and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
 entangling a multi-statistic compound beyond its readable tails: the flat same-extent normalize sweep, or a free
-sweep of flat same-extent additive folds — the expectation channels of a fused softmax·V region, which the
-online-softmax pairing sinks into and joins; other shapes fall to the raw-loop
+sweep of flat same-extent additive folds — the value folds of a fused softmax·V region, which read as one
+contraction over the pair; other shapes fall to the raw-loop
 escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.
@@ -373,7 +375,8 @@ failing several passes later:
   Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting zero-axis fold
-  over a per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
+  over a per-row statistic — `PLANAR` (rms/mean) or `TWISTED` (the online-softmax `(m, d)` pair, which is what makes
+  a fused `softmax(S)·V` region this shape) — whose tail is one or more ⊗-folds of one shared A value nodifies to
   `Fold.projection(fn=projection, operands=(fold,))` — over ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each
   ⊗-channel's B against the one shared inline A cone edge (itself a node tree: the statistic is the cone's inner
   `Fold` operand, the per-cell normalize its own `lift`). Sharing is edge REUSE — the product semiring outputting N

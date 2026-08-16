@@ -15,6 +15,7 @@ import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
@@ -151,7 +152,8 @@ def test_foreign_value_loop_declines() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# The fused-matmul spelling: the channels sit inside a free output sweep — the pair sinks in.
+# The fused-matmul spelling: the channels sit inside a free output sweep — the pair stays at its
+# own level as that sweep's per-ROW statistic, and the sweep binds as one computed-A contraction.
 # --------------------------------------------------------------------------------------------
 
 
@@ -185,32 +187,39 @@ def _value_loop_2d() -> Loop:
     )
 
 
-def test_pair_sinks_into_the_free_sweep() -> None:
+def test_pair_stays_above_the_free_sweep() -> None:
+    # A channel joins only where it is a SIBLING of the pair. Inside a following free sweep it
+    # is one fold per output COLUMN, so joining per cell would recompute the statistic once per
+    # column; the pair stays at its own level and the sweep rides untouched.
     fused, changed = _fuse(_sweep_body())
     assert changed
     stmts = list(fused)
-    assert len(stmts) == 1 and isinstance(stmts[0], Loop) and not stmts[0].is_reduce, "everything sank into the sweep"
-    inner = list(stmts[0].body)
-    assert isinstance(inner[0], Loop) and inner[0].role is AxisRole.TWISTED
-    assert sum(1 for s in inner[0].body if isinstance(s, Accum)) == 3, "per-cell (m, d, expectation) join"
-    assert inner[1:] == [
-        _recip(),
-        Assign(name="acc2", op="multiply", args=("acc2__sum", "v2")),
-        Write(output="out", value="acc2", index=(Var("a0"), Var("a2"))),
-    ]
-    assert fold_from_loop(inner[0]) is not None
-
-
-def test_sink_declines_when_moved_state_is_read_downstream() -> None:
-    # A trailing read of the denominator outside the sweep pins the pair at its level: the
-    # sink would strand the reader, so only the plain (m, d) pairing happens.
-    tail = Write(output="dsum", value="acc1", index=(Var("a0"),))
-    fused, changed = _fuse(Body.coerce((*list(_sweep_body()), tail)))
-    assert changed
-    stmts = list(fused)
     assert isinstance(stmts[0], Loop) and stmts[0].role is AxisRole.TWISTED
-    assert sum(1 for s in stmts[0].body if isinstance(s, Accum)) == 2, "plain (m, d) pairing only"
-    assert stmts[-1] == tail
+    assert sum(1 for s in stmts[0].body if isinstance(s, Accum)) == 2, "the plain (m, d) pair"
+    assert stmts[1] == _recip(), "the hoisted normalize is the statistic's scalar epilogue"
+    assert isinstance(stmts[2], Loop) and not stmts[2].is_reduce and stmts[2].body == _sweep_body()[-1].body
+
+
+def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
+    """The whole point of keeping the pair above the sweep: the region reads as ONE computed-A
+    contraction over the FULL reduce axis whose cone is ``exp(score − m)·(1/d)`` and whose cone
+    SOURCE is the pair — the same binding the norm→linear edge uses, so the contraction schedule
+    catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
+    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    (stat,) = tile.op.operands
+    assert stat.role is AxisRole.TWISTED, "the row statistic is the online-softmax pair"
+
+    bound = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+    assert bound is not None, "the sweep must bind as a computed-A contraction over the twisted statistic"
+    node, n_axis, _stores = bound
+    con = node.operands[0]
+    assert is_contraction(con) and con.axis.extent == Dim(128), "one contraction over the whole reduce axis"
+    assert n_axis.extent == Dim(32), "the output column axis joins the grid"
+    assert con.a.operands[0].operands == (stat,), "the A cone's source is the pair, its K seam the node boundary"
 
 
 # --------------------------------------------------------------------------------------------
@@ -218,14 +227,15 @@ def test_sink_declines_when_moved_state_is_read_downstream() -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def _softmax_matmul_graph(m: int = 8, k: int = 16, n: int = 4) -> Graph:
+def _softmax_matmul_graph(m: int = 8, k: int = 16, n: int = 4, dtype=None) -> Graph:
     from emmy.compiler.ir.frontend.ir import MatmulOp, SoftmaxOp
 
+    kw = {} if dtype is None else {"dtype": dtype}
     g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (m, k)), node_id="x")
-    g.add_node(InputOp(), [], Tensor("w", (k, n)), node_id="w")
-    g.add_node(SoftmaxOp(), ["x"], Tensor("p", (m, k)), node_id="p")
-    g.add_node(MatmulOp(), ["p", "w"], Tensor("y", (m, n)), node_id="y")
+    g.add_node(InputOp(), [], Tensor("x", (m, k), **kw), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (k, n), **kw), node_id="w")
+    g.add_node(SoftmaxOp(), ["x"], Tensor("p", (m, k), **kw), node_id="p")
+    g.add_node(MatmulOp(), ["p", "w"], Tensor("y", (m, n), **kw), node_id="y")
     g.inputs, g.outputs = ["x", "w"], ["y"]
     return g
 
@@ -243,6 +253,28 @@ def test_softmax_matmul_merges_to_one_kernel_with_matching_numerics() -> None:
     backend = NumpyBackend()
     after = backend.run(backend.compile(merged), input_data={"x": x, "w": w})[0].outputs
     np.testing.assert_allclose(list(after.values())[0], expect, rtol=1e-5, atol=1e-5)
+
+
+def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> None:
+    """The carrier step at fragment residence, end to end and CPU-side: with the contraction's
+    warp tile pinned, the emitted kernel carries BOTH halves — the ``mma.sync`` product against the
+    compute-filled ``exp(score − m)`` slab, and the pair's own streaming merge plus the generated
+    cross-lane state combine (``__shfl_xor_sync`` over both components). Nothing here is
+    attention-specific machinery: it is the norm→linear compute fill with a two-component carrier."""
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.backend import CUDA_PASSES
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    monkeypatch.setenv("EMMY_KNOBS", "TILE=mma_m16n8k16_f16_f32/f1x1,STAGE=d1/smem,WORK=w1x1")
+    target_mod.set_target((8, 0))
+    try:
+        out = Pipeline.build(CUDA_PASSES).run(_softmax_matmul_graph(m=32, k=64, n=16, dtype=F16))
+    finally:
+        target_mod.set_target(None)
+    src = "\n".join(nd.op.kernel_source for nd in out.nodes.values() if isinstance(nd.op, CudaOp))
+    assert "mma.sync" in src, "the twisted statistic's contraction must reach the mma tier"
+    assert "__shfl_xor_sync" in src, "the pair's cross-lane state combine rides the shared reduction emitters"
+    assert src.count("expf") >= 2, "the streaming merge and the cone's exp both survive into the kernel"
 
 
 def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:

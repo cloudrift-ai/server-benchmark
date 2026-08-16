@@ -294,6 +294,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py",
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
@@ -359,6 +360,13 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "q_length=1" in emmy_runner
     assert "q.reshape(1,8,8,1,128)" in emmy_runner
     assert "is_causal=False).reshape(1,64,1,128)" in emmy_runner
+    assert "run_pytorch.py" in emmy_runner
+    assert 'status="pytorch-only:emmy-failed:$emmy_status"' in emmy_runner
+
+    pytorch_runner = (Path(directory) / "run_pytorch.py").read_text()
+    assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner
+    assert "torch.testing.assert_close" in pytorch_runner
+    assert '"captured_whole_forward"' in pytorch_runner
 
 
 def test_every_command_variant_renders(project_root) -> None:

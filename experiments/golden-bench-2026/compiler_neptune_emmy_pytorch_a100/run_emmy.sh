@@ -8,6 +8,8 @@ fi
 
 emmy=$1
 results=$2
+python=$(dirname "$emmy")/python
+pytorch_runner=$(cd "$(dirname "$0")" && pwd)/run_pytorch.py
 mkdir -p "$results/json" "$results/dumps" "$results/logs"
 status_file="$results/setup-status.tsv"
 printf "operator\tsequence_length\tstatus\n" > "$status_file"
@@ -92,7 +94,19 @@ for operator in "${operators[@]}"; do
       status=ok
       successful_setups=$((successful_setups + 1))
     else
-      status="failed:$?"
+      emmy_status=$?
+      if [ -f "$results/json/$setup.json" ]; then
+        mv "$results/json/$setup.json" "$results/json/$setup.emmy-failed.json"
+      fi
+      if timeout --signal=TERM --kill-after=30s 600s \
+        "$python" "$pytorch_runner" "$operator" "$sequence_length" \
+        --warmup 1 --iters 15 --json "$results/json/$setup.pytorch.json" \
+        2>&1 | tee "$results/logs/$setup.pytorch.log"; then
+        status="pytorch-only:emmy-failed:$emmy_status"
+        successful_setups=$((successful_setups + 1))
+      else
+        status="failed:emmy=$emmy_status,pytorch=$?"
+      fi
     fi
     printf "%s\t%s\t%s\n" "$operator" "$sequence_length" "$status" >> "$status_file"
   done

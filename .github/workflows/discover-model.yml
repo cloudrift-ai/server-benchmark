@@ -18,6 +18,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
     env:
       GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
@@ -310,6 +312,7 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
       - name: Create or update rolling discovery pull request
+        id: lifecycle-pr
         if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
@@ -347,6 +350,7 @@ jobs:
           retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
             -f 'labels[]=model-discovery' \
             -f 'labels[]=model-onboarding' >/dev/null
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Cleanup discovery credentials and output
         if: always()
@@ -358,3 +362,27 @@ jobs:
             "$AGENT_INVENTORY" \
             "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true
+
+  notify:
+    name: Notify Discord
+    needs: discover
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+      WORKFLOW_KIND: discover
+      WORKFLOW_RESULT: ${{ needs.discover.result }}
+      PR_NUMBER: ${{ needs.discover.outputs.pr_number }}
+    steps:
+      - name: Checkout exact workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Send discovery summary
+        continue-on-error: true
+        run: python3 .github/scripts/discord_notification.py

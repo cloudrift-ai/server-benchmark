@@ -126,6 +126,12 @@ model, and expected lifecycle tag. The workflow then commits those artifacts, re
 and updates or opens the rolling model lifecycle PR using renewable GitHub App credentials for the long-running push
 path.
 
+Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery posts its result, run, and
+rolling PR; onboarding also includes the selected model, target, and operation mode. Because the notification job is
+independent of the self-hosted agent job, it still runs after a failure, cancellation, or timeout. Discord delivery
+retries three times, remains non-blocking, and disables all mentions; the workflow run and rolling PR retain the
+detailed evidence.
+
 ### Discovery lifecycle PR
 
 **Discover model** runs nightly or by manual dispatch. Discovery and qualification share a static concurrency group
@@ -183,6 +189,7 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 Agent workflows use these repository secrets as applicable:
 
 - `CLOUDRIFT_API_KEY` for model discovery, Robots-team resolution, availability, and CloudRift provisioning;
+- `DISCORD_EMMY_ROBOTS_WEBHOOK_URL` for non-pinging model discovery, verification, and onboarding summaries;
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 

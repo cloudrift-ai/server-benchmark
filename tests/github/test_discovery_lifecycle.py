@@ -54,6 +54,38 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 
+@pytest.mark.parametrize(
+    ("workflow", "primary_job", "workflow_kind", "notification_name"),
+    [
+        ("discover-model.yml", "discover", "discover", "Send discovery summary"),
+        ("onboard-model.yml", "onboard", "onboard", "Send onboarding summary"),
+    ],
+)
+def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workflow, primary_job, workflow_kind, notification_name):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text())
+    lifecycle = document["jobs"][primary_job]
+    notify = document["jobs"]["notify"]
+    lifecycle_pr = next(step for step in lifecycle["steps"] if step.get("id") == "lifecycle-pr")
+    checkout, notification = notify["steps"]
+
+    assert notify["needs"] == primary_job
+    assert notify["if"] == "${{ always() }}"
+    assert notify["runs-on"] == "ubuntu-latest"
+    assert notify["permissions"] == {"contents": "read"}
+    assert notify["env"]["DISCORD_WEBHOOK_URL"] == "${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}"
+    assert notify["env"]["WORKFLOW_KIND"] == workflow_kind
+    assert notify["env"]["WORKFLOW_RESULT"] == f"${{{{ needs.{primary_job}.result }}}}"
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert notification["name"] == notification_name
+    assert notification["continue-on-error"] is True
+    assert notification["run"] == "python3 .github/scripts/discord_notification.py"
+    assert 'echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"' in lifecycle_pr["run"]
+    assert lifecycle["outputs"]["pr_number"] == "${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}"
+    assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
+
+
 def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     workspace = Path(__file__).parents[2]
     document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())

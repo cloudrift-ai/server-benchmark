@@ -43,6 +43,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      selected: ${{ steps.selection.outputs.selected }}
+      model_id: ${{ steps.selection.outputs.model_id }}
+      gpu: ${{ steps.selection.outputs.gpu }}
+      gpu_count: ${{ steps.selection.outputs.gpu_count }}
+      mode: ${{ steps.selection.outputs.mode }}
+      pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
     env:
       GH_REPO: ${{ github.repository }}
       REQUESTED_MODEL_ID: ${{ inputs.model_id }}
@@ -765,6 +772,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Create or update rolling model lifecycle pull request
+        id: lifecycle-pr
         if: steps.vm.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
@@ -807,6 +815,7 @@ jobs:
           retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
             -f 'labels[]=model-discovery' \
             -f 'labels[]=model-onboarding' >/dev/null
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Cleanup local credentials and output
         if: always()
@@ -827,3 +836,32 @@ jobs:
             *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
           esac
           git config --unset-all credential.helper || true
+
+  notify:
+    name: Notify Discord
+    needs: onboard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+      WORKFLOW_KIND: onboard
+      WORKFLOW_RESULT: ${{ needs.onboard.result }}
+      SELECTED: ${{ needs.onboard.outputs.selected }}
+      MODEL_ID: ${{ needs.onboard.outputs.model_id || inputs.model_id }}
+      TARGET_GPU: ${{ needs.onboard.outputs.gpu || inputs.gpu }}
+      TARGET_GPU_COUNT: ${{ needs.onboard.outputs.gpu_count || inputs.gpu_count }}
+      ONBOARD_MODE: ${{ needs.onboard.outputs.mode }}
+      PR_NUMBER: ${{ needs.onboard.outputs.pr_number }}
+    steps:
+      - name: Checkout exact workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Send onboarding summary
+        continue-on-error: true
+        run: python3 .github/scripts/discord_notification.py

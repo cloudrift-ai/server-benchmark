@@ -31,10 +31,16 @@ loop as one more carried state — pivot ``m``, denominator ``d``, one expectati
 fold. A loop-invariant multiplicative factor on such a fold (softmax's hoisted
 ``1/d`` normalize) is split off first (``Σₖ c·xₖ = c·Σₖ xₖ`` — :func:`split_invariant_factors`)
 and multiplies the state back after the loop, so a fused softmax·V region streams as one
-``(m, d, o…)`` pass and the probability matrix never materializes. When the expectation
-folds sit inside a following free output sweep (the fused-matmul spelling — one fold per
-output column), the pair and its held-back pure companions sink into that sweep first, and
-the per-cell join proceeds there.
+``(m, d, o…)`` pass and the probability matrix never materializes.
+
+A channel joins only where it is a SIBLING of the pair. When the expectation folds sit inside a
+following free output sweep instead (the fused-matmul spelling — one fold per output column), the
+pair stays at its own level and is that sweep's per-ROW statistic: the sweep then reads as ONE
+computed-A contraction whose cone is ``exp(score − m)·(1/d)`` and whose source is the pair, through
+the same binding the norm→linear edge uses (``_atomize.bind_prologue_contraction``). That is what
+puts the region on the contraction schedule catalog — the warp/mma tier, the staged transports and
+split-K — instead of a per-cell serial fold, and it is why the pair must NOT be pushed into the
+sweep: inside it the statistic is recomputed once per output column.
 """
 
 from __future__ import annotations
@@ -232,7 +238,7 @@ def _score_head(maxacc: str, score: str, cone: list, ld: Load) -> tuple[str, tup
     return score, tuple(cone)
 
 
-def _twist(s: Loop, nxt: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld: Load, canon: str, rest: list) -> tuple[list, int]:
+def _twist(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld: Load, canon: str, rest: list) -> tuple[list, int]:
     """Emit the fused streaming loop for a matched ``(rowmax, Σexp)`` pair, joining every
     EXPECTATION channel that follows. Returns ``(emitted stmts, extra stmts consumed from
     ``rest``)``.
@@ -246,8 +252,11 @@ def _twist(s: Loop, nxt: Loop, maxacc: str, sumacc: str, score: str, cone: list,
     The channel scan walks the adjacent siblings: a same-extent additive fold reading as an
     expectation channel joins; pure stmts are held back and re-emitted after the fused loop
     (they may read the pair's final states — the hoisted normalize); anything else stops the
-    scan. A pair with no adjacent channels tries the sink (:func:`_sink`) before falling back
-    to the plain ``(m, d)`` spelling — byte-identical to the historical pair emission."""
+    scan. A pair with no adjacent channels keeps the plain ``(m, d)`` spelling — byte-identical
+    to the historical pair emission — and STAYS AT ITS OWN LEVEL: when the expectation folds sit
+    inside a following free output sweep (the fused-matmul spelling), the pair is that sweep's
+    per-ROW statistic, and the sweep binds as one computed-A contraction over it
+    (``_atomize.bind_prologue_contraction`` — the same seam the norm→linear edge uses)."""
     region: list = []
     consumed = 0
     nchan = 0
@@ -269,9 +278,6 @@ def _twist(s: Loop, nxt: Loop, maxacc: str, sumacc: str, score: str, cone: list,
         emitted = _emit_channels(s, maxacc, sumacc, score, cone, ld, region[: _last_channel(region)])
         if emitted is not None:
             return emitted, consumed
-    sunk = _sink(s, nxt, maxacc, sumacc, canon, rest)
-    if sunk is not None:
-        return sunk
     src, head = _score_head(maxacc, score, cone, ld)
     fused = Loop(
         axis=s.axis,
@@ -330,36 +336,6 @@ def _emit_channels(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld
     return [fused, *epilogue]
 
 
-def _sink(s: Loop, nxt: Loop, maxacc: str, sumacc: str, canon: str, rest: list) -> tuple[list, int] | None:
-    """Sink a pair whose expectation channels sit inside a following free output sweep (the
-    fused-matmul spelling: one same-extent additive fold per output column) into that sweep,
-    then fuse per cell. The pair loops and the held-back pure siblings (the hoisted normalize)
-    move to the sweep's head; commits only when the per-cell pairing actually joins a channel
-    (≥3 carried states), and only when nothing after the sweep reads a moved binding."""
-    pending: list = []
-    for idx, t in enumerate(rest):
-        if isinstance(t, (Load, Assign, Select)):
-            pending.append(t)
-            continue
-        if isinstance(t, Loop) and not t.is_reduce:
-            joinable = any(
-                isinstance(u, Loop) and u.is_reduce and u.axis.extent == s.axis.extent and _channel(u, maxacc, sumacc, canon) is not None
-                for u in t.body
-            )
-            if not joinable:
-                return None
-            moved = {maxacc, sumacc} | {d for p in pending for d in p.defines()}
-            if moved & _deep_reads(rest[idx + 1 :]):
-                return None
-            nb, ch = _fuse(Body.coerce((s, nxt, *pending, *t.body)))
-            fused = next((st for st in nb if isinstance(st, Loop) and st.role is AxisRole.TWISTED), None)
-            if not ch or fused is None or sum(1 for st in fused.body if isinstance(st, Accum)) < 3:
-                return None
-            return [replace(t, body=nb)], idx + 1
-        return None
-    return None
-
-
 def _fuse(body: Body) -> tuple[Body, bool]:
     """Recurse into nested ``Loop`` bodies; fuse any adjacent ``(rowmax, sum-of-exp)``
     reduce pair over the same input + reduce extent — together with every expectation
@@ -380,7 +356,7 @@ def _fuse(body: Body) -> tuple[Body, bool]:
                 se = _sumexp(nxt, maxacc)
                 canon = _cone_canon(cone, score, s.axis.name)
                 if se is not None and canon == _cone_canon(se[2], se[1], nxt.axis.name):
-                    emitted, extra = _twist(s, nxt, maxacc, se[0], score, cone, ld, canon, stmts[i + 2 :])
+                    emitted, extra = _twist(s, maxacc, se[0], score, cone, ld, canon, stmts[i + 2 :])
                     out.extend(emitted)
                     changed = True
                     i += 2 + extra

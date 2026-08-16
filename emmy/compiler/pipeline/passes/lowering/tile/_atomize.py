@@ -362,8 +362,8 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     if not (isinstance(op, Fold) and op.axis is None) or len(op.operands) != 1 or not isinstance(op.operands[0], Fold):
         return None
     red = op.operands[0]
-    if red.role is not AxisRole.PLANAR:
-        return None
+    if red.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
+        return None  # the statistic is a projected reduce; WHICH carrier it folds is not this binding's business
     if any(isinstance(s, Fold) for s in red.step_stmts()) or any(isinstance(e, Fold) for e in red.operands):
         return None  # a composed reduce (its partial or an operand edge holds a node) is not the bare statistic shape
     body = list(op.body)

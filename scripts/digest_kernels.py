@@ -6,7 +6,7 @@ source. Run at the baseline commit and after each migration commit; diff the out
 byte-neutral storage migration must leave every digest unchanged. Covers the scalar/warp/f16acc/
 split-K/raster matmuls and the producer band, the coop-t matvec, dynM forms, the reduce tiers
 (rms/softmax/reduce/pointwise), the computed-A fused kinds (norm_linear canonical + .lin +
-split-K + coop, mlp_geglu) and flash (hd128 tma/cp, hd256 split, fm sibling, chain, scalar).
+split-K + coop, mlp_geglu) and flash (hd128 tma/cp, masked, hd256 split, fm sibling, chain, scalar).
 
 Every case additionally asserts LIVENESS — that its pins reached a kernel (see :func:`_liveness`).
 A digest alone cannot tell a covered path from an unscheduled one: both render, both hash stably.
@@ -113,7 +113,7 @@ def pointwise(S=64, H=4096):
     return g
 
 
-def sdpa(head_dim=128, seq=128, heads=4):
+def sdpa(head_dim=128, seq=128, heads=4, causal=False):
     import torch  # noqa: F401
 
     from emmy.commands.trace import graph_from_code
@@ -121,7 +121,7 @@ def sdpa(head_dim=128, seq=128, heads=4):
     code = (
         f"torch.nn.functional.scaled_dot_product_attention(torch.randn(1,{heads},{seq},{head_dim},dtype=torch.float16), "
         f"torch.randn(1,{heads},{seq},{head_dim},dtype=torch.float16), torch.randn(1,{heads},{seq},{head_dim},dtype=torch.float16), "
-        "is_causal=False)"
+        f"is_causal={causal})"
     )
     graph, _, _ = graph_from_code(code)
     return graph
@@ -161,6 +161,9 @@ CASES = [
     ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/f4x8", "WORK": "w2x2", "REDUCE": ""}),
     ("sdpa_warp", lambda: sdpa(128), {"WORK": "w4x1"}),
     ("sdpa_warp_tma", lambda: sdpa(128), {"WORK": "w1x4", "STAGE": "d1/smem-tma"}),
+    # The MASKED score cone — the mask is a coord-predicated ``Select`` the twisted λ read and the
+    # MAP cone carry, so it reaches the same computed-A contraction the unmasked one reaches.
+    ("sdpa_warp_masked", lambda: sdpa(128, causal=True), {"WORK": "w4x1"}),
     ("sdpa_hd256", lambda: sdpa(256), {"WORK": "w4x1"}),
     ("sdpa_scalar", lambda: sdpa(64), {"REDUCE": "coop", "WORK": "t128"}),
 ]

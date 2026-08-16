@@ -62,6 +62,40 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
     assert artifacts == [Path(path) for path in paths]
 
 
+def test_validate_summary_includes_separately_declared_artifacts(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": [paths[2]],
+                "artifacts": [paths[0]],
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    _, artifacts = onboarding_artifacts.validate_summary(
+        summary_path,
+        tmp_path,
+        "org/Model",
+        "NVIDIA H200 141GB",
+        1,
+        "user@host",
+        "onboarding",
+        "best-effort",
+    )
+
+    assert artifacts == [Path(path) for path in paths]
+
+
 def test_validate_summary_rejects_experiment_result(tmp_path):
     paths = _write_artifacts(tmp_path)
     raw_result = tmp_path / "experiments" / "Model" / "serving_h200" / "2026-08-08" / "result.json"

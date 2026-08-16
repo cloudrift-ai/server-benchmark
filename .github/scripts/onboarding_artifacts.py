@@ -104,13 +104,20 @@ def validate_summary(
         raise ValueError("The experiment recipe must be included in experiment_artifacts")
     raw_artifacts = summary.get("artifacts")
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
-        raise ValueError("Summary must list every intended repository file in artifacts")
-    artifacts = [_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts]
+        raise ValueError("Summary must include a non-empty artifacts list")
+    artifacts = list(
+        dict.fromkeys(
+            [
+                *(_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts),
+                recipe,
+                report,
+                *experiment_artifacts,
+            ]
+        )
+    )
     invalid_result_artifacts = _invalid_result_artifacts(artifacts)
     if invalid_result_artifacts:
         raise ValueError(f"Only recipe.yaml and final recipe RESULTS.md artifacts may be retained: {invalid_result_artifacts}")
-    if not {recipe, report, *experiment_artifacts}.issubset(set(artifacts)):
-        raise ValueError("artifacts must include the recipe, report, and every experiment_artifacts entry")
     return summary, artifacts
 
 

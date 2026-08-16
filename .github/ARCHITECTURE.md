@@ -100,7 +100,9 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
+allowed recipe, experiment, serving-image, and canonical-golden paths. The validator mechanically includes the
+separately declared recipe, report, and retained experiment recipes in the staging set, while optional outputs must
+remain in `artifacts`; unmanifested or exploratory output is rejected.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
 model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,

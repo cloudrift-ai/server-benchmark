@@ -172,7 +172,7 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          ./venv/bin/emmy recipe list recipes --json > "$RECIPE_INVENTORY"
+          ./venv/bin/emmy recipe list --json > "$RECIPE_INVENTORY"
           ./venv/bin/python - <<'PY'
           import asyncio
           import json

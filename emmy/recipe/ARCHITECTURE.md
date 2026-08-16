@@ -15,8 +15,7 @@ validation.
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
-- `bundled.py` — `bundled_root()`, `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an
-  installed wheel
+- `bundled.py` — automatic editable-checkout/wheel catalog selection and bare-name materialization
 
 ## Key Design Decisions
 
@@ -26,9 +25,8 @@ A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes
 `recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
 site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a timestamped
 run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the
-bundled recipe into the current directory and returns that path. An existing directory always takes precedence, so a
-name that matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never
-clobbered.
+recipe selected from the live editable checkout or installed bundle into the current directory and returns that path.
+An existing directory always takes precedence, so a matching edited copy is never clobbered.
 
 ### Recipe Lifecycle Tags
 
@@ -59,9 +57,9 @@ does not affect engine arguments, deployment, or benchmark behavior.
 versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
 state, and each matrix-expanded deployment's effective context length to the identity, tags, task, and rationale.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
-may add fields without removing or redefining fields in the current version. With no explicit root, editable installs
-read the checkout's live top-level `recipes/` and wheel installs read their packaged runnable recipes.
-`emmy recipe list --bundled --json` forces the packaged set for release-artifact inspection.
+may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
+live top-level `recipes/` and wheel installs read their packaged runnable recipes. The CLI deliberately exposes no
+catalog-selection arguments, so every consumer observes the same installation-aware behavior.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 

@@ -104,8 +104,8 @@ directly; they never import from another test module or from `conftest.py`.
 - **Recipe lifecycle** — named-model deployment assertions skip when their recipe is disabled; maintained and
   best-effort recipes keep the full serving contract coverage, while obsolete recipes remain covered by lifecycle
   validation. Catalog and command tests cover the versioned JSON inventory, effective deployment metadata,
-  tag-filtered inventory, editable-versus-wheel catalog selection, recipe-name materialization, and validated shell
-  creation. Repository-
+  tag-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
+  materialization, and validated shell creation. Repository-
   automation tests validate required lifecycle rationales and the one-to-three-entry onboarding deployment matrix
   through that shared library. Qualification-manifest tests also pin the requested operation mode, exact model ID,
   target, and preserved lifecycle tag before artifacts may be staged.

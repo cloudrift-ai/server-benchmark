@@ -344,8 +344,8 @@ See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy 
 ### `emmy recipe`
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
-Without a root it detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use
-their packaged runnable set. Repeat `--tag` to require several tags. `--bundled` forces the packaged set.
+It detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use their packaged
+runnable set. Repeat `--tag` to require several tags.
 `--json` emits the versioned catalog object documented in the recipe architecture; each record includes matrix-
 expanded GPU/count/context metadata and whether the recipe is runnable. Machine consumers reject unknown versions.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
@@ -353,7 +353,7 @@ table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and n
 directory.
 
 ```bash
-emmy recipe list [ROOT] [--bundled] [--tag TAG]... [--json]
+emmy recipe list [--tag TAG]... [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```

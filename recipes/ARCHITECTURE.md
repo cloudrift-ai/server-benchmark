@@ -15,10 +15,10 @@ here for lifecycle continuity, but their tags disable deployment. The recipe for
 `cross`/`zip`, deep merge, `extra_args` validation, `docker_options`, command recipes — is documented in
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md); this file is about **what belongs here** and why.
 
-Every runnable `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without
-a checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
-that. Obsolete recipes and onboarding shells remain repository-only. Only the recipe files travel — `RESULTS.md` and
-local benchmark output do not.
+Every runnable `recipe.yaml` here also ships inside the published wheel. `--recipe <model>` (a bare name, no path)
+copies from this live tree in an editable install or from the packaged catalog in a wheel install, then uses that
+working copy. Obsolete recipes and onboarding shells remain repository-only. Only the recipe files travel —
+`RESULTS.md` and local benchmark output do not.
 
 ## Lifecycle
 

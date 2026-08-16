@@ -7,7 +7,7 @@ import yaml
 GPU = "NVIDIA H200 141GB"
 
 
-def test_recipe_create_and_list_by_tag(run_cli, tmp_path):
+def test_recipe_create(run_cli, tmp_path):
     root = tmp_path / "recipes"
     returncode, stdout, stderr = run_cli(
         "recipe",
@@ -27,22 +27,27 @@ def test_recipe_create_and_list_by_tag(run_cli, tmp_path):
     assert stdout.strip() == str(recipe_path)
     assert yaml.safe_load(recipe_path.read_text())["matrices"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
 
-    returncode, stdout, stderr = run_cli("recipe", "list", str(root), "--tag", "onboarding", "--json")
+
+def test_recipe_list_by_tag(run_cli):
+    returncode, stdout, stderr = run_cli("recipe", "list", "--tag", "best-effort", "--json")
 
     assert returncode == 0, stderr
     document = json.loads(stdout)
     assert document["schema_version"] == 1
-    assert [recipe["model_id"] for recipe in document["recipes"]] == ["org/new-model"]
-    assert document["recipes"][0]["runnable"] is False
+    assert document["recipes"]
+    assert all("best-effort" in recipe["tags"] for recipe in document["recipes"])
 
 
-def test_recipe_list_excludes_recipes_without_requested_tag(run_cli, tmp_path):
-    root = tmp_path / "recipes"
-    recipe = root / "ready" / "recipe.yaml"
-    recipe.parent.mkdir(parents=True)
-    recipe.write_text("tags: [best-effort]\nmodel:\n  huggingface: org/ready\n")
-
-    returncode, stdout, stderr = run_cli("recipe", "list", str(root), "--tag", "maintained", "--json")
+def test_recipe_list_excludes_recipes_without_requested_tag(run_cli):
+    returncode, stdout, stderr = run_cli("recipe", "list", "--tag", "does-not-exist", "--json")
 
     assert returncode == 0, stderr
     assert json.loads(stdout) == {"schema_version": 1, "recipes": []}
+
+
+def test_recipe_list_rejects_catalog_selection_arguments(run_cli):
+    for arguments in (("recipes",), ("--bundled",)):
+        returncode, _stdout, stderr = run_cli("recipe", "list", *arguments, "--json")
+
+        assert returncode == 2
+        assert "unrecognized arguments" in stderr

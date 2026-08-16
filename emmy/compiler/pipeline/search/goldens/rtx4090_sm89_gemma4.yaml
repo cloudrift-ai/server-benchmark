@@ -2489,12 +2489,12 @@ configs:
     knobs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE: g4k
+      REDUCE: g2k
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
-      emmy_us: 48.0
-      reference_us: 49.0
+      emmy_us: 59.3
+      reference_us: 49.6
       reference_backend: cublas
 - program: 3
   target:
@@ -2976,12 +2976,12 @@ configs:
     knobs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      REDUCE: g8k
+      REDUCE: g4k
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
-      emmy_us: 19.6
-      reference_us: 16.6
+      emmy_us: 22.8
+      reference_us: 16.9
       reference_backend: cublas
   - name: gemma4_12b.k_proj_global
     bindings: {}
@@ -2990,12 +2990,12 @@ configs:
     knobs:
       WORK: w2x4
       TILE: mma_m16n8k16_f16_f16/f2x4/k2
-      REDUCE: g8k
+      REDUCE: g4k
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
-      emmy_us: 17.9
-      reference_us: 16.6
+      emmy_us: 23.4
+      reference_us: 16.9
       reference_backend: cublas
 - program: 19
   target:
@@ -3208,12 +3208,12 @@ configs:
     knobs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE: g4k
+      REDUCE: g2k
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
-      emmy_us: 47.9
-      reference_us: 48.7
+      emmy_us: 59.9
+      reference_us: 49.5
       reference_backend: cublas
 - program: 26
   target:
@@ -5387,9 +5387,10 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: g4k
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
-      emmy_us: 641.8
-      reference_us: 447.5
+      emmy_us: 517.3
+      reference_us: 368.4
       reference_backend: cublas
 - program: 105
   target:

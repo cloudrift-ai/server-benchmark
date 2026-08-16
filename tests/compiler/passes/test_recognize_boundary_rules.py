@@ -316,7 +316,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == operand_name(c.a)
     assert cone.operands[0].operands[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
-    pro, cell, stats = cone_seam(cone)
+    pro, cell, stats = cone_seam(cone, c.axis.name)
     assert pro == tuple(cone.operands[0].lower()) and cell == tuple(cone.body)
     assert not any(refs_axis(s, c.axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(refs_axis(s, c.axis.name) for s in cell), "the per-cell body is the k-varying remainder"

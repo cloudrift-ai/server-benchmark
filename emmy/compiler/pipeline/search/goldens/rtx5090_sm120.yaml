@@ -1558,30 +1558,30 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      REDUCE@a2: coop
-      WORK: t128
-      TILE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f1x2/k4
+      REDUCE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 105.13
-      reference_us: 117.09
+      emmy_us: 11.95
+      reference_us: 104.99
       reference_backend: emmy-greedy
   - name: attention.hd128.dynM.softmax_v
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a2: coop
-      WORK: t128
-      TILE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f1x2/k4
+      REDUCE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 102.74
-      reference_us: 117.41
+      emmy_us: 11.9
+      reference_us: 104.99
       reference_backend: emmy-greedy
 - program: 34
   target:
@@ -1694,30 +1694,30 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      REDUCE@a2: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f1x2/k8
+      REDUCE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 57.68
-      reference_us: 58.7
+      emmy_us: 13.51
+      reference_us: 59.03
       reference_backend: emmy-greedy
   - name: attention.hd64.dynM.softmax_v
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a2: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f1x2/k8
+      REDUCE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 58.12
-      reference_us: 58.41
+      emmy_us: 13.51
+      reference_us: 59.03
       reference_backend: emmy-greedy
 loops:
 - inputs: [x0, x1]

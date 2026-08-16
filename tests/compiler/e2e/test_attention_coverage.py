@@ -7,11 +7,14 @@ softmax reduce. This file pins every tier of it:
   readable-seam split (Q·K^T | softmax pieces | P·V, plus cut glue) and matches torch, static AND
   dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. The kernel count belongs to
   the fusion pass; these tests assert numerics over the whole kernel set.
-- **fused tensor-core flash** — NOT currently generatable: the flash pattern compiler (its private
-  recognition, the ``_twist`` fragment emitter, the streaming-pair schedule tiers) was deleted with
-  the perf gates. The generic-path successor is the TWISTED computed-A arm of the one recognizer
-  (``bind_prologue_contraction`` accepting the ``(m, d)`` exp-family statistic source) — until it
-  lands, the split above is the supported SDPA lowering.
+- **fused tensor-core flash** — the flash pattern compiler (its private recognition, the ``_twist``
+  fragment emitter, the streaming-pair schedule tiers) was deleted with the perf gates; its
+  generic-path successor has LANDED as the TWISTED computed-A arm of the one recognizer
+  (``bind_prologue_contraction`` accepting the ``(m, d)`` exp-family statistic source), so the
+  ``softmax·V`` half of SDPA is one contraction over the KV axis and takes the warp/mma tier, the
+  staged transports and split-K wherever the target's atoms admit a compute-filled ``a`` edge
+  (sm_80+; Volta's atoms are materialized-edges-only). The score contraction still lands in its own
+  kernel — a SINGLE-kernel flash additionally needs the score contraction inside the A cone.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →

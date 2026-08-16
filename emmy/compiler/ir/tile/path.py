@@ -40,7 +40,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from emmy.compiler.ir.tile.ir import Fold, is_contraction
+from emmy.compiler.ir.tile.ir import Fold, edge_refs_axis, is_contraction
 
 #: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
@@ -76,13 +76,17 @@ class Site:
     the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
     living in a λ-spelled fold's DERIVED evaluation (flash's synthesized PV contraction) — a real
     schedule site (``TILE@pj``) but combine material BELOW the seam lattice, never a ``PLACE``
-    target."""
+    target. ``inline`` is the mirror: a node the enclosing cell EVALUATES INLINE (a cone's
+    per-cell producer edge — the attention score contraction the compute fill evaluates per slab
+    cell, from lowered loop IR), so no schedule slice can address it, but it is still a ``PLACE``
+    seam — cutting it materializes the value into its own kernel."""
 
     node: object
     axis: str | None
     segments: tuple[str, ...]
     ordinal: int = 1
     derived: bool = False
+    inline: bool = False
 
     @property
     def depth(self) -> int:
@@ -96,6 +100,10 @@ def _seg(node) -> str:
     return "map" if node.axis is None else "fold"
 
 
+#: One ``_walk`` visit: the node, its segment path, and the two carried flags (derived / inline).
+_Visit = tuple[object, tuple[str, ...], bool, bool]
+
+
 def _stmt_children(stmt):
     """Structural nodes embedded in a plain stmt's nested bodies (a composed step reached through
     a ``Loop`` — ``030``'s sliced partials)."""
@@ -107,8 +115,8 @@ def _stmt_children(stmt):
                 yield from _stmt_children(child)
 
 
-def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...], bool]], derived: bool = False) -> None:
-    out.append((node, prefix, derived))
+def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = False, inline: bool = False, k_name: str | None = None) -> None:
+    out.append((node, prefix, derived, inline))
     if not isinstance(node, Fold):
         return
     if is_contraction(node):
@@ -116,21 +124,26 @@ def _walk(node, prefix: tuple[str, ...], out: list[tuple[object, tuple[str, ...]
         # rides the stored operand order, so the labels are as stable as the term. This branch
         # must precede the generic operand walk: the stored corpus keys ``PLACE@a`` against it,
         # and a contraction falling through to ``_seg`` would silently re-spell those rows.
+        # The K axis travels one level down: a computed edge is a CONE, and which of the cone's
+        # own edges the fill evaluates per cell is that same K-seam question (``ops.cone_seam``).
         for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
             if isinstance(edge, Fold):
-                _walk(edge, (*prefix, label), out, derived)
+                _walk(edge, (*prefix, label), out, derived, inline, node.axis.name)
         return
     if node.axis is None:
+        # A cone's per-cell producer edge — and everything under it — is evaluated INLINE by the
+        # enclosing fill, from lowered loop IR, so no schedule slice reaches it. The row-invariant
+        # prologue edge is not inline: it runs once per tile row and carries its own families.
         for src in node.operands:
             if isinstance(src, Fold):
-                _walk(src, (*prefix, _seg(src)), out, derived)
+                _walk(src, (*prefix, _seg(src)), out, derived, inline or (k_name is not None and edge_refs_axis(src, k_name)))
         for s in node.body:
             for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
-                _walk(child, (*prefix, _seg(child)), out, derived)
+                _walk(child, (*prefix, _seg(child)), out, derived, inline or k_name is not None)
         return
     for edge in node.operands:
         if isinstance(edge, Fold):
-            _walk(edge, (*prefix, _seg(edge)), out, derived)
+            _walk(edge, (*prefix, _seg(edge)), out, derived, inline)
     # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the fold)
     # are real schedule sites, marked ``derived`` (combine material below the seam lattice; a
     # lift-body inline node — the demoted cone — likewise: un-realizable as a seam). Operand
@@ -152,15 +165,15 @@ def sites(root) -> tuple[Site, ...]:
     ``(segments, axis)``."""
     if root is None:
         return ()
-    nodes: list[tuple[object, tuple[str, ...], bool]] = []
+    nodes: list[_Visit] = []
     _walk(root, (_seg(root),), nodes)
     counts: dict[tuple, int] = {}
     result: list[Site] = []
-    for node, segments, derived in nodes:
+    for node, segments, derived, inline in nodes:
         axis = node.axis.name if isinstance(node, Fold) and node.axis is not None else None
         key = (segments, axis)
         counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
+        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived, inline=inline))
     return tuple(result)
 
 
@@ -182,16 +195,21 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
     zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR
     escape); ``PLACE`` every NON-ROOT node (the child names its parent↔child seam — cut legality is
-    structural, edge-iff-closed by construction)."""
+    structural, edge-iff-closed by construction).
+
+    An ``inline`` site carries NO slice: the enclosing cell evaluates it from lowered loop IR, so a
+    ``TILE`` / ``REDUCE`` / ``STAGE`` value there could never be realized, and offering one would
+    widen the row product with rows that emit the identical kernel. It stays a ``PLACE`` seam — the
+    cut is exactly how such a value becomes a kernel of its own, with a schedule of its own."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
     if family == "PLACE":
         return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
-        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None)
+        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None and not s.inline)
     out = []
     for s in all_sites:
-        if not isinstance(s.node, Fold):
+        if not isinstance(s.node, Fold) or s.inline:
             continue
         if s.node.axis is not None and is_contraction(s.node):
             out.append(s)

@@ -25,6 +25,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import Fold, TileOp
+from emmy.compiler.ir.tile.ir import deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -316,13 +317,103 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == operand_name(c.a)
     assert cone.operands[0].operands[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
-    pro, cell, stats = cone_seam(cone)
+    pro, cell, stats = cone_seam(cone, c.axis.name)
     assert pro == tuple(cone.operands[0].lower()) and cell == tuple(cone.body)
     assert not any(refs_axis(s, c.axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(refs_axis(s, c.axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
     # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
     assert operand_body(c.a) == tuple(cone.lower()) == (*pro, *cell)
+
+
+def _attention_cone_term() -> tuple[Fold, Fold]:
+    """The attention shape of the computed-A cone, built directly: the ``softmax(Q·Kᵀ)·V``
+    contraction over the KV axis whose A cone is ``exp(s − m)·(1/d)`` over a COMPUTED score — one
+    edge for the row statistic (the twisted ``(m, d)`` pair) and one for the per-cell score
+    contraction ``s = Σ_d Q·K``. Returns ``(root, cone)``."""
+    from emmy.compiler.ir.stmt import Lambda
+    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.tile import Channel
+
+    def score(kv_name: str, dd: Axis, acc: str) -> Fold:
+        q = Load(names=(f"{acc}__q",), input="q", index=(Var("m"), Var(dd.name)))
+        k = Load(names=(f"{acc}__k",), input="k", index=(Var(kv_name), Var(dd.name)))
+        return Fold.contraction(k_axis=dd, a=q, channels=(Channel(b=k, acc=acc),))
+
+    names, other = ("mx", "dn"), ("mx__o", "dn__o")
+    stat = Fold(
+        axis=Axis("kv", Dim(32)),
+        operands=(score("kv", Axis("dd", Dim(16)), "s1"),),
+        lift=Lambda(params=("kv", "s1"), body=Body(()), results=("s1", 1.0)),
+        init=(float("-inf"), 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
+    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,))
+    cone = Fold.projection(
+        body=Body(
+            (
+                Assign(name="ex0", op="subtract", args=("s2", "mx")),
+                Assign(name="ex1", op="exp", args=("ex0",)),
+                Assign(name="pw", op="multiply", args=("rd", "ex1")),
+            )
+        ),
+        operands=(prologue, score("kvb", Axis("ddb", Dim(16)), "s2")),
+    )
+    v = Load(names=("vl",), input="v", index=(Var("kvb"), Var("n")))
+    pv = Fold.contraction(k_axis=Axis("kvb", Dim(32)), a=cone, channels=(Channel(b=v, acc="o"),))
+    return Fold.projection(body=Body(()), operands=(pv,)), cone
+
+
+def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
+    """A cone may carry more than the one row-invariant statistic edge: attention's score
+    contraction is a PER-CELL producer its ``exp(s − m)`` reads. The K seam splits the EDGES the
+    same way it splits the stmts — a k-invariant edge is the prologue (run once per tile row), a
+    k-varying one is per-cell and splices into the cell ahead of its first use — so the fill
+    computes the score instead of reading a name nothing defines.
+
+    Such an edge is evaluated INLINE from lowered loop IR, so no ``TILE`` / ``REDUCE`` / ``STAGE``
+    slice can address it and none is offered (a value there would be unrealizable, and the rows
+    carrying it would emit the identical kernel). It stays a ``PLACE`` seam: cutting it is exactly
+    how the score becomes a kernel of its own — the two-kernel form evidence prices against this
+    one."""
+    from emmy.compiler.ir.tile.ir import refs_axis
+    from emmy.compiler.ir.tile.ops import cone_seam
+    from emmy.compiler.ir.tile.path import family_sites, sites
+
+    root, cone = _attention_cone_term()
+    pv = root.operands[0]
+    pro, cell, stats = cone_seam(cone, pv.axis.name)
+    assert pro == tuple(cone.operands[0].lower()), "the k-invariant statistic edge is the prologue"
+    assert not any(refs_axis(s, pv.axis.name) for s in pro)
+    assert cell[0] == cone.operands[1].lower()[0], "the score edge leads the per-cell cell"
+    assert stats == ("mx", "rd"), f"the statistic bridges through the stat smem rows: {stats}"
+    # Every name the cell reads is defined by the cell, the bridged stats, or an axis.
+    defined = {nm for s in cell for nm in deep_defines(s)} | set(stats) | stmt_axis_names(cell) | {"m", "n", pv.axis.name}
+    assert deep_reads(list(cell)) <= defined, f"the fill reads an undefined name: {deep_reads(list(cell)) - defined}"
+
+    all_sites = sites(root)
+    (inline,) = [s for s in all_sites if s.inline]
+    assert inline.node is cone.operands[1] and inline.axis == "ddb"
+    for family in ("TILE", "REDUCE", "STAGE"):
+        assert not [s for s in family_sites(family, all_sites) if s.node is inline.node], f"{family} must not address an inline node"
+    assert [s for s in family_sites("PLACE", all_sites) if s.node is inline.node], "the score edge stays a cuttable seam"
+    # …and the statistic edge keeps its own reduce site — it is realized per tile ROW, not per cell.
+    stat = cone.operands[0].operands[0]
+    assert any(s.node is stat for s in family_sites("REDUCE", all_sites))
+
+
+def test_cone_per_cell_edge_reaches_the_per_cell_emitter():
+    """The same edge on the untiled tier: the emitter's node-walk lowers EVERY operand edge of a
+    zero-axis node, so the score's own reduce loop is emitted ahead of the cell that reads it.
+    Walking only the first edge left the cell reading a name nothing defined — nvcc's
+    ``identifier "s2" is undefined``."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _emit
+
+    _root, cone = _attention_cone_term()
+    body = Body(tuple(_emit(cone, Ctx(grid=())).body))
+    defined = {nm for s in body for nm in deep_defines(s)} | stmt_axis_names(body) | {"m", "n", "kvb"}
+    assert "s2" in defined, "the cone's score edge never reached the emitted body"
+    assert deep_reads(list(body)) <= defined, f"the emitted body reads an undefined name: {deep_reads(list(body)) - defined}"
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():

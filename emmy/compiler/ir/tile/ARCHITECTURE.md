@@ -85,8 +85,14 @@ derived material — a synthesized node reading the carrier's running state — 
 schedule site excluded from PLACE (`Site.derived`). A hoisted operand edge IS a PLACE site.
 
 A cone's SOURCE is the row-invariant prologue (the per-row statistic) and its body the per-cell normalize, so the K
-seam is the node boundary (`ops.cone_seam`). The A/B asymmetry that is real — A M-resident and compute-fillable, B
-streamed — is a SCHEDULE fact read off the node (`isinstance(c.b, Load)` eligibility gates), not a storage fact.
+seam is the node boundary (`ops.cone_seam`). The seam splits the cone's EDGES by the same rule it splits its stmts: an
+edge that never indexes the contraction axis is prologue (run once per tile row, and it carries its own schedule
+families — the statistic's `REDUCE`), while a k-VARYING producer edge — attention's score contraction, which the
+cone's `exp(s − m)` reads — is per-cell, splices into the cell ahead of its first use, and is evaluated INLINE by the
+fill from lowered loop IR. An inline-evaluated node carries no schedule slice (`Site.inline`: no value there could be
+realized, and rows carrying one would emit the identical kernel) but stays a PLACE seam — cutting it is how such a
+value becomes a kernel of its own. The A/B asymmetry that is real — A M-resident and compute-fillable, B streamed — is
+a SCHEDULE fact read off the node (`isinstance(c.b, Load)` eligibility gates), not a storage fact.
 
 ## The node carries no placement and no schedule
 

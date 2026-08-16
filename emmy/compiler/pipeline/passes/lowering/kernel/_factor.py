@@ -128,8 +128,10 @@ def _emit(op, ctx: Ctx) -> Frag:
     ``step`` so nested contractions are reached as nodes. Scalar-nested: a node's body is its
     lowered loop-IR (byte-identical to ``Fold.lower``)."""
     if isinstance(op, Fold) and op.axis is None:
-        src = _emit(op.operands[0], ctx) if op.operands else None
-        prefix = list(src.body) if src is not None else []
+        # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
+        # edge per computed input: the row statistic, plus (attention) the per-cell score
+        # contraction its ``exp(s − m)`` reads.
+        prefix = [s for e in op.operands for s in _emit(e, ctx).body]
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
@@ -306,7 +308,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
             epi = with_store(epi, ctx.output, grid, c.out)
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
-        seam = cone_seam(c.a) if (not isinstance(c.a, Load)) else None
+        seam = cone_seam(c.a, c.axis.name) if (not isinstance(c.a, Load)) else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.

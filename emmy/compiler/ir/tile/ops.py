@@ -22,15 +22,21 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, stmt_axis_names
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, edge_refs_axis, effect_tail, splice_operands, stmt_axis_names
 
 
-def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
+def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
     scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
-    prologue>,))``, and the prologue node IS the per-row statistic (its own zero-axis ``Fold`` over the stat
-    ``Fold``) plus any row-invariant cone prefix, placed there when the cone was built
-    (``_atomize.make_cone`` splits at the K seam once, structurally).
+    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
+    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
+    when the cone was built (``_atomize.make_cone`` splits at the K seam once, structurally).
+
+    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
+    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
+    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
+    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
+    carries the single row-invariant edge, so its seam reads exactly as it always did.
 
     ``stats`` are the prologue defs the cell reads — the values bridged through the stat smem rows;
     a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
@@ -38,8 +44,9 @@ def cone_seam(cone) -> tuple[tuple, tuple, tuple[str, ...]]:
     them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    pro = tuple(cone.operands[0].lower())
-    cell = tuple(cone.body)
+    varying = [edge_refs_axis(e, k_name) for e in cone.operands]
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
+    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
     stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
 

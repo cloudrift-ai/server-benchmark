@@ -807,7 +807,11 @@ def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     def resolve(st: Stage) -> Stage | None:
         r = _resolve_stage(term, node, tile, st)
         if r is None:  # per DECLINED depth, so a pin that fits no depth names its own budget
-            legal.enforce(f"the smem compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
+            legal.enforce(
+                f"the smem compute fill does not resolve at depth {st.depth}: its slabs must fit the "
+                f"{term.ctx.max_dynamic_smem} B smem budget and its K chunk must tile the contraction K",
+                pinned=pin is not None,
+            )
         return r
 
     return _resolved((Stage(depth=d) for d in depths), resolve, gmem_direct=False)
@@ -861,12 +865,11 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     out = [ReducePlan()]
     ext = node.axis.extent
     k = ext.as_static() if ext.is_static else None
-    # The σ-reindex a cross-CTA split performs needs a gmem index on every channel's B, so a
-    # COMPUTED B admits no split — in the bare ``g<n>`` moves OR in the transposed band's ``g<n>k``
-    # composites. Asked HERE and not only at materialization: ``_splitk_option`` enforces it with
-    # ``pinned=True``, so an unpinned candidate the enumeration offered became a raise instead of a
-    # dropped row — the raise-vs-drop split this module exists to keep on one side.
-    splittable = k is not None and legal.enforce(legal.splitk_materialized_b(node), pinned=False)
+    # A cross-CTA split factors a STATIC K; either edge's σ-reindex then rides ``_sliced_edge``
+    # (a gmem index, or a computed cone's own k coordinate). Asked HERE and not only at
+    # materialization: ``_splitk_option`` enforces the same rule with ``pinned=True``, so a
+    # candidate the enumeration offered would otherwise become a raise instead of a dropped row.
+    splittable = k is not None and legal.enforce(legal.splitk_computed_b_site(node), pinned=False)
     if k is not None and not plan.is_tiled:
         inner = _inner_free(term.place)
         for p in coop_reduce_moves():
@@ -1413,16 +1416,16 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     return ksplit, kslice, sigma
 
 
-def _sliced_a(a, sigma: Sigma):
-    """The ``a`` edge σ-reindexed to absolute k for a split partition. A MATERIALIZED edge rewrites
-    its gmem index; a COMPUTED cone rewrites its per-cell BODY only — the REDUNDANT-STATISTIC split:
-    the cone's row-invariant prologue (the per-row statistic, the K seam ``ops.cone_seam`` reads off
-    the node boundary) spans the whole row and stays FULL-ROW in every partition, each recomputing
-    it. That redundancy is what the split trades for parallelism; whether it pays on a given shape
-    is evidence's decision."""
-    if isinstance(a, Load):
-        return replace(a, index=tuple(sigma.apply(e) for e in a.index))
-    return a.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in a.body)),))
+def _sliced_edge(edge, sigma: Sigma):
+    """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
+    edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
+    only — the REDUNDANT-STATISTIC split: the cone's row-invariant prologue (the per-row statistic,
+    the K seam ``ops.cone_seam`` reads off the node boundary) spans the whole row and stays
+    FULL-ROW in every partition, each recomputing it. That redundancy is what the split trades for
+    parallelism; whether it pays on a given shape is evidence's decision."""
+    if isinstance(edge, Load):
+        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
+    return edge.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
 
 
 def _splitk_option(
@@ -1439,12 +1442,12 @@ def _splitk_option(
         legal.enforce(legal.scalar_block_threads(plan), pinned=True)
     w = rplan.cta
     legal.enforce(legal.splitk_slice_k_step(node, plan, w), pinned=True)
-    legal.enforce(legal.splitk_materialized_b(node), pinned=True)
+    legal.enforce(legal.splitk_computed_b_site(node), pinned=True)
     ksplit, kslice, sigma = _factor_k(node.axis, w)
     inner = Fold.contraction(
         k_axis=kslice,
-        a=_sliced_a(node.a, sigma),
-        channels=tuple(replace(ch, b=replace(ch.b, index=tuple(sigma.apply(e) for e in ch.b.index))) for ch in node.channels),
+        a=_sliced_edge(node.a, sigma),
+        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma)) for ch in node.channels),
     )
     placed = plan.placed_on(term.place)
     # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is

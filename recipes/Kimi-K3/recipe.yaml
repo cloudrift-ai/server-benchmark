@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: moonshotai/Kimi-K3
+  rationale: World's first open 2.8T MoE with MXFP4; beats frontier on coding and reasoning; native vLLM support.
+  heat: 88
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

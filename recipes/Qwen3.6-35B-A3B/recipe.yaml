@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
   rationale: "Flagship Qwen3.6 MoE with top coding scores, 5.9M downloads, and two-tier GPU coverage with MTP."
-
+  heat: 74
 engine:
   llm:
     tensor_parallel_size: 2

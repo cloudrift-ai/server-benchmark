@@ -7,7 +7,8 @@ tags:
 
 model:
   huggingface: "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
-  rationale: "AWQ 4-bit Llama 3.1 uniquely fits one 16GB V100 SXM2 where the FP16 checkpoint fails outright."
+  rationale: "AWQ 4-bit Llama uniquely fits one 16GB V100 SXM2 where the FP16 checkpoint fails outright."
+  heat: 35
   revision: db1f81ad4b8c7e39777509fac66c652eb0a52f91
     Public 4-bit AWQ preserves the Llama 3.1 8B Instruct chat and tool-use contract
     while fitting one 16 GB V100; the official FP16 checkpoint does not fit there.

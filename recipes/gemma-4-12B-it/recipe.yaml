@@ -22,7 +22,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Instruction-tuned Gemma 4 with fast-math kernels and MTP on one RTX 5090 at the lightweight 12B class."
+  rationale: "Instruction-tuned Gemma 4 with fast-math kernels and MTP on one RTX 5090 at lightweight 12B."
+  heat: 55
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 
 engine:

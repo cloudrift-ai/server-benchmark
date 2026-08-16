@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
   rationale: "Highest-capability agentic model with dedicated glm47 parser on eight H200s at 200K context."
-
+  heat: 75
 engine:
   llm:
     tensor_parallel_size: 8

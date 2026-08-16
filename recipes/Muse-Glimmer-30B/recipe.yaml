@@ -3,7 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "This 29.6B text-and-image agent model combines tool use, failure recovery, 131K context, and a separate DFlash drafter. Onboard the BF16 checkpoint on one Pro 6000 and one H200; quantized consumer deployment can follow as a separate checkpoint."
+  rationale: "29.6B agentic vision-language with tool use and failure recovery; strong Reddit discussion confirmed."
+  heat: 68
   task: generate
 matrices:
   - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

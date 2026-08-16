@@ -3,7 +3,8 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "The 124B/5.1B-active hybrid-linear MoE combines a 256K context window, native reasoning, and an agentic focus. Its official SGLang recipe validates this BF16 checkpoint on four 141 GB-class GPUs with MTP, making 4×H200 the onboarding target."
+  rationale: "124B hybrid-linear MoE with 256K context and native reasoning; unique for Emmy serving."
+  heat: 62
   task: generate
 matrices:
   - deploy.gpu: NVIDIA H200 141GB

@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Largest Qwen3.5 MoE serving on eight Pro 6000 or eight H200 with dual-engine SGLang and vLLM paths."
-
+  rationale: "Largest Qwen3.5 MoE on 8 Pro 6000 or 8 H200 through dual-engine SGLang and vLLM paths."
+  heat: 48
 engine:
   llm:
     pipeline_parallel_size: 1

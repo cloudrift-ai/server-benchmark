@@ -40,7 +40,7 @@ model:
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
   rationale: "Unique V100 MoE entry at the lowest-cost tier where the BF16 and FP8 variants cannot fit."
-
+  heat: 42
 engine:
   llm:
     tensor_parallel_size: 1

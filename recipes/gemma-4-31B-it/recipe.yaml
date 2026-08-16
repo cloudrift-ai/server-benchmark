@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: "google/gemma-4-31B-it"
   rationale: "Google flagship with 9.7M downloads and 3.5k likes covering the single-GPU dense multimodal path."
-
+  heat: 66
 engine:
   llm:
     tensor_parallel_size: 1

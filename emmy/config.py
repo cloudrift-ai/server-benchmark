@@ -48,6 +48,9 @@ CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
 KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
+BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
+BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
+BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
@@ -424,6 +427,36 @@ def kernel_timeout_ms() -> float:
     the deadline-cliff rationale lives at the backend call site)."""
     raw = os.environ.get(KERNEL_TIMEOUT_MS)
     return float(raw) if raw else 2000.0
+
+
+def bench_compile_timeout_s(default: float = 30.0) -> float:
+    """``EMMY_BENCH_COMPILE_TIMEOUT_S`` — wall-clock cap on the compile stage of one
+    ``benchmark()`` call. ``default`` is the caller's own budget (constructor policy —
+    e.g. ``tune`` shrinks it for fast-fail single-kernel sweeps); the env var, when set,
+    overrides every caller uniformly. Semantics live on ``Backend.bench_compile_timeout_s``."""
+    return float_env(BENCH_COMPILE_TIMEOUT_S, default)
+
+
+def bench_run_timeout_s(default: float = 10.0) -> float:
+    """``EMMY_BENCH_RUN_TIMEOUT_S`` — accumulated-GPU-time cap on a ``benchmark()`` call's
+    iter loop. Same override contract as :func:`bench_compile_timeout_s`; raise it to bench
+    a program whose per-launch latency times the iter count exceeds the default budget.
+    Semantics live on ``Backend.bench_run_timeout_s``."""
+    return float_env(BENCH_RUN_TIMEOUT_S, default)
+
+
+def bench_wall_timeout_s(default: float | None = None) -> float | None:
+    """``EMMY_BENCH_WALL_TIMEOUT_S`` — hard SIGKILL wall-clock cap on one isolated-worker
+    ``benchmark()`` call. Same override contract as :func:`bench_compile_timeout_s`;
+    ``None`` (unset, no caller value) keeps the in-process path. Semantics live on
+    ``Backend.bench_wall_timeout_s``."""
+    raw = os.environ.get(BENCH_WALL_TIMEOUT_S)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def gpu_lock_path() -> str | None:

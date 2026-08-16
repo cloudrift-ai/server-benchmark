@@ -234,6 +234,13 @@ entry points (`handle_run`, `_handle_run_ir`, `_run_bench`) bridge with `asyncio
 run-path job flags), `test_hung_kernel_watchdog.py` (watchdog raises promptly), and
 `tests/compiler/cli/test_tune_bench_hung_kernel.py` (the `_run_bench` control flow).
 
+The three bench budgets (`bench_compile_timeout_s`, `bench_run_timeout_s`, `bench_wall_timeout_s`) are constructor
+policy on the backend, read through live `EMMY_BENCH_COMPILE_TIMEOUT_S` / `EMMY_BENCH_RUN_TIMEOUT_S` /
+`EMMY_BENCH_WALL_TIMEOUT_S` overrides (`emmy/config.py` owns the vars, mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env
+setting reaches every bench path uniformly — the in-child backend inherits the env, and derived wall caps (the
+pinned-row cap, the comparison jobs' workload-scaled cap) recompute from the overridden values. Raising them is how a
+golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified.
+
 The one-shot comparison result includes the worker's non-fatal `accuracy_error` beside timings, reference
 availability, and capture state. `tune --bench` persists that verdict per provenance reproducer instead of treating a
 successful timing response as proof of correctness.

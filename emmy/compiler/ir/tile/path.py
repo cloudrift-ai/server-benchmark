@@ -100,6 +100,10 @@ def _seg(node) -> str:
     return "map" if node.axis is None else "fold"
 
 
+#: One ``_walk`` visit: the node, its segment path, and the two carried flags (derived / inline).
+_Visit = tuple[object, tuple[str, ...], bool, bool]
+
+
 def _stmt_children(stmt):
     """Structural nodes embedded in a plain stmt's nested bodies (a composed step reached through
     a ``Loop`` — ``030``'s sliced partials)."""
@@ -111,7 +115,7 @@ def _stmt_children(stmt):
                 yield from _stmt_children(child)
 
 
-def _walk(node, prefix: tuple[str, ...], out: list, derived: bool = False, inline: bool = False, k_name: str | None = None) -> None:
+def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = False, inline: bool = False, k_name: str | None = None) -> None:
     out.append((node, prefix, derived, inline))
     if not isinstance(node, Fold):
         return
@@ -161,7 +165,7 @@ def sites(root) -> tuple[Site, ...]:
     ``(segments, axis)``."""
     if root is None:
         return ()
-    nodes: list = []
+    nodes: list[_Visit] = []
     _walk(root, (_seg(root),), nodes)
     counts: dict[tuple, int] = {}
     result: list[Site] = []

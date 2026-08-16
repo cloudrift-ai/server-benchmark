@@ -90,8 +90,10 @@ retaining the owned lease as an independent verification handle.
 The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
 Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
-lifecycle tag. The job has a 24-hour limit and gives the agent a 23.5-hour deadline so artifact validation and cleanup
-retain 30 minutes. The shared serving experiment retains one LFS archive and top-level row-record set per exact GPU
+lifecycle tag. Before the agent starts, the workflow installs the small remote Python/rsync prerequisite set and
+requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
+venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
+the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment retains one LFS archive and top-level row-record set per exact GPU
 platform plus one cumulative `RESULTS.md`; a run replaces only its platform snapshot. Ignored dated run directories,
 loose benchmark output, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image is
 produced only when every release gate passes. Nightly image publication is disabled unless
@@ -102,7 +104,7 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
-The workflow also attaches the exact-SHA `onboard-model` and `run-experiment` skills as authoritative agent inputs;
+The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills as authoritative agent inputs;
 older copies on the rolling branch cannot silently override a proposed artifact contract.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the

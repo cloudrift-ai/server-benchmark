@@ -409,6 +409,52 @@ jobs:
             echo "lease=$VM_LEASE"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Prepare target GPU host
+        if: steps.vm.outcome == 'success'
+        timeout-minutes: 30
+        env:
+          SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
+          SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+        run: |
+          ssh_args=(
+            ssh -i "$SSH_KEY" -p "$SSH_PORT"
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+          "${ssh_args[@]}" "$SSH_TARGET" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git make python3.12-venv rsync
+
+          scratch_base="$HOME/.cache/emmy"
+          mkdir -p "$scratch_base"
+          filesystem_type=$(df -PT "$scratch_base" | awk 'NR == 2 {print $2}')
+          case "$filesystem_type" in
+            tmpfs|ramfs)
+              echo "Durable onboarding scratch resolved to $filesystem_type" >&2
+              exit 1
+              ;;
+          esac
+          free_kb=$(df -Pk "$scratch_base" | awk 'NR == 2 {print $4}')
+          if [ "$free_kb" -lt 8388608 ]; then
+            echo "Durable onboarding scratch requires at least 8 GiB free" >&2
+            exit 1
+          fi
+
+          bootstrap_venv=$(mktemp -d "$scratch_base/bootstrap.XXXXXX")
+          cleanup() {
+            case "$bootstrap_venv" in
+              "$scratch_base"/bootstrap.*) rm -rf -- "$bootstrap_venv" ;;
+              *) echo "Refusing to remove unexpected bootstrap path" >&2; exit 1 ;;
+            esac
+          }
+          trap cleanup EXIT
+          TMPDIR="$bootstrap_venv" python3.12 -m venv "$bootstrap_venv"
+          "$bootstrap_venv/bin/pip" --version >/dev/null
+          REMOTE
+
       - name: Run onboard-model agent
         if: steps.vm.outcome == 'success'
         env:
@@ -437,7 +483,7 @@ jobs:
               )
           prompt = f"""Use the onboard-model skill non-interactively.
 
-          The attached exact-workflow-SHA copies of the onboard-model and run-experiment skills are authoritative.
+          The attached exact-workflow-SHA copies of the onboard-model, tune-kernels, and run-experiment skills are authoritative.
           Follow them instead of any older skill copies in the artifact worktree.
 
           Operation mode: {mode}
@@ -474,6 +520,7 @@ jobs:
             --model cloudrift/agent \
             --format json \
             --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
             --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?

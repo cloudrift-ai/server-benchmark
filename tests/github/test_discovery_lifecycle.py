@@ -59,6 +59,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
     steps = document["jobs"]["onboard"]["steps"]
     lfs_script = next(step["run"] for step in steps if step.get("name") == "Configure Git LFS")
+    host_setup_script = next(step["run"] for step in steps if step.get("name") == "Prepare target GPU host")
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Remove archived task-local raw results")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
@@ -68,9 +69,15 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert 'echo "$lfs_dir" >> "$GITHUB_PATH"' in lfs_script
     assert "git lfs install --local" in lfs_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in lfs_script
+    assert "python3.12-venv" in host_setup_script
+    assert 'scratch_base="$HOME/.cache/emmy"' in host_setup_script
+    assert "tmpfs|ramfs" in host_setup_script
+    assert "8388608" in host_setup_script
+    subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
     assert "results_<gpu-short>x<gpu-count>.tar.gz" in agent_script
     assert "preserve every other platform archive" in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
+    assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert "do not modify or list .gitattributes" in agent_script
     assert 'tarfile.open(archive, "r:gz")' in cleanup_script

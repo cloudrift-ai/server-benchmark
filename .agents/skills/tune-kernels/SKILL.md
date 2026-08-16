@@ -32,10 +32,18 @@ When the caller supplies SSH, run tracing, tuning, O3 verification, and profilin
 VM; never provision, stop, or delete it here. Record the SSH target and verify its GPU names/count before spending a
 search budget. Fail on a mismatch rather than switching hardware.
 
-Create a task-owned remote scratch directory and source tree:
+Create a task-owned remote scratch directory and source tree on durable storage. Never put the remote checkout,
+virtual environment, package cache, or build temporary files under `/tmp`: Cloud GPU images commonly mount it as a
+small tmpfs. Prefer `$HOME/.cache/emmy`, reject `tmpfs` and `ramfs`, and require at least 8 GiB free before setup.
+The caller may preinstall `python3.12-venv`, `git`, `make`, and `rsync`; otherwise install those prerequisites with
+the host's package manager before creating the source tree. Do not fall back to installing compiler dependencies or
+running compiler qualification on the local caller when remote setup fails.
+
+Then create the task-owned source tree:
 
 1. capture the local repository URL and revision;
-2. create an exact remote directory with `mktemp -d`, record it immediately, and clone the repository there;
+2. create an exact remote directory with `mktemp -d` under the validated durable base, record it immediately, and
+   clone the repository there;
 3. check out the captured revision, then rsync the local tracked-file list so reviewed uncommitted source changes are
    represented; remove the exact tracked paths deleted locally, and add only explicitly enumerated task-owned
    untracked source files to that list;
@@ -55,7 +63,10 @@ A typical setup is:
 ```bash
 REPO_URL=$(git remote get-url origin)
 REVISION=$(git rev-parse HEAD)
-REMOTE_ROOT=$(ssh "$REMOTE" 'mktemp -d /tmp/emmy-tune.XXXXXX')
+REMOTE_BASE=$(ssh "$REMOTE" 'set -eu; base="$HOME/.cache/emmy"; mkdir -p "$base"; \
+  case "$(df -PT "$base" | awk "NR == 2 {print \\$2}")" in tmpfs|ramfs) exit 1;; esac; \
+  test "$(df -Pk "$base" | awk "NR == 2 {print \\$4}")" -ge 8388608; printf "%s\\n" "$base"')
+REMOTE_ROOT=$(ssh "$REMOTE" "mktemp -d '$REMOTE_BASE/tune.XXXXXX'")
 LOCAL_MANIFEST=$(mktemp /tmp/emmy-tune-files.XXXXXX)
 ssh "$REMOTE" "git clone --no-checkout '$REPO_URL' '$REMOTE_ROOT/repo' && \
   git -C '$REMOTE_ROOT/repo' checkout --detach '$REVISION'"
@@ -66,7 +77,8 @@ git ls-files -z | while IFS= read -r -d '' tracked_path; do
 done > "$LOCAL_MANIFEST"
 rsync -a --from0 --files-from="$LOCAL_MANIFEST" ./ "$REMOTE:$REMOTE_ROOT/repo/"
 rsync -a --relative _tune/<run>/working.yaml "$REMOTE:$REMOTE_ROOT/repo/"
-ssh "$REMOTE" "cd '$REMOTE_ROOT/repo' && make setup"
+ssh "$REMOTE" "mkdir -p '$REMOTE_ROOT/tmp' && cd '$REMOTE_ROOT/repo' && \
+  TMPDIR='$REMOTE_ROOT/tmp' PIP_NO_CACHE_DIR=1 make setup"
 ```
 
 Apply the validated NUL-delimited output of `git diff --name-only --diff-filter=D "$REVISION" --` as exact removals

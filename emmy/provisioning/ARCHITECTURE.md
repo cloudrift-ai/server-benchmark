@@ -80,7 +80,8 @@ after allocation.
 `emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
 deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
 lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
-is always a hard refusal.
+is always a hard refusal. CloudRift's `Deactivating` state acknowledges that termination is scheduled, so cleanup and
+lease audit accept it without waiting for the provider's asynchronous transition to a terminal state.
 
 Run-unique automation may add a second ownership check with `terminate_instances_by_tags()`. It requires at least one
 non-empty tag, lists instances carrying every supplied tag across the caller's visible personal/team scope, terminates

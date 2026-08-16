@@ -644,9 +644,9 @@ async def create_instance(
 
 
 async def instance_is_active(api_key, instance_id, api_url=DEFAULT_API_URL):
-    """Return whether CloudRift still reports an active instance handle."""
+    """Return whether CloudRift still reports an instance requiring cleanup."""
     info = await _get_instance_info(api_key, instance_id, api_url)
-    return info is not None and info.get("status") not in TERMINAL_INSTANCE_STATUSES
+    return info is not None and info.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
 
 
 async def delete_instance(api_key, instance_id, api_url=DEFAULT_API_URL, dry_run=False):

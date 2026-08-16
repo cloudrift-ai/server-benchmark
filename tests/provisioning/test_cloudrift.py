@@ -25,6 +25,7 @@ from emmy.provisioning.cloudrift import (
     _rent_instance,
     _terminate_instance,
     create_instance,
+    instance_is_active,
     list_available_instance_types,
     list_instances_by_tags,
     resolve_node_id,
@@ -285,6 +286,30 @@ async def test_terminate_instances_by_tags_fails_when_audit_stays_active(mock_ap
 
     assert mock_sleep.await_count == 2
     mock_api.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("Active", True),
+        ("Initializing", True),
+        ("Deactivating", False),
+        ("Inactive", False),
+        ("Terminated", False),
+    ],
+)
+@patch("emmy.provisioning.cloudrift._get_instance_info", new_callable=AsyncMock)
+async def test_instance_is_active_accepts_scheduled_cleanup(mock_get, status, expected):
+    mock_get.return_value = {"id": "inst-1", "status": status}
+
+    assert await instance_is_active(API_KEY, "inst-1", API_URL) is expected
+
+
+@patch("emmy.provisioning.cloudrift._get_instance_info", new_callable=AsyncMock)
+async def test_instance_is_active_returns_false_when_instance_is_absent(mock_get):
+    mock_get.return_value = None
+
+    assert not await instance_is_active(API_KEY, "inst-1", API_URL)
 
 
 # ── _rent_instance ────────────────────────────────────────────────

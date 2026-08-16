@@ -21,7 +21,7 @@ softmax reduce. This file pins every tier of it:
   the two-kernel split at S=32/D=16 and far worse as S grows, which is why loop fusion still refuses
   to nest the score reduce inside the softmax reduce. What closes the gap is RESIDENCE, not algebra:
   the block's score must stay in C fragments across both consumers (the reference kernel below) —
-  the chained-mma realization the flash deletion removed.
+  the warp chain (score mma, fragment online-softmax, C->A repack) the flash deletion removed.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →

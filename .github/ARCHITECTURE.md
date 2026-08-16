@@ -72,16 +72,19 @@ expose the same packages through OpenCode's native skill tool.
 
 ### Nightly verification and direct onboarding
 
-**Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its mechanical selector reads
-the recipe inventory and CloudRift VM variant availability, without filtering on public-IP supply. It considers only
-declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the first
-priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest last-change
-timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
-ID breaks remaining ties. No eligible deployment is a successful no-op.
+**Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its selector uses the
+`emmy recipe query` command against the rolling branch's recipe root, with the command implementation loaded from the
+exact workflow SHA.
+The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
+only declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the
+first priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest
+last-change timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments,
+and model ID breaks remaining ties. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
-every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches `emmy`, workflow, and GitHub job tags,
+every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches
+`emmy`, workflow, and GitHub job tags,
 makes at most three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete
 tag set before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular
 team rental. The workflow never falls back to GCP or changes the selected GPU type/count.

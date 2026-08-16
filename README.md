@@ -227,6 +227,15 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe list --tag maintained --json
 
+# Select the oldest runnable onboarding or maintained deployment. Referencing deployment.* expands each recipe into
+# deployment rows; the CloudRift availability and Git history fields are resolved only because this query uses them.
+emmy recipe query \
+  --filter 'lifecycle in ["onboarding", "maintained"]' \
+  --filter 'deployment.availability.cloudrift == true' \
+  --sort 'lifecycle order ["onboarding", "maintained"]' \
+  --sort 'results.last_run_at asc nulls-first' \
+  --limit 1 --json
+
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
@@ -237,6 +246,8 @@ each recipe carries its directory `name`, model ID, task, lifecycle-aware `runna
 deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
 schema version, but existing fields are not removed or redefined. Emmy always detects its installation: an editable
 checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged runnable recipe bundle.
+`recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys.
+CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require `CLOUDRIFT_TEAM_ID`.
 
 ```yaml
 tags:

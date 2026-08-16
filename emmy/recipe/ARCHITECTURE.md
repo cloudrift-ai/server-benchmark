@@ -12,6 +12,7 @@ validation.
   `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
 - `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
 - `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
+- `query.py` — constrained predicates, deployment-row expansion, ordering, and the versioned query result
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
@@ -58,10 +59,43 @@ versioned JSON document produced by `recipe_inventory_document()` adds the direc
 state, and each matrix-expanded deployment's effective context length to the identity, tags, task, and rationale.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
-live top-level `recipes/` and wheel installs read their packaged runnable recipes. The CLI deliberately exposes no
-catalog-selection arguments, so every consumer observes the same installation-aware behavior.
+live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
+no catalog-selection arguments, so its consumers observe the same installation-aware behavior.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
+
+`emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
+expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.
+An exact `--model` plus `--gpu`/`--gpu-count` replaces the declared deployments with that requested setup, and
+`--allow-missing-model` represents a new model as an onboarding candidate. Every row carries its lifecycle-derived
+operation (`onboarding` or `verification`) and expected post-run lifecycle so automation does not reproduce those
+rules.
+
+The row fields are grouped by ownership:
+
+| Fields | Meaning |
+|---|---|
+| `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale` | Compact catalog metadata |
+| `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
+| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
+| `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
+| `results.path`, `results.last_run_at` | Sibling report path and its last committed change |
+| `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
+
+The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+`FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
+AND; repeated sort keys are applied in command order. Requirements use the predicate grammar but fail the query
+instead of removing a candidate. The independent versioned JSON result contains `schema_version` and `rows`; an empty
+result is successful.
+
+Computed fields are resolved only when a predicate or sort references them. `deployment.availability.cloudrift`
+queries current CloudRift capacity and requires `CLOUDRIFT_API_KEY`; it uses the hardware table and requires the exact
+GPU count. `provider.cloudrift.team_access` validates `CLOUDRIFT_TEAM_ID` with the same key before capacity is queried.
+`results.last_run_at` reads the last committed change to the recipe's sibling `RESULTS.md`; a missing report is `null`,
+while requesting the field outside a Git checkout is an error. These annotations are read-only: the query never rents
+hardware, writes workflow outputs, or changes recipes. Computed values that the query does not reference remain
+`null` in its output.
 
 ### Matrix Expansion for Benchmark Sweeps
 

@@ -51,3 +51,33 @@ def test_recipe_list_rejects_catalog_selection_arguments(run_cli):
 
         assert returncode == 2
         assert "unrecognized arguments" in stderr
+
+
+def test_recipe_query_filters_sorts_and_limits_catalog_rows(run_cli):
+    returncode, stdout, stderr = run_cli(
+        "recipe",
+        "query",
+        "--filter",
+        'lifecycle == "best-effort"',
+        "--sort",
+        "results.last_run_at asc nulls-first",
+        "--sort",
+        "model_id asc",
+        "--limit",
+        "2",
+        "--json",
+    )
+
+    assert returncode == 0, stderr
+    document = json.loads(stdout)
+    assert document["schema_version"] == 1
+    assert 0 < len(document["rows"]) <= 2
+    assert all(row["lifecycle"] == "best-effort" for row in document["rows"])
+    assert [row["model_id"] for row in document["rows"]] == sorted(row["model_id"] for row in document["rows"])
+
+
+def test_recipe_query_rejects_non_positive_limit(run_cli):
+    returncode, stdout, _stderr = run_cli("recipe", "query", "--limit", "0", "--json")
+
+    assert returncode == 2
+    assert "limit must be positive" in stdout

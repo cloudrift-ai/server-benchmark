@@ -254,15 +254,22 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
     assert expected_snapshot <= set(updated_summary["artifacts"])
 
 
-def test_onboarding_consumes_versioned_recipe_inventory():
+def test_onboarding_selects_with_generic_recipe_query():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
 
-    assert 'recipe_inventory_document(Path("recipes"))' in script
-    assert 'inventory_document.get("schema_version") != 1' in script
-    assert 'inventory = inventory_document["recipes"]' in script
-    assert 'deployment.get("gpu", deployment.get("deploy.gpu"))' in script
-    assert 'deployment.get("gpu_count", deployment.get("deploy.gpu_count"))' in script
+    assert "recipe query" in script
+    assert "--root recipes" in script
+    assert "provider.cloudrift.team_access == true" in script
+    assert 'lifecycle in ["onboarding", "maintained"]' in script
+    assert "deployment.availability.cloudrift == true" in script
+    assert 'lifecycle order ["onboarding", "maintained"]' in script
+    assert "results.last_run_at asc nulls-first" in script
+    assert "deployment.index asc" in script
+    assert "--allow-missing-model" in script
+    assert 'lifecycle != "obsolete"' in script
+    assert "recipe_inventory_document" not in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 
 
 def test_discovery_prompt_keeps_obsolete_classification_conservative():

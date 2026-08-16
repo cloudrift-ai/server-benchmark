@@ -107,8 +107,10 @@ directly; they never import from another test module or from `conftest.py`.
   tag-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
   materialization, and validated shell creation. Repository-automation tests validate required lifecycle rationales
   and the one-to-three-entry onboarding deployment matrix through that shared library. Notification tests cover the
-  modified-model lifecycle groups and validated deployment/performance summaries. Qualification-manifest tests also
-  pin the requested operation mode, exact model ID, target, preserved lifecycle tag, compact notification evidence,
+  modified-model lifecycle groups and validated deployment/performance summaries. Query tests cover constrained
+  expression parsing, implicit deployment expansion, lifecycle ordering, requirements, and the versioned row result.
+  Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved lifecycle tag,
+  compact notification evidence,
   current-platform archive and row records, and isolation from other platform results before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.

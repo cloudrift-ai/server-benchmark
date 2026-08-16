@@ -1,6 +1,6 @@
 """Recipe loading and configuration."""
 
-from emmy.recipe.bundled import bundled_names, resolve_recipe_dir
+from emmy.recipe.bundled import bundled_names, bundled_root, resolve_recipe_dir
 from emmy.recipe.engines import banned_extra_arg_flags, build_engine_args
 from emmy.recipe.matrix import (
     build_override,
@@ -45,6 +45,7 @@ __all__ = [
     "build_engine_args",
     "build_override",
     "bundled_names",
+    "bundled_root",
     "deep_merge",
     "dot_to_nested",
     "expand_matrix",

@@ -344,13 +344,15 @@ See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy 
 ### `emmy recipe`
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
-Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+Repeat `--tag` to require several tags. `--bundled` reads the runnable recipe set shipped in the installed wheel.
+`--json` emits the versioned catalog object documented in the recipe architecture; each record includes matrix-
+expanded GPU/count/context metadata and whether the recipe is runnable. Machine consumers reject unknown versions.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
 directory.
 
 ```bash
-emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe list [ROOT | --bundled] [--tag TAG]... [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```

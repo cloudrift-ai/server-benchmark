@@ -4,21 +4,30 @@ import json
 import logging
 from pathlib import Path
 
-from emmy.recipe.catalog import create_recipe_stub, recipe_inventory
+from emmy.recipe.bundled import bundled_root
+from emmy.recipe.catalog import create_recipe_stub, recipe_inventory_document
 
 logger = logging.getLogger(__name__)
 
 
 def _handle_list(args) -> None:
     try:
-        inventory = recipe_inventory(args.root, tuple(args.tag))
+        if args.bundled and args.root is not None:
+            raise ValueError("recipe list accepts either ROOT or --bundled, not both")
+        if args.bundled:
+            with bundled_root() as root:
+                if root is None:
+                    raise ValueError("this Emmy installation does not contain bundled recipes")
+                document = recipe_inventory_document(root, tuple(args.tag))
+        else:
+            document = recipe_inventory_document(args.root or Path("recipes"), tuple(args.tag))
     except (OSError, ValueError) as exc:
         logger.error(str(exc))
         raise SystemExit(2) from exc
     if args.json:
-        logger.info(json.dumps(inventory, sort_keys=True))
+        logger.info(json.dumps(document, sort_keys=True))
         return
-    for recipe in inventory:
+    for recipe in document["recipes"]:
         logger.info("%s\t%s\t%s", recipe["model_id"], ",".join(recipe["tags"]) or "-", recipe["path"])
 
 
@@ -37,9 +46,10 @@ def register_recipe_command(subparsers) -> None:
     actions = parser.add_subparsers(dest="recipe_action", required=True)
 
     list_parser = actions.add_parser("list", help="List recipe metadata")
-    list_parser.add_argument("root", nargs="?", type=Path, default=Path("recipes"), help="Recipe root (default: recipes)")
+    list_parser.add_argument("root", nargs="?", type=Path, help="Recipe root (default: recipes)")
+    list_parser.add_argument("--bundled", action="store_true", help="List recipes shipped with this Emmy installation")
     list_parser.add_argument("--tag", action="append", default=[], help="Require a tag; repeat to require multiple tags")
-    list_parser.add_argument("--json", action="store_true", help="Print a JSON array of recipe metadata")
+    list_parser.add_argument("--json", action="store_true", help="Print the versioned JSON recipe catalog")
     list_parser.set_defaults(func=_handle_list)
 
     create_parser = actions.add_parser("create", help="Create an onboarding/untested recipe stub")

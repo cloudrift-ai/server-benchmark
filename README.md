@@ -221,10 +221,19 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 # Inspect recipe metadata or count one lifecycle group in automation.
 emmy recipe list recipes --tag maintained --json
 
+# Inspect only the runnable recipes shipped by an installed Emmy wheel.
+emmy recipe list --bundled --json
+
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
+
+`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
+each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, and matrix-expanded
+deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
+schema version, but existing fields are not removed or redefined. `--bundled` reads the recipes inside the installed
+wheel instead of a source-tree root.
 
 ```yaml
 tags:

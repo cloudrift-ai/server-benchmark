@@ -15,7 +15,8 @@ validation.
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
-- `bundled.py` — `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an installed wheel
+- `bundled.py` — `bundled_root()`, `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an
+  installed wheel
 
 ## Key Design Decisions
 
@@ -54,8 +55,12 @@ rejects direct use of disabled recipes, while bulk benchmark enumeration and pac
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
 does not affect engine arguments, deployment, or benchmark behavior.
 
-`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
-records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
+versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
+state, and each matrix-expanded deployment's effective context length to the identity, tags, task, and rationale.
+This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
+may add fields without removing or redefining fields in the current version. `emmy recipe list --bundled --json`
+applies the same catalog contract to the runnable recipes shipped in the installed wheel.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 

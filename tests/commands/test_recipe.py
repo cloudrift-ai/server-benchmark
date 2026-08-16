@@ -30,8 +30,10 @@ def test_recipe_create_and_list_by_tag(run_cli, tmp_path):
     returncode, stdout, stderr = run_cli("recipe", "list", str(root), "--tag", "onboarding", "--json")
 
     assert returncode == 0, stderr
-    inventory = json.loads(stdout)
-    assert [recipe["model_id"] for recipe in inventory] == ["org/new-model"]
+    document = json.loads(stdout)
+    assert document["schema_version"] == 1
+    assert [recipe["model_id"] for recipe in document["recipes"]] == ["org/new-model"]
+    assert document["recipes"][0]["runnable"] is False
 
 
 def test_recipe_list_excludes_recipes_without_requested_tag(run_cli, tmp_path):
@@ -43,4 +45,4 @@ def test_recipe_list_excludes_recipes_without_requested_tag(run_cli, tmp_path):
     returncode, stdout, stderr = run_cli("recipe", "list", str(root), "--tag", "maintained", "--json")
 
     assert returncode == 0, stderr
-    assert json.loads(stdout) == []
+    assert json.loads(stdout) == {"schema_version": 1, "recipes": []}

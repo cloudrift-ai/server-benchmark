@@ -8,7 +8,7 @@ reading the real one, so the suite behaves the same either way.
 import pytest
 
 from emmy.recipe import bundled
-from emmy.recipe.bundled import resolve_recipe_dir
+from emmy.recipe.bundled import bundled_root, resolve_recipe_dir
 
 
 @pytest.fixture
@@ -28,6 +28,11 @@ def test_existing_directory_is_used_as_given(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     assert resolve_recipe_dir(str(local)) == str(local)
+
+
+def test_bundled_root_returns_packaged_recipe_directory(fake_package):
+    with bundled_root() as root:
+        assert root == fake_package
 
 
 def test_bundled_name_materializes_a_local_copy(tmp_path, monkeypatch, fake_package):

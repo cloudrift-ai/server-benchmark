@@ -8,13 +8,14 @@ from pathlib import Path
 import yaml
 
 from emmy import gpu as gpu_registry
-from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, validate_recipe_tags
+from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, recipe_is_runnable, validate_recipe_tags
 from emmy.recipe.matrix import build_override, expand_matrix
 from emmy.recipe.recipe import deep_merge
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DEPLOYMENT_FIELDS = frozenset({"deploy.gpu", "deploy.gpu_count"})
 MAX_STUB_DEPLOYMENTS = 3
+CATALOG_SCHEMA_VERSION = 1
 
 
 def recipe_catalog(root: str | Path) -> dict[str, dict]:
@@ -37,13 +38,18 @@ def recipe_catalog(root: str | Path) -> dict[str, dict]:
     return records
 
 
-def deployment_setups(config: dict) -> list[dict[str, object]]:
-    """Return the unique GPU/count combinations produced by one recipe matrix."""
+def _resolved_variants(config: dict) -> list[dict]:
+    """Apply every matrix combination to the recipe base configuration."""
     base = {key: value for key, value in config.items() if key != "matrices"}
     matrices = config.get("matrices")
-    variants = [base]
-    if matrices:
-        variants = [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
+    if not matrices:
+        return [base]
+    return [deep_merge(base, build_override(combination)) for combination in expand_matrix(matrices)]
+
+
+def deployment_setups(config: dict) -> list[dict[str, object]]:
+    """Return the unique GPU/count combinations produced by one recipe matrix."""
+    variants = _resolved_variants(config)
 
     setups = []
     seen = set()
@@ -60,6 +66,33 @@ def deployment_setups(config: dict) -> list[dict[str, object]]:
     return setups
 
 
+def _inventory_deployments(config: dict) -> list[dict[str, object]]:
+    """Return machine-readable hardware metadata after applying matrix overrides."""
+    variants = _resolved_variants(config)
+
+    deployments = []
+    seen = set()
+    for variant in variants:
+        deploy = variant.get("deploy") or {}
+        gpu = deploy.get("gpu")
+        gpu_count = deploy.get("gpu_count", 1)
+        valid_count = isinstance(gpu_count, int) and not isinstance(gpu_count, bool) and gpu_count >= 1
+        if not isinstance(gpu, str) or not valid_count or (gpu, gpu_count) in seen:
+            continue
+        seen.add((gpu, gpu_count))
+
+        context_length = ((variant.get("engine") or {}).get("llm") or {}).get("context_length")
+        valid_context = isinstance(context_length, int) and not isinstance(context_length, bool) and context_length >= 1
+        deployments.append(
+            {
+                "gpu": gpu,
+                "gpu_count": gpu_count,
+                "context_length": context_length if valid_context else None,
+            }
+        )
+    return deployments
+
+
 def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]:
     """Return compact, JSON-ready metadata for recipes carrying every requested tag."""
     records = recipe_catalog(root)
@@ -69,21 +102,33 @@ def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]
             continue
         config = record["config"]
         model = config.get("model") or {}
+        task = model.get("task", "generate")
+        has_inference_engine = bool((config.get("engine") or {}).get("llm"))
         try:
             display_path = record["path"].relative_to(Path.cwd())
         except ValueError:
             display_path = record["path"]
         inventory.append(
             {
+                "name": record["path"].parent.name,
                 "path": str(display_path),
                 "model_id": model_id,
                 "tags": list(record["tags"]),
-                "task": model.get("task", "generate"),
-                "deployments": deployment_setups(config),
+                "task": task,
+                "runnable": recipe_is_runnable(config) and has_inference_engine and task in ("generate", "embed"),
+                "deployments": _inventory_deployments(config),
                 "rationale": model.get("rationale"),
             }
         )
     return inventory
+
+
+def recipe_inventory_document(root: str | Path, tags: tuple[str, ...] = ()) -> dict:
+    """Return the versioned machine-readable recipe catalog document."""
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "recipes": recipe_inventory(root, tags),
+    }
 
 
 def validate_stub_deployments(value: object, model_id: str) -> list[dict[str, object]]:

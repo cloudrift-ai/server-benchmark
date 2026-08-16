@@ -9,17 +9,29 @@ materializes a working copy in the current directory first.
 """
 
 import shutil
-from importlib.resources import files
+from contextlib import contextmanager
+from importlib.resources import as_file, files
 from pathlib import Path
+
+
+@contextmanager
+def bundled_root():
+    """Yield a filesystem root for the recipes shipped with the package."""
+    try:
+        resource = files("emmy.recipes")
+    except ModuleNotFoundError:
+        yield None
+        return
+    with as_file(resource) as root:
+        yield root
 
 
 def bundled_names() -> list[str]:
     """Names of the recipes shipped with the installed package."""
-    try:
-        root = files("emmy.recipes")
-    except ModuleNotFoundError:
-        return []
-    return sorted(entry.name for entry in root.iterdir() if (entry / "recipe.yaml").is_file())
+    with bundled_root() as root:
+        if root is None:
+            return []
+        return sorted(entry.name for entry in root.iterdir() if (entry / "recipe.yaml").is_file())
 
 
 def resolve_recipe_dir(name_or_path: str) -> str:
@@ -35,8 +47,9 @@ def resolve_recipe_dir(name_or_path: str) -> str:
     if name_or_path in bundled_names():
         target = Path(name_or_path)
         target.mkdir(parents=True)
-        source = files("emmy.recipes") / name_or_path / "recipe.yaml"
-        shutil.copyfile(str(source), target / "recipe.yaml")
+        with bundled_root() as source:
+            assert source is not None
+            shutil.copyfile(source / name_or_path / "recipe.yaml", target / "recipe.yaml")
         return str(target)
 
     available = bundled_names()

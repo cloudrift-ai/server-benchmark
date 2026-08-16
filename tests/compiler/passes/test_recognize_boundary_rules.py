@@ -395,8 +395,8 @@ def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
     (inline,) = [s for s in all_sites if s.inline]
     assert inline.node is cone.operands[1] and inline.axis == "ddb"
     for family in ("TILE", "REDUCE", "STAGE"):
-        assert inline not in family_sites(family, all_sites), f"{family} must not address an inline-evaluated node"
-    assert inline in family_sites("PLACE", all_sites), "the score edge stays a cuttable seam"
+        assert not [s for s in family_sites(family, all_sites) if s.node is inline.node], f"{family} must not address an inline node"
+    assert [s for s in family_sites("PLACE", all_sites) if s.node is inline.node], "the score edge stays a cuttable seam"
     # …and the statistic edge keeps its own reduce site — it is realized per tile ROW, not per cell.
     stat = cone.operands[0].operands[0]
     assert any(s.node is stat for s in family_sites("REDUCE", all_sites))

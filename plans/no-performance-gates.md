@@ -70,7 +70,10 @@ and the `eval golden` deploy/offer audits. Goldens remain as data: named pinned 
 exactly (`run --golden NAME`, `--ab`), offline-fit training data, eval datasets. The deploy
 hierarchy is now measured reservoir/DB evidence → prior → option-0; deployed-model parity is
 restored later by the strict structural-identity decode (below), never by re-adding fuzzy
-matching. Still adopted:
+matching. **Both are now LANDED**: the verified tier deploys on strict identity + exact row decode
+(`_verified_index` / `_verified_pick`), and `search/audit.py`, the greedy verdict sink, and the
+`eval golden` serving/offer audits are rebuilt on top of it — verdicts keyed by `deploy_identity`,
+never by a shape. Still adopted:
 the scalar tier's slab K-chunk on TILE's existing `/k<bk>` token (an added tuning dimension, not a
 correction — deferred); per-edge `STAGE@a`/`STAGE@b` keys (same verdict: the single key is coherent —
 the term decides each edge's fill — so the split only widens the space; deferred); `ZERO_DELEGATE` +

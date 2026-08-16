@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -520,6 +521,57 @@ def _pins_live(pins: dict) -> bool:
     return True
 
 
+# Optional per-consultation verdict sink for the drift audit (``search/audit.py``). ``None``
+# (the default, and what every real compile runs with) is zero-cost: one identity test per
+# consulted fork. ``golden_audit`` installs a list that :func:`_verified_pick` appends one record
+# per consulted SCHEDULE fork to — the supported hook the audit reads.
+_AUDIT_SINK: list[dict] | None = None
+
+
+@contextmanager
+def golden_audit(records: list[dict]):
+    """Collect one ``{node, key, verdict, golden, us, n_rows, unrealized}`` record per
+    verified-tier consultation into ``records`` for the duration of the block. ``key`` is the
+    fork's ``deploy_identity`` — the strict structural identity the tier joins on, not a
+    classified shape. Verdicts:
+
+      MATCH  a record carrying the fork's identity decided it (its spelled row equalled exactly
+             one enumerated leaf)
+      DRIFT  records carry the identity but NO offered leaf equals any of their rows — the
+             recording no longer realizes under the current enumeration, so the tier decides
+             nothing and falls through (:func:`_verified_pick` already warns)
+      GAP    no record carries the fork's identity (coverage information, not a defect)
+
+    ``unrealized`` (MATCH/DRIFT only; ``None`` on GAP) lists the identity's records that no
+    offered leaf realizes — the per-entry signal the ``eval golden`` offer audit reads (one entry
+    can be individually unrealizable while a sibling still MATCHes and floors the deploy)."""
+    global _AUDIT_SINK
+    prev = _AUDIT_SINK
+    _AUDIT_SINK = records
+    try:
+        yield records
+    finally:
+        _AUDIT_SINK = prev
+
+
+def _audit_record(
+    node_id: str, key, verdict: str, golden: str | None, us: float | None, n_rows: int, unrealized: list | None = None
+) -> None:
+    if _AUDIT_SINK is not None:
+        _AUDIT_SINK.append(
+            {"node": node_id, "key": key, "verdict": verdict, "golden": golden, "us": us, "n_rows": n_rows, "unrealized": unrealized}
+        )
+
+
+def _live_leaf_rows(leaves: list, node_blocked) -> list[tuple[object, dict]]:
+    """The fork's enumerated schedule rows — every non-structural leaf paired with its complete
+    knob row, minus the tiles this node already failed to lower."""
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+
+    rows = [(o, _leaf_knobs(o)) for o in leaves if not _is_structural_option(o)]
+    return rows if node_blocked is None else [(o, k) for o, k in rows if not _tile_blocked(k, node_blocked)]
+
+
 def _verified_index(ctx: Context) -> tuple[dict, dict]:
     """The card's recorded goldens keyed by STRICT structural identity — the recognized term's
     algebra digest + dtype fingerprint (``_schedule.deploy_identity``), derived record-side from
@@ -564,7 +616,10 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     A PLACEMENT fork (``Graph`` cut options beside the fused ``TileOp``): a ROUTING record picks
     the cut fragment whose parent piece stamps the record's ``PLACE`` keys; otherwise a schedule
     record for the fused identity keeps the fused side (the verified µs is fused truth, so the
-    prior must not cut against it)."""
+    prior must not cut against it).
+
+    Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
+    (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
@@ -601,21 +656,28 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
         return None
-    recs = sched_idx.get(deploy_identity(root))
-    if not recs:
-        return None
+    identity = deploy_identity(root)
+    recs = sched_idx.get(identity)
     node_blocked = blocked.get(fp.node_id) if blocked else None
-    live = [(o, _leaf_knobs(o)) for o in leaves if not _is_structural_option(o)]
-    if node_blocked is not None:
-        live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
+    if not recs:
+        if _AUDIT_SINK is not None:  # the row count is the audit's alone — never paid on a deploy
+            _audit_record(fp.node_id, identity, "GAP", None, None, len(_live_leaf_rows(leaves, node_blocked)))
+        return None
+    live = _live_leaf_rows(leaves, node_blocked)
     # Both sides normalize through the ONE schedule-row identity (``schedule_row_key``: the
     # recording canonicalizer restricted to what THIS fork decides) — equality after it is exact
     # realized identity, never a prefix or any-of acceptance.
     by_key = {schedule_row_key(k): (o, k) for o, k in live}
+    # Per-entry realizability, computed only under an active audit sink: the ``eval golden`` offer
+    # audit reads which records the enumeration no longer offers. The deploy below still stops at
+    # the first record whose row is offered.
+    unrealized = None if _AUDIT_SINK is None else [g for g in recs if schedule_row_key(g.knobs) not in by_key]
     for rec in recs:
         hit = by_key.get(schedule_row_key(rec.knobs))
         if hit is not None:
+            _audit_record(fp.node_id, identity, "MATCH", rec.name, float(rec.emmy_us or 0.0), len(live), unrealized=unrealized)
             return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
+    _audit_record(fp.node_id, identity, "DRIFT", ", ".join(g.name for g in recs), None, len(live), unrealized=unrealized)
     logger.warning(
         "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "
         "the recording no longer realizes under the current enumeration (drift); falling through to measured "
@@ -704,7 +766,9 @@ def greedy_decide(
             if verified_state[0] is None:
                 verified_state[0] = _verified_index(fp.ctx)
             sched_idx, routing_idx = verified_state[0]
-            if sched_idx or routing_idx:
+            # An empty index still consults under an audit sink: "this card records nothing for
+            # any fork" is the audit's all-GAP coverage answer, not silence.
+            if sched_idx or routing_idx or _AUDIT_SINK is not None:
                 got_verified = _verified_pick(fp, sched_idx, routing_idx, blocked)
                 if got_verified is not None:
                     leaf, price, row = got_verified

@@ -151,12 +151,12 @@ error naming the node.
 Honestly: there is no single switch that reports, per fork, which tier decided it. What exists is three things you
 correlate.
 
-- **The warnings.** A golden shape whose entries match nothing on offer, measured evidence that overlaps none of the
-  offered options, and a golden overriding the first option on a compile with no prior are all logged loudly.
+- **The warnings.** A kernel whose recorded configurations no longer equal anything the compiler offers, and measured
+  evidence that overlaps none of the offered options, are both logged loudly.
 - **The record of the resolution.** Each decided fork records what was chosen and the time of whichever row decided
-  it — a measured time when a golden or a measurement decided, a predicted one otherwise.
+  it — a measured time when a recording or a measurement decided, a predicted one otherwise.
 - **The audits.** `emmy eval golden GOLDEN_YAML --serving-config PATH` re-runs the file's own-program and exact
-  serving-matrix consultations on the pinned GPU. That is the subject of the next page.
+  serving-matrix consultations on the pinned GPU, one verdict per consultation. That is the subject of the next page.
 
 ## See it yourself
 

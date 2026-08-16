@@ -137,8 +137,12 @@ emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
 
 The serving config names that exact file and supplies the model, revision, GPU, and reachable realization matrix.
 The command must run on that GPU. It validates the schema and provenance and proves every structural target contains
-every expected static/symbolic precision realization. A recorded row's health beyond that is its exact pinned
-replay — `run --golden NAME --bench` reproduces it under the A/B integrity gates above.
+every expected static/symbolic precision realization. It then compiles — first each record's own program, then the
+freshly traced serving twins of every precision lane — and reports, per consultation, whether a record still decided
+the fork (a match), whether the records for that kernel no longer equal anything the compiler offers (drift), or
+whether no record covers it at all (a gap). Drift, a gap, or a compile failure fails the release. Beyond that, a
+recorded row's health is its exact pinned replay — `run --golden NAME --bench` reproduces it under the A/B integrity
+gates above.
 
 ## Two smaller rules
 

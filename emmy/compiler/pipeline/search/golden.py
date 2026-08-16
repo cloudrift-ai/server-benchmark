@@ -922,10 +922,20 @@ def _file_gpu_name(path: Path) -> str | None:
     return None
 
 
+#: Optional scope override for :func:`records_for_card` — the corpus the deploy tier reads.
+#: ``None`` (the default, and the only value a real deploy ever sees) reads the repository files.
+#: The drift audit (``search/audit.py``) installs one file's / one precision lane's records here so
+#: its verdicts judge exactly that set, the way the release gate needs them scoped.
+RECORDS_OVERRIDE: list[GoldenRecord] | None = None
+
+
 def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
     """The repository records for ONE card, loading only that card's files (header sniff) — the
     deploy tier's loader. ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit consumers;
-    both share the per-path document memo so nothing parses twice."""
+    both share the per-path document memo so nothing parses twice. :data:`RECORDS_OVERRIDE`
+    replaces the repository corpus when the audit has scoped it."""
+    if RECORDS_OVERRIDE is not None:
+        return [r for r in RECORDS_OVERRIDE if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap)]
     records: list[GoldenRecord] = []
     for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
         head_gpu = _file_gpu_name(path)

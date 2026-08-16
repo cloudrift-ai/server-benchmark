@@ -188,6 +188,28 @@ def online_path() -> Path:
     return _CACHE_ROOT / "online.json"
 
 
+@contextmanager
+def online_file_override(path: str | Path | None):
+    """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
+
+    The verified-tier drift audit (``search/audit.py``) uses this with a nonexistent path so a
+    compile's evidence hierarchy sees NO machine-local online prior / reservoir — the verified
+    goldens plus the repo-shipped offline prior are the only inputs, making the MATCH / DRIFT /
+    GAP verdicts machine-independent."""
+    if path is None:
+        yield
+        return
+    prev = os.environ.get(ONLINE_FILE)
+    os.environ[ONLINE_FILE] = str(path)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(ONLINE_FILE, None)
+        else:
+            os.environ[ONLINE_FILE] = prev
+
+
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 

@@ -98,6 +98,8 @@ publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual
 The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
 `github.sha` whose workflow definition started the job. This keeps normal scheduled runs reproducible and lets a
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
+The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
+and priority always reflect the branch that the agent will update.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. The validator mechanically includes the

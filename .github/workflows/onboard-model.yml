@@ -56,7 +56,6 @@ jobs:
       AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
       AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
-      RECIPE_INVENTORY: /tmp/emmy-onboard-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       PROVIDER_CONFIG: /tmp/emmy-onboard-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
       PR_SUMMARY: /tmp/emmy-onboard-pr-${{ github.run_id }}-${{ github.run_attempt }}.md
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
@@ -185,10 +184,8 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          ./venv/bin/emmy recipe list --json > "$RECIPE_INVENTORY"
           ./venv/bin/python - <<'PY'
           import asyncio
-          import json
           import os
           import re
           import subprocess
@@ -196,8 +193,9 @@ jobs:
 
           from emmy.provisioning.candidates import iter_candidates
           from emmy.provisioning.cloudrift import list_available_instance_types, validate_team_id_access
+          from emmy.recipe.catalog import recipe_inventory_document
 
-          inventory_document = json.loads(Path(os.environ["RECIPE_INVENTORY"]).read_text())
+          inventory_document = recipe_inventory_document(Path("recipes"))
           if inventory_document.get("schema_version") != 1 or not isinstance(inventory_document.get("recipes"), list):
               raise SystemExit("Unsupported `emmy recipe list --json` schema")
           inventory = inventory_document["recipes"]
@@ -617,7 +615,6 @@ jobs:
             "$ONBOARD_SUMMARY" \
             "$PR_SUMMARY" \
             "$PROVIDER_CONFIG" \
-            "$RECIPE_INVENTORY" \
             "$VM_LEASE" \
             "$SSH_KEY" \
             "$SSH_KEY.pub"

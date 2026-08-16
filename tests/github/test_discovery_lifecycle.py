@@ -56,6 +56,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
 
+    assert "sudo apt-get install --no-install-recommends -y git-lfs" in lfs_script
     assert "git lfs install --local" in lfs_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in lfs_script
     assert "results_<gpu-short>x<gpu-count>.tar.gz" in agent_script

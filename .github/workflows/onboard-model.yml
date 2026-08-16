@@ -129,7 +129,12 @@ jobs:
 
       - name: Configure Git LFS
         run: |
+          if ! git lfs version >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install --no-install-recommends -y git-lfs
+          fi
           git lfs install --local
+          mkdir -p .git/info
           lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
           grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
             printf '%s\n' "$lfs_attribute" >> .git/info/attributes

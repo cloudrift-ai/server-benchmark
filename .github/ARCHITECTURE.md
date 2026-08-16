@@ -76,26 +76,52 @@ priority. If none can run, it chooses a `maintained` recipe whose committed `RES
 timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
 ID breaks remaining ties. No eligible deployment is a successful no-op.
 
-The workflow accepts a Robots-scoped CloudRift team API key, whose authenticated principal makes every rent and tag
-query team-owned without a request `team_id`. With a user API key it instead resolves the exact visible team named
-`Robots` and includes its UUID in every rent request. It attaches `emmy`, workflow, and GitHub job tags, makes at most
-three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete tag set
-before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular team
-rental. The workflow never falls back to GCP or changes the selected GPU type/count.
+The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
+checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
+every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches `emmy`, workflow, and GitHub job tags,
+makes at most three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete
+tag set before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular
+team rental. The workflow never falls back to GCP or changes the selected GPU type/count.
+
+Unconditional teardown sends the complete tag-scoped terminate request before its bounded status audit and lease
+audit. This ordering gives cancellation cleanup a short critical path inside GitHub's cancellation grace period while
+retaining the owned lease as an independent verification handle.
 
 The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
 Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
-lifecycle tag. The job has a 24-hour limit and gives the agent a 23.5-hour deadline so artifact validation and cleanup
-retain 30 minutes. Raw benchmark output, experiment reports, dated run snapshots, and qualification summaries are not
-repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes. Nightly image
-publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
+lifecycle tag. Before the agent starts, the workflow installs the small remote Python/rsync prerequisite set and
+requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
+venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
+the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment retains one LFS archive and top-level row-record set per exact GPU
+platform plus one cumulative `RESULTS.md`; a run replaces only its platform snapshot. Ignored dated run directories,
+loose benchmark output, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image is
+produced only when every release gate passes. Nightly image publication is disabled unless
+`NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
+
+The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
+`github.sha` whose workflow definition started the job. This keeps normal scheduled runs reproducible and lets a
+manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
+The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
+and priority always reflect the branch that the agent will update.
+The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills as authoritative agent inputs;
+older copies on the rolling branch cannot silently override a proposed artifact contract.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
-The validator also checks the requested mode, exact recipe model, and expected lifecycle tag. The workflow then
-commits those artifacts, rebases on the latest default branch, and updates or opens the rolling model lifecycle PR
-using renewable GitHub App credentials for the long-running push path.
+allowed recipe, experiment, serving-image, and canonical-golden paths. The validator requires the shared experiment
+recipe and report, the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and matching current-platform row
+records.
+It rejects changes to another platform snapshot and requires the current archive to be created or updated. Optional
+outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. The job installs a pinned,
+checksum-verified Git LFS binary in the runner's temporary directory when needed, then configures LFS locally before
+staging so the normal push uploads the archive object with the rolling branch. After the agent returns, the workflow
+requires each task-local timestamp directory to be a root member of the declared platform archive before removing
+that ignored local directory; only the durable archive proceeds to staging.
+The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
+the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
+model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,
+and updates or opens the rolling model lifecycle PR using renewable GitHub App credentials for the long-running push
+path.
 
 ### Discovery lifecycle PR
 
@@ -158,6 +184,8 @@ Agent workflows use these repository secrets as applicable:
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+`CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
+selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
 `https://inference.cloudrift.ai/v1`.
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE=true` authorizes a nightly qualification to publish an otherwise eligible image; it is

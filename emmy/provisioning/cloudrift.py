@@ -29,6 +29,7 @@ DEFAULT_CLOUDINIT_URL = "https://storage.googleapis.com/cloudrift-vm-disks/cloud
 # change request/response shapes (e.g. add another default-off field mask) under us.
 API_VERSION = "2026-08-05"
 TERMINAL_INSTANCE_STATUSES = {"Deleted", "Failed", "Inactive", "Terminated"}
+CLEANUP_ACCEPTED_INSTANCE_STATUSES = TERMINAL_INSTANCE_STATUSES | {"Deactivating"}
 
 
 def select_image_url(instance_type):
@@ -88,6 +89,7 @@ async def _rent_instance(
     node_id=None,
     tags=None,
     team_id=None,
+    with_public_ip=True,
 ):
     """Rent a new CloudRift VM instance.
 
@@ -99,6 +101,7 @@ async def _rent_instance(
             ``ByNodeId`` selector instead of letting the provider place the instance.
         tags: optional list of free-form labels attached to the rental.
         team_id: optional team UUID that owns the rental.
+        with_public_ip: whether CloudRift should assign a public IP to the VM.
     """
     vm_config = {
         "ssh_key": {"PublicKeys": ssh_public_keys},
@@ -116,7 +119,7 @@ async def _rent_instance(
         "config": {
             "VirtualMachine": vm_config,
         },
-        "with_public_ip": True,
+        "with_public_ip": with_public_ip,
     }
     if billing_exempt:
         data["billing_exempt"] = True
@@ -183,32 +186,32 @@ async def list_available_instance_types(api_key, api_url=DEFAULT_API_URL):
     return available
 
 
-async def resolve_team_id(api_key, team_name, api_url=DEFAULT_API_URL, allow_implicit_team_key=False):
-    """Resolve one exact team name, or accept ownership implicit in a team API key."""
+async def resolve_team_id(api_key, team_name, api_url=DEFAULT_API_URL):
+    """Resolve one exact team name visible to a user API key."""
     data = {"selector": "Mine", "with_members": False, "with_account_info": False}
-    try:
-        result = await _api_request("POST", "/api/v1/teams/list", data, api_key, api_url)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 401 or not allow_implicit_team_key:
-            raise
-        # Team API keys are intentionally rejected by the user-only teams/list
-        # endpoint. Verify the key against a team-aware endpoint before relying
-        # on CloudRift to infer the owning team from the authenticated principal.
-        await _api_request(
-            "POST",
-            "/api/v2/account/info",
-            {"selector": "ByToken", "with_auto_top_up": False},
-            api_key,
-            api_url,
-        )
-        logger.info(f"CloudRift team API key supplies implicit ownership for configured team {team_name!r}")
-        return None
+    result = await _api_request("POST", "/api/v1/teams/list", data, api_key, api_url)
     matches = [team.get("id") for team in result.get("teams", []) if team.get("name") == team_name and team.get("id")]
     if not matches:
         raise TerminalProvisionError(f"CloudRift API key cannot access team {team_name!r}")
     if len(matches) > 1:
         raise TerminalProvisionError(f"CloudRift team name {team_name!r} is ambiguous")
     return matches[0]
+
+
+async def validate_team_id_access(api_key, team_id, api_url=DEFAULT_API_URL):
+    """Validate an exact team UUID and prove that the API key can act for it."""
+    try:
+        normalized_team_id = str(uuid.UUID(team_id))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise TerminalProvisionError("CloudRift team ID must be a UUID") from exc
+    await _api_request(
+        "POST",
+        "/api/v2/account/info",
+        {"selector": {"ByTeam": normalized_team_id}, "with_auto_top_up": False},
+        api_key,
+        api_url,
+    )
+    return normalized_team_id
 
 
 def _validate_instance_tags(tags):
@@ -233,11 +236,11 @@ async def list_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL):
 
 
 async def terminate_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL, audit_attempts=12, audit_delay=10):
-    """Terminate all active instances carrying every supplied tag and verify they stop."""
+    """Terminate all active tagged instances and verify CloudRift starts stopping them."""
     tags = _validate_instance_tags(tags)
     instances = await list_instances_by_tags(api_key, tags, api_url)
     instance_ids = [
-        instance["id"] for instance in instances if instance.get("id") and instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+        instance["id"] for instance in instances if instance.get("id") and instance.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
     ]
     if instance_ids:
         logger.info(f"Terminating CloudRift instances selected by tags {tags}: {instance_ids}")
@@ -253,7 +256,7 @@ async def terminate_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL, au
         remaining = [
             instance
             for instance in await list_instances_by_tags(api_key, tags, api_url)
-            if instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+            if instance.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
         ]
         if not remaining:
             return instance_ids
@@ -509,6 +512,7 @@ async def create_instance(
     node=None,
     tags=None,
     team_id=None,
+    with_public_ip=True,
 ):
     """Create a CloudRift VM instance.
 
@@ -521,6 +525,7 @@ async def create_instance(
         tags: rental labels; ``None`` resolves through :func:`emmy.config.rental_tags`
             (``EMMY_RENTAL_TAGS`` override, default ``["emmy"]``).
         team_id: optional team UUID that owns the rental.
+        with_public_ip: whether CloudRift should assign a public IP to the VM.
         extra_public_keys: optional list of additional SSH public key strings to
             install in the VM's authorized_keys alongside the key from
             ``ssh_key_path`` (e.g. ["ssh-ed25519 AAAA bob@host"]).
@@ -572,6 +577,7 @@ async def create_instance(
             node_id=node_id,
             tags=tags,
             team_id=team_id,
+            with_public_ip=with_public_ip,
         )
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
@@ -638,9 +644,9 @@ async def create_instance(
 
 
 async def instance_is_active(api_key, instance_id, api_url=DEFAULT_API_URL):
-    """Return whether CloudRift still reports an active instance handle."""
+    """Return whether CloudRift still reports an instance requiring cleanup."""
     info = await _get_instance_info(api_key, instance_id, api_url)
-    return info is not None and info.get("status") not in TERMINAL_INSTANCE_STATUSES
+    return info is not None and info.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
 
 
 async def delete_instance(api_key, instance_id, api_url=DEFAULT_API_URL, dry_run=False):

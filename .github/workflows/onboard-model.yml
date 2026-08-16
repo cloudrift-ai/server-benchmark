@@ -46,7 +46,7 @@ jobs:
       REQUESTED_MODEL_ID: ${{ inputs.model_id }}
       REQUESTED_GPU: ${{ inputs.gpu }}
       REQUESTED_GPU_COUNT: ${{ inputs.gpu_count }}
-      CLOUDRIFT_TEAM_NAME: Robots
+      CLOUDRIFT_TEAM_ID: ${{ vars.CLOUDRIFT_TEAM_ID }}
       MULTIMODAL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.multimodal_mode || 'auto' }}
       PUBLISH_IMAGE: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_image) || (github.event_name == 'schedule' && vars.NIGHTLY_ONBOARD_PUBLISH_IMAGE == 'true') }}
       RUN_OWNER: ${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
@@ -56,11 +56,11 @@ jobs:
       AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
       AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
-      RECIPE_INVENTORY: /tmp/emmy-onboard-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       PROVIDER_CONFIG: /tmp/emmy-onboard-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
       PR_SUMMARY: /tmp/emmy-onboard-pr-${{ github.run_id }}-${{ github.run_attempt }}.md
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
+      WORKFLOW_SOURCE: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
@@ -166,39 +166,80 @@ jobs:
       - name: Install Emmy
         run: make setup-agent
 
+      - name: Load exact workflow source
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: |
+          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
+            git fetch --depth=1 origin "$WORKFLOW_SHA"
+          fi
+          mkdir -p "$WORKFLOW_SOURCE"
+          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+          echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
+          echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
+
+      - name: Configure Git LFS
+        run: |
+          if ! git lfs version >/dev/null 2>&1; then
+            lfs_version=3.7.1
+            case "$(uname -m)" in
+              x86_64) lfs_arch=amd64; lfs_sha256=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;;
+              aarch64) lfs_arch=arm64; lfs_sha256=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;;
+              *) echo "Unsupported Git LFS architecture: $(uname -m)" >&2; exit 1 ;;
+            esac
+            lfs_dir="$RUNNER_TEMP/git-lfs-$lfs_version"
+            lfs_archive="$RUNNER_TEMP/git-lfs-$lfs_version-$lfs_arch.tar.gz"
+            curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+              --output "$lfs_archive" \
+              "https://github.com/git-lfs/git-lfs/releases/download/v$lfs_version/git-lfs-linux-$lfs_arch-v$lfs_version.tar.gz"
+            printf '%s  %s\n' "$lfs_sha256" "$lfs_archive" | sha256sum --check
+            mkdir -p "$lfs_dir"
+            tar -xzf "$lfs_archive" -C "$lfs_dir" --strip-components=1 "git-lfs-$lfs_version/git-lfs"
+            chmod +x "$lfs_dir/git-lfs"
+            echo "$lfs_dir" >> "$GITHUB_PATH"
+            export PATH="$lfs_dir:$PATH"
+          fi
+          git lfs install --local
+          mkdir -p .git/info
+          lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
+          grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
+            printf '%s\n' "$lfs_attribute" >> .git/info/attributes
+
       - name: Select one available deployment
         id: selection
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          ./venv/bin/emmy recipe list --json > "$RECIPE_INVENTORY"
           ./venv/bin/python - <<'PY'
           import asyncio
-          import json
           import os
           import re
           import subprocess
           from pathlib import Path
 
           from emmy.provisioning.candidates import iter_candidates
-          from emmy.provisioning.cloudrift import list_available_instance_types, resolve_team_id
+          from emmy.provisioning.cloudrift import list_available_instance_types, validate_team_id_access
+          from emmy.recipe.catalog import recipe_inventory_document
 
-          inventory = json.loads(Path(os.environ["RECIPE_INVENTORY"]).read_text())
-          available = asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"]))
+          inventory_document = recipe_inventory_document(Path("recipes"))
+          if inventory_document.get("schema_version") != 1 or not isinstance(inventory_document.get("recipes"), list):
+              raise SystemExit("Unsupported `emmy recipe list --json` schema")
+          inventory = inventory_document["recipes"]
           team_id = asyncio.run(
-              resolve_team_id(
+              validate_team_id_access(
                   os.environ["CLOUDRIFT_API_KEY"],
-                  os.environ["CLOUDRIFT_TEAM_NAME"],
-                  allow_implicit_team_key=True,
+                  os.environ.get("CLOUDRIFT_TEAM_ID"),
               )
           )
+          available = asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"]))
           with Path(os.environ["GITHUB_ENV"]).open("a") as output:
-              output.write(f"CLOUDRIFT_TEAM_ID={team_id or ''}\n")
+              output.write(f"CLOUDRIFT_TEAM_ID={team_id}\n")
 
           def available_deployment(deployment):
-              gpu = deployment.get("deploy.gpu")
-              count = deployment.get("deploy.gpu_count")
+              gpu = deployment.get("gpu", deployment.get("deploy.gpu"))
+              count = deployment.get("gpu_count", deployment.get("deploy.gpu_count"))
               try:
                   candidates = iter_candidates(gpu, count, "cloudrift", exact_gpu_count=True)
               except (TypeError, ValueError):
@@ -206,11 +247,13 @@ jobs:
               return any(candidate.instance_type in available for candidate in candidates)
 
           def write_selection(record, deployment, mode, lifecycle):
+              gpu = deployment.get("gpu", deployment.get("deploy.gpu"))
+              gpu_count = deployment.get("gpu_count", deployment.get("deploy.gpu_count"))
               values = {
                   "selected": "true",
                   "model_id": record["model_id"],
-                  "gpu": deployment["deploy.gpu"],
-                  "gpu_count": str(deployment["deploy.gpu_count"]),
+                  "gpu": gpu,
+                  "gpu_count": str(gpu_count),
                   "mode": mode,
                   "lifecycle": lifecycle,
               }
@@ -238,7 +281,7 @@ jobs:
                   raise SystemExit("model_id must be an exact Hugging Face owner/repository ID")
               if gpu_count < 1:
                   raise SystemExit("gpu_count must be positive")
-              deployment = {"deploy.gpu": gpu, "deploy.gpu_count": gpu_count}
+              deployment = {"gpu": gpu, "gpu_count": gpu_count}
               if not available_deployment(deployment):
                   raise SystemExit(f"CloudRift has no available exact {gpu} x{gpu_count} VM")
               existing = next((record for record in inventory if record["model_id"] == model_id), None)
@@ -309,11 +352,8 @@ jobs:
         if: steps.selection.outputs.selected == 'true'
         run: |
           ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
-          if [ -n "$CLOUDRIFT_TEAM_ID" ]; then
-            printf 'providers:\n  cloudrift:\n    team_id: "%s"\n' "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
-          else
-            printf 'providers:\n  cloudrift: {}\n' > "$PROVIDER_CONFIG"
-          fi
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
+            "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
           chmod 600 "$PROVIDER_CONFIG"
 
       - name: Rent exact target VM
@@ -369,6 +409,53 @@ jobs:
             echo "lease=$VM_LEASE"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Prepare target GPU host
+        if: steps.vm.outcome == 'success'
+        timeout-minutes: 30
+        env:
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
+          SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
+        run: |
+          ssh_args=(
+            ssh -i "$SSH_KEY" -p "$SSH_PORT"
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+          "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git make python3.12-venv rsync
+
+          scratch_base="$HOME/.cache/emmy"
+          mkdir -p "$scratch_base"
+          filesystem_type=$(df -PT "$scratch_base" | awk 'NR == 2 {print $2}')
+          case "$filesystem_type" in
+            tmpfs|ramfs)
+              echo "Durable onboarding scratch resolved to $filesystem_type" >&2
+              exit 1
+              ;;
+          esac
+          free_kb=$(df -Pk "$scratch_base" | awk 'NR == 2 {print $4}')
+          if [ "$free_kb" -lt 8388608 ]; then
+            echo "Durable onboarding scratch requires at least 8 GiB free" >&2
+            exit 1
+          fi
+
+          bootstrap_venv=$(mktemp -d "$scratch_base/bootstrap.XXXXXX")
+          cleanup() {
+            case "$bootstrap_venv" in
+              "$scratch_base"/bootstrap.*) rm -rf -- "$bootstrap_venv" ;;
+              *) echo "Refusing to remove unexpected bootstrap path" >&2; exit 1 ;;
+            esac
+          }
+          trap cleanup EXIT
+          TMPDIR="$bootstrap_venv" python3.12 -m venv "$bootstrap_venv"
+          "$bootstrap_venv/bin/pip" --version >/dev/null
+          REMOTE
+
       - name: Run onboard-model agent
         if: steps.vm.outcome == 'success'
         env:
@@ -376,8 +463,10 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ env.PUBLISH_IMAGE == 'true' && secrets.DOCKERHUB_TOKEN || '' }}
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
           SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -397,10 +486,15 @@ jobs:
               )
           prompt = f"""Use the onboard-model skill non-interactively.
 
+          The attached exact-workflow-SHA copies of the onboard-model, tune-kernels, and run-experiment skills are authoritative.
+          Follow them instead of any older skill copies in the artifact worktree.
+
           Operation mode: {mode}
           Hugging Face model ID: {os.environ['MODEL_ID']}
           Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
           SSH target: {os.environ['SSH_TARGET']}
+          Raw SSH host: {os.environ['SSH_HOST']}
+          Raw SSH user: {os.environ['SSH_USER']}
           SSH port: {os.environ['SSH_PORT']}
           SSH private key: {os.environ['SSH_KEY']} (pass --ssh-key {os.environ['SSH_KEY']} to every Emmy remote command)
           Absolute deadline: {os.environ['ONBOARD_DEADLINE']}
@@ -411,8 +505,13 @@ jobs:
           {task}
           Do not select a model or GPU, provision or delete the VM, commit, push, or open/update a pull request.
           Always write the required atomic summary with mode set to {mode}, including experiment_artifacts with
-          retained experiment recipe.yaml files only. Put selected benchmark numbers in the final recipe's
-          RESULTS.md; do not retain raw results, experiment reports, dated run snapshots, or onboarding summaries.
+          the shared experiment recipe and RESULTS.md, the exact results_<gpu-short>x<gpu-count>.tar.gz archive, and
+          the retained top-level experiment records for this platform. Replace only this platform's archive and
+          records; preserve every other platform archive, record, and RESULTS.md section. Do not retain the ignored
+          dated run directory or onboarding summaries. Update the final recipe's RESULTS.md for this platform while
+          preserving still-valid measurements for its other platforms.
+          Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
+          filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
           output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, and canonical golden YAML.
           """
@@ -425,12 +524,131 @@ jobs:
             --agent onboard-model \
             --model cloudrift/agent \
             --format json \
+            --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
             --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
             "$AGENT_EVENTS" > "$AGENT_OUTPUT"
+          if [ -s "$AGENT_OUTPUT" ]; then
+            sed 's/^/onboard-model: /' "$AGENT_OUTPUT"
+          else
+            echo "::error::Onboarding agent produced no final text output"
+          fi
           exit "$agent_status"
+
+      - name: Remove archived task-local raw results
+        if: steps.vm.outcome == 'success'
+        run: |
+          ./venv/bin/python - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          from emmy.hardware import gpu_short_name
+
+          workspace = Path.cwd().resolve()
+          experiments_root = (workspace / "experiments").resolve()
+          summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          summary = json.loads(summary_path.read_text())
+          if summary.get("status") != "success":
+              raise SystemExit(f"Onboarding did not succeed: {summary.get('failure')}")
+          experiment_recipe = Path(summary.get("experiment") or "")
+          if experiment_recipe.is_absolute() or ".." in experiment_recipe.parts or experiment_recipe.name != "recipe.yaml":
+              raise SystemExit(f"Unsafe experiment recipe path: {experiment_recipe}")
+          experiment_dir = (workspace / experiment_recipe).parent.resolve()
+          if experiments_root not in experiment_dir.parents:
+              raise SystemExit(f"Experiment directory is outside experiments/: {experiment_dir}")
+
+          timestamp = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+          raw_directories = sorted(
+              path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)
+          )
+          platform = f"{gpu_short_name(os.environ['TARGET_GPU'])}x{int(os.environ['TARGET_GPU_COUNT'])}"
+          archive_path = experiment_recipe.parent / f"results_{platform}.tar.gz"
+          archive = workspace / archive_path
+          legacy_archive = experiment_dir / "results.tar.gz"
+
+          def verify_archive(path):
+              member_paths = []
+              with tarfile.open(path, "r:gz") as source:
+                  for member in source.getmembers():
+                      member_paths.append(PurePosixPath(member.name.removeprefix("./")))
+                      if member.isfile():
+                          contents = source.extractfile(member)
+                          if contents is None:
+                              raise SystemExit(f"Could not read archived file: {member.name}")
+                          while contents.read(1024 * 1024):
+                              pass
+              return {path.parts[0] for path in member_paths if path.parts}
+
+          if raw_directories:
+              temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
+              try:
+                  with tarfile.open(temporary_archive, "w:gz") as output:
+                      for raw_directory in raw_directories:
+                          output.add(raw_directory, arcname=raw_directory.name)
+                  temporary_roots = verify_archive(temporary_archive)
+                  missing_roots = [path.name for path in raw_directories if path.name not in temporary_roots]
+                  if missing_roots:
+                      raise SystemExit(f"New results archive is missing raw directories: {missing_roots}")
+                  os.replace(temporary_archive, archive)
+              finally:
+                  temporary_archive.unlink(missing_ok=True)
+          elif not archive.is_file() and legacy_archive.is_file():
+              verify_archive(legacy_archive)
+              os.replace(legacy_archive, archive)
+
+          if not archive.is_file():
+              raise SystemExit(f"Current-platform results archive was not produced: {archive_path}")
+
+          member_roots = verify_archive(archive)
+
+          for raw_directory in raw_directories:
+              if raw_directory.name not in member_roots:
+                  raise SystemExit(f"Raw directory is not preserved by {archive_path}: {raw_directory.name}")
+              shutil.rmtree(raw_directory)
+
+          if legacy_archive != archive:
+              legacy_archive.unlink(missing_ok=True)
+
+          experiment_report = experiment_recipe.with_name("RESULTS.md")
+          platform_records = sorted(
+              path.relative_to(workspace)
+              for path in experiment_dir.glob("*.experiment.yaml")
+              if path.is_file()
+              and (path.name == f"{platform}.experiment.yaml" or path.name.startswith(f"{platform}_"))
+          )
+          durable_snapshot = [
+              experiment_recipe,
+              experiment_report,
+              archive_path,
+              *platform_records,
+          ]
+          missing = [path for path in durable_snapshot if not (workspace / path).is_file()]
+          if missing:
+              raise SystemExit(f"Current-platform durable snapshot is incomplete: {missing}")
+
+          legacy_path = experiment_recipe.parent / "results.tar.gz"
+          for key in ("experiment_artifacts", "artifacts"):
+              existing = summary.get(key) or []
+              if not isinstance(existing, list):
+                  raise SystemExit(f"Summary {key} must be a list")
+              retained = [path for path in existing if Path(path) != legacy_path]
+              summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in durable_snapshot)]))
+
+          temporary_summary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+          try:
+              temporary_summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+              os.replace(temporary_summary, summary_path)
+          finally:
+              temporary_summary.unlink(missing_ok=True)
+          PY
 
       - name: Delete workflow-owned CloudRift VMs
         if: always() && steps.selection.outputs.selected == 'true'
@@ -438,11 +656,6 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
           set +e
-          lease_status=0
-          if [ -f "$VM_LEASE" ]; then
-            ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
-            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
-          fi
           ./venv/bin/python - <<'PY'
           import asyncio
           import os
@@ -450,9 +663,25 @@ jobs:
           from emmy.provisioning.cloudrift import terminate_instances_by_tags
 
           tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
-          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          asyncio.run(
+              terminate_instances_by_tags(
+                  os.environ["CLOUDRIFT_API_KEY"],
+                  tags,
+                  audit_attempts=18,
+                  audit_delay=5,
+              )
+          )
           PY
           tag_status=$?
+          lease_status=0
+          if [ -f "$VM_LEASE" ]; then
+            ./venv/bin/emmy vm delete lease "$VM_LEASE" \
+              --owner "$RUN_OWNER" \
+              --retries 1 \
+              --audit-attempts 3 \
+              --audit-delay 5 || lease_status=$?
+            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
+          fi
           set -e
           if [ "$lease_status" -ne 0 ] || [ "$tag_status" -ne 0 ]; then
             echo "CloudRift cleanup or audit failed" >&2
@@ -467,7 +696,7 @@ jobs:
           git diff --exit-code -- .github .agents/skills/onboard-model .claude/skills/onboard-model
           test -z "$(git ls-files --others --exclude-standard -- \
             .github .agents/skills/onboard-model .claude/skills/onboard-model)"
-          ./venv/bin/python .github/scripts/onboarding_artifacts.py \
+          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/onboarding_artifacts.py" \
             --summary "$ONBOARD_SUMMARY" \
             --model-id "$MODEL_ID" \
             --gpu "$TARGET_GPU" \
@@ -476,6 +705,7 @@ jobs:
             --mode "$ONBOARD_MODE" \
             --expected-tag "$EXPECTED_LIFECYCLE" \
             --stage
+          git lfs status
           git diff --cached --check
           if git diff --cached --quiet; then
             echo "::error::Model qualification produced no repository artifacts"
@@ -587,8 +817,11 @@ jobs:
             "$ONBOARD_SUMMARY" \
             "$PR_SUMMARY" \
             "$PROVIDER_CONFIG" \
-            "$RECIPE_INVENTORY" \
             "$VM_LEASE" \
             "$SSH_KEY" \
             "$SSH_KEY.pub"
+          case "$WORKFLOW_SOURCE" in
+            /tmp/emmy-onboard-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
+            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
+          esac
           git config --unset-all credential.helper || true

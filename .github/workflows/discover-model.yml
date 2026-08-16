@@ -146,7 +146,7 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/emmy recipe list recipes --json > "$AGENT_INVENTORY"
+          ./venv/bin/emmy recipe list --json > "$AGENT_INVENTORY"
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -216,7 +216,7 @@ jobs:
             ]
           }}
           maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
-          for an embedding model. Copy deploy.gpu values exactly from deployment setups in repository-inventory.
+          for an embedding model. Copy each deployment's gpu value exactly from repository-inventory.
           Return an empty onboarding_models list when nothing new is suitable. The manifest file is required; do not edit any
           repository file. When OpenCode requires your final response, return the best manifest supported by the
           evidence already gathered without making another tool call. Before returning, check every key letter for
@@ -251,12 +251,12 @@ jobs:
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
-          maintained_count="$(./venv/bin/emmy recipe list recipes --tag maintained --json | jq 'length')"
+          maintained_count="$(./venv/bin/emmy recipe list --tag maintained --json | jq '.recipes | length')"
           if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
             echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
             exit 1
           fi
-          onboarding_count="$(./venv/bin/emmy recipe list recipes --tag onboarding --json | jq 'length')"
+          onboarding_count="$(./venv/bin/emmy recipe list --tag onboarding --json | jq '.recipes | length')"
           if [ "$onboarding_count" -gt 3 ]; then
             echo "Expected at most 3 onboarding recipes, found $onboarding_count" >&2
             exit 1

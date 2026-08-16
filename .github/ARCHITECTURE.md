@@ -47,7 +47,8 @@ lifecycle decision. It keeps at most three total onboarding shells for open-weig
 contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
 consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
 ignores otherwise valid new candidates beyond the remaining shell slots. `emmy recipe list --json` supplies the
-compact agent inventory, and tag-filtered list queries enforce the maintained and onboarding counts after application.
+versioned compact agent inventory under its `recipes` field, and tag-filtered list queries enforce the maintained and
+onboarding counts after application.
 The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
 validates and applies its lifecycle manifest. The helper
 tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields

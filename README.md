@@ -183,9 +183,10 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
 ```
 
-`--recipe` also takes the bare name of a recipe bundled with the installed package (`--recipe gemma-4-12B-it`),
-which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
-its timestamped run directory. A path that exists always wins, so an edited working copy is never overwritten.
+`--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
+checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
+first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
+exists always wins, so an edited working copy is never overwritten.
 
 ## Publish a serving image
 
@@ -218,13 +219,23 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Recipe
 
 ```bash
-# Inspect recipe metadata or count one lifecycle group in automation.
-emmy recipe list recipes --tag maintained --json
+# Automatically inspect live source recipes for an editable install, or the
+# runnable recipes bundled in an installed wheel.
+emmy recipe list --json
+
+# Count one lifecycle group in automation.
+emmy recipe list --tag maintained --json
 
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
+
+`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
+each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, and matrix-expanded
+deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
+schema version, but existing fields are not removed or redefined. Emmy always detects its installation: an editable
+checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged runnable recipe bundle.
 
 ```yaml
 tags:

@@ -410,19 +410,15 @@ def _summary(manifest: dict) -> str:
 def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     """Apply a validated manifest and return change/count outputs."""
     records = recipe_catalog(workspace / "recipes")
-    modified_models = []
+    changed = False
     for decision in manifest["maintained_models"]:
-        if _set_lifecycle(records[decision["model_id"]], MAINTAINED_TAG, decision["rationale"]):
-            modified_models.append({"model_id": decision["model_id"], "lifecycle": MAINTAINED_TAG})
+        changed = _set_lifecycle(records[decision["model_id"]], MAINTAINED_TAG, decision["rationale"]) or changed
     for decision in manifest["best_effort_models"]:
-        if _set_lifecycle(records[decision["model_id"]], BEST_EFFORT_TAG, decision["rationale"]):
-            modified_models.append({"model_id": decision["model_id"], "lifecycle": BEST_EFFORT_TAG})
+        changed = _set_lifecycle(records[decision["model_id"]], BEST_EFFORT_TAG, decision["rationale"]) or changed
     for decision in manifest["obsolete_models"]:
-        if _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG, decision["rationale"]):
-            modified_models.append({"model_id": decision["model_id"], "lifecycle": OBSOLETE_TAG})
+        changed = _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG, decision["rationale"]) or changed
     for decision in manifest["existing_onboarding_models"]:
-        if _set_lifecycle(records[decision["model_id"]], ONBOARDING_TAG, decision["rationale"]):
-            modified_models.append({"model_id": decision["model_id"], "lifecycle": ONBOARDING_TAG})
+        changed = _set_lifecycle(records[decision["model_id"]], ONBOARDING_TAG, decision["rationale"]) or changed
     for candidate in manifest["onboarding_models"]:
         create_recipe_stub(
             workspace / "recipes",
@@ -431,9 +427,9 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
             candidate["task"],
             candidate["deployments"],
         )
-        modified_models.append({"model_id": candidate["model_id"], "lifecycle": ONBOARDING_TAG})
+        changed = True
     summary_path.write_text(_summary(manifest))
-    return {"changed": bool(modified_models), "modified_models": modified_models}
+    return {"changed": changed}
 
 
 def _write_outputs(result: dict) -> None:
@@ -442,12 +438,7 @@ def _write_outputs(result: dict) -> None:
         return
     with open(output_path, "a") as output:
         for key, value in result.items():
-            if isinstance(value, bool):
-                rendered = str(value).lower()
-            elif isinstance(value, (dict, list)):
-                rendered = json.dumps(value, separators=(",", ":"), sort_keys=True)
-            else:
-                rendered = value
+            rendered = str(value).lower() if isinstance(value, bool) else value
             output.write(f"{key}={rendered}\n")
 
 

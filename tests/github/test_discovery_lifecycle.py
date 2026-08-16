@@ -346,15 +346,7 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    assert result == {
-        "changed": True,
-        "modified_models": [
-            {"model_id": "org/first", "lifecycle": "maintained"},
-            {"model_id": "org/second", "lifecycle": "best-effort"},
-            {"model_id": "org/third", "lifecycle": "obsolete"},
-            {"model_id": "org/new-model", "lifecycle": "onboarding"},
-        ],
-    }
+    assert result == {"changed": True}
     assert first.read_text().startswith("# Keep this qualification note.\ntags:\n  - maintained\n")
     assert yaml.safe_load(second.read_text())["tags"] == ["best-effort"]
     assert yaml.safe_load(third.read_text())["tags"] == ["obsolete"]
@@ -376,20 +368,26 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     assert "`org/third` → `org/first`" in summary
 
 
-def test_discovery_outputs_modified_models_as_compact_json(tmp_path, monkeypatch):
-    output_path = tmp_path / "github-output"
-    monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+def test_discovery_workflow_summarizes_tracked_and_new_recipe_changes(tmp_path):
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    existing = _recipe(tmp_path, "existing", "org/existing", tags=["best-effort"])
+    subprocess.run(["git", "add", "recipes"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=tmp_path, check=True)
+    existing.write_text(existing.read_text().replace("best-effort", "maintained"))
+    _recipe(tmp_path, "new", "org/new", tags=["onboarding", "untested"])
 
-    discovery_lifecycle._write_outputs(
-        {
-            "changed": True,
-            "modified_models": [{"model_id": "org/model", "lifecycle": "maintained"}],
-        }
-    )
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in workflow["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
+    source = script.split("./venv/bin/python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    output_path = tmp_path / "github-output"
+    env = {**os.environ, "GITHUB_OUTPUT": str(output_path)}
+
+    subprocess.run([sys.executable, "-"], cwd=tmp_path, env=env, input=source, text=True, check=True)
 
     assert output_path.read_text().splitlines() == [
-        "changed=true",
-        'modified_models=[{"lifecycle":"maintained","model_id":"org/model"}]',
+        'modified_models=[{"lifecycle":"maintained","model_id":"org/existing"},{"lifecycle":"onboarding","model_id":"org/new"}]'
     ]
 
 

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "FP8 122B MoE with three-platform coverage (H200, Pro6000, MI350X); complements the BF16 V100 variant."
+  rationale: "FP8 122B MoE with three-platform coverage on H200, Pro6000 TP8, and MI350X complements the BF16 path."
 
 engine:
   llm:

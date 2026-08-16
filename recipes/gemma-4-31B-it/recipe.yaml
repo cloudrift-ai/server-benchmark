@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Google's flagship with 9.7M downloads and 3.5k likes, single-H200 coverage for the Gemma family."
+  rationale: "Google flagship with 9.7M downloads and 3.5k likes covering the single-GPU dense multimodal path."
 
 engine:
   llm:

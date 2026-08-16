@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Flagship Qwen3.6 MoE with 5.9M downloads, top coding-agent scores across two GPU tiers."
+  rationale: "Flagship Qwen3.6 MoE with top coding scores, 5.9M downloads, and two-tier GPU coverage with MTP."
 
 engine:
   llm:

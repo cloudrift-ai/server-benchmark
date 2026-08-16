@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "Largest Qwen3 embedding recipe, primary stock-vLLM versus Emmy compiler-plugin comparison target."
+  rationale: "Largest Qwen3 embedding and primary compiler-plugin comparison target across consumer GPU family."
   task: embed
 
 engine:

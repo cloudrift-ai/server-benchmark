@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "High-capability agentic model with glm47 parser on eight H200s, distinct from other deepseek-gemma families."
+  rationale: "Highest-capability agentic model with dedicated glm47 parser on eight H200s at 200K context."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "262K-context FP8 Gemma 4 on one H200 doubles the BF16 checkpoint's context length."
+  rationale: "FP8 dynamic Gemma 4 on one H200 doubles context to 262K where the BF16 checkpoint is KV-limited."
 
 engine:
   llm:

@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Qualified 118B agentic-coding FP8 on eight V100s at 1M context with unique tool-call parser."
+  rationale: "Unique 118B agentic-coding FP8 path on eight V100s at 1M context with a distinct poolside_v1 tool parser."
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

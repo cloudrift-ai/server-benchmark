@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Base-checkpoint continuation workloads on one RTX 5090 with prebuilt fast-math serving image."
+  rationale: "Base-checkpoint continuation workload on one RTX 5090 with prebuilt fast-math image at 131K context."
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion
 

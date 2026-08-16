@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Single-GPU mid-size dense FP8 with full 262K context and H200 MTP speculative decoding."
+  rationale: "Single-GPU mid-size dense FP8 with full 262K context, H200 MTP speculative decoding, and Pro 6000 coverage."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Strong coding MoE demand with 1.2M downloads, uniquely fits one RTX 5090 at consumer price."
+  rationale: "Only coding MoE with a one-RTX-5090 consumer deployment path and 1.2M downloads at the 30B class."
 
 engine:
   llm:

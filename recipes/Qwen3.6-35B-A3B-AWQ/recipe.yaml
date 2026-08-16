@@ -39,7 +39,7 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Unique one-V100 Qwen3.6 MoE at the lowest-cost deployment tier; 4-bit AWQ fits where BF16/FP8 fail."
+  rationale: "Unique V100 MoE entry at the lowest-cost tier where the BF16 and FP8 variants cannot fit."
 
 engine:
   llm:

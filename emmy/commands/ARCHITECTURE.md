@@ -124,8 +124,9 @@ keeps the existing Transformers path. `dit` delegates to the Diffusers block ada
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
 and Emmy always rebuild the same module and example inputs. Inductor compiles with
-`fullgraph=True, mode="max-autotune"`; its output must match eager on the same inputs at `rtol=atol=1e-3` before its
-latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+`fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
+has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
+before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
 Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave

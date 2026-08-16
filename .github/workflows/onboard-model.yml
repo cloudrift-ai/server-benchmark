@@ -226,18 +226,15 @@ jobs:
           query=(
             recipe query
             --root recipes
-            --require 'provider.cloudrift.team_access == true'
+            --filter 'provider.cloudrift.team_access == true'
             --limit 1
             --json
           )
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             query+=(
-              --model "$REQUESTED_MODEL_ID"
-              --gpu "$REQUESTED_GPU"
-              --gpu-count "$REQUESTED_GPU_COUNT"
-              --allow-missing-model
-              --require 'lifecycle != "obsolete"'
-              --require 'deployment.availability.cloudrift == true'
+              --candidate "$REQUESTED_MODEL_ID" "$REQUESTED_GPU" "$REQUESTED_GPU_COUNT"
+              --filter 'lifecycle != "obsolete"'
+              --filter 'deployment.availability.cloudrift == true'
             )
           else
             query+=(
@@ -257,6 +254,10 @@ jobs:
           fi
           row=$(jq -c '.rows[0] // empty' <<< "$selection")
           if [ -z "$row" ]; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "Manual candidate is obsolete or has no available exact CloudRift VM." >&2
+              exit 1
+            fi
             echo "selected=false" >> "$GITHUB_OUTPUT"
             echo "No onboarding or maintained recipe has an available exact CloudRift VM." >> "$GITHUB_STEP_SUMMARY"
             exit 0

@@ -225,7 +225,7 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 emmy recipe list --json
 
 # Count one lifecycle group in automation.
-emmy recipe list --tag maintained --json
+emmy recipe query --filter 'tags contains "maintained"' --json
 
 # Select the oldest runnable onboarding or maintained deployment. Referencing deployment.* expands each recipe into
 # deployment rows; the CloudRift availability and Git history fields are resolved only because this query uses them.
@@ -235,6 +235,10 @@ emmy recipe query \
   --sort 'lifecycle order ["onboarding", "maintained"]' \
   --sort 'results.last_run_at asc nulls-first' \
   --limit 1 --json
+
+# Check one exact external candidate, including a model without a recipe yet.
+emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
+  --filter 'deployment.availability.cloudrift == true' --json
 
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
@@ -246,8 +250,10 @@ each recipe carries its directory `name`, model ID, task, lifecycle-aware `runna
 deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
 schema version, but existing fields are not removed or redefined. Emmy always detects its installation: an editable
 checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged runnable recipe bundle.
-`recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys.
-CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require `CLOUDRIFT_TEAM_ID`.
+`recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its
+optional `--candidate MODEL GPU COUNT` source hydrates lifecycle metadata from an existing recipe or represents a new
+model as onboarding work. CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require
+`CLOUDRIFT_TEAM_ID`.
 
 ```yaml
 tags:

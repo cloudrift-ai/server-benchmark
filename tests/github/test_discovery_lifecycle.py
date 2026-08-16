@@ -266,9 +266,21 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle order ["onboarding", "maintained"]' in script
     assert "results.last_run_at asc nulls-first" in script
     assert "deployment.index asc" in script
-    assert "--allow-missing-model" in script
+    assert "--candidate" in script
     assert 'lifecycle != "obsolete"' in script
+    assert "--require" not in script
     assert "recipe_inventory_document" not in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+
+def test_discovery_counts_lifecycle_with_recipe_query():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
+
+    assert "recipe query" in script
+    assert 'tags contains "maintained"' in script
+    assert 'tags contains "onboarding"' in script
+    assert "recipe list --tag" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 
 

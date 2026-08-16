@@ -66,10 +66,10 @@ GPU/count setups and writes the minimal disabled shell without duplicating YAML 
 
 `emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
 expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.
-An exact `--model` plus `--gpu`/`--gpu-count` replaces the declared deployments with that requested setup, and
-`--allow-missing-model` represents a new model as an onboarding candidate. Every row carries its lifecycle-derived
-operation (`onboarding` or `verification`) and expected post-run lifecycle so automation does not reproduce those
-rules.
+`--candidate MODEL GPU COUNT` instead supplies one exact external deployment. The query hydrates its
+model metadata from the catalog when present and represents a missing model as onboarding work. Every row carries its
+lifecycle-derived operation (`onboarding` or `verification`) and expected post-run lifecycle so automation does not
+reproduce those rules.
 
 The row fields are grouped by ownership:
 
@@ -85,9 +85,8 @@ The row fields are grouped by ownership:
 The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
 field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
 `FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
-AND; repeated sort keys are applied in command order. Requirements use the predicate grammar but fail the query
-instead of removing a candidate. The independent versioned JSON result contains `schema_version` and `rows`; an empty
-result is successful.
+AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
+and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.
 
 Computed fields are resolved only when a predicate or sort references them. `deployment.availability.cloudrift`
 queries current CloudRift capacity and requires `CLOUDRIFT_API_KEY`; it uses the hardware table and requires the exact

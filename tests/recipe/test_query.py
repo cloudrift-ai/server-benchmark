@@ -4,6 +4,7 @@ import pytest
 
 import emmy.recipe.query as recipe_query
 from emmy.recipe.query import (
+    RecipeCandidate,
     build_query_rows,
     parse_predicate,
     parse_sort,
@@ -76,7 +77,6 @@ def test_query_filters_and_sorts_lifecycle_then_oldest_results_then_model():
             parse_predicate('lifecycle in ["onboarding", "maintained"]'),
             parse_predicate("deployment.availability.cloudrift == true"),
         ],
-        requirements=[],
         sorts=[
             parse_sort('lifecycle order ["onboarding", "maintained"]'),
             parse_sort("results.last_run_at asc nulls-first"),
@@ -93,10 +93,7 @@ def test_query_filters_and_sorts_lifecycle_then_oldest_results_then_model():
 def test_query_manual_missing_model_is_onboarding_candidate():
     rows = build_query_rows(
         [],
-        model_id="org/new-model",
-        allow_missing_model=True,
-        gpu="NVIDIA H200 141GB",
-        gpu_count=1,
+        candidate=RecipeCandidate("org/new-model", "NVIDIA H200 141GB", 1),
         expand_deployments=True,
     )
 
@@ -113,9 +110,7 @@ def test_query_manual_existing_model_uses_explicit_deployment():
 
     rows = build_query_rows(
         inventory,
-        model_id="org/model",
-        gpu="Requested GPU",
-        gpu_count=2,
+        candidate=RecipeCandidate("org/model", "Requested GPU", 2),
         expand_deployments=True,
     )
 
@@ -125,20 +120,35 @@ def test_query_manual_existing_model_uses_explicit_deployment():
     assert rows[0]["deployment"]["gpu_count"] == 2
 
 
-def test_query_requirement_fails_instead_of_discarding_candidate():
+def test_query_filter_discards_obsolete_candidate():
     rows = build_query_rows(
-        [_record("org/model", ["obsolete"], [_deployment("GPU")])],
+        [_record("org/model", ["obsolete"], [_deployment("Declared GPU")])],
+        candidate=RecipeCandidate("org/model", "Requested GPU", 1),
         expand_deployments=True,
     )
 
-    with pytest.raises(ValueError, match="requirement failed.*lifecycle !="):
+    assert (
         query_rows(
             rows,
-            filters=[],
-            requirements=[parse_predicate('lifecycle != "obsolete"')],
+            filters=[parse_predicate('lifecycle != "obsolete"')],
             sorts=[],
             limit=1,
         )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "message"),
+    [
+        (RecipeCandidate("not-a-model", "GPU", 1), "exact Hugging Face"),
+        (RecipeCandidate("org/model", "", 1), "GPU must be non-empty"),
+        (RecipeCandidate("org/model", "GPU", 0), "GPU count must be positive"),
+    ],
+)
+def test_query_rejects_invalid_candidates(candidate, message):
+    with pytest.raises(ValueError, match=message):
+        build_query_rows([], candidate=candidate, expand_deployments=True)
 
 
 @pytest.mark.parametrize(
@@ -170,11 +180,13 @@ def test_query_rejects_invalid_sorts(source):
 
 
 def test_query_referenced_fields_drive_lazy_enrichment():
-    filters = [parse_predicate("deployment.availability.cloudrift == true")]
-    requirements = [parse_predicate("provider.cloudrift.team_access == true")]
+    filters = [
+        parse_predicate("deployment.availability.cloudrift == true"),
+        parse_predicate("provider.cloudrift.team_access == true"),
+    ]
     sorts = [parse_sort("results.last_run_at asc nulls-first")]
 
-    assert referenced_fields(filters, requirements, sorts) == {
+    assert referenced_fields(filters, sorts) == {
         "deployment.availability.cloudrift",
         "provider.cloudrift.team_access",
         "results.last_run_at",
@@ -196,10 +208,7 @@ async def test_query_resolves_team_access_before_cloudrift_availability(monkeypa
     monkeypatch.setattr(recipe_query, "list_available_instance_types", list_available)
     rows = build_query_rows(
         [],
-        model_id="org/new-model",
-        allow_missing_model=True,
-        gpu="NVIDIA GeForce RTX 4090",
-        gpu_count=1,
+        candidate=RecipeCandidate("org/new-model", "NVIDIA GeForce RTX 4090", 1),
         expand_deployments=True,
     )
 

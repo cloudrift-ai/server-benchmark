@@ -28,25 +28,18 @@ def test_recipe_create(run_cli, tmp_path):
     assert yaml.safe_load(recipe_path.read_text())["matrices"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
 
 
-def test_recipe_list_by_tag(run_cli):
-    returncode, stdout, stderr = run_cli("recipe", "list", "--tag", "best-effort", "--json")
+def test_recipe_list_json_contains_complete_catalog(run_cli):
+    returncode, stdout, stderr = run_cli("recipe", "list", "--json")
 
     assert returncode == 0, stderr
     document = json.loads(stdout)
     assert document["schema_version"] == 1
     assert document["recipes"]
-    assert all("best-effort" in recipe["tags"] for recipe in document["recipes"])
-
-
-def test_recipe_list_excludes_recipes_without_requested_tag(run_cli):
-    returncode, stdout, stderr = run_cli("recipe", "list", "--tag", "does-not-exist", "--json")
-
-    assert returncode == 0, stderr
-    assert json.loads(stdout) == {"schema_version": 1, "recipes": []}
+    assert all("deployments" in recipe for recipe in document["recipes"])
 
 
 def test_recipe_list_rejects_catalog_selection_arguments(run_cli):
-    for arguments in (("recipes",), ("--bundled",)):
+    for arguments in (("recipes",), ("--bundled",), ("--tag", "maintained")):
         returncode, _stdout, stderr = run_cli("recipe", "list", *arguments, "--json")
 
         assert returncode == 2
@@ -81,3 +74,32 @@ def test_recipe_query_rejects_non_positive_limit(run_cli):
 
     assert returncode == 2
     assert "limit must be positive" in stdout
+
+
+def test_recipe_query_hydrates_external_candidate(run_cli):
+    returncode, stdout, stderr = run_cli(
+        "recipe",
+        "query",
+        "--candidate",
+        "org/new-model",
+        GPU,
+        "1",
+        "--filter",
+        'lifecycle != "obsolete"',
+        "--json",
+    )
+
+    assert returncode == 0, stderr
+    row = json.loads(stdout)["rows"][0]
+    assert row["model_id"] == "org/new-model"
+    assert row["operation"] == "onboarding"
+    assert row["deployment"]["gpu"] == GPU
+
+
+def test_recipe_query_exposes_one_external_candidate_option(run_cli):
+    returncode, stdout, stderr = run_cli("recipe", "query", "--help")
+
+    assert returncode == 0, stderr
+    assert "--candidate MODEL GPU COUNT" in stdout
+    for removed_option in ("--require", "--model MODEL", "--gpu GPU", "--gpu-count", "--allow-missing-model"):
+        assert removed_option not in stdout

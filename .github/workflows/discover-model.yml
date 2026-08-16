@@ -256,12 +256,12 @@ jobs:
           ./venv/bin/python .github/scripts/discovery_lifecycle.py \
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
-          maintained_count="$(./venv/bin/emmy recipe list --tag maintained --json | jq '.recipes | length')"
+          maintained_count="$(./venv/bin/emmy recipe query --filter 'tags contains "maintained"' --json | jq '.rows | length')"
           if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
             echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
             exit 1
           fi
-          onboarding_count="$(./venv/bin/emmy recipe list --tag onboarding --json | jq '.recipes | length')"
+          onboarding_count="$(./venv/bin/emmy recipe query --filter 'tags contains "onboarding"' --json | jq '.rows | length')"
           if [ "$onboarding_count" -gt 3 ]; then
             echo "Expected at most 3 onboarding recipes, found $onboarding_count" >&2
             exit 1

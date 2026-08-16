@@ -57,6 +57,15 @@ class Predicate:
 
 
 @dataclass(frozen=True)
+class RecipeCandidate:
+    """One exact model/deployment supplied outside the recipe catalog."""
+
+    model_id: str
+    gpu: str
+    gpu_count: int
+
+
+@dataclass(frozen=True)
 class SortExpression:
     """One validated row sort key."""
 
@@ -79,7 +88,7 @@ def _validate_field(field: str) -> None:
 
 
 def parse_predicate(source: str) -> Predicate:
-    """Parse one constrained filter or requirement expression."""
+    """Parse one constrained filter expression."""
     match = _PREDICATE.fullmatch(source)
     if match is None:
         raise ValueError(f"Invalid recipe query predicate: {source!r}")
@@ -122,13 +131,9 @@ def parse_sort(source: str) -> SortExpression:
     return SortExpression(field=field, direction=direction, nulls=nulls or "nulls-last")
 
 
-def referenced_fields(
-    filters: list[Predicate],
-    requirements: list[Predicate],
-    sorts: list[SortExpression],
-) -> frozenset[str]:
+def referenced_fields(filters: list[Predicate], sorts: list[SortExpression]) -> frozenset[str]:
     """Return every field needed to evaluate a parsed query."""
-    return frozenset([predicate.field for predicate in [*filters, *requirements]] + [sort.field for sort in sorts])
+    return frozenset([predicate.field for predicate in filters] + [sort.field for sort in sorts])
 
 
 def _lifecycle(tags: list[str]) -> str | None:
@@ -170,38 +175,28 @@ def _base_row(record: dict | None, model_id: str) -> dict:
 def build_query_rows(
     inventory: list[dict],
     *,
-    model_id: str | None = None,
-    allow_missing_model: bool = False,
-    gpu: str | None = None,
-    gpu_count: int | None = None,
+    candidate: RecipeCandidate | None = None,
     expand_deployments: bool = False,
 ) -> list[dict]:
     """Build normalized recipe or recipe/deployment rows for query evaluation."""
-    if model_id is not None and HF_ID.fullmatch(model_id) is None:
-        raise ValueError("model_id must be an exact Hugging Face owner/repository ID")
-    if allow_missing_model and model_id is None:
-        raise ValueError("--allow-missing-model requires --model")
-    if (gpu is None) != (gpu_count is None):
-        raise ValueError("--gpu and --gpu-count must be used together")
-    if gpu is not None and model_id is None:
-        raise ValueError("An explicit deployment requires --model")
-    if gpu_count is not None and (isinstance(gpu_count, bool) or gpu_count < 1):
-        raise ValueError("gpu_count must be positive")
-
     by_model = {record["model_id"]: record for record in inventory}
-    if model_id is not None:
-        record = by_model.get(model_id)
-        if record is None and not allow_missing_model:
-            raise ValueError(f"No recipe found for model {model_id}")
-        records = [(model_id, record)]
+    if candidate is not None:
+        if HF_ID.fullmatch(candidate.model_id) is None:
+            raise ValueError("candidate model must be an exact Hugging Face owner/repository ID")
+        if not candidate.gpu:
+            raise ValueError("candidate GPU must be non-empty")
+        if isinstance(candidate.gpu_count, bool) or candidate.gpu_count < 1:
+            raise ValueError("candidate GPU count must be positive")
+        deployment = {"gpu": candidate.gpu, "gpu_count": candidate.gpu_count, "context_length": None}
+        sources = [(candidate.model_id, by_model.get(candidate.model_id), deployment)]
     else:
-        records = [(record["model_id"], record) for record in inventory]
+        sources = [(record["model_id"], record, None) for record in inventory]
 
     rows = []
-    for selected_model_id, record in records:
+    for selected_model_id, record, candidate_deployment in sources:
         base = _base_row(record, selected_model_id)
-        if gpu is not None:
-            deployments = [{"gpu": gpu, "gpu_count": gpu_count, "context_length": None}]
+        if candidate_deployment is not None:
+            deployments = [candidate_deployment]
         elif expand_deployments:
             deployments = record["deployments"] if record is not None else []
         else:
@@ -303,21 +298,12 @@ def query_rows(
     rows: list[dict],
     *,
     filters: list[Predicate],
-    requirements: list[Predicate],
     sorts: list[SortExpression],
     limit: int | None,
 ) -> list[dict]:
-    """Apply requirements, filters, stable lexicographic ordering, and a limit."""
+    """Apply filters, stable lexicographic ordering, and a limit."""
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
-    for requirement in requirements:
-        failed = list(dict.fromkeys(row["model_id"] for row in rows if not _matches(row, requirement)))
-        if failed:
-            raise ValueError(
-                f"Recipe query requirement failed for {', '.join(failed)}: "
-                f"{requirement.field} {requirement.operator} {json.dumps(requirement.value)}"
-            )
-
     selected = [row for row in rows if all(_matches(row, predicate) for predicate in filters)]
 
     def compare(left: dict, right: dict) -> int:

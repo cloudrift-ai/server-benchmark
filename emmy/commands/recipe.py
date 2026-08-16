@@ -13,6 +13,7 @@ from emmy.provisioning.errors import TerminalProvisionError
 from emmy.recipe.bundled import default_recipe_root
 from emmy.recipe.catalog import create_recipe_stub, recipe_inventory, recipe_inventory_document
 from emmy.recipe.query import (
+    RecipeCandidate,
     build_query_rows,
     enrich_query_rows,
     parse_predicate,
@@ -31,7 +32,7 @@ def _handle_list(args) -> None:
         with default_recipe_root() as root:
             if root is None:
                 raise ValueError("this Emmy installation does not contain recipes")
-            document = recipe_inventory_document(root, tuple(args.tag))
+            document = recipe_inventory_document(root)
     except (OSError, ValueError) as exc:
         logger.error(str(exc))
         raise SystemExit(2) from exc
@@ -65,9 +66,16 @@ def _handle_query(args) -> None:
         if args.limit is not None and args.limit < 1:
             raise ValueError("limit must be positive")
         filters = [parse_predicate(source) for source in args.filters]
-        requirements = [parse_predicate(source) for source in args.requirements]
         sorts = [parse_sort(source) for source in args.sorts]
-        fields = referenced_fields(filters, requirements, sorts)
+        fields = referenced_fields(filters, sorts)
+        candidate = None
+        if args.candidate is not None:
+            model_id, gpu, raw_gpu_count = args.candidate
+            try:
+                gpu_count = int(raw_gpu_count)
+            except ValueError as exc:
+                raise ValueError("candidate GPU count must be positive") from exc
+            candidate = RecipeCandidate(model_id, gpu, gpu_count)
         root_context = nullcontext(args.root) if args.root is not None else default_recipe_root()
         with root_context as root:
             if root is None:
@@ -75,13 +83,10 @@ def _handle_query(args) -> None:
             if not root.is_dir():
                 raise ValueError(f"Recipe root is not a directory: {root}")
             inventory = recipe_inventory(root)
-        expand_deployments = args.gpu is not None or any(field.startswith("deployment.") for field in fields)
+        expand_deployments = any(field.startswith("deployment.") for field in fields)
         rows = build_query_rows(
             inventory,
-            model_id=args.model,
-            allow_missing_model=args.allow_missing_model,
-            gpu=args.gpu,
-            gpu_count=args.gpu_count,
+            candidate=candidate,
             expand_deployments=expand_deployments,
         )
         needs_cloudrift = any(field.startswith("provider.cloudrift.") or field.endswith(".availability.cloudrift") for field in fields)
@@ -97,7 +102,6 @@ def _handle_query(args) -> None:
         selected = query_rows(
             rows,
             filters=filters,
-            requirements=requirements,
             sorts=sorts,
             limit=args.limit,
         )
@@ -121,7 +125,6 @@ def register_recipe_command(subparsers) -> None:
     actions = parser.add_subparsers(dest="recipe_action", required=True)
 
     list_parser = actions.add_parser("list", help="List recipe metadata")
-    list_parser.add_argument("--tag", action="append", default=[], help="Require a tag; repeat to require multiple tags")
     list_parser.add_argument("--json", action="store_true", help="Print the versioned JSON recipe catalog")
     list_parser.set_defaults(func=_handle_list)
 
@@ -135,14 +138,6 @@ def register_recipe_command(subparsers) -> None:
         help="Keep matching rows; repeat for logical AND",
     )
     query_parser.add_argument(
-        "--require",
-        action="append",
-        default=[],
-        dest="requirements",
-        metavar="EXPRESSION",
-        help="Fail if any candidate row does not match; repeat for logical AND",
-    )
-    query_parser.add_argument(
         "--sort",
         action="append",
         default=[],
@@ -151,13 +146,11 @@ def register_recipe_command(subparsers) -> None:
         help="Add a stable sort key in priority order",
     )
     query_parser.add_argument("--limit", type=int, default=None, help="Return at most this many rows")
-    query_parser.add_argument("--model", help="Restrict the candidate source to one exact Hugging Face model ID")
-    query_parser.add_argument("--gpu", help="Use this exact deployment GPU for --model")
-    query_parser.add_argument("--gpu-count", type=int, help="Use this exact deployment GPU count for --model")
     query_parser.add_argument(
-        "--allow-missing-model",
-        action="store_true",
-        help="Create a synthetic onboarding candidate when --model is absent from the catalog",
+        "--candidate",
+        nargs=3,
+        metavar=("MODEL", "GPU", "COUNT"),
+        help="Query one exact external model/deployment",
     )
     query_parser.add_argument(
         "--root",

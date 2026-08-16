@@ -127,33 +127,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Configure Git LFS
-        run: |
-          if ! git lfs version >/dev/null 2>&1; then
-            lfs_version=3.7.1
-            case "$(uname -m)" in
-              x86_64) lfs_arch=amd64; lfs_sha256=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;;
-              aarch64) lfs_arch=arm64; lfs_sha256=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;;
-              *) echo "Unsupported Git LFS architecture: $(uname -m)" >&2; exit 1 ;;
-            esac
-            lfs_dir="$RUNNER_TEMP/git-lfs-$lfs_version"
-            lfs_archive="$RUNNER_TEMP/git-lfs-$lfs_version-$lfs_arch.tar.gz"
-            curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
-              --output "$lfs_archive" \
-              "https://github.com/git-lfs/git-lfs/releases/download/v$lfs_version/git-lfs-linux-$lfs_arch-v$lfs_version.tar.gz"
-            printf '%s  %s\n' "$lfs_sha256" "$lfs_archive" | sha256sum --check
-            mkdir -p "$lfs_dir"
-            tar -xzf "$lfs_archive" -C "$lfs_dir" --strip-components=1 "git-lfs-$lfs_version/git-lfs"
-            chmod +x "$lfs_dir/git-lfs"
-            echo "$lfs_dir" >> "$GITHUB_PATH"
-            export PATH="$lfs_dir:$PATH"
-          fi
-          git lfs install --local
-          mkdir -p .git/info
-          lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
-          grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
-            printf '%s\n' "$lfs_attribute" >> .git/info/attributes
-
       - name: Rebase existing branch on latest main
         id: rebase
         if: steps.rolling.outputs.branch != ''
@@ -196,6 +169,7 @@ jobs:
       - name: Load exact workflow source
         env:
           WORKFLOW_SHA: ${{ github.sha }}
+          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
           if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
             git fetch --depth=1 origin "$WORKFLOW_SHA"
@@ -204,6 +178,33 @@ jobs:
           git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
           echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
           echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
+
+      - name: Configure Git LFS
+        run: |
+          if ! git lfs version >/dev/null 2>&1; then
+            lfs_version=3.7.1
+            case "$(uname -m)" in
+              x86_64) lfs_arch=amd64; lfs_sha256=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;;
+              aarch64) lfs_arch=arm64; lfs_sha256=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;;
+              *) echo "Unsupported Git LFS architecture: $(uname -m)" >&2; exit 1 ;;
+            esac
+            lfs_dir="$RUNNER_TEMP/git-lfs-$lfs_version"
+            lfs_archive="$RUNNER_TEMP/git-lfs-$lfs_version-$lfs_arch.tar.gz"
+            curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+              --output "$lfs_archive" \
+              "https://github.com/git-lfs/git-lfs/releases/download/v$lfs_version/git-lfs-linux-$lfs_arch-v$lfs_version.tar.gz"
+            printf '%s  %s\n' "$lfs_sha256" "$lfs_archive" | sha256sum --check
+            mkdir -p "$lfs_dir"
+            tar -xzf "$lfs_archive" -C "$lfs_dir" --strip-components=1 "git-lfs-$lfs_version/git-lfs"
+            chmod +x "$lfs_dir/git-lfs"
+            echo "$lfs_dir" >> "$GITHUB_PATH"
+            export PATH="$lfs_dir:$PATH"
+          fi
+          git lfs install --local
+          mkdir -p .git/info
+          lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
+          grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
+            printf '%s\n' "$lfs_attribute" >> .git/info/attributes
 
       - name: Select one available deployment
         id: selection
@@ -436,6 +437,9 @@ jobs:
               )
           prompt = f"""Use the onboard-model skill non-interactively.
 
+          The attached exact-workflow-SHA copies of the onboard-model and run-experiment skills are authoritative.
+          Follow them instead of any older skill copies in the artifact worktree.
+
           Operation mode: {mode}
           Hugging Face model ID: {os.environ['MODEL_ID']}
           Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
@@ -467,6 +471,8 @@ jobs:
             --agent onboard-model \
             --model cloudrift/agent \
             --format json \
+            --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
             --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?
           set -e

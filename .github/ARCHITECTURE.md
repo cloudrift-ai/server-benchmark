@@ -102,6 +102,8 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
+The workflow also attaches the exact-SHA `onboard-model` and `run-experiment` skills as authoritative agent inputs;
+older copies on the rolling branch cannot silently override a proposed artifact contract.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. The validator requires the shared experiment

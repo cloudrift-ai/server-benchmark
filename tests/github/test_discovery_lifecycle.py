@@ -35,13 +35,15 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
     steps = document["jobs"]["onboard"]["steps"]
     load_index = next(index for index, step in enumerate(steps) if step.get("name") == "Load exact workflow source")
+    lfs_index = next(index for index, step in enumerate(steps) if step.get("name") == "Configure Git LFS")
     selection_index = next(index for index, step in enumerate(steps) if step.get("name") == "Select one available deployment")
     load_script = steps[load_index]["run"]
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup local credentials and output")
 
-    assert load_index < selection_index
+    assert load_index < lfs_index < selection_index
     assert 'git archive "$WORKFLOW_SHA"' in load_script
+    assert "GIT_LFS_SKIP_SMUDGE" in steps[load_index]["env"]
     assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
     assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
     assert '"$WORKFLOW_SOURCE/.github/scripts/onboarding_artifacts.py"' in validation_script
@@ -63,6 +65,8 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "experiments/**/results_*.tar.gz filter=lfs" in lfs_script
     assert "results_<gpu-short>x<gpu-count>.tar.gz" in agent_script
     assert "preserve every other platform archive" in agent_script
+    assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
+    assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert "git lfs status" in validation_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in (workspace / ".gitattributes").read_text()
 

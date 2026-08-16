@@ -202,7 +202,11 @@ IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the
 transport prologue
 (`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
 the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
-the per-cell compute fill reads the bridged values back from the stat rows. Geometry: exact cover on N/K only — a
+the per-cell compute fill reads the bridged values back from the stat rows. A cone edge that DOES index K (attention's
+score contraction, read by the cone's `exp(s − m)`) is per-cell instead: it splices into the fill's cell and is
+evaluated inline, from lowered loop IR, so it takes no schedule slice of its own (a scalar dot per slab cell —
+computing that tile on the warp tier, and keeping it resident across the statistic and the weight, is what a
+single-kernel flash still needs). Geometry: exact cover on N/K only — a
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
 the `RegStore` guard). A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
 shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per channel, drains N

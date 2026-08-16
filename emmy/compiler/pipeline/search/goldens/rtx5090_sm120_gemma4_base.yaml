@@ -8746,12 +8746,7 @@ configs:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a0: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 18.4463727272163
       reference_us: 18.434169939008807
@@ -8761,12 +8756,7 @@ configs:
       num_tokens: 32
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 36.89314424991608
       reference_us: 36.88971485410418
@@ -8776,12 +8766,7 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 1274.6399641036987
       reference_us: 1275.37602186203
@@ -8790,12 +8775,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 203.79199981689453
       reference_us: 203.51680517196655
@@ -8805,12 +8785,7 @@ configs:
       num_tokens: 1
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a0: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 18.43688144522198
       reference_us: 18.43416993900881
@@ -8820,12 +8795,7 @@ configs:
       num_tokens: 32
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 32.843355209596695
       reference_us: 36.882856062480386
@@ -8835,12 +8805,7 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 877.0720064640045
       reference_us: 1276.8959999084473
@@ -8849,12 +8814,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 129.7299936413765
       reference_us: 203.75679731369019
@@ -8868,12 +8828,7 @@ configs:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a0: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 20.477283675715608
       reference_us: 20.4676221001823
@@ -8883,12 +8838,7 @@ configs:
       num_tokens: 32
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 24.588279945905818
       reference_us: 24.589395800302192
@@ -8898,12 +8848,7 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 1329.263985157013
       reference_us: 1331.1359882354736
@@ -8912,12 +8857,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 207.2543978691101
       reference_us: 206.90879821777344
@@ -8927,12 +8867,7 @@ configs:
       num_tokens: 1
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a0: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 20.465207549760926
       reference_us: 20.469131334772648
@@ -8942,12 +8877,7 @@ configs:
       num_tokens: 32
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 22.493251197192134
       reference_us: 24.59088314411252
@@ -8957,12 +8887,7 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 892.7520215511322
       reference_us: 1328.768014907837
@@ -8971,12 +8896,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: true
-    knobs:
-      REDUCE@a1: ''
-      STAGE@a1: ''
-      WORK: ''
-      TILE: ''
-      RASTER: ''
+    knobs: {}
     measurements:
       emmy_us: 131.61000609397888
       reference_us: 206.98879957199097

@@ -4,9 +4,15 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight test runs when a new commit lands on the same pull request.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: ubuntu-runners
     steps:
       - uses: actions/checkout@v4
 
@@ -24,7 +30,8 @@ jobs:
         run: ./venv/bin/ruff format --check
 
   test:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: ubuntu-runners
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +59,8 @@ jobs:
 
   package:
     name: PyPI package dry run
-    runs-on: ubuntu-latest
+    runs-on:
+      group: ubuntu-runners
     steps:
       - uses: actions/checkout@v4
 

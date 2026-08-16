@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Official Gemma 4 BF16 baseline on one H200 covering Google's flagship at 131K context."
+  rationale: "Google's flagship with 9.7M downloads and 3.5k likes, single-H200 coverage for the Gemma family."
 
 engine:
   llm:

@@ -5,7 +5,7 @@ tags:
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
-  rationale: "FP16 on one 32GB V100 with byte-identical Meta payload, complements the 16GB AWQ variant."
+  rationale: "FP16 Llama 3.1 8B on one 32GB V100, complements the AWQ variant that alone fits a 16GB card."
   revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
     FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned
     public mirror is byte-identical to the official Meta model payload.

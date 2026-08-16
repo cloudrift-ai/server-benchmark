@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "Retained for 122B MoE FP8 coverage on one H200 short-context and multi-GPU Pro 6000."
+  rationale: "FP8 122B MoE with three-platform coverage (H200, Pro6000, MI350X); complements the BF16 V100 variant."
 
 engine:
   llm:

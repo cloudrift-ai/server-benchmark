@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "Unique large-MoE 16xV100 pipeline-parallel path preserving Volta serving for 122B models."
+  rationale: "Unique 122B MoE on sixteen V100s via pipeline parallelism; irreplaceable Volta large-MoE path."
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 

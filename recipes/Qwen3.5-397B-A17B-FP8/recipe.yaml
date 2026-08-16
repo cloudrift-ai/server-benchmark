@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Largest Qwen3.5 MoE across Pro 6000 and H200 for multi-platform scaling coverage."
+  rationale: "Largest Qwen3.5 MoE with eight-GPU scaling across Pro6000 and H200 for multi-platform coverage."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Retained for unique 2xH200 long-context path; official 0731 targets different 16xV100 hardware."
+  rationale: "Retained for unique 2xH200 long-context path; its 284B MoE target differs from the 0731 variant's hardware class."
 
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).

@@ -413,8 +413,9 @@ jobs:
         if: steps.vm.outcome == 'success'
         timeout-minutes: 30
         env:
-          SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
           SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
           ssh_args=(
             ssh -i "$SSH_KEY" -p "$SSH_PORT"
@@ -422,7 +423,7 @@ jobs:
             -o StrictHostKeyChecking=no
             -o UserKnownHostsFile=/dev/null
           )
-          "${ssh_args[@]}" "$SSH_TARGET" 'bash -s' <<'REMOTE'
+          "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
           sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -462,8 +463,10 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ env.PUBLISH_IMAGE == 'true' && secrets.DOCKERHUB_TOKEN || '' }}
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
           SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -490,6 +493,8 @@ jobs:
           Hugging Face model ID: {os.environ['MODEL_ID']}
           Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
           SSH target: {os.environ['SSH_TARGET']}
+          Raw SSH host: {os.environ['SSH_HOST']}
+          Raw SSH user: {os.environ['SSH_USER']}
           SSH port: {os.environ['SSH_PORT']}
           SSH private key: {os.environ['SSH_KEY']} (pass --ssh-key {os.environ['SSH_KEY']} to every Emmy remote command)
           Absolute deadline: {os.environ['ONBOARD_DEADLINE']}

@@ -71,6 +71,8 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "experiments/**/results_*.tar.gz filter=lfs" in lfs_script
     assert "python3.12-venv" in host_setup_script
     assert 'scratch_base="$HOME/.cache/emmy"' in host_setup_script
+    assert '"$SSH_USER@$SSH_HOST"' in host_setup_script
+    assert '"$SSH_TARGET"' not in host_setup_script
     assert "tmpfs|ramfs" in host_setup_script
     assert "8388608" in host_setup_script
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)

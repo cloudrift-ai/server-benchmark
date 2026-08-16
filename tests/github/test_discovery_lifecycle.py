@@ -82,7 +82,11 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert "do not modify or list .gitattributes" in agent_script
-    assert 'tarfile.open(archive, "r:gz")' in cleanup_script
+    assert 'tarfile.open(temporary_archive, "w:gz")' in cleanup_script
+    assert "temporary_roots = verify_archive(temporary_archive)" in cleanup_script
+    assert "os.replace(temporary_archive, archive)" in cleanup_script
+    assert 'tarfile.open(path, "r:gz")' in cleanup_script
+    assert "contents.read(1024 * 1024)" in cleanup_script
     assert "raw_directory.name not in member_roots" in cleanup_script
     assert "shutil.rmtree(raw_directory)" in cleanup_script
     assert "git lfs status" in validation_script
@@ -98,6 +102,9 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     raw_directory = experiment_dir / "2026-08-16_14-41-08"
     raw_directory.mkdir(parents=True)
     (raw_directory / "benchmark.log").write_text("measured\n")
+    (experiment_dir / "recipe.yaml").write_text("name: serving\n")
+    (experiment_dir / "RESULTS.md").write_text("# Results\n")
+    (experiment_dir / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
     archive = experiment_dir / "results_rtx4090x1.tar.gz"
     with tarfile.open(archive, "w:gz") as output:
         root_info = tarfile.TarInfo(".")
@@ -108,8 +115,10 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     summary.write_text(
         json.dumps(
             {
+                "status": "success",
                 "experiment": "experiments/Model/serving/recipe.yaml",
                 "experiment_artifacts": ["experiments/Model/serving/results_rtx4090x1.tar.gz"],
+                "artifacts": [],
             }
         )
     )
@@ -117,7 +126,12 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     subprocess.run(
         [sys.executable, "-"],
         cwd=tmp_path,
-        env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
+        env={
+            **os.environ,
+            "ONBOARD_SUMMARY": str(summary),
+            "TARGET_GPU": "NVIDIA GeForce RTX 4090",
+            "TARGET_GPU_COUNT": "1",
+        },
         input=cleanup_source,
         text=True,
         check=True,
@@ -125,6 +139,76 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
 
     assert not raw_directory.exists()
     assert archive.is_file()
+    updated_summary = json.loads(summary.read_text())
+    archive_path = "experiments/Model/serving/results_rtx4090x1.tar.gz"
+    assert archive_path in updated_summary["experiment_artifacts"]
+    assert archive_path in updated_summary["artifacts"]
+
+
+def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+    experiment_dir = tmp_path / "experiments" / "Model" / "serving"
+    raw_directory = experiment_dir / "2026-08-16_14-41-08"
+    raw_directory.mkdir(parents=True)
+    (raw_directory / "benchmark.log").write_text("measured\n")
+    (experiment_dir / "recipe.yaml").write_text("name: serving\n")
+    (experiment_dir / "RESULTS.md").write_text("# Results\n")
+    (experiment_dir / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
+    archive = experiment_dir / "results_rtx4090x1.tar.gz"
+    old_results = tmp_path / "old-results"
+    old_results.mkdir()
+    (old_results / "obsolete.log").write_text("old measurement\n")
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(old_results, arcname="2026-08-01_00-00-00")
+    other_archive = experiment_dir / "results_h200x1.tar.gz"
+    other_archive.write_bytes(b"preserved platform")
+    summary = tmp_path / "summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "experiment": "experiments/Model/serving/recipe.yaml",
+                "experiment_artifacts": [
+                    "experiments/Model/serving/recipe.yaml",
+                    "experiments/Model/serving/RESULTS.md",
+                ],
+                "artifacts": [],
+            }
+        )
+    )
+
+    subprocess.run(
+        [sys.executable, "-"],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "ONBOARD_SUMMARY": str(summary),
+            "TARGET_GPU": "NVIDIA GeForce RTX 4090",
+            "TARGET_GPU_COUNT": "1",
+        },
+        input=cleanup_source,
+        text=True,
+        check=True,
+    )
+
+    assert archive.is_file()
+    with tarfile.open(archive, "r:gz") as source:
+        assert "2026-08-16_14-41-08/benchmark.log" in source.getnames()
+        assert "2026-08-01_00-00-00/obsolete.log" not in source.getnames()
+    assert not raw_directory.exists()
+    assert other_archive.read_bytes() == b"preserved platform"
+    updated_summary = json.loads(summary.read_text())
+    expected_snapshot = {
+        "experiments/Model/serving/recipe.yaml",
+        "experiments/Model/serving/RESULTS.md",
+        "experiments/Model/serving/results_rtx4090x1.tar.gz",
+        "experiments/Model/serving/rtx4090x1_serving.experiment.yaml",
+    }
+    assert expected_snapshot <= set(updated_summary["experiment_artifacts"])
+    assert expected_snapshot <= set(updated_summary["artifacts"])
 
 
 def test_onboarding_consumes_versioned_recipe_inventory():

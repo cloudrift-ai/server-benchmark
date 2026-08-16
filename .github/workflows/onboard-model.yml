@@ -550,9 +550,14 @@ jobs:
           import tarfile
           from pathlib import Path, PurePosixPath
 
+          from emmy.hardware import gpu_short_name
+
           workspace = Path.cwd().resolve()
           experiments_root = (workspace / "experiments").resolve()
-          summary = json.loads(Path(os.environ["ONBOARD_SUMMARY"]).read_text())
+          summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          summary = json.loads(summary_path.read_text())
+          if summary.get("status") != "success":
+              raise SystemExit(f"Onboarding did not succeed: {summary.get('failure')}")
           experiment_recipe = Path(summary.get("experiment") or "")
           if experiment_recipe.is_absolute() or ".." in experiment_recipe.parts or experiment_recipe.name != "recipe.yaml":
               raise SystemExit(f"Unsafe experiment recipe path: {experiment_recipe}")
@@ -560,29 +565,89 @@ jobs:
           if experiments_root not in experiment_dir.parents:
               raise SystemExit(f"Experiment directory is outside experiments/: {experiment_dir}")
 
-          archive_paths = [
-              Path(raw_path)
-              for raw_path in summary.get("experiment_artifacts") or []
-              if Path(raw_path).parent == experiment_recipe.parent
-              and Path(raw_path).name.startswith("results_")
-              and Path(raw_path).name.endswith(".tar.gz")
-          ]
-          if len(archive_paths) != 1:
-              raise SystemExit(f"Expected one current-platform results archive, found: {archive_paths}")
-          archive = workspace / archive_paths[0]
-          with tarfile.open(archive, "r:gz") as source:
-              member_paths = [
-                  PurePosixPath(member.name.removeprefix("./"))
-                  for member in source.getmembers()
-              ]
-              member_roots = {path.parts[0] for path in member_paths if path.parts}
-
           timestamp = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
-          raw_directories = [path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)]
+          raw_directories = sorted(
+              path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)
+          )
+          platform = f"{gpu_short_name(os.environ['TARGET_GPU'])}x{int(os.environ['TARGET_GPU_COUNT'])}"
+          archive_path = experiment_recipe.parent / f"results_{platform}.tar.gz"
+          archive = workspace / archive_path
+          legacy_archive = experiment_dir / "results.tar.gz"
+
+          def verify_archive(path):
+              member_paths = []
+              with tarfile.open(path, "r:gz") as source:
+                  for member in source.getmembers():
+                      member_paths.append(PurePosixPath(member.name.removeprefix("./")))
+                      if member.isfile():
+                          contents = source.extractfile(member)
+                          if contents is None:
+                              raise SystemExit(f"Could not read archived file: {member.name}")
+                          while contents.read(1024 * 1024):
+                              pass
+              return {path.parts[0] for path in member_paths if path.parts}
+
+          if raw_directories:
+              temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
+              try:
+                  with tarfile.open(temporary_archive, "w:gz") as output:
+                      for raw_directory in raw_directories:
+                          output.add(raw_directory, arcname=raw_directory.name)
+                  temporary_roots = verify_archive(temporary_archive)
+                  missing_roots = [path.name for path in raw_directories if path.name not in temporary_roots]
+                  if missing_roots:
+                      raise SystemExit(f"New results archive is missing raw directories: {missing_roots}")
+                  os.replace(temporary_archive, archive)
+              finally:
+                  temporary_archive.unlink(missing_ok=True)
+          elif not archive.is_file() and legacy_archive.is_file():
+              verify_archive(legacy_archive)
+              os.replace(legacy_archive, archive)
+
+          if not archive.is_file():
+              raise SystemExit(f"Current-platform results archive was not produced: {archive_path}")
+
+          member_roots = verify_archive(archive)
+
           for raw_directory in raw_directories:
               if raw_directory.name not in member_roots:
-                  raise SystemExit(f"Raw directory is not preserved by {archive_paths[0]}: {raw_directory.name}")
+                  raise SystemExit(f"Raw directory is not preserved by {archive_path}: {raw_directory.name}")
               shutil.rmtree(raw_directory)
+
+          if legacy_archive != archive:
+              legacy_archive.unlink(missing_ok=True)
+
+          experiment_report = experiment_recipe.with_name("RESULTS.md")
+          platform_records = sorted(
+              path.relative_to(workspace)
+              for path in experiment_dir.glob("*.experiment.yaml")
+              if path.is_file()
+              and (path.name == f"{platform}.experiment.yaml" or path.name.startswith(f"{platform}_"))
+          )
+          durable_snapshot = [
+              experiment_recipe,
+              experiment_report,
+              archive_path,
+              *platform_records,
+          ]
+          missing = [path for path in durable_snapshot if not (workspace / path).is_file()]
+          if missing:
+              raise SystemExit(f"Current-platform durable snapshot is incomplete: {missing}")
+
+          legacy_path = experiment_recipe.parent / "results.tar.gz"
+          for key in ("experiment_artifacts", "artifacts"):
+              existing = summary.get(key) or []
+              if not isinstance(existing, list):
+                  raise SystemExit(f"Summary {key} must be a list")
+              retained = [path for path in existing if Path(path) != legacy_path]
+              summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in durable_snapshot)]))
+
+          temporary_summary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+          try:
+              temporary_summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+              os.replace(temporary_summary, summary_path)
+          finally:
+              temporary_summary.unlink(missing_ok=True)
           PY
 
       - name: Delete workflow-owned CloudRift VMs

@@ -105,8 +105,9 @@ def coop_band_geometry(plan: ReducePlan, k: int | None, inner: Axis | None) -> s
     """The TRANSPOSED coop band's structural requirements — the same fact for every tier that
     offers it. The band swaps the lane mapping so 32 lanes sweep the innermost FREE axis while
     each lane walks K serially, which fixes three things about the term: the coop width must be a
-    whole number of warps, the swept axis must be static and 32-divisible (there is no partial-warp
-    sweep), and a split composite must divide K.
+    whole number of warps, there must BE an innermost free axis to sweep, and a split composite
+    must divide K. The swept extent itself is free — the grid is ``ceil(E/32)`` blocks and the
+    emitter clamp-reads + store-guards an overhanging last block.
 
     One home because it had two: the reduce tier and the contraction tier each spelled a version of
     this inline, with different conditions and neither of them here — exactly the raise-vs-drop
@@ -117,8 +118,8 @@ def coop_band_geometry(plan: ReducePlan, k: int | None, inner: Axis | None) -> s
         return None
     if plan.coop % WARP_LANES:
         return f"the transposed coop band sweeps whole warps — coop={plan.coop} is not a multiple of {WARP_LANES}"
-    if inner is None or not inner.extent.is_static or inner.extent.as_static() % WARP_LANES:
-        return f"the transposed coop band needs a static {WARP_LANES}-divisible innermost free axis to sweep"
+    if inner is None:
+        return "the transposed coop band needs an innermost free axis to sweep; this term has none"
     if plan.needs_split and (k is None or k % plan.cta):
         return f"the transposed split composite g{plan.cta} must divide a static K"
     return None
@@ -201,23 +202,29 @@ def warp_atom_stage(atom, stage: Stage) -> str | None:
 
 
 def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
-    """The inner mma K-step ``atom_k·bk`` must tile a STATIC contraction K: the warp K-loop has no
-    static-K tail masking, so a partial final step reads past the operand and silently corrupts the
-    result. A SYMBOLIC K reaches the masked tier and is fine — except on the fp8 atoms, whose
-    byte-gather fragment loaders have no masked-K zero-fill family."""
+    """Whether this atom's fragment loaders can reach the contraction K.
+
+    The warp K-loop steps by ``atom_k`` and zero-fills the overhanging half of its final fragment
+    (``_atom`` passes the loop's ``k_zero`` bound whenever the step does not tile K), so a K the
+    step does not divide — static or symbolic — is masked and correct. The masked tail is the
+    gmem-direct tier's; a STAGED row's K-chunk divisibility is the stage resolvers' own rule
+    (``_warp_vector_copy`` / ``_warp_tma`` / :func:`resolve_fill_stage`), stated where the chunk
+    width is.
+
+    The fp8 atoms are the exception on both counts: their byte-gather fragment loaders have no
+    masked-K zero-fill family, so they take an exact K — static, and tiled by the full K-step."""
+    if not (plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1):
+        return None
     ext = node.axis.extent
     if not ext.is_static:
-        if plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1:
-            return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
-        return None
+        return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
     k, step = ext.as_static(), plan.atom.atom_k * plan.bk
     if k % step == 0:
         return None
     return (
         f"warp TILE K-step {step} (atom_k={plan.atom.atom_k}*bk={plan.bk}) does not divide the static "
-        f"contraction K={k}; the warp K-loop has no static-K tail masking yet, so a partial final step "
-        f"corrupts the result. Pin a K that is a multiple of {step}, or drop the atom token to use the "
-        f"scalar tier."
+        f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
+        f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
     )
 
 
@@ -236,6 +243,27 @@ def splitk_slice_k_step(node: Fold, plan: TilePlan, width: int) -> str | None:
     )
 
 
+def splitk_computed_b_site(node: Fold) -> str | None:
+    """Whether a COMPUTED B cone survives the split's σ-reindex with its schedule intact.
+
+    The split rewrites every edge to absolute k. A materialized edge rewrites its gmem index in
+    place; a computed cone is rewritten BODY AND ALL, which replaces the nodes inside it — and a
+    schedule slice is keyed by NODE IDENTITY, so a cone carrying a scheduling site of its own (a
+    fold over its own axis) would lose the value the row decided for it and stamp a knob no kernel
+    realizes. The ordinary decode / map cone carries no such fold and rewrites cleanly. A computed
+    ``a``'s sites are the compute fill's own statistic prologue, which the fill realizes itself,
+    so they hold no slice to lose."""
+    for ch in node.channels:
+        if isinstance(ch.b, Load):
+            continue
+        if ch.b.axis is not None or ch.b.body.iter_of_type(Fold):
+            return (
+                "split-K rewrites a computed B cone's coordinates, which would drop the schedule slice of a "
+                "fold nested in it; pin the serial fold on this edge"
+            )
+    return None
+
+
 def splitk_width(k_axis: Axis, width: int) -> str | None:
     """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
     absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
@@ -245,19 +273,20 @@ def splitk_width(k_axis: Axis, width: int) -> str | None:
     return f"split-K width {width} does not divide K={big_k}; pick a dividing split width."
 
 
-def splitk_materialized_b(node: Fold) -> str | None:
-    """Every channel's B must be a gmem ``Load`` — a computed B has no index to σ-reindex."""
-    if all(isinstance(ch.b, Load) for ch in node.channels):
-        return None
-    return "split-K needs a materialized B on every channel — a computed B has no gmem index to σ-reindex"
-
-
 # ---- the register strip ------------------------------------------------------------------------ #
 
 
 def strip_width(extent: int, width: int) -> str | None:
     """The pointwise strip hands each thread ``width`` CONTIGUOUS inner-axis elements, so the width
-    must tile the inner free extent."""
+    must tile the inner free extent.
+
+    Not an unimplemented mask — MEASURED. The one form that masks the overhang without breaking the
+    strip's flat shape slides the last cell back onto the final full run (``min(cell·width,
+    extent − width)``, idempotent because the cell is a pure map), and that slid base is no longer a
+    provably aligned affine form, so ``050_vectorize_loads`` / ``080_vectorize_stores`` decline —
+    which is the only thing the strip exists to buy. On a V100, gelu over 65536×255 (no width tiles
+    255): the flat per-cell map runs 158.5 µs while the slid ``f2`` / ``f4`` / ``f8`` strips run
+    199.5 / 220.2 / 390.8 µs. The refused rows are strictly worse than the row that remains."""
     if width <= 1 or (extent and extent % width == 0):
         return None
     return f"register strip width {width} does not divide the inner free extent {extent}"
@@ -490,6 +519,8 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     if atom.operand_dtype("a").nbytes < 2:
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
+    if c.axis.extent.is_static and c.axis.extent.as_static() % bk_elems:
+        return None  # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
     _, _, stats = cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
@@ -577,7 +608,7 @@ __all__ = [
     "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
-    "splitk_materialized_b",
+    "splitk_computed_b_site",
     "splitk_slice_k_step",
     "splitk_width",
     "stage_target",

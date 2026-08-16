@@ -98,9 +98,11 @@ alone made a nested key a knob no kernel realized — a row spelling `REDUCE@j` 
 Two consequences fall out of "one kernel, one inventory": a row's cooperative claims must AGREE rather than be
 folded with a maximum (a `REDUCE` value spells no width — it lives once in `WORK` — so two sites wanting different
 bands name a kernel the wire format cannot tell apart, and admitting both produced byte-identical duplicate rows),
-and a candidate the enumeration offers must be one materialization can build: `splitk_materialized_b` is asked at
+and a candidate the enumeration offers must be one materialization can build: `splitk_computed_b_site` is asked at
 enumeration, not only inside `_splitk_option` where it is enforced with `pinned=True` and would turn an unpinned
-offered candidate into a raise.
+offered candidate into a raise. That predicate is also where the nested-key rule bites the other way — the split
+σ-reindexes both operand edges through `_sliced_edge`, and rewriting a COMPUTED cone replaces the nodes inside it, so
+a cone carrying a scheduling site of its own would lose the slice keyed by that node's identity.
 
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 

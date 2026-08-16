@@ -715,6 +715,8 @@ def _compile_run_mma(graph, feed: dict) -> tuple[np.ndarray, str]:
 
 # (M, N, K, out_dtype, transposed-B). 128 / 256 are tile (128) multiples (exact-cover static);
 # the dynamic column runs at M+2 to straddle the tile and exercise the masked store / clamp.
+# K=136 and K=132 are STATIC contraction extents the mma K-step does not tile: 136 is a multiple
+# of ``atom_k`` (16) but not of the ``atom_k·bk`` = 32 chunk, 132 of neither — the masked-K tail.
 _MMA_CASES = [
     (128, 128, 128, "f32", False),
     (256, 256, 128, "f32", False),
@@ -722,6 +724,9 @@ _MMA_CASES = [
     (128, 256, 128, "f16", False),
     (128, 128, 128, "f32", True),  # transposed-B (Q@Kᵀ)
     (128, 128, 128, "f16", True),
+    (128, 128, 136, "f32", False),  # static K off the K-chunk — the masked tail
+    (128, 128, 132, "f32", False),  # static K off atom_k itself
+    (128, 128, 132, "f32", True),  # …transposed-B (the (n,k)-swapped zero-fill helper)
 ]
 
 
@@ -758,6 +763,44 @@ def test_matmul_mma_coverage(M, N, K, out, trans, mode, monkeypatch):
         assert "emmy_mma_load_b_gmem_trans" in src, "transposed-B must use the gmem-direct trans helper"
     if mode == "dynamic":
         assert "int seq_len" in src, "the symbolic-M grid must carry the runtime extent arg"
+
+
+def _render_src(graph, cc=(12, 0)) -> str:
+    """Lower ``graph`` to CUDA on a FORCED target and return the kernel source (no GPU needed)."""
+    out = Pipeline.build(TILE_PASSES + CUDA_PASSES).run(graph, ctx=Context.from_target(cc))
+    return "\n".join(n.op.kernel_source for n in out.nodes.values() if getattr(n.op, "kernel_source", None))
+
+
+@pytest.mark.parametrize(("K", "masked"), [(128, False), (136, True), (132, True)])
+def test_mma_static_k_tail_zero_fills(K, masked, monkeypatch):
+    """A STATIC contraction K the warp K-loop's ``atom_k`` step does not tile reaches the mma tier
+    through the SAME masked-K zero-fill a symbolic K uses — the loop's final partial step reads
+    the loaders' ``k_zero`` bound and zeroes the fragment halves past K, so the summed reduction
+    keeps its identity. An exactly tiled K carries no bound at all (byte-identical to before).
+
+    K=136 is a multiple of ``atom_k`` (16) but not of the row's ``atom_k·bk`` = 32 chunk — the
+    K-STEP divisibility the warp tier used to refuse, which the gmem-direct loop never needed."""
+    _pin_tile(monkeypatch, _WARP_PIN)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the masked-K tier (a staged K chunk must divide K)
+    src = _render_src(_mma_matmul_graph("static", 128, 128, K, "f32", False))
+    body = src[src.index('extern "C"') :]
+    assert "mma.sync.aligned.m16n8k16" in src, "the row must still reach the mma tier"
+    assert ("emmy_mma_load_a_gmem_kzero" in body) is masked, f"K={K}: A loader zero-fill should be {masked}"
+    assert ("emmy_mma_load_b_gmem_kzero" in body) is masked, f"K={K}: B loader zero-fill should be {masked}"
+
+
+def test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile(monkeypatch):
+    """The unpinned fork OFFERS mma rows at a static K the K-step does not tile (no GPU —
+    enumeration only). The K-step divisibility used to drop every warp candidate on such a shape,
+    so no golden could record one."""
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
+        monkeypatch.delenv(var, raising=False)
+    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 136, _F16, False), Context.from_target((12, 0)))
+    tiles = {str(v) for r in rows for k, v in r.items() if k.startswith("TILE")}
+    assert any(t.startswith("mma_m16n8k16") for t in tiles), tiles
 
 
 # =========================================================================== #
@@ -1559,21 +1602,15 @@ def _run_tile_pass(graph: Graph):
     return Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((12, 0)))
 
 
-def test_warp_static_k_indivisible_rejected(monkeypatch) -> None:
-    """A WARP pin whose static K is not a multiple of ``atom_k·bk`` is rejected — the warp
-    K-loop has no static-K tail masking, so lowering it would silently corrupt the result (the
-    error the accuracy gate's mean-error escape clause misses)."""
+def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
+    """A WARP pin whose static K is not a multiple of the K-step LOWERS — the warp K-loop's final
+    partial step zero-fills the fragment halves past K, the same masking a symbolic K gets. The
+    K-step used to be a hard divisibility gate, which put every such shape out of a golden's reach
+    (the emitted zero-fill is asserted by ``test_mma_static_k_tail_zero_fills``)."""
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1")  # K-step 16
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    with pytest.raises(ValueError, match="does not divide the static contraction K=100"):
-        _run_tile_pass(_guard_mm_graph(128, 128, 100))
-
-
-def test_warp_static_k_divisible_ok(monkeypatch) -> None:
-    """The same pin on a K that IS a multiple of the K-step lowers without the guard firing."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1")
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — no raise
+    _run_tile_pass(_guard_mm_graph(128, 128, 100))  # 100 % 16 == 4 — masked, no raise
+    _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — exact, no mask
 
 
 def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:

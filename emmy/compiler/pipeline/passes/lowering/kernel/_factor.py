@@ -59,7 +59,7 @@ from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import Fold, effect_tail, is_contraction
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
-from emmy.compiler.pipeline.passes.lowering.kernel._atom import copy_cell, reduce_codegen, store_sink
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import clamp_last, copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 
@@ -333,7 +333,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
             # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
-            # output-var references were σ-substituted to ``blk·32 + n_lane`` inside.
+            # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
+            # and the store guarded, when 32 does not tile the swept extent).
             state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
             out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
             blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
@@ -577,7 +578,8 @@ def _tile_reduce_axis_transposed(
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
     keeps referencing the original output axis var — one σ substitutes it with
-    ``blk·32 + n_lane`` (the caller rebinds the shrunk ``<out>_blk`` grid axis). The combine is
+    ``blk·32 + n_lane`` (the caller rebinds the shrunk ``ceil(E/32)`` ``<out>_blk`` grid axis; an
+    overhanging last block clamp-reads and guards its store). The combine is
     the segment-indexed smem tree (``emit_combine(inner=…)`` — never a shuffle: adjacent lanes
     hold different outputs); the projection stores guard on ``k_co == 0``, each lane writing its
     own cell. Unsupported here (the enumeration must not offer ``t`` on them): shared-row
@@ -601,7 +603,15 @@ def _tile_reduce_axis_transposed(
     k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
     start = Var(k_co.name) if k_co is not None else Literal(0, "int")
     blk_name = f"{out_ax.name}_blk"
-    subst = Sigma({out_ax.name: BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))})
+    # The swept cell this lane owns. The grid is ``ceil(E / 32)`` blocks, so a swept axis 32 does
+    # not tile leaves the last block's upper lanes OVERHANGING: they clamp-read the last valid
+    # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
+    # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
+    cell = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))
+    out_ext = out_ax.extent_expr()
+    overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % lanes_n == 0)
+    subst = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
+    store_subst = Sigma({out_ax.name: cell})  # the guarded projection: in range by the guard, so no clamp
     ident = lambda n: n  # noqa: E731
 
     nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
@@ -623,7 +633,9 @@ def _tile_reduce_axis_transposed(
         merge += emit_combine(alg, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
-    tail_stmts = [s.rewrite(ident, subst) for s in tail_stmts]
+    tail_stmts = [s.rewrite(ident, store_subst) for s in tail_stmts]
+    if overhang:
+        tail_stmts = [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(tail_stmts))]
     if k_co is not None:
         tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
 

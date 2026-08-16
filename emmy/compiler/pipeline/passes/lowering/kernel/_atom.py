@@ -358,7 +358,7 @@ def _staged_inner_atom_loop(
     return stmts
 
 
-def _clamp_last(idx: Expr, ext: Expr) -> Expr:
+def clamp_last(idx: Expr, ext: Expr) -> Expr:
     """Clamp an overhanging gmem coordinate to the last valid index — the overhanging cell still
     reads an in-bounds (duplicate) operand, and its store is discarded by the guard (``RegStore`` /
     ``Cond``)."""
@@ -399,7 +399,7 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
             t = BinaryExpr("+", tile_base, tc)
             sig = Sigma(
                 {
-                    tile.axis.name: _clamp_last(t, tile.ext) if tile.mask else t,
+                    tile.axis.name: clamp_last(t, tile.ext) if tile.mask else t,
                     k_axis.name: BinaryExpr("+", k0, kc),
                     **_sibling_sigma(sibling),
                 }
@@ -535,7 +535,7 @@ def _sync_operands(
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
-        return _clamp_last(t, mn[0].ext) if mn[0].mask else t
+        return clamp_last(t, mn[0].ext) if mn[0].mask else t
 
     def a_value(k0, row, col):
         sigma = Sigma({m_name: m_coord(row), k_name: BinaryExpr("+", k0, col)})
@@ -545,7 +545,7 @@ def _sync_operands(
 
     def n_coord(col) -> Expr:
         t = BinaryExpr("+", col_base, col)
-        return _clamp_last(t, mn[1].ext) if mn[1].mask else t
+        return clamp_last(t, mn[1].ext) if mn[1].mask else t
 
     prologue: list[Stmt] = []
     if stats:
@@ -1064,8 +1064,12 @@ class _MmaOps(_AtomOps):
         assert isinstance(c.a, Load), "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the smem compute fill"
         a_load, b_load, b_trans = c.a, c.b, c.b_trans
-        k_static = k_axis.extent.is_static
-        k_zero = None if k_static else (Var(k_axis.name), k_axis.extent_expr())
+        # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
+        # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
+        # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
+        # keeps its identity. An exactly tiled static K carries no bound (byte-identical output).
+        k_exact = k_axis.extent.is_static and k_axis.extent.as_static() % atom.atom_k == 0
+        k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expr())
 
         def read_row(i):
             cell = offset[0].base(i)

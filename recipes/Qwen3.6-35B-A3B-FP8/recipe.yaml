@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "Retained as the full-262K Qwen3.6 MoE FP8 option on Pro 6000, A100, or H200."
+  rationale: "FP8 variant enables 262K context on Pro 6000, A100, or H200 beyond BF16 targets."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Maintained as the Gemma 4 BF16 serving baseline on one H200 and reference for the FP8 variant."
+  rationale: "Official Gemma 4 BF16 baseline on one H200 covering Google's flagship at 131K context."
 
 engine:
   llm:

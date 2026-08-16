@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Maintained as the current flagship Qwen3.6 MoE with strong coding and agent benchmark scores."
+  rationale: "Current flagship Qwen3.6 dense MoE with top coding and agent scores across two GPU tiers."
 
 engine:
   llm:

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Maintained for high-capability agentic and long-context coverage at 202K context on eight H200s."
+  rationale: "High-capability agentic long-context coverage at 202K on eight H200s with glm47 parser."
 
 engine:
   llm:

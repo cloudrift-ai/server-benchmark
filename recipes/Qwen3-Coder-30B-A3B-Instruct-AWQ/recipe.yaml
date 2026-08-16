@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Maintained for coding-focused MoE coverage on one RTX 5090 at 114K context with strong community demand."
+  rationale: "Strong coding MoE demand with 1.2M downloads, fits one RTX 5090 at consumer price."
 
 engine:
   llm:

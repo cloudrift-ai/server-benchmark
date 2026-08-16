@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Maintained as the flagship 80B coding MoE FP8 on Pro 6000 with 1.4M HF downloads and 262K context."
+  rationale: "Flagship 80B coding MoE FP8 with 1.4M HF downloads on single Pro 6000 at 262K."
 
 engine:
   llm:

@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Retained as the middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparisons."
+  rationale: "Middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparisons on consumer GPUs."
   task: embed
 
 engine:

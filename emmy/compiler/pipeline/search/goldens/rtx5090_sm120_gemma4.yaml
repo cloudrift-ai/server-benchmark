@@ -5025,13 +5025,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE: g4k
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: g2k
+      STAGE: d2/smem-tma
       RASTER: ''
+      LOOPIFY: '0'
     measurements:
-      emmy_us: 530.5
-      reference_us: 295.0
+      emmy_us: 343.88
+      reference_us: 306.78
       reference_backend: cublas
 - program: 10
   target:
@@ -8234,8 +8236,8 @@ configs:
       WORK: ''
       TILE: f4
     measurements:
-      emmy_us: 1.9
-      reference_us: 6.0
+      emmy_us: 1.24
+      reference_us: 2.05
       reference_backend: torch-eager
 - program: 119
   target:
@@ -8812,8 +8814,8 @@ configs:
     knobs:
       PLACE: cut
     measurements:
-      emmy_us: 465.0
-      reference_us: 315.0
+      emmy_us: 345.06
+      reference_us: 316.37
       reference_backend: torch-eager
   - name: gemma4_12b.norm_gate_up.m256.lin
     bindings:

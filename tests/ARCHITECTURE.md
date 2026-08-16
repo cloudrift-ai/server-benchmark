@@ -114,8 +114,8 @@ directly; they never import from another test module or from `conftest.py`.
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved lifecycle tag
-  and heat, compact notification evidence, current-platform archive and row records, and isolation from other platform
-  results before artifacts may be staged.
+  and heat, compact notification evidence, current-platform records inside the named archive, bounded compatibility
+  fixes, regression notices, and isolation from other platform results before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

@@ -119,8 +119,15 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert lifecycle["outputs"]["performance_summary"] == "${{ steps.artifacts.outputs.performance_summary }}"
         assert notify["env"]["DEPLOYMENT_SUMMARY"] == "${{ needs.onboard.outputs.deployment_summary }}"
         assert notify["env"]["PERFORMANCE_SUMMARY"] == "${{ needs.onboard.outputs.performance_summary }}"
+        assert lifecycle["outputs"]["failure_kind"] == "${{ steps.notice.outputs.failure_kind }}"
+        assert lifecycle["outputs"]["failure_summary"] == "${{ steps.notice.outputs.failure_summary }}"
+        assert notify["env"]["FAILURE_KIND"] == "${{ needs.onboard.outputs.failure_kind }}"
+        assert notify["env"]["FAILURE_SUMMARY"] == "${{ needs.onboard.outputs.failure_summary }}"
         assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
         assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
+        notice = next(step for step in lifecycle["steps"] if step.get("id") == "notice")
+        assert notice["if"] == "always() && steps.vm.outcome == 'success'"
+        assert 'failure.get("regression") is True' in notice["run"]
     assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
 
 
@@ -148,6 +155,8 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
     assert "results_<gpu-short>x<gpu-count>.tar.gz" in agent_script
     assert "preserve every other platform archive" in agent_script
+    assert "do not retain those records as" in agent_script
+    assert "onboard-investigator subagent" in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
@@ -155,12 +164,37 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert 'tarfile.open(temporary_archive, "w:gz")' in cleanup_script
     assert "temporary_roots = verify_archive(temporary_archive)" in cleanup_script
     assert "os.replace(temporary_archive, archive)" in cleanup_script
+    assert "Results archive contains no" in cleanup_script
+    assert "(workspace / record).unlink()" in cleanup_script
     assert 'tarfile.open(path, "r:gz")' in cleanup_script
     assert "contents.read(1024 * 1024)" in cleanup_script
     assert "raw_directory.name not in member_roots" in cleanup_script
     assert "shutil.rmtree(raw_directory)" in cleanup_script
     assert "git lfs status" in validation_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in (workspace / ".gitattributes").read_text()
+
+
+def test_onboarding_uses_bounded_read_only_investigator():
+    workspace = Path(__file__).parents[2]
+    parent = (workspace / ".opencode" / "agents" / "onboard-model.md").read_text()
+    investigator = (workspace / ".opencode" / "agents" / "onboard-investigator.md").read_text()
+    parent_config = yaml.safe_load(parent.split("---", 2)[1])
+    investigator_config = yaml.safe_load(investigator.split("---", 2)[1])
+
+    assert parent_config["permission"]["task"] == {"*": "deny", "onboard-investigator": "allow"}
+    assert investigator_config["mode"] == "subagent"
+    assert investigator_config["hidden"] is True
+    assert investigator_config["steps"] == 20
+    assert investigator_config["permission"] == {
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+    }
+    assert "Use at most four public-web calls" in " ".join(investigator.splitlines())
 
 
 def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_path):
@@ -172,6 +206,7 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     raw_directory = experiment_dir / "2026-08-16_14-41-08"
     raw_directory.mkdir(parents=True)
     (raw_directory / "benchmark.log").write_text("measured\n")
+    (raw_directory / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
     (experiment_dir / "recipe.yaml").write_text("name: serving\n")
     (experiment_dir / "RESULTS.md").write_text("# Results\n")
     (experiment_dir / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
@@ -209,10 +244,12 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
 
     assert not raw_directory.exists()
     assert archive.is_file()
+    assert not (experiment_dir / "rtx4090x1_serving.experiment.yaml").exists()
     updated_summary = json.loads(summary.read_text())
     archive_path = "experiments/Model/serving/results_rtx4090x1.tar.gz"
     assert archive_path in updated_summary["experiment_artifacts"]
     assert archive_path in updated_summary["artifacts"]
+    assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
 def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_path):
@@ -224,6 +261,7 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
     raw_directory = experiment_dir / "2026-08-16_14-41-08"
     raw_directory.mkdir(parents=True)
     (raw_directory / "benchmark.log").write_text("measured\n")
+    (raw_directory / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
     (experiment_dir / "recipe.yaml").write_text("name: serving\n")
     (experiment_dir / "RESULTS.md").write_text("# Results\n")
     (experiment_dir / "rtx4090x1_serving.experiment.yaml").write_text("status: succeeded\n")
@@ -267,18 +305,20 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as source:
         assert "2026-08-16_14-41-08/benchmark.log" in source.getnames()
+        assert "2026-08-16_14-41-08/rtx4090x1_serving.experiment.yaml" in source.getnames()
         assert "2026-08-01_00-00-00/obsolete.log" not in source.getnames()
     assert not raw_directory.exists()
+    assert not (experiment_dir / "rtx4090x1_serving.experiment.yaml").exists()
     assert other_archive.read_bytes() == b"preserved platform"
     updated_summary = json.loads(summary.read_text())
     expected_snapshot = {
         "experiments/Model/serving/recipe.yaml",
         "experiments/Model/serving/RESULTS.md",
         "experiments/Model/serving/results_rtx4090x1.tar.gz",
-        "experiments/Model/serving/rtx4090x1_serving.experiment.yaml",
     }
     assert expected_snapshot <= set(updated_summary["experiment_artifacts"])
     assert expected_snapshot <= set(updated_summary["artifacts"])
+    assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
 def test_onboarding_selects_with_generic_recipe_query():

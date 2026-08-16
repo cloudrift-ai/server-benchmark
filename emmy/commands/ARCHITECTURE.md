@@ -654,8 +654,7 @@ one durable snapshot per exact GPU platform:
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
   <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
-  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run
-  rtx5090x1_<row>.experiment.yaml
+  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run and row records
   RESULTS.md                # one interpretation across retained platforms
 ```
 
@@ -664,9 +663,10 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
 Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
-the platform's named raw-results archive and system-only records, update its section in the shared `RESULTS.md`, and
-commit the complete platform snapshot without changing other platform results. The CLI and experiment code do not
-interpret measurements; the skill performs the intelligent review and the CLI itself performs no Git operation.
+the platform's named raw-results archive containing its system-only records, update its section in the shared
+`RESULTS.md`, and commit the complete platform snapshot without changing other platform results. The CLI and
+experiment code do not interpret measurements; the skill performs the intelligent review and the CLI itself performs
+no Git operation.
 
 ## Adding a New VM Provider
 

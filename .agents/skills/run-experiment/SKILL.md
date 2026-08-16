@@ -2,7 +2,7 @@
 name: run-experiment
 description: >-
   Run or rerun Emmy experiment recipes, including requests to adjust an experiment harness before running it, then
-  preserve per-platform compressed raw results, system-only YAML experiment records, and a thoughtful cumulative
+  preserve per-platform compressed raw results with system-only YAML experiment records and a thoughtful cumulative
   RESULTS.md interpretation. Use for requests such as "run this experiment", "benchmark this recipe", "rerun this on
   a GPU", or "customize and execute this Emmy experiment". Interpret results through intelligent review, never
   repository code.
@@ -53,20 +53,22 @@ For each selected experiment directory and exact GPU name/count:
    stability, failures, correctness evidence, and protocol limitations. Do this as intelligent review, not with code
    added to the experiment recipe or repository.
 3. Derive the platform key as `<gpu-short>x<gpu-count>` with `emmy.hardware.gpu_short_name`, for example `rtx4090x1`.
-   Remove only prior top-level `<platform-key>*.experiment.yaml` files and copy the latest records beside `recipe.yaml`.
-   Preserve every other platform's records and the timestamped local directory exactly as Emmy produced it.
+   Preserve the latest system-only records inside the timestamped raw directory exactly as Emmy produced them. Do not
+   copy them beside `recipe.yaml`.
 4. Replace `<experiment>/results_<platform-key>.tar.gz` with a gzip-compressed tar archive whose root member is the
-   latest timestamped directory. Keep that local directory through archive extraction or byte verification and never
-   delete another platform's archive. If the caller requires an artifact-only checkout, delete the task-owned local
-   directory only after that archive verification. Track `experiments/**/results_*.tar.gz` with Git LFS.
+   latest timestamped directory, including its system-only records. Verify that archive contains every expected row
+   record. Remove legacy top-level `<platform-key>*.experiment.yaml` files only after this verification. Keep the local
+   directory through archive extraction or byte verification and never delete another platform's archive. If the
+   caller requires an artifact-only checkout, delete the task-owned local directory only after that archive
+   verification. Track `experiments/**/results_*.tar.gz` with Git LFS.
 5. Update the current platform section in `<experiment>/RESULTS.md` with a thoughtful, evidence-backed interpretation.
    Preserve other platform sections. Include the question, protocol, result summary, repeat variation, comparisons,
    conclusion, limitations, timestamp, run ID, machine and software information, row status, failures, archive path,
    and member names. Distinguish direct comparisons from directional ones and avoid claims the harness does not
    support.
-6. Ensure the durable experiment contains `recipe.yaml`, one cumulative `RESULTS.md`, and for every retained platform
-   one named archive plus matching top-level records. The current platform's archive, records, and report section must
-   describe the same most recent run; do not modify another platform's snapshot.
+6. Ensure the durable experiment contains `recipe.yaml`, one cumulative `RESULTS.md`, and one named archive for every
+   retained platform. Each archive contains that platform's matching records. The current platform's archive and
+   report section must describe the same most recent run; do not modify another platform's snapshot.
 
 ## Verify and commit
 
@@ -80,9 +82,11 @@ Force-stage only the requested experiments' durable snapshot because `experiment
 git check-attr filter -- experiments/<model>/<experiment>/results_<gpu-short>x<gpu-count>.tar.gz
 git add -f -A -- experiments/<model>/<experiment>/recipe.yaml \
   experiments/<model>/<experiment>/results_<gpu-short>x<gpu-count>.tar.gz \
-  ':(glob)experiments/<model>/<experiment>/<gpu-short>x<gpu-count>*.experiment.yaml' \
   experiments/<model>/<experiment>/RESULTS.md
 ```
+
+When the platform update removes tracked legacy top-level records, stage those exact deleted paths separately with
+`git add -u -- <paths>`.
 
 The archive must report `filter: lfs`. If the repository pattern is missing and the caller permits infrastructure
 changes, add it with `git lfs track "experiments/**/results_*.tar.gz"` and stage `.gitattributes`. If the caller says

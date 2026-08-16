@@ -123,6 +123,34 @@ def test_no_eligible_onboarding_is_a_neutral_summary():
     assert embed["color"] == discord_notification.NEUTRAL_COLOR
 
 
+def test_unresolved_onboarding_regression_is_prominent_and_non_pinging():
+    environment = {
+        **BASE_ENVIRONMENT,
+        "WORKFLOW_KIND": "onboard",
+        "WORKFLOW_RESULT": "failure",
+        "SELECTED": "true",
+        "MODEL_ID": "Qwen/Qwen3-Embedding-8B",
+        "TARGET_GPU": "NVIDIA GeForce RTX 4090",
+        "TARGET_GPU_COUNT": "1",
+        "ONBOARD_MODE": "verification",
+        "FAILURE_KIND": "regression",
+        "FAILURE_SUMMARY": "serving: the official image replacement still fails its health check",
+    }
+
+    payload = discord_notification.build_payload(environment)
+    embed = payload["embeds"][0]
+
+    assert payload["content"] == "🚨 **Model regression needs attention**"
+    assert payload["allowed_mentions"] == {"parse": []}
+    assert embed["title"] == "Model regression needs attention"
+    assert embed["color"] == discord_notification.FAILURE_COLOR
+    assert {
+        "name": "Regression",
+        "value": "serving: the official image replacement still fails its health check",
+        "inline": False,
+    } in embed["fields"]
+
+
 def test_delivery_retries_and_requests_a_confirmed_discord_response():
     calls = []
     sleeps = []

@@ -86,7 +86,7 @@ schedule site excluded from PLACE (`Site.derived`). A hoisted operand edge IS a 
 
 A cone's SOURCE is the row-invariant prologue (the per-row statistic) and its body the per-cell normalize, so the K
 seam is the node boundary (`ops.cone_seam`). The seam splits the cone's EDGES by the same rule it splits its stmts: an
-edge that never indexes the contraction axis is prologue (run once per tile row, and it carries its own schedule
+edge that never reads the contraction axis is prologue (run once per tile row, and it carries its own schedule
 families — the statistic's `REDUCE`), while a k-VARYING producer edge — attention's score contraction, which the
 cone's `exp(s − m)` reads — is per-cell, splices into the cell ahead of its first use, and is evaluated INLINE by the
 fill from lowered loop IR. An inline-evaluated node carries no schedule slice (`Site.inline`: no value there could be

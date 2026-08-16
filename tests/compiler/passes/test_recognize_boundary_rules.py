@@ -610,3 +610,69 @@ def test_duplicated_cone_with_commuted_args_still_shares_one_a():
     c_map, _, _stores = bound
     (product,) = c_map.operands
     assert len(product.channels) == 2, "both ⊗-folds grouped over the one shared cone"
+
+
+# --------------------------------------------------------------------------- #
+# The MASKED score cone — SDPA's ``softmax(Q·Kᵀ + mask)·V``. A coordinate-predicated
+# ``Select`` in the score is an ordinary pure stmt of the cone, so the masked region must
+# reach the SAME computed-A contraction the unmasked one reaches.
+# --------------------------------------------------------------------------- #
+
+
+def _sdpa_graph(*, is_causal: bool, B: int = 1, H: int = 2, S: int = 64, D: int = 32) -> Graph:
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (Dim(B), Dim(H), Dim(S), Dim(D)), dtype=F16), node_id=name)
+    g.add_node(SdpaOp(is_causal=is_causal), ["q", "k", "v"], Tensor("o", (Dim(B), Dim(H), Dim(S), Dim(D)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v"], ["o"]
+    return g
+
+
+def _resolve_sdpa(is_causal: bool) -> tuple[list[dict], TileOp]:
+    """Run the tile passes over an SDPA graph, picking the warp row wherever one is offered.
+    Returns ``(the softmax·V node's fork rows — empty when the cell took the flat zero-axis
+    escape and no schedule fork was offered at all, its TileOp)``."""
+    rows: dict[str, list[dict]] = {}
+
+    def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
+        leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
+        harvest = [dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves]
+        rows.setdefault(fp.node_id, []).extend(harvest)
+        return next((leaf for leaf, row in zip(leaves, harvest, strict=True) if _is_warp_row(row)), leaves[0])
+
+    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_sdpa_graph(is_causal=is_causal), decide)
+    return rows.get("o", []), rg.nodes["o"].op
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_masked_sdpa_reaches_the_computed_a_contraction(is_causal):
+    """SDPA's ``softmax·V`` half binds as ONE computed-A contraction over the ``(m, d)`` statistic
+    — masked as well as unmasked. The mask is a ``Select`` on the score, which the twisted λ read
+    and the MAP cone both carry, so the fork offers the mma tier either way. When they did not, the
+    causal region kept the flat zero-axis ``Fold`` escape: a knob-less serial kernel, two orders of
+    magnitude off the split it replaced, on the shape every decoder-only model uses."""
+    rows, tile = _resolve_sdpa(is_causal)
+    assert any(_is_warp_row(r) for r in rows), "the masked softmax·V must offer the warp/mma tier, not just the scalar escape"
+    assert any("mma" in str(r.get("TILE", "")) for r in rows), "no mma TILE was offered for the softmax·V contraction"
+    assert tile.knobs.get("TILE", "").startswith("mma"), f"the picked row must realize the contraction: {tile.knobs.get('TILE')!r}"
+
+
+def test_masked_score_cone_keeps_its_predicate_per_cell():
+    """The mask ``Select`` reads the contraction axis through its PREDICATE, not an index, so the
+    K seam must place it in the per-cell body. Hoisted into the row-invariant prologue it would be
+    evaluated once per row, at a coordinate that is not even bound there."""
+    from emmy.compiler.ir.stmt import Select
+    from emmy.compiler.ir.tile.ops import cone_seam
+
+    _, tile = _resolve_sdpa(is_causal=True)
+    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    assert fold.role is AxisRole.CONTRACTION and not isinstance(fold.a, Load)
+    pro, cell, _stats = cone_seam(fold.a, fold.axis.name)
+    assert any(isinstance(s, Select) for s in cell), "the mask predicates the per-cell weight"
+    assert not any(isinstance(s, Select) for s in pro), "the mask is k-varying — it never joins the row prologue"

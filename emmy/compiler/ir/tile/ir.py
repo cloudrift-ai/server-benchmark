@@ -842,9 +842,11 @@ def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
 
 
 def refs_axis(s: Stmt, name: str) -> bool:
-    """``s`` references axis ``name`` in any index expr (deep)."""
-    idx = getattr(s, "index", None)
-    if idx and any(name in e.free_vars() for e in idx):
+    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
+    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
+    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
+    the per-cell body it predicates."""
+    if any(name in e.free_vars() for e in s.exprs()):
         return True
     return any(refs_axis(child, name) for b in s.nested() for child in b)
 
@@ -864,8 +866,7 @@ def edge_refs_axis(edge, name: str) -> bool:
     def refs(s: Stmt) -> bool:
         if name in s.binds_axes() or (isinstance(s, Fold) and s.axis is not None and s.axis.name == name):
             return False
-        idx = getattr(s, "index", None)
-        if idx and any(name in e.free_vars() for e in idx):
+        if any(name in e.free_vars() for e in s.exprs()):
             return True
         return any(refs(child) for b in s.nested() for child in b)
 

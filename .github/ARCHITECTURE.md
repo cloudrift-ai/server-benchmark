@@ -52,8 +52,9 @@ lifecycle decision. Every existing recipe and selected new model receives a 0-10
 priority. Each promising new open-weight Hugging Face model becomes an onboarding shell with one to three proposed
 deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; there is no shell-count limit. Existing shells
 remain in the manifest and must retain their task and deployment matrix while discovery refreshes their heat and
-rationale. `emmy recipe list --json` supplies the versioned compact agent inventory under its `recipes` field, and
-recipe queries enforce the maintained count after application.
+rationale. The exact-SHA catalog helper reads the rolling `recipes/` root to supply the versioned compact agent
+inventory under its `recipes` field, and an exact-SHA recipe query against the same root enforces the maintained count
+after application.
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, lifecycle helper, OpenCode agent and
 plugin directory, and attached discovery skill come from the exact `github.sha` that started the run. This lets a

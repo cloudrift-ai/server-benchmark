@@ -306,6 +306,7 @@ def test_discovery_counts_lifecycle_with_recipe_query():
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
 
     assert "recipe query" in script
+    assert "--root recipes" in script
     assert 'tags contains "maintained"' in script
     assert 'tags contains "onboarding"' not in script
     assert "recipe list --tag" not in script
@@ -322,6 +323,14 @@ def test_discovery_prompt_keeps_obsolete_classification_conservative():
     assert '"Comparable reasoning"' in script
     assert "replacement_model_id is allowed" in script
     assert "only in obsolete_models" in script
+
+
+def test_discovery_inventory_uses_exact_catalog_code_against_rolling_recipes():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+
+    assert 'recipe_inventory_document("recipes")' in script
+    assert "recipe list --json" not in script
 
 
 def test_discovery_uses_source_subagents_and_scores_every_model():

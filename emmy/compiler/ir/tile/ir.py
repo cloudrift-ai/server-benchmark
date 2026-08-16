@@ -849,6 +849,29 @@ def refs_axis(s: Stmt, name: str) -> bool:
     return any(refs_axis(child, name) for b in s.nested() for child in b)
 
 
+def edge_refs_axis(edge, name: str) -> bool:
+    """Whether an operand EDGE's producing stmts index the ENCLOSING axis ``name`` — the K-SEAM
+    test, applied to an edge instead of a stmt. A node's own operands hang off ``operands``, not
+    ``nested()``, so the question is asked of its LOWERING. The cone seam (which of a cone's edges
+    runs once per tile row and which per cell) and the site walk (which of them a schedule slice
+    can address) are the same question, so they share this one read.
+
+    SCOPED: a nested loop that RE-BINDS the name shadows it, and indices under it name that inner
+    axis, not the enclosing one. Axis names collide across a tree by design (the codec spells
+    ``REDUCE@a.fold.k`` exactly for a cone statistic whose axis name matches the contraction's), so
+    an unscoped scan would read a row-invariant statistic as k-varying."""
+
+    def refs(s: Stmt) -> bool:
+        if name in s.binds_axes() or (isinstance(s, Fold) and s.axis is not None and s.axis.name == name):
+            return False
+        idx = getattr(s, "index", None)
+        if idx and any(name in e.free_vars() for e in idx):
+            return True
+        return any(refs(child) for b in s.nested() for child in b)
+
+    return any(refs(s) for s in operand_body(edge))
+
+
 @dataclass(frozen=True)
 class Channel:
     """One product channel of a contraction — the streamed K×N operand edge ``b`` plus the
@@ -993,6 +1016,7 @@ __all__ = [
     "TileOp",
     "deep_defines",
     "deep_reads",
+    "edge_refs_axis",
     "effect_tail",
     "operand_body",
     "operand_name",

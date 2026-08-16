@@ -519,11 +519,11 @@ jobs:
               raise SystemExit(f"Expected one current-platform results archive, found: {archive_paths}")
           archive = workspace / archive_paths[0]
           with tarfile.open(archive, "r:gz") as source:
-              member_roots = {
-                  PurePosixPath(member.name.removeprefix("./")).parts[0]
+              member_paths = [
+                  PurePosixPath(member.name.removeprefix("./"))
                   for member in source.getmembers()
-                  if member.name.removeprefix("./")
-              }
+              ]
+              member_roots = {path.parts[0] for path in member_paths if path.parts}
 
           timestamp = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
           raw_directories = [path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)]

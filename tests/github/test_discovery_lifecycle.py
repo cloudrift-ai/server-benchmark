@@ -91,6 +91,9 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     (raw_directory / "benchmark.log").write_text("measured\n")
     archive = experiment_dir / "results_rtx4090x1.tar.gz"
     with tarfile.open(archive, "w:gz") as output:
+        root_info = tarfile.TarInfo(".")
+        root_info.type = tarfile.DIRTYPE
+        output.addfile(root_info)
         output.add(raw_directory, arcname=raw_directory.name)
     summary = tmp_path / "summary.json"
     summary.write_text(

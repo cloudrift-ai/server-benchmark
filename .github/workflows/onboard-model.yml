@@ -130,8 +130,23 @@ jobs:
       - name: Configure Git LFS
         run: |
           if ! git lfs version >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install --no-install-recommends -y git-lfs
+            lfs_version=3.7.1
+            case "$(uname -m)" in
+              x86_64) lfs_arch=amd64; lfs_sha256=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;;
+              aarch64) lfs_arch=arm64; lfs_sha256=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;;
+              *) echo "Unsupported Git LFS architecture: $(uname -m)" >&2; exit 1 ;;
+            esac
+            lfs_dir="$RUNNER_TEMP/git-lfs-$lfs_version"
+            lfs_archive="$RUNNER_TEMP/git-lfs-$lfs_version-$lfs_arch.tar.gz"
+            curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+              --output "$lfs_archive" \
+              "https://github.com/git-lfs/git-lfs/releases/download/v$lfs_version/git-lfs-linux-$lfs_arch-v$lfs_version.tar.gz"
+            printf '%s  %s\n' "$lfs_sha256" "$lfs_archive" | sha256sum --check
+            mkdir -p "$lfs_dir"
+            tar -xzf "$lfs_archive" -C "$lfs_dir" --strip-components=1 "git-lfs-$lfs_version/git-lfs"
+            chmod +x "$lfs_dir/git-lfs"
+            echo "$lfs_dir" >> "$GITHUB_PATH"
+            export PATH="$lfs_dir:$PATH"
           fi
           git lfs install --local
           mkdir -p .git/info

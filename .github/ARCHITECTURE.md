@@ -108,8 +108,9 @@ allowed recipe, experiment, serving-image, and canonical-golden paths. The valid
 recipe and report, the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and matching current-platform row
 records.
 It rejects changes to another platform snapshot and requires the current archive to be created or updated. Optional
-outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. Git LFS is configured locally
-before staging so the normal push uploads the archive object with the rolling branch.
+outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. The job installs a pinned,
+checksum-verified Git LFS binary in the runner's temporary directory when needed, then configures LFS locally before
+staging so the normal push uploads the archive object with the rolling branch.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
 model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,

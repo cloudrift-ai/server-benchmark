@@ -1721,6 +1721,31 @@ def test_batched_symbolic_mk_reaches_warp(monkeypatch):
     assert "int seq_len" in src, "runtime extent must be a kernel arg"
 
 
+def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
+    """A COMPUTED-A contraction over a SYMBOLIC K — softmax(scores) @ V, the SDPA P@V edge under a
+    dynamic sequence — reaches the mma tier through the smem compute fill, whose K MASK covers the
+    last chunk's overhang: the cone's own reads clamp in-bounds and every slab lane past the
+    runtime extent stores the additive fold identity, so the drain still reads whole chunks. The
+    B peer clamps its overhanging slab ROW the same way (K is that slab's outer dim, so the
+    cp.async chunk stays contiguous). Without the mask the schedule refused the tier outright and
+    this shape had only the scalar rows."""
+    for k, v in {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}.items():
+        monkeypatch.setenv(f"EMMY_{k}", v)
+    lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
+    kop = lowered.nodes["o"].op
+    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "a computed-A symbolic-K contraction must reach the warp tier"
+    src = kop.kernel_source
+    assert "mma.sync.aligned.m16n8k16" in src and "int seq_len" in src
+    assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
+    lines = src.splitlines()
+    masked = [ln for ln in lines if "__km__c" in ln and ln.strip().startswith("float ")]
+    assert masked, "the compute fill must predicate its stored value on the runtime K"
+    assert all("< seq_len) ?" in ln for ln in masked), f"every masked lane selects on the runtime K: {masked[:1]}"
+    assert any("__kid = 0.0f;" in ln for ln in lines), "the overhanging lane must store the additive fold identity 0"
+    fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
+    assert "< seq_len) ?" in fill and "seq_len - 1" in fill, f"the B slab fill must clamp its overhanging K row: {fill}"
+
+
 def test_transposed_b_symbolic_k_zero_fills(monkeypatch):
     """A warp-tier A @ Bᵀ with symbolic K (transposed-B, K contiguous) emits the (n,k)-swapped
     K-zero-fill helper — K is summed by the mma, so the straddling final K tile must read +0.0
@@ -1823,8 +1848,8 @@ def _make_pv_softmax(seq):
 
 def _make_pv_materialized(seq):
     """The P@V split-consumer gemm with the softmax P operand fed MATERIALIZED (realistic
-    row-stochastic values): the batched masked-M + masked-K warp shape the demoted producer
-    can no longer expose to a warp pin (its symbolic-K computed-A kernel refuses one loudly)."""
+    row-stochastic values): the batched masked-M + masked-K warp shape over two gmem edges,
+    whose accuracy rides the gmem-direct fragment path's masked-K zero fill."""
     g = _batched_symbolic_mk_graph()
     rng = np.random.default_rng(seq)
     scores = (rng.standard_normal((16, seq, seq)) * 2).astype(np.float32)
@@ -1855,14 +1880,22 @@ _MASKED_CASES = {
     # at runtime is a separate gap, so accuracy rides the scalar tier (the structure render
     # reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).
     "batched_mk": ({}, (), [16, 31, 130, 512, 700], _make_batched_mk),
-    # The demoted B-cone / softmax-P@V splits run under GREEDY: under the sdpa seam split the
-    # softmax normalize fuses into a computed-A symbolic-K kernel, and a warp/STAGE pin landing
-    # there raises the pinned-unbuildable legality error (a computed contraction operand needs a
-    # static K). ``SPLIT_CONE`` forces the demotion split.
+    # The demoted B-cone / softmax-P@V splits run under GREEDY — the planner's own pick over the
+    # fused computed-operand cone. ``SPLIT_CONE`` forces the demotion split.
     "demoted_n": ({"SPLIT_CONE": "1"}, (), [31, 130, 512, 700], _make_demoted_n),
     "demoted_pv": ({"SPLIT_CONE": "1"}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
-    # The warp-tier P@V masked-M+K accuracy rides the materialized-P split-consumer gemm (STAGE
-    # unpinned: smem staging never enumerates for a symbolic-K contraction).
+    # The same softmax-P@V shape PINNED onto the mma tier: a COMPUTED A over a symbolic K, which
+    # only the smem compute fill's K mask makes realizable. The straddling extents are where that
+    # mask earns its keep — 16 and 31 are shorter than one whole slab chunk.
+    "computed_a_symbolic_k_warp": (
+        {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""},
+        (),
+        [16, 31, 130, 512, 700],
+        _make_pv_softmax,
+    ),
+    # The warp-tier P@V masked-M+K accuracy over two MATERIALIZED edges (STAGE unpinned: a
+    # byte-copied operand stages K as its contiguous inner dim, so a symbolic K has no staged
+    # transport and the row stays gmem-direct).
     "pv_materialized_warp": (
         {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "REDUCE": ""},
         (),

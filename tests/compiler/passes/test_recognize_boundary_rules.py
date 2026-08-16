@@ -402,6 +402,20 @@ def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
     assert any(s.node is stat for s in family_sites("REDUCE", all_sites))
 
 
+def test_cone_per_cell_edge_reaches_the_per_cell_emitter():
+    """The same edge on the untiled tier: the emitter's node-walk lowers EVERY operand edge of a
+    zero-axis node, so the score's own reduce loop is emitted ahead of the cell that reads it.
+    Walking only the first edge left the cell reading a name nothing defined — nvcc's
+    ``identifier "s2" is undefined``."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _emit
+
+    _root, cone = _attention_cone_term()
+    body = Body(tuple(_emit(cone, Ctx(grid=())).body))
+    defined = {nm for s in body for nm in deep_defines(s)} | stmt_axis_names(body) | {"m", "n", "kvb"}
+    assert "s2" in defined, "the cone's score edge never reached the emitted body"
+    assert deep_reads(list(body)) <= defined, f"the emitted body reads an undefined name: {deep_reads(list(body)) - defined}"
+
+
 def test_norm_linear_fp32_keeps_map_rows_only():
     """No 16-bit mma atom ⇒ the bilinear fold form contributes ZERO rows (never a raising row) and
     the fork is exactly the Map-form reduce rows — the graceful fallback."""

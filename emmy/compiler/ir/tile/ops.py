@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, effect_tail, refs_axis, splice_operands, stmt_axis_names
+from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, edge_refs_axis, effect_tail, splice_operands, stmt_axis_names
 
 
 def cone_seam(cone, k_name: str | None = None) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -44,10 +44,9 @@ def cone_seam(cone, k_name: str | None = None) -> tuple[tuple, tuple, tuple[str,
     them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    bodies = [(e, tuple(e.lower())) for e in cone.operands]
-    varying = [k_name is not None and any(refs_axis(s, k_name) for s in b) for _, b in bodies]
-    pro = tuple(s for (_, b), k in zip(bodies, varying, strict=True) for s in b if not k)
-    cell = splice_operands(tuple(e for (e, _), k in zip(bodies, varying, strict=True) if k), tuple(cone.body))
+    varying = [k_name is not None and edge_refs_axis(e, k_name) for e in cone.operands]
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
+    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
     stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
 

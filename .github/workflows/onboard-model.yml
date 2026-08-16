@@ -37,7 +37,7 @@ concurrency:
 jobs:
   onboard:
     runs-on: [self-hosted, agents]
-    timeout-minutes: 360
+    timeout-minutes: 1440
     permissions:
       contents: read
       pull-requests: read
@@ -299,7 +299,7 @@ jobs:
 
       - name: Set onboarding deadline
         if: steps.selection.outputs.selected == 'true'
-        run: echo "ONBOARD_DEADLINE=$(date -u -d '+5 hours 30 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+        run: echo "ONBOARD_DEADLINE=$(date -u -d '+23 hours 30 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       - name: Generate ephemeral SSH key and isolated provider config
         if: steps.selection.outputs.selected == 'true'

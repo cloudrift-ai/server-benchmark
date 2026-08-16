@@ -82,8 +82,8 @@ rental. The workflow never falls back to GCP or changes the selected GPU type/co
 The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
 Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
-lifecycle tag. The job has a six-hour limit and gives the agent an earlier deadline so artifact validation and cleanup
-retain time. Raw benchmark output, experiment reports, dated run snapshots, and qualification summaries are not
+lifecycle tag. The job has a 24-hour limit and gives the agent a 23.5-hour deadline so artifact validation and cleanup
+retain 30 minutes. Raw benchmark output, experiment reports, dated run snapshots, and qualification summaries are not
 repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes. Nightly image
 publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 

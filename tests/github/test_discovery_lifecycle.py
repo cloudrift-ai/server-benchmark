@@ -1,5 +1,9 @@
 import importlib.util
 import json
+import os
+import subprocess
+import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -56,6 +60,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     steps = document["jobs"]["onboard"]["steps"]
     lfs_script = next(step["run"] for step in steps if step.get("name") == "Configure Git LFS")
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
+    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Remove archived task-local raw results")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
 
     assert "lfs_version=3.7.1" in lfs_script
@@ -68,8 +73,46 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert "do not modify or list .gitattributes" in agent_script
+    assert 'tarfile.open(archive, "r:gz")' in cleanup_script
+    assert "raw_directory.name not in member_roots" in cleanup_script
+    assert "shutil.rmtree(raw_directory)" in cleanup_script
     assert "git lfs status" in validation_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in (workspace / ".gitattributes").read_text()
+
+
+def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+    experiment_dir = tmp_path / "experiments" / "Model" / "serving"
+    raw_directory = experiment_dir / "2026-08-16_14-41-08"
+    raw_directory.mkdir(parents=True)
+    (raw_directory / "benchmark.log").write_text("measured\n")
+    archive = experiment_dir / "results_rtx4090x1.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        output.add(raw_directory, arcname=raw_directory.name)
+    summary = tmp_path / "summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "experiment": "experiments/Model/serving/recipe.yaml",
+                "experiment_artifacts": ["experiments/Model/serving/results_rtx4090x1.tar.gz"],
+            }
+        )
+    )
+
+    subprocess.run(
+        [sys.executable, "-"],
+        cwd=tmp_path,
+        env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
+        input=cleanup_source,
+        text=True,
+        check=True,
+    )
+
+    assert not raw_directory.exists()
+    assert archive.is_file()
 
 
 def test_onboarding_consumes_versioned_recipe_inventory():

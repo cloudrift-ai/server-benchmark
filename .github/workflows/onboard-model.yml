@@ -487,6 +487,52 @@ jobs:
           fi
           exit "$agent_status"
 
+      - name: Remove archived task-local raw results
+        if: steps.vm.outcome == 'success'
+        run: |
+          ./venv/bin/python - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          workspace = Path.cwd().resolve()
+          experiments_root = (workspace / "experiments").resolve()
+          summary = json.loads(Path(os.environ["ONBOARD_SUMMARY"]).read_text())
+          experiment_recipe = Path(summary.get("experiment") or "")
+          if experiment_recipe.is_absolute() or ".." in experiment_recipe.parts or experiment_recipe.name != "recipe.yaml":
+              raise SystemExit(f"Unsafe experiment recipe path: {experiment_recipe}")
+          experiment_dir = (workspace / experiment_recipe).parent.resolve()
+          if experiments_root not in experiment_dir.parents:
+              raise SystemExit(f"Experiment directory is outside experiments/: {experiment_dir}")
+
+          archive_paths = [
+              Path(raw_path)
+              for raw_path in summary.get("experiment_artifacts") or []
+              if Path(raw_path).parent == experiment_recipe.parent
+              and Path(raw_path).name.startswith("results_")
+              and Path(raw_path).name.endswith(".tar.gz")
+          ]
+          if len(archive_paths) != 1:
+              raise SystemExit(f"Expected one current-platform results archive, found: {archive_paths}")
+          archive = workspace / archive_paths[0]
+          with tarfile.open(archive, "r:gz") as source:
+              member_roots = {
+                  PurePosixPath(member.name.removeprefix("./")).parts[0]
+                  for member in source.getmembers()
+                  if member.name.removeprefix("./")
+              }
+
+          timestamp = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+          raw_directories = [path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)]
+          for raw_directory in raw_directories:
+              if raw_directory.name not in member_roots:
+                  raise SystemExit(f"Raw directory is not preserved by {archive_paths[0]}: {raw_directory.name}")
+              shutil.rmtree(raw_directory)
+          PY
+
       - name: Delete workflow-owned CloudRift VMs
         if: always() && steps.selection.outputs.selected == 'true'
         env:

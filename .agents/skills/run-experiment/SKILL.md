@@ -56,8 +56,9 @@ For each selected experiment directory and exact GPU name/count:
    Remove only prior top-level `<platform-key>*.experiment.yaml` files and copy the latest records beside `recipe.yaml`.
    Preserve every other platform's records and the timestamped local directory exactly as Emmy produced it.
 4. Replace `<experiment>/results_<platform-key>.tar.gz` with a gzip-compressed tar archive whose root member is the
-   latest timestamped directory. Do not delete that local directory or another platform's archive. Track
-   `experiments/**/results_*.tar.gz` with Git LFS.
+   latest timestamped directory. Keep that local directory through archive extraction or byte verification and never
+   delete another platform's archive. If the caller requires an artifact-only checkout, delete the task-owned local
+   directory only after that archive verification. Track `experiments/**/results_*.tar.gz` with Git LFS.
 5. Update the current platform section in `<experiment>/RESULTS.md` with a thoughtful, evidence-backed interpretation.
    Preserve other platform sections. Include the question, protocol, result summary, repeat variation, comparisons,
    conclusion, limitations, timestamp, run ID, machine and software information, row status, failures, archive path,

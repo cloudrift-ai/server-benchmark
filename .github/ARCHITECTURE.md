@@ -9,7 +9,7 @@ tracked skills and CloudRift inference endpoint.
 
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
-| **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff and the complete test suite. |
+| **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff, the complete test suite, and a PyPI package dry run. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
@@ -21,8 +21,9 @@ from a developer checkout through the tracked `.agents/skills/run-experiment` sk
 
 **Tests** installs the CI dependency set on Python 3.13. Its lint job runs Ruff check and format verification; its test
 job runs `make test`, including `tests/github/` coverage for helpers under `.github/scripts/`. Hugging Face downloads
-used by tests are cached because anonymous shared-runner traffic is rate-limited. This workflow has no write
-permission and does not use deployment credentials.
+used by tests are cached because anonymous shared-runner traffic is rate-limited. A separate bare-Python job runs
+`make pypi-dist`, the exact non-publishing build path used by the release workflow, and requires one wheel and one
+source distribution. This workflow has no write permission and does not use deployment credentials.
 
 ## Package publication
 
@@ -33,11 +34,12 @@ permission and does not use deployment credentials.
 - A manually published GitHub release must already have a tag matching `pyproject.toml`; the workflow validates and
   publishes that version without creating another release.
 
-Both paths run lint and tests before building. `scripts/prepare_dist.py` stages bundled recipes and rewrites
-repository-relative README links for PyPI. The build artifact moves between jobs through GitHub artifacts. PyPI uses
-trusted publishing through the `pypi` environment and an OIDC token, so the repository stores no PyPI password. The
-manual path creates its GitHub release only after a successful upload, preventing a failed publication from leaving a
-release behind.
+Both paths run lint and tests before building. `make pypi-dist` first installs its minimal build dependencies, then
+uses `scripts/prepare_dist.py` to stage bundled recipes and rewrite repository-relative README links for PyPI before
+building the wheel and source distribution. The build artifact moves between jobs through GitHub artifacts. PyPI
+uses trusted publishing through the `pypi` environment and an OIDC token, so the repository stores no PyPI password.
+The manual path creates its GitHub release only after a successful upload, preventing a failed publication from
+leaving a release behind.
 
 ## Model discovery and onboarding
 

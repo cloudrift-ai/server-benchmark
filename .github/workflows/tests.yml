@@ -49,3 +49,21 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  package:
+    name: PyPI package dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build with the release path without publishing
+        run: make pypi-dist
+
+      - name: Verify both distribution artifacts exist
+        run: |
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1

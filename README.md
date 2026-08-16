@@ -318,6 +318,7 @@ make test      # run pytest
 make lint      # ruff check + format check
 make format    # auto-fix
 make wheel     # build the wheel into dist/
+make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
 
 ### Release
@@ -326,6 +327,9 @@ Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** w
 there, and refuses to run if that version is already tagged. It lints, tests, builds, uploads to PyPI via trusted
 publishing, and only then creates the tag and GitHub release, so a failed upload leaves nothing behind. Publishing
 a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
+
+Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
+dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
 the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub

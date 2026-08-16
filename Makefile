@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -13,6 +13,7 @@ help:
 	@echo "  bench-force    - Run benchmarks in parallel (force re-run, skip cached results)"
 	@echo "  bench-kernels  - Run per-kernel perf comparison vs PyTorch (tests/perf/, requires CUDA)"
 	@echo "  wheel          - Build the emmy wheel into dist/"
+	@echo "  pypi-dist      - Dry-run the exact PyPI sdist + wheel build into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
 	@echo "  serve-goldens / serve-warm / serve-image / serve-verify  MODEL=<hf-id>"
@@ -105,6 +106,15 @@ wheel: setup
 	./venv/bin/pip install --quiet build
 	./venv/bin/python scripts/prepare_dist.py --recipes
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
+
+# The release runner starts with a bare Python. Keep its complete build contract in one
+# target so pull-request CI can exercise the exact same dependency install and staging path.
+EMMY_PYPI_PYTHON ?= python3
+pypi-dist:
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML
+	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
+	rm -rf dist build
+	$(EMMY_PYPI_PYTHON) -m build
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.

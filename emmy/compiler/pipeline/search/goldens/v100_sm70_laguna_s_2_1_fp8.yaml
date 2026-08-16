@@ -7874,16 +7874,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a2: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
       LOOPIFY: '0'
     measurements:
-      emmy_us: 1760.2560138702393
+      emmy_us: 191.1
       reference_backend: emmy-greedy
-      reference_us: 26912.76741027832
+      reference_us: 214.0
 - program: 0
   target:
     loop: 3
@@ -7974,16 +7974,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a2: coop
-      WORK: t128
-      TILE: ''
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
       LOOPIFY: '0'
     measurements:
-      emmy_us: 2614.272117614746
+      emmy_us: 274.9
       reference_backend: emmy-greedy
-      reference_us: 27204.608917236328
+      reference_us: 305.2
 - program: 1
   target:
     loop: 8

@@ -587,8 +587,8 @@ warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
-across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap
-exactly on the small-free decode shapes the split-K CTA-count cap admits), the per-cell cone σ-reindexed to
+across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
+cheap on the small-free decode shapes and is left to evidence to price elsewhere), the per-cell cone σ-reindexed to
 absolute k and the wrapping zero-axis fold's projection folded into the deferred finalize (the split-K option's
 computed-A arm
 → `030_split_reduce`'s structural path). Multi-channel (gate/up) nodes split too: the synthesized fold loop

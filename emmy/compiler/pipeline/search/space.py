@@ -460,8 +460,8 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     return [*smems, *depths, Stage.parse("d2/smem-async/p2")]
 
 
-# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is
-# the scheduler's.
+# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width
+# must divide K, and the per-CTA remainder must tile the warp K-step — is the scheduler's.
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 

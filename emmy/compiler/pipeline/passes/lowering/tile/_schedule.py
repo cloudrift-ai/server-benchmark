@@ -193,9 +193,8 @@ def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
     """The hint-resolved extents of the term's SYMBOLIC axes, in walk order. ``Dim.hint`` is
     deliberately excluded from identity (``Op.cache_key`` stays hint-independent), but the
     enumeration SIZES against it (:func:`_hint_extent` → which coop bands the reduce extent can
-    feed), so
-    the pool cache's key must carry it — two same-key ops traced at different ``--seq-len``
-    hints enumerate different pools."""
+    feed), so the pool cache's key must carry it — two same-key ops traced at different
+    ``--seq-len`` hints enumerate different pools."""
     out: list[int] = []
 
     def note(ax) -> None:

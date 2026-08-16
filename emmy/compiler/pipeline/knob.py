@@ -605,6 +605,24 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
 
 
+def drop_uninformative_scopes(knobs: dict) -> dict[str, str]:
+    """The two spelling rules that make a row equal its own realization, WITHOUT the
+    family-level OFF fill: a bare OFF beside scoped keys of the same family is dropped (a bare pin
+    fans out over every eligible site, so it would contradict them), and a scoped OFF is dropped
+    (it names a site that declined, which is exactly what stamping nothing there says). Both are
+    no-information spellings, so removing them changes no decision — unlike the fill, which turns
+    "this family was never mentioned" into "this family is pinned OFF" and would over-constrain a
+    partial row. :func:`stamp_schedule_families` applies these rules and then fills; a replay pin
+    wants only these."""
+    out = dict(tuning_knob_items(knobs))
+    for family in {family_of(name) for name in out if "@" in name}:
+        if out.get(family) == "":
+            out.pop(family)
+    for name in [n for n in out if "@" in n and out[n] == ""]:
+        out.pop(name)
+    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
+
+
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`
@@ -618,24 +636,8 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     # test temporarily replaces the registry after ``space`` has already loaded.
     from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
 
-    out = dict(tuning_knob_items(knobs))
-    # A previously stamped row can carry the family's bare OFF together with a later
-    # axis-scoped decision (for example ``REDUCE=''`` plus ``REDUCE@a0='coop'``).
-    # The scoped spelling is the exact tree-site decision; retaining the bare spelling
-    # would fan OFF across every eligible site during replay and make the row ambiguous.
-    scoped_families = {family_of(name) for name in out if "@" in name}
-    for family in scoped_families:
-        bare = out.get(family)
-        if bare == "":
-            out.pop(family)
-    # The MIRROR rule: a scoped OFF names a site that DECLINED, which is exactly what stamping
-    # nothing at that site says — realization drops the key entirely, so keeping it would spell one
-    # configuration two ways (the row would never equal its own realized stamp) and, beside a bare
-    # non-OFF value, would even contradict it (a bare pin fans out over every eligible site —
-    # ``pin_key_matches`` — so the same site would be pinned twice with different values). An OFF
-    # value carries no site information; the family-level OFF fill below says all of it.
-    for name in [n for n in out if "@" in n and out[n] == ""]:
-        out.pop(name)
+    # The no-information spellings go first (:func:`drop_uninformative_scopes`), THEN the fill.
+    out = drop_uninformative_scopes(knobs)
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:

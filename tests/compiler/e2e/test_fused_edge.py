@@ -328,9 +328,10 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
 def test_fused_rmsnorm_linear_unpinned():
     """UNPINNED greedy on the fused norm→linear: the merged fork (coop ``Map`` rows + the
     computed-A bilinear fold's warp rows) lowers and matches numpy whichever row the prior picks —
-    the fork-integrity e2e (runs on any CUDA device; option-0 stays the coop row). The pick may
-    be the 1-kernel fused row or a 2-kernel redundant-statistic split row; both are legal fork
-    members on this decode-M shape."""
+    the fork-integrity e2e (runs on any CUDA device). Which row wins is not this test's business:
+    the pick may be a serial or cooperative ``Map`` row, a warp row, the 1-kernel fused form or a
+    2-kernel redundant-statistic split; every one of them is a legal fork member on this decode-M
+    shape and every one of them must lower and be accurate."""
     S, H, inter = 32, 256, 512
     _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False, kernels=(1, 2))
 

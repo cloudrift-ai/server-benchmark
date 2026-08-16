@@ -27,7 +27,7 @@ geometry."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.tile import Channel, Fold, Store
@@ -41,12 +41,11 @@ def _idx_vars(index) -> set[str]:
 
 
 def _idx_vars_deep(stmts) -> set:
-    """Every free Var name across the index exprs reachable in ``stmts`` (deep)."""
+    """Every free Var name across the coordinate exprs reachable in ``stmts`` (deep) — indices and
+    ``Select`` predicates alike (``Stmt.exprs``)."""
     out: set = set()
     for s in stmts:
-        idx = getattr(s, "index", None)
-        if idx:
-            out |= {v for e in idx for v in e.free_vars()}
+        out |= {v for e in s.exprs() for v in e.free_vars()}
         for b in s.nested():
             out |= _idx_vars_deep(list(b))
     return out
@@ -54,8 +53,11 @@ def _idx_vars_deep(stmts) -> set:
 
 def map_cone(body: list, root: str) -> list | None:
     """The backward cone of SSA ``root`` within ``body`` — the fused producer's compute, in body
-    order. ``None`` unless every cone stmt is a scalar ``Load`` or a pointwise ``Assign`` (a pure
-    MAP cone — a reduce-bearing cone, e.g. an rmsnorm scale, is not compute-fillable per cell)."""
+    order. ``None`` unless every cone stmt is a scalar ``Load``, a pointwise ``Assign``, or a
+    coordinate-predicated ``Select`` (a pure MAP cone — a reduce-bearing cone, e.g. an rmsnorm
+    scale, is not compute-fillable per cell). A ``Select`` is a pure value binding of the cell's
+    own coordinates (an attention mask's additive term), so it fills per cell like any other
+    pointwise stmt; its coordinates decide the K seam through :func:`~..ir.tile.ir.refs_axis`."""
     defs: dict[str, Stmt] = {}
     for st in body:
         for d in st.defines():
@@ -76,11 +78,11 @@ def map_cone(body: list, root: str) -> list | None:
             # simply ignores names not defined by the body.
             need.extend(st.deps())
             continue
-        if isinstance(st, Assign):
+        if isinstance(st, (Assign, Select)):
             cone.append(st)
-            need.extend(st.args)
+            need.extend(st.deps())
             continue
-        return None  # an Accum / Loop / Select in the cone — not a pure MAP producer
+        return None  # an Accum / Loop in the cone — not a pure MAP producer
     order = {id(st): i for i, st in enumerate(body)}
     return sorted(cone, key=lambda st: order[id(st)])
 
@@ -403,7 +405,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     # its scalar epilogue) — anything else is a shape this binding doesn't understand.
     stat_defs = {red.out} | {nm for s in stat_epi for nm in s.defines()}
     cone_defs = {nm for st in cone for nm in st.defines()}
-    free_refs = {a for st in cone if isinstance(st, Assign) for a in st.args if a not in cone_defs}
+    free_refs = {a for st in cone if isinstance(st, (Assign, Select)) for a in st.deps() if a not in cone_defs}
     if not free_refs or not free_refs <= stat_defs:
         return None  # a stat-free cone is the demoted option's shape, not ours
     # The statistic prologue must be row-local: its gmem reads may index (m, its own reduce axis)

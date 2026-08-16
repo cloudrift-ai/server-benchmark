@@ -3,7 +3,7 @@
 Response fixtures are captured from real CloudRift API calls.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
 import pytest
@@ -199,6 +199,50 @@ async def test_resolve_team_id_rejects_missing_team(mock_api):
     mock_api.return_value = {"teams": [{"id": "team-research", "name": "Research"}]}
 
     with pytest.raises(TerminalProvisionError, match="cannot access team 'Robots'"):
+        await resolve_team_id(API_KEY, "Robots", API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_accepts_authenticated_implicit_team_key(mock_api):
+    request = httpx.Request("POST", f"{API_URL}/api/v1/teams/list")
+    unauthorized = httpx.HTTPStatusError(
+        "team keys cannot list teams",
+        request=request,
+        response=httpx.Response(401, request=request),
+    )
+    mock_api.side_effect = [unauthorized, {"balance": 100.0}]
+
+    result = await resolve_team_id(API_KEY, "Robots", API_URL, allow_implicit_team_key=True)
+
+    assert result is None
+    assert mock_api.await_args_list == [
+        call(
+            "POST",
+            "/api/v1/teams/list",
+            {"selector": "Mine", "with_members": False, "with_account_info": False},
+            API_KEY,
+            API_URL,
+        ),
+        call(
+            "POST",
+            "/api/v2/account/info",
+            {"selector": "ByToken", "with_auto_top_up": False},
+            API_KEY,
+            API_URL,
+        ),
+    ]
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_keeps_implicit_team_key_opt_in(mock_api):
+    request = httpx.Request("POST", f"{API_URL}/api/v1/teams/list")
+    mock_api.side_effect = httpx.HTTPStatusError(
+        "unauthorized",
+        request=request,
+        response=httpx.Response(401, request=request),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
         await resolve_team_id(API_KEY, "Robots", API_URL)
 
 

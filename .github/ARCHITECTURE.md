@@ -73,8 +73,9 @@ priority. If none can run, it chooses a `maintained` recipe whose committed `RES
 timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
 ID breaks remaining ties. No eligible deployment is a successful no-op.
 
-The workflow resolves the exact visible CloudRift team named `Robots` and includes its UUID in every rent request, so
-the VM is team-owned and visible to team members. It attaches `emmy`, workflow, and GitHub job tags, makes at most
+The workflow accepts a Robots-scoped CloudRift team API key, whose authenticated principal makes every rent and tag
+query team-owned without a request `team_id`. With a user API key it instead resolves the exact visible team named
+`Robots` and includes its UUID in every rent request. It attaches `emmy`, workflow, and GitHub job tags, makes at most
 three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete tag set
 before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular team
 rental. The workflow never falls back to GCP or changes the selected GPU type/count.

@@ -1,15 +1,16 @@
 # GitHub Actions architecture
 
 GitHub Actions owns pull-request checks, package publication, and automated model discovery and onboarding.
-Pull-request checks use the organization-level `ubuntu-runners` builder group, while package publication remains on
-GitHub-hosted runners. Agent-driven model work uses the separate `agent-runners` group with the `agents` label because
-it can exceed ordinary hosted-runner limits and needs the tracked skills and CloudRift inference endpoint.
+Pull-request lint and packaging use GitHub-hosted runners, while the compiler-heavy test job uses the organization-level
+`ubuntu-runners` builder group. Package publication remains GitHub-hosted. Agent-driven model work uses the separate
+`agent-runners` group with the `agents` label because it can exceed ordinary hosted-runner limits and needs the tracked
+skills and CloudRift inference endpoint.
 
 ## Workflow overview
 
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
-| **Tests** | Pull request to `main` | `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
+| **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
@@ -19,13 +20,13 @@ from a developer checkout through the tracked `.agents/skills/run-experiment` sk
 
 ## Pull-request checks
 
-**Tests** runs three parallel jobs in the organization `ubuntu-runners` builder group and installs the CI dependency
-set on Python 3.13. A newer commit cancels the previous run for the same pull request. The lint job runs Ruff check and
-format verification; the test job runs `make test`, including `tests/github/` coverage for helpers under
+**Tests** runs three parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the
+previous run for the same pull request. The GitHub-hosted lint job runs Ruff check and format verification. The
+compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/github/` coverage for helpers under
 `.github/scripts/`. Hugging Face downloads used by tests are cached because anonymous shared-runner traffic is
-rate-limited. A separate bare-Python job runs `make pypi-dist`, the exact non-publishing build path used by the release
-workflow, and requires one wheel and one source distribution. This workflow has no write permission and does not use
-deployment credentials.
+rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact non-publishing build path used
+by the release workflow, and requires one wheel and one source distribution. This workflow has no write permission
+and does not use deployment credentials.
 
 ## Package publication
 

@@ -11,8 +11,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on:
-      group: ubuntu-runners
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -59,8 +58,7 @@ jobs:
 
   package:
     name: PyPI package dry run
-    runs-on:
-      group: ubuntu-runners
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

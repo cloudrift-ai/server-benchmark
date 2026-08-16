@@ -78,7 +78,7 @@ ID breaks remaining ties. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
-every rent then includes the UUID and disables public-IP allocation. It attaches `emmy`, workflow, and GitHub job tags,
+every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches `emmy`, workflow, and GitHub job tags,
 makes at most three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete
 tag set before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular
 team rental. The workflow never falls back to GCP or changes the selected GPU type/count.

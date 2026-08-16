@@ -259,7 +259,6 @@ async def test_terminate_instances_by_tags_terminates_every_active_match(mock_ap
             {"id": "inst-old", "status": "Terminated"},
         ],
         [{"id": "inst-1", "status": "Deactivating"}],
-        [{"id": "inst-1", "status": "Terminated"}, {"id": "inst-2", "status": "Inactive"}],
     ]
 
     result = await terminate_instances_by_tags(API_KEY, ["emmy", "gh-job:7"], API_URL, audit_delay=0)
@@ -272,7 +271,7 @@ async def test_terminate_instances_by_tags_terminates_every_active_match(mock_ap
         API_KEY,
         API_URL,
     )
-    mock_sleep.assert_awaited_once_with(0)
+    mock_sleep.assert_not_awaited()
 
 
 @patch("emmy.provisioning.cloudrift.asyncio.sleep", new_callable=AsyncMock)

@@ -29,6 +29,7 @@ DEFAULT_CLOUDINIT_URL = "https://storage.googleapis.com/cloudrift-vm-disks/cloud
 # change request/response shapes (e.g. add another default-off field mask) under us.
 API_VERSION = "2026-08-05"
 TERMINAL_INSTANCE_STATUSES = {"Deleted", "Failed", "Inactive", "Terminated"}
+CLEANUP_ACCEPTED_INSTANCE_STATUSES = TERMINAL_INSTANCE_STATUSES | {"Deactivating"}
 
 
 def select_image_url(instance_type):
@@ -235,11 +236,11 @@ async def list_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL):
 
 
 async def terminate_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL, audit_attempts=12, audit_delay=10):
-    """Terminate all active instances carrying every supplied tag and verify they stop."""
+    """Terminate all active tagged instances and verify CloudRift starts stopping them."""
     tags = _validate_instance_tags(tags)
     instances = await list_instances_by_tags(api_key, tags, api_url)
     instance_ids = [
-        instance["id"] for instance in instances if instance.get("id") and instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+        instance["id"] for instance in instances if instance.get("id") and instance.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
     ]
     if instance_ids:
         logger.info(f"Terminating CloudRift instances selected by tags {tags}: {instance_ids}")
@@ -255,7 +256,7 @@ async def terminate_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL, au
         remaining = [
             instance
             for instance in await list_instances_by_tags(api_key, tags, api_url)
-            if instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+            if instance.get("status") not in CLEANUP_ACCEPTED_INSTANCE_STATUSES
         ]
         if not remaining:
             return instance_ids

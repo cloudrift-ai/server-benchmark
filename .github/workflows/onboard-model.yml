@@ -326,7 +326,7 @@ jobs:
         if: steps.selection.outputs.selected == 'true'
         run: |
           ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
-          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: false\n' \
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
             "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
           chmod 600 "$PROVIDER_CONFIG"
 

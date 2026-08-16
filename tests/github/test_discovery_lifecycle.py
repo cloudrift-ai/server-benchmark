@@ -42,6 +42,7 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     assert load_index < selection_index
     assert 'git archive "$WORKFLOW_SHA"' in load_script
     assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
+    assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 

@@ -177,6 +177,7 @@ jobs:
           mkdir -p "$WORKFLOW_SOURCE"
           git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
           echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
+          echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
 
       - name: Select one available deployment
         id: selection

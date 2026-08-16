@@ -105,7 +105,8 @@ directly; they never import from another test module or from `conftest.py`.
   best-effort recipes keep the full serving contract coverage, while obsolete recipes remain covered by lifecycle
   validation. Catalog and command tests cover tag-filtered inventory and validated shell creation. Repository-
   automation tests validate required lifecycle rationales and the one-to-three-entry onboarding deployment matrix
-  through that shared library.
+  through that shared library. Qualification-manifest tests also pin the requested operation mode, exact model ID,
+  target, and preserved lifecycle tag before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

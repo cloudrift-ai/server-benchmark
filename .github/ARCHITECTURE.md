@@ -11,7 +11,7 @@ tracked skills and CloudRift inference endpoint.
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff and the complete test suite. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
-| **Onboard model** | Manual dispatch | Self-hosted `agents` | Produces measured model artifacts on an exact GPU target and updates a PR. |
+| **Verify or onboard model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
@@ -64,31 +64,40 @@ provider alias, while `.opencode/agents/` owns the separate discovery and onboar
 tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
 expose the same packages through OpenCode's native skill tool.
 
-### Direct onboarding
+### Nightly verification and direct onboarding
 
-**Onboard model** accepts an exact Hugging Face model ID, exact GPU name/count, multimodal qualification mode, optional
-existing onboarding PR, and explicit image-publication authorization. The job has a six-hour limit and gives the
-agent an earlier deadline so artifact validation and cleanup retain time. When the PR contains a discovery shell, the
-qualified recipe replaces it and changes `onboarding`/`untested` to `best-effort`; later discovery runs can promote it
-to the maintained set.
+**Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its mechanical selector reads
+the recipe inventory and CloudRift VM variant availability, without filtering on public-IP supply. It considers only
+declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the first
+priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest last-change
+timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
+ID breaks remaining ties. No eligible deployment is a successful no-op.
 
-The workflow uses `gh` to resolve an existing labeled onboarding PR or prepares a new artifact branch, provisions
-exactly the requested platform through CloudRift or optional GCP, and passes the resulting SSH target to the tracked
-`onboard-model` skill. If neither provider can supply the exact target, the workflow fails; it does not silently change
-GPU type or count. The skill produces the recommended recipe, its compact serving report, and reproducible experiment
-YAML. Raw benchmark output, experiment reports, dated run snapshots, and onboarding summaries are not repository
-artifacts. An Emmy-tuned prebuilt image is produced only when the architecture, quantization, trace, serving, and
-release gates pass.
+The workflow resolves the exact visible CloudRift team named `Robots` and includes its UUID in every rent request, so
+the VM is team-owned and visible to team members. It attaches `emmy`, workflow, and GitHub job tags, makes at most
+three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete tag set
+before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular team
+rental. The workflow never falls back to GCP or changes the selected GPU type/count.
+
+The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
+`onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
+Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
+lifecycle tag. The job has a 24-hour limit and gives the agent a 23.5-hour deadline so artifact validation and cleanup
+retain 30 minutes. Raw benchmark output, experiment reports, dated run snapshots, and qualification summaries are not
+repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes. Nightly image
+publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
-The workflow then commits those artifacts, updates or opens the onboarding PR, and uses renewable GitHub App
-credentials for the long-running push path.
+The validator also checks the requested mode, exact recipe model, and expected lifecycle tag. The workflow then
+commits those artifacts, rebases on the latest default branch, and updates or opens the rolling model lifecycle PR
+using renewable GitHub App credentials for the long-running push path.
 
 ### Discovery lifecycle PR
 
-**Discover model** runs nightly or by manual dispatch. It updates one rolling draft PR rather than opening one PR per
-model, and the workflow fails closed if more than one rolling discovery PR exists. It also adopts one unpaired
+**Discover model** runs nightly or by manual dispatch. Discovery and qualification share a static concurrency group
+and one rolling draft PR rather than opening one PR per model. Each workflow fails closed if more than one rolling PR
+exists. It also adopts one unpaired
 discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
 agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
@@ -127,11 +136,11 @@ GitHub Actions, and GitHub CLI credentials from every agent shell subprocess. On
 required Hugging Face and Docker Hub credentials. The self-hosted runner must not carry unrelated ambient cloud
 credentials.
 
-`emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID or GCP creates the
-named instance. The lease binds the provider handle, exact request, workflow owner, and SSH target. Cleanup through
-`emmy vm delete lease` accepts only that lease, retries deletion, and audits only the recorded handle; it never
-enumerates or deletes unrelated VMs. An `if: always()` workflow step performs cleanup after OpenCode exits, then
-`emmy vm audit lease` fails the job if its owned VM is still active.
+`emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID. The lease binds the
+provider handle, exact request, workflow owner, and SSH target. Cleanup first deletes and audits that handle, then
+lists and terminates every still-active CloudRift VM carrying the complete run-unique tag set. The tag audit catches a
+VM created before the lease was durable without selecting another job's rentals. An `if: always()` step performs both
+paths after OpenCode exits and fails the job if either ownership audit leaves a VM active.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.
@@ -140,11 +149,12 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 
 Agent workflows use these repository secrets as applicable:
 
-- `CLOUDRIFT_API_KEY` for model discovery and CloudRift provisioning;
+- `CLOUDRIFT_API_KEY` for model discovery, Robots-team resolution, availability, and CloudRift provisioning;
 - `HF_TOKEN` for gated checkpoints;
-- `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image;
-- optional `GCP_SERVICE_ACCOUNT_KEY` and `GCP_SERVICE_ACCOUNT` for GCP capacity.
+- `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
 `https://inference.cloudrift.ai/v1`.
+`NIGHTLY_ONBOARD_PUBLISH_IMAGE=true` authorizes a nightly qualification to publish an otherwise eligible image; it is
+false when unset.

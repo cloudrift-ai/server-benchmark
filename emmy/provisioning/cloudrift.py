@@ -87,6 +87,7 @@ async def _rent_instance(
     network=None,
     node_id=None,
     tags=None,
+    team_id=None,
 ):
     """Rent a new CloudRift VM instance.
 
@@ -97,6 +98,7 @@ async def _rent_instance(
         node_id: optional node UUID; when set, rents on exactly that node via the
             ``ByNodeId`` selector instead of letting the provider place the instance.
         tags: optional list of free-form labels attached to the rental.
+        team_id: optional team UUID that owns the rental.
     """
     vm_config = {
         "ssh_key": {"PublicKeys": ssh_public_keys},
@@ -120,6 +122,8 @@ async def _rent_instance(
         data["billing_exempt"] = True
     if network is not None:
         data["network"] = network
+    if team_id is not None:
+        data["team_id"] = team_id
     if tags:
         data["tags"] = list(tags)
     return await _api_request("POST", "/api/v1/instances/rent", data, api_key, api_url, dry_run)
@@ -164,6 +168,82 @@ async def _terminate_instance(api_key, instance_id, api_url=DEFAULT_API_URL, dry
     """
     data = {"selector": {"ById": [instance_id]}}
     return await _api_request("POST", "/api/v1/instances/terminate", data, api_key, api_url, dry_run)
+
+
+async def list_available_instance_types(api_key, api_url=DEFAULT_API_URL):
+    """Return VM instance-variant names that CloudRift currently reports available."""
+    data = {"selector": {"ByServiceAndLocation": {"services": ["vm"]}}}
+    result = await _api_request("POST", "/api/v1/instance-types/list", data, api_key, api_url)
+    available = set()
+    for instance_type in result.get("instance_types", []):
+        for variant in instance_type.get("variants", []):
+            name = variant.get("name")
+            if isinstance(name, str) and variant.get("available_nodes", 0) > 0:
+                available.add(name)
+    return available
+
+
+async def resolve_team_id(api_key, team_name, api_url=DEFAULT_API_URL):
+    """Resolve one exact team name visible to the API key into its UUID."""
+    data = {"selector": "Mine", "with_members": False, "with_account_info": False}
+    result = await _api_request("POST", "/api/v1/teams/list", data, api_key, api_url)
+    matches = [team.get("id") for team in result.get("teams", []) if team.get("name") == team_name and team.get("id")]
+    if not matches:
+        raise TerminalProvisionError(f"CloudRift API key cannot access team {team_name!r}")
+    if len(matches) > 1:
+        raise TerminalProvisionError(f"CloudRift team name {team_name!r} is ambiguous")
+    return matches[0]
+
+
+def _validate_instance_tags(tags):
+    if not tags or not all(isinstance(tag, str) and tag.strip() for tag in tags):
+        raise ValueError("CloudRift instance tag selection requires at least one non-empty tag")
+    return list(dict.fromkeys(tag.strip() for tag in tags))
+
+
+async def list_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL):
+    """List instances carrying every supplied tag."""
+    tags = _validate_instance_tags(tags)
+    data = {
+        "selector": {"ByTags": {"all": tags, "any": []}},
+        "mask": {
+            "with_connection_info": False,
+            "with_hardware_info": False,
+            "with_usage_info": False,
+        },
+    }
+    result = await _api_request("POST", "/api/v1/instances/list", data, api_key, api_url)
+    return result.get("instances", [])
+
+
+async def terminate_instances_by_tags(api_key, tags, api_url=DEFAULT_API_URL, audit_attempts=12, audit_delay=10):
+    """Terminate all active instances carrying every supplied tag and verify they stop."""
+    tags = _validate_instance_tags(tags)
+    instances = await list_instances_by_tags(api_key, tags, api_url)
+    instance_ids = [
+        instance["id"] for instance in instances if instance.get("id") and instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+    ]
+    if instance_ids:
+        logger.info(f"Terminating CloudRift instances selected by tags {tags}: {instance_ids}")
+        await _api_request(
+            "POST",
+            "/api/v1/instances/terminate",
+            {"selector": {"ById": instance_ids}},
+            api_key,
+            api_url,
+        )
+
+    for _ in range(audit_attempts):
+        remaining = [
+            instance
+            for instance in await list_instances_by_tags(api_key, tags, api_url)
+            if instance.get("status") not in TERMINAL_INSTANCE_STATUSES
+        ]
+        if not remaining:
+            return instance_ids
+        await asyncio.sleep(audit_delay)
+    remaining_ids = [instance.get("id") for instance in remaining]
+    raise RuntimeError(f"CloudRift instances remain active for tags {tags}: {remaining_ids}")
 
 
 async def _get_instance_info(api_key, instance_id, api_url=DEFAULT_API_URL, dry_run=False):
@@ -412,6 +492,7 @@ async def create_instance(
     allocation_observer=None,
     node=None,
     tags=None,
+    team_id=None,
 ):
     """Create a CloudRift VM instance.
 
@@ -423,6 +504,7 @@ async def create_instance(
             :func:`resolve_node_id`); placement fallback does not apply to a pinned node.
         tags: rental labels; ``None`` resolves through :func:`emmy.config.rental_tags`
             (``EMMY_RENTAL_TAGS`` override, default ``["emmy"]``).
+        team_id: optional team UUID that owns the rental.
         extra_public_keys: optional list of additional SSH public key strings to
             install in the VM's authorized_keys alongside the key from
             ``ssh_key_path`` (e.g. ["ssh-ed25519 AAAA bob@host"]).
@@ -473,6 +555,7 @@ async def create_instance(
             network=network,
             node_id=node_id,
             tags=tags,
+            team_id=team_id,
         )
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code

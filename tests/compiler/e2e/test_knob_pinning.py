@@ -391,9 +391,14 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
 def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
     """A graph-wide warp pin can be inapplicable to a mixed-dtype sibling. The scheduler then
     leaves that term unmapped; scalar materialization must restore its free-axis grid rather than
-    emit loads and stores that reference coordinates no thread binds."""
+    emit loads and stores that reference coordinates no thread binds.
+
+    The ``a`` edge is 1-byte here: a 16-bit ``a`` the atom cannot bind directly rides the
+    CONVERTING smem compute fill instead (the fill's slab store converts), so it is realizable and
+    would not exercise the fallback. The fill is 16-bit-only, which leaves the f8 edge with no warp
+    row at all — the drop this guardrail is written against."""
     from emmy.compiler.context import Context
-    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.dtype import F8E4M3, F16, F32
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.cuda.ir import CudaOp
@@ -411,7 +416,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
         monkeypatch.setenv(f"EMMY_{key}", value)
 
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), F8E4M3), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16), node_id="w")
     graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
     graph.inputs, graph.outputs = ["x", "w"], ["o"]
@@ -420,6 +425,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
     [source] = [node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert "int a0 =" in source and "int a1 =" in source
     assert "if (_gid < 32)" in source
+    assert "mma.sync" not in source
 
 
 @requires_cuda

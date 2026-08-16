@@ -636,15 +636,15 @@ emmy fit --folds 0 --out _tune/fits/ab    # full-train only, fixed run dir for a
 ## Experiments
 
 Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory keeps the recipe and
-one durable snapshot of its last run:
+one durable snapshot per exact GPU platform:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
   <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
-  results.tar.gz          # Git LFS archive of the last run
-  <row>.experiment.yaml
-  RESULTS.md
+  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run
+  rtx5090x1_<row>.experiment.yaml
+  RESULTS.md                # one interpretation across retained platforms
 ```
 
 ```bash
@@ -652,9 +652,9 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
 Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
-the raw-results archive, assemble the system-only records and a thoughtful `RESULTS.md` interpretation, and commit the
-complete last-run snapshot. The CLI and experiment code do not interpret measurements; the skill performs the
-intelligent review and the CLI itself performs no Git operation.
+the platform's named raw-results archive and system-only records, update its section in the shared `RESULTS.md`, and
+commit the complete platform snapshot without changing other platform results. The CLI and experiment code do not
+interpret measurements; the skill performs the intelligent review and the CLI itself performs no Git operation.
 
 ## Adding a New VM Provider
 

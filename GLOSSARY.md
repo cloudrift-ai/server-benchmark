@@ -151,7 +151,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   row identity and matrix parameters, Git revision and dirty flag, execution lifecycle, and generic system
   information. It never contains interpreted or parsed experiment measurements.
 - **Raw experiment results** — Logs and declared measurement files preserved in an ignored timestamped local run
-  directory. The last run is committed as an LFS-backed `results.tar.gz`, not as a second structured result format.
+  directory. Each exact GPU platform's last run is committed as an LFS-backed
+  `results_<gpu-short>x<gpu-count>.tar.gz`, not as a second structured result format.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is

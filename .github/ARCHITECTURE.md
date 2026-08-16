@@ -91,9 +91,11 @@ The workflow passes the resulting SSH target and an explicit `onboarding` or `ve
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
 Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
 lifecycle tag. The job has a 24-hour limit and gives the agent a 23.5-hour deadline so artifact validation and cleanup
-retain 30 minutes. Raw benchmark output, experiment reports, dated run snapshots, and qualification summaries are not
-repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes. Nightly image
-publication is disabled unless `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
+retain 30 minutes. The shared serving experiment retains one LFS archive and top-level row-record set per exact GPU
+platform plus one cumulative `RESULTS.md`; a run replaces only its platform snapshot. Ignored dated run directories,
+loose benchmark output, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image is
+produced only when every release gate passes. Nightly image publication is disabled unless
+`NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
 The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
 `github.sha` whose workflow definition started the job. This keeps normal scheduled runs reproducible and lets a
@@ -102,9 +104,12 @@ The selector runs the exact-SHA catalog logic against the rolling worktree's `re
 and priority always reflect the branch that the agent will update.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, and canonical-golden paths. The validator mechanically includes the
-separately declared recipe, report, and retained experiment recipes in the staging set, while optional outputs must
-remain in `artifacts`; unmanifested or exploratory output is rejected.
+allowed recipe, experiment, serving-image, and canonical-golden paths. The validator requires the shared experiment
+recipe and report, the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and matching current-platform row
+records.
+It rejects changes to another platform snapshot and requires the current archive to be created or updated. Optional
+outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. Git LFS is configured locally
+before staging so the normal push uploads the archive object with the rolling branch.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
 model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,

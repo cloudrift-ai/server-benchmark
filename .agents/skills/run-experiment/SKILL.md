@@ -2,15 +2,17 @@
 name: run-experiment
 description: >-
   Run or rerun Emmy experiment recipes, including requests to adjust an experiment harness before running it, then
-  preserve the latest compressed raw results, system-only YAML experiment records, and a thoughtful RESULTS.md
-  interpretation. Use for requests such as "run this experiment", "benchmark this recipe", "rerun this on a GPU", or
-  "customize and execute this Emmy experiment". Interpret results through intelligent review, never repository code.
+  preserve per-platform compressed raw results, system-only YAML experiment records, and a thoughtful cumulative
+  RESULTS.md interpretation. Use for requests such as "run this experiment", "benchmark this recipe", "rerun this on
+  a GPU", or "customize and execute this Emmy experiment". Interpret results through intelligent review, never
+  repository code.
 ---
 
 # Run Experiment
 
-Produce one durable snapshot of the last requested run. Use Emmy for execution. Preserve measurements as raw evidence
-and review them yourself; do not add a result-conversion, plotting, manifest, analysis, or report-generation script.
+Produce one durable snapshot for each requested exact GPU platform. Use Emmy for execution. Preserve measurements as
+raw evidence and review them yourself; do not add a result-conversion, plotting, manifest, analysis, or
+report-generation script.
 
 ## Prepare
 
@@ -24,7 +26,8 @@ and review them yourself; do not add a result-conversion, plotting, manifest, an
 
 ## Run
 
-Run the selected directories in one Emmy invocation when practical:
+Run the selected directories in one Emmy invocation per exact GPU name/count when practical. Separate invocations
+keep each platform archive self-contained:
 
 ```bash
 ./venv/bin/emmy bench experiments/<model>/<experiment> [host and filter flags]
@@ -40,7 +43,7 @@ retain the machine. Verify the records were updated after cleanup.
 
 ## Assemble the durable snapshot
 
-For each selected experiment directory:
+For each selected experiment directory and exact GPU name/count:
 
 1. Load `recipe.yaml` and every `<timestamp>/*.experiment.yaml` from the run just completed. Verify that records cover
    the expected filtered rows, use one run ID, parse as YAML, contain generic system information, and have a terminal
@@ -49,16 +52,20 @@ For each selected experiment directory:
    compare the intended lanes, calculate only quantities needed for a clear interpretation, and inspect repeat
    stability, failures, correctness evidence, and protocol limitations. Do this as intelligent review, not with code
    added to the experiment recipe or repository.
-3. Remove only the prior top-level `*.experiment.yaml` files for that exact experiment. Copy the latest records beside
-   `recipe.yaml`, preserving the timestamped local directory exactly as Emmy produced it.
-4. Replace `<experiment>/results.tar.gz` with a gzip-compressed tar archive whose root member is the latest timestamped
-   directory. Do not delete that local directory. Track `experiments/**/results.tar.gz` with Git LFS.
-5. Overwrite `<experiment>/RESULTS.md` with a thoughtful, evidence-backed interpretation. Include the question,
-   protocol, result summary, repeat variation, comparisons, conclusion, limitations, timestamp, run ID, machine and
-   software information, row status, failures, archive path, and member names. Distinguish direct comparisons from
-   directional ones and avoid claims the harness does not support.
-6. Ensure the durable experiment contains `recipe.yaml`, `results.tar.gz`, top-level experiment records, and
-   `RESULTS.md`. Do not retain durable records, archives, or reports from an earlier run.
+3. Derive the platform key as `<gpu-short>x<gpu-count>` with `emmy.hardware.gpu_short_name`, for example `rtx4090x1`.
+   Remove only prior top-level `<platform-key>*.experiment.yaml` files and copy the latest records beside `recipe.yaml`.
+   Preserve every other platform's records and the timestamped local directory exactly as Emmy produced it.
+4. Replace `<experiment>/results_<platform-key>.tar.gz` with a gzip-compressed tar archive whose root member is the
+   latest timestamped directory. Do not delete that local directory or another platform's archive. Track
+   `experiments/**/results_*.tar.gz` with Git LFS.
+5. Update the current platform section in `<experiment>/RESULTS.md` with a thoughtful, evidence-backed interpretation.
+   Preserve other platform sections. Include the question, protocol, result summary, repeat variation, comparisons,
+   conclusion, limitations, timestamp, run ID, machine and software information, row status, failures, archive path,
+   and member names. Distinguish direct comparisons from directional ones and avoid claims the harness does not
+   support.
+6. Ensure the durable experiment contains `recipe.yaml`, one cumulative `RESULTS.md`, and for every retained platform
+   one named archive plus matching top-level records. The current platform's archive, records, and report section must
+   describe the same most recent run; do not modify another platform's snapshot.
 
 ## Verify and commit
 
@@ -69,10 +76,11 @@ reported value and conclusion back to the raw files and protocol.
 Force-stage only the requested experiments' durable snapshot because `experiments/` is ignored by default:
 
 ```bash
-git lfs track "experiments/**/results.tar.gz"
+git lfs track "experiments/**/results_*.tar.gz"
 git add .gitattributes
-git add -f experiments/<model>/<experiment>/results.tar.gz \
-  experiments/<model>/<experiment>/*.experiment.yaml \
+git add -f -A -- experiments/<model>/<experiment>/recipe.yaml \
+  experiments/<model>/<experiment>/results_<gpu-short>x<gpu-count>.tar.gz \
+  ':(glob)experiments/<model>/<experiment>/<gpu-short>x<gpu-count>*.experiment.yaml' \
   experiments/<model>/<experiment>/RESULTS.md
 ```
 

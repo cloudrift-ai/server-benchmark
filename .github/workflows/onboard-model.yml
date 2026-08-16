@@ -127,6 +127,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Configure Git LFS
+        run: |
+          git lfs install --local
+          lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
+          grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
+            printf '%s\n' "$lfs_attribute" >> .git/info/attributes
+
       - name: Rebase existing branch on latest main
         id: rebase
         if: steps.rolling.outputs.branch != ''
@@ -423,8 +430,11 @@ jobs:
           {task}
           Do not select a model or GPU, provision or delete the VM, commit, push, or open/update a pull request.
           Always write the required atomic summary with mode set to {mode}, including experiment_artifacts with
-          retained experiment recipe.yaml files only. Put selected benchmark numbers in the final recipe's
-          RESULTS.md; do not retain raw results, experiment reports, dated run snapshots, or onboarding summaries.
+          the shared experiment recipe and RESULTS.md, the exact results_<gpu-short>x<gpu-count>.tar.gz archive, and
+          the retained top-level experiment records for this platform. Replace only this platform's archive and
+          records; preserve every other platform archive, record, and RESULTS.md section. Do not retain the ignored
+          dated run directory or onboarding summaries. Update the final recipe's RESULTS.md for this platform while
+          preserving still-valid measurements for its other platforms.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
           output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, and canonical golden YAML.
           """
@@ -495,7 +505,7 @@ jobs:
           git diff --exit-code -- .github .agents/skills/onboard-model .claude/skills/onboard-model
           test -z "$(git ls-files --others --exclude-standard -- \
             .github .agents/skills/onboard-model .claude/skills/onboard-model)"
-          ./venv/bin/python .github/scripts/onboarding_artifacts.py \
+          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/onboarding_artifacts.py" \
             --summary "$ONBOARD_SUMMARY" \
             --model-id "$MODEL_ID" \
             --gpu "$TARGET_GPU" \
@@ -504,6 +514,7 @@ jobs:
             --mode "$ONBOARD_MODE" \
             --expected-tag "$EXPECTED_LIFECYCLE" \
             --stage
+          git lfs status
           git diff --cached --check
           if git diff --cached --quiet; then
             echo "::error::Model qualification produced no repository artifacts"

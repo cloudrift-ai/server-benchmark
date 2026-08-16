@@ -13,17 +13,24 @@ Turn a Hugging Face model ID, an operation mode, and an exact `(GPU name, GPU co
 artifacts:
 
 - one recommended serving recipe under `recipes/<model>/recipe.yaml`;
-- reproducible qualification or comparison configurations under `experiments/<model>/`, without committed run output;
+- one reusable serving experiment under `experiments/<model>/` with a cumulative report, system-only row records,
+  and one Git LFS raw-results archive per exact GPU platform;
 - one compact, self-contained `recipes/<model>/RESULTS.md` only when a valid final deployment recipe exists;
 - a complete compiler golden under `emmy/compiler/pipeline/search/goldens/` when full coverage qualifies;
 - when Emmy is eligible, tuned kernels and a verified, prebuilt
   `cloudriftai/vllm-emmy-<model-slug>:<tag>` image.
 
-Repository storage is intentionally minimal. Do not commit experiment `RESULTS.md` files, benchmark JSON/TXT/logs,
-dated run snapshots, plots, compiler run summaries, partial working goldens, or onboarding-summary files unless the
-caller explicitly asks to retain a particular experiment result. Keep measurement output ignored or outside the
-checkout long enough to write the final recipe report, then remove task-owned copies from the checkout. Experiment
-YAML is reproducibility input and may remain committed.
+Repository storage retains reproducibility input and durable evidence for each qualified serving platform. In the
+serving experiment root, commit `recipe.yaml`, one cumulative `RESULTS.md`, top-level system-only experiment records,
+and `results_<gpu-short>x<gpu-count>.tar.gz` for each measured exact GPU name/count. Derive `<gpu-short>` with
+`emmy.hardware.gpu_short_name`; for example, a single RTX 4090 uses `results_rtx4090x1.tar.gz`. Track these archives
+with Git LFS. Do not commit the ignored dated run directory, loose benchmark JSON/TXT/logs, plots, compiler run
+summaries, partial working goldens, or onboarding-summary files.
+
+Use one serving experiment root for all GPU platforms that share the protocol. On a platform-specific run, replace
+only that platform's archive and top-level records, update only its section of the shared experiment `RESULTS.md`, and
+preserve every other platform archive, record, and report section. Reuse the existing serving experiment root when it
+already represents the protocol; otherwise create `experiments/<model>/serving/`.
 
 Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns deployed workloads and
 must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
@@ -80,15 +87,14 @@ duplicated in `extra_args`.
 
 ## 2. Create and validate a conservative baseline
 
-Create a provisional experiment recipe under
-`experiments/<model>/serving_<hardware-slug>/recipe.yaml`. Start with the smallest tensor-parallel size that fits the
-weights on the requested GPU count, conservative memory utilization and concurrency, and a short benchmark. Keep
-the target matrix exact.
+Create or update the shared experiment recipe under the model's serving experiment root. Start with the smallest
+tensor-parallel size that fits the weights on the requested GPU count, conservative memory utilization and
+concurrency, and a short benchmark. Keep the current target matrix row exact and preserve the other platform rows.
 
 Deploy before benchmarking:
 
 ```bash
-emmy deploy ssh --recipe experiments/<model>/serving_<hardware-slug> --ssh <target>
+emmy deploy ssh --recipe experiments/<model>/serving --ssh <target>
 ```
 
 Require all of these before measuring performance:
@@ -216,10 +222,12 @@ Use comparison lanes to select and explain the recommended configuration. Benchm
 section 5. Include the comparisons that matter for this model's decision and clearly identify the engine and
 configuration selected by `recipes/<model>/recipe.yaml`; do not force unrelated models into one table layout.
 
-Commit a canonical experiment `recipe.yaml` when the comparison configuration remains useful. Follow the repository's
-`run-experiment` skill for the final measurement: retain its last raw `results/` directory, top-level system-only
-experiment records, and factual experiment `RESULTS.md`, including failed-row evidence. Fold the measured winner into
-a single-variant serving recipe under `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block.
+Commit the canonical experiment `recipe.yaml` when the comparison configuration remains useful. Follow the
+repository's `run-experiment` skill for the final measurement. Store the run as
+`results_<gpu-short>x<gpu-count>.tar.gz`, replace only the current platform's top-level system-only experiment records,
+and update its section in the shared factual experiment `RESULTS.md`, including failed-row evidence. Preserve every
+other platform snapshot. Fold the measured winner into a single-variant serving recipe under
+`recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block.
 
 ## 7. Write the durable report
 
@@ -235,8 +243,9 @@ the recipe report directly; do not add a result-analysis script.
 Before writing performance numbers, find a successful experiment row and raw artifacts for the exact selected recipe
 configuration: model revision, engine image tag or digest, GPU name/count, precision policy, context, concurrency,
 workload, and engine knobs must all match. Re-run that lane with the existing `emmy bench` experiment when evidence
-is missing, stale, or does not identify the selected engine. Update the recipe report from the new measurement, but
-do not copy measurements into the experiment record or experiment artifact index.
+is missing, stale, or does not identify the selected engine. Update the current platform section of the recipe report
+from the new measurement while preserving still-valid sections for other platforms, but do not copy measurements
+into the experiment record or experiment artifact index.
 Never estimate a missing value, copy a competing engine's result, or combine metrics from different runs.
 
 Choose the report structure that makes this model's evidence easy to understand. A dense model, a quantized model, a
@@ -269,7 +278,7 @@ input, raw results, per-row system-only experiment records, and its factual last
 Before reporting success:
 
 ```bash
-emmy bench --dry-run experiments/<model>/serving_<hardware-slug>
+emmy bench --dry-run experiments/<model>/serving
 emmy deploy ssh --dry-run --recipe recipes/<model> --ssh <target>
 ```
 
@@ -287,8 +296,9 @@ Also verify:
   verified FAST_MATH pack for the exact serving shape;
 - `EMMY_FAST_MATH=1` appears in an Emmy recipe unless its accuracy gate regressed, and never appears in a
   mainstream-only recipe;
-- no experiment result, experiment `RESULTS.md`, dated run snapshot, or onboarding summary is staged unless the caller
-  explicitly requested that exact repository artifact;
+- the experiment snapshot contains the shared `recipe.yaml` and `RESULTS.md`, the exact platform's LFS archive and
+  top-level records, while other platform archives, records, and report sections remain unchanged;
+- no ignored dated run directory, loose benchmark output, or onboarding summary is staged;
 - tracked artifacts contain no credentials, absolute scratch paths, or VM identifiers;
 - deployed workloads are torn down and `docker logout` has run.
 
@@ -297,9 +307,10 @@ login, or no Docker login was performed because the stock-only path did not requ
 
 Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
 final line. Include the requested mode on success and failure. List every repository file created, modified, or deleted
-by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`, and only
-retained experiment recipe YAML in
-`experiment_artifacts`. Do not list or commit raw measurement output.
+by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`. In
+`experiment_artifacts`, list the shared experiment recipe and report, the current platform's compressed archive, and
+its retained top-level experiment records. List deleted prior records for the current platform in `artifacts`, but not
+in `experiment_artifacts`. Do not list unchanged artifacts from other platforms or the ignored dated run directory.
 
 ```json
 {
@@ -308,18 +319,24 @@ retained experiment recipe YAML in
   "model_id": "org/model",
   "target": {"gpu": "exact hardware.py name", "gpu_count": 1, "ssh": "user@host"},
   "recipe": "recipes/<model>/recipe.yaml",
-  "experiment": "experiments/<model>/serving_<hardware-slug>/recipe.yaml",
+  "experiment": "experiments/<model>/serving/recipe.yaml",
   "artifacts": [
     "recipes/<model>/recipe.yaml",
     "recipes/<model>/RESULTS.md",
     "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
-    "experiments/<model>/serving_<hardware-slug>/recipe.yaml"
+    "experiments/<model>/serving/recipe.yaml",
+    "experiments/<model>/serving/RESULTS.md",
+    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz",
+    "experiments/<model>/serving/<gpu-short>x<gpu-count>_<row-id>.experiment.yaml"
   ],
   "compiler_artifacts": [
     "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml"
   ],
   "experiment_artifacts": [
-    "experiments/<model>/serving_<hardware-slug>/recipe.yaml"
+    "experiments/<model>/serving/recipe.yaml",
+    "experiments/<model>/serving/RESULTS.md",
+    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz",
+    "experiments/<model>/serving/<gpu-short>x<gpu-count>_<row-id>.experiment.yaml"
   ],
   "report": "recipes/<model>/RESULTS.md",
   "compiler": {

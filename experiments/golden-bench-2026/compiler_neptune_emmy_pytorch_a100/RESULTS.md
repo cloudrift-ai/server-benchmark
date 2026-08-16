@@ -7,6 +7,11 @@ PyTorch. Across the three prefill families shared by both systems, PyTorch 2.13 
 available Neptune schedule by 11–20% geometric mean. Neptune was approximately tied on ordinary decode: its best
 available schedules were 1.07x faster than Inductor, while its fixed manual schedules were 0.99x as fast.
 
+This prefill result agrees with the Neptune paper once its baselines are separated correctly. The paper compares
+Neptune with tensor compilers in Table 2 and with manually optimized libraries in Table 4. On A100, its library table
+also reports that the best library beats Neptune on global, causal, and GQA prefill. The current PyTorch lane is a new
+comparison with `torch.compile`, not a reproduction of the paper's tensor-compiler table.
+
 Decode GQA is the clear Neptune result. Neptune was 3.01x faster than Inductor by geometric mean across all eight
 sequence lengths, with per-shape speedups from 1.68x to 4.54x. Inductor itself was 7.67x faster than eager PyTorch on
 that family, so Neptune's advantage remains after using a recent compiler baseline rather than the PyTorch 2.6 stack
@@ -35,6 +40,49 @@ Best-available Neptune beat Inductor on 15 of the 40 individual shapes: two pref
 decode-GQA setups. The decode-GQA speedup increased with context, from 1.68x at sequence 256 to 4.54x at sequence
 32768. By contrast, Neptune's best prefill results ranged from 0.76x to 1.19x Inductor across individual shapes.
 
+## Alignment with the Neptune paper
+
+The [Neptune paper](https://arxiv.org/abs/2510.08726) reports the geometric-mean speedup of Neptune over the fastest
+manually optimized library in Table 4. To compare with that table, the replay values below use the arithmetic mean of
+the 15 projected GPU times for each implementation and then the geometric mean across the eight sequence lengths.
+This is the closest aggregation available in the durable Nsight exports to the paper's mean-of-15 kernel rule. Values
+above 1.00x favor Neptune.
+
+| Operator | Paper, A100 | This artifact replay | Difference |
+| --- | ---: | ---: | ---: |
+| Prefill global | 0.84x | 0.79x | -5.5% |
+| Prefill causal | 0.81x | 0.79x | -2.7% |
+| Prefill GQA | 0.80x | 0.78x | -3.1% |
+| Decode causal | 0.99x | 1.05x | +6.1% |
+| Decode GQA | 1.24x | 1.19x | -3.9% |
+| Prefill windowed | 0.70x | 0.68x | -2.3% |
+
+The six comparable library results agree within 2.3–6.1%. In particular, both the paper and this replay find that
+optimized libraries beat Neptune on the three common A100 prefill operators, while Neptune is competitive on causal
+decode and ahead on GQA decode. The paper used an A100-SXM4-40GB, whereas this run used an A100-SXM4-80GB; the GPUs
+have the same compute architecture but different memory systems, so exact latency equality is not expected.
+
+The paper's Table 2 reports Neptune relative to Triton, FlexAttention, TVM, and Mirage, rather than to the manually
+optimized libraries. The pinned artifact revision leaves its TVM runners disabled, so this experiment cannot claim a
+complete reproduction of every Table 2 cell. Its PyTorch 2.6 runners also select specialized SDPA, cuDNN, or CUTLASS
+paths; they are not equivalent to the full-graph PyTorch 2.13 lane added here.
+
+The paper does not publish per-shape latency tables or raw plot data. Its absolute attention results are throughput
+plots at sequence length 8192 over varying batch sizes. Representative absolute minima from this run are below,
+reported as `Neptune / torch.compile` in microseconds. These use the experiment's minimum-of-15 convention, not the
+paper-style means in the alignment table.
+
+| Operator | Sequence 2048 | Sequence 32768 |
+| --- | ---: | ---: |
+| Prefill global | 479.8 / 364.5 | 83,978.9 / 75,066.4 |
+| Prefill causal | 298.0 / 243.7 | 45,798.3 / 40,020.0 |
+| Prefill GQA | 488.7 / 405.5 | 91,127.6 / 79,070.2 |
+| Decode causal | 35.3 / 30.7 | 320.7 / 322.6 |
+| Decode GQA | 15.8 / 41.0 | 111.1 / 503.8 |
+
+The absolute trend is coherent with the ratios: prefill remains close but favors current PyTorch, causal decode
+converges toward parity, and Neptune's decode-GQA advantage grows with context length.
+
 ## Published artifact coverage
 
 All ten operator families and all eight sequence lengths produced Nsight profiles. Sixty-four of 80 tuning jobs
@@ -61,6 +109,10 @@ Neptune's original comparison environment; the modern Inductor comparison above 
 The harness treats a Neptune manual schedule as its correctness reference. Agreement from the other runners supports
 the non-ALiBi rows, but it is not an independent oracle for Neptune. ALiBi is therefore excluded rather than assigning
 the disagreement to either side.
+
+SoftCap decode is the remaining performance-reproduction outlier. This replay reports 4.96x over Flex, while the
+paper's A100 compiler table reports 1.86x over its best compiler baseline. The modern PyTorch lane does not implement
+SoftCap, so this result should not be treated as reproduced until that difference is explained.
 
 ## Protocol and limitations
 

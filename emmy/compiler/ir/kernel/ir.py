@@ -2524,7 +2524,7 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: RegFragment, rename, sigma, axis_fn):
-    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count)
+    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count, nregs=s.nregs)
 
 
 @_rewrite.register
@@ -2542,6 +2542,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         b_trans=s.b_trans,
         pair_frag=None if s.pair_frag is None else rename(s.pair_frag),
         byte_slab=s.byte_slab,
+        fragment_layout=s.fragment_layout,
     )
 
 
@@ -2602,6 +2603,7 @@ def _(s: RegStore, rename, sigma, axis_fn):
         # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
         # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
         atomic=s.atomic,
+        fragment_layout=s.fragment_layout,
     )
 
 

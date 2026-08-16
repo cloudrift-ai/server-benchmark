@@ -70,7 +70,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert atom.ptx_shape == (8, 8, 4)
     assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
-    assert atom.materialized_edges_only and atom.sync_copy_staging and not atom.c_to_a_repack
+    assert atom.sync_copy_staging and not atom.c_to_a_repack
 
     # The PTX C-fragment map covers the logical 16x16 output exactly once.
     coords = []

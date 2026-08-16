@@ -504,13 +504,11 @@ def _converting_a(node, atom, inputs) -> bool:
     the CONVERTING smem compute fill's case (Gemma's erased ``.float()`` cast ahead of an f16
     projection): the synchronous fill evaluates the load per slab cell and the typed slab store
     performs the conversion. A byte transport moves raw bits and cannot, so such an edge takes the
-    fill or nothing. ``False`` for computed edges (the fill's native case), matching dtypes,
-    1-byte loads (the f8 tiers move raw bits by design), and atoms WITHOUT a compute fill (the
-    Volta byte-copy family) — there the ordinary operand-dtype rule stands and the tile simply
-    has no warp row."""
+    fill or nothing. ``False`` for computed edges (the fill's native case), matching dtypes, and
+    1-byte loads (the f8 tiers move raw bits by design)."""
     if not isinstance(node.a, Load) or not inputs:
         return False
-    if atom.materialized_edges_only or atom.operand_dtype("a").nbytes < 2:
+    if atom.operand_dtype("a").nbytes < 2:
         return False
     t = inputs.get(node.a.input)
     return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
@@ -529,8 +527,6 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     row needs, plus the exact-cover geometry a COMPUTED ``a`` edge's compute fill adds. Both are
     ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=False):
-        return False
-    if not legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=False):
         return False
     conv = _converting_a(node, plan.atom, term.tile.inputs)
     # The converting fill reads A per element through its own σ — the fragment loader's contiguous
@@ -764,8 +760,6 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     budget = term.ctx.max_dynamic_smem
     if want is not None and legal.stage_target(want, term.ctx) is not None:
         return None
-    if want is not None and tile.is_warp and legal.warp_atom_stage(tile.atom, want) is not None:
-        return None
     if _needs_fill(term, node, tile):
         # A computed (or converting materialized) edge takes only the ``smem`` compute fill — a
         # want naming an asynchronous byte transport declines rather than silently resolving to
@@ -840,12 +834,10 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         if not pinned:
             return [None]
         wanted = Stage.parse(pinned)
-        # SM70 pins are strict: do not silently turn a newer copy instruction or an unsupported
-        # Volta fragment drain into the gmem-direct sibling.
+        # SM70 pins are strict: do not silently turn a newer copy instruction into the
+        # gmem-direct sibling.
         if term.ctx.compute_capability < (8, 0):
             legal.enforce(legal.stage_target(wanted, term.ctx), pinned=True)
-            if plan.is_warp:
-                legal.enforce(legal.warp_atom_stage(plan.atom, wanted), pinned=True)
         return [resolve(wanted)]
     return _resolved(stage_moves(warp=plan.is_warp), resolve)
 
@@ -920,7 +912,6 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
                 # A PIN with an indivisible K-step or a gather epilogue RAISES — the same predicates
                 # the unpinned catalog above drops on, one home each.
                 legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=True)
-                legal.enforce(legal.warp_atom_edges(node, plan.atom), pinned=True)
                 conv = _converting_a(node, plan.atom, term.tile.inputs)
                 if not conv:
                     legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)

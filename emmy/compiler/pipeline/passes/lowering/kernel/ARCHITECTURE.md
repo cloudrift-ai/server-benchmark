@@ -151,7 +151,10 @@ its kill point so the copy overlaps every segment outside the live range. cp.asy
 static pass over the placed schedule (the commits younger than a group's fill at its wait point); the prologue primes
 exactly the fills the pre-loop iterations would have issued. `staged_kloop` is the whole-body single-group entry
 (the matmul tier's classic `fill → commit → wait → drain → Sync` phases fall out of the derivation). Behind it, a
-`Transport` strategy: `SyncCopyTransport` (blocking vector load/store → CTA barrier), `CpAsyncTransport`
+`Transport` strategy: `SyncTransport` (the `smem` fill — a producer cone evaluated per thread into its slab, its
+materialized peers copied underneath it, closed by one CTA barrier; `copy_sync` swaps those peer copies from
+`cp.async` to the blocking vector load/store on a target without it, which is also how a fully materialized term
+stages on sm_70), `CpAsyncTransport`
 (fill → commit → wait-group), and `TmaTransport` (an `arrive.expect_tx` + box copy gated by a **per-slot mbarrier
 array**, so `depth` is a free knob for TMA too). The three producers —
 structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and

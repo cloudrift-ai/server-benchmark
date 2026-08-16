@@ -156,15 +156,6 @@ def warp_atom_target(atom, ctx) -> str | None:
     )
 
 
-def warp_atom_edges(node: Fold, atom) -> str | None:
-    """Whether the atom can consume this contraction's materialized/computed operand edges."""
-    if not atom.materialized_edges_only:
-        return None
-    if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
-        return f"warp TILE: atom {atom.name} accepts only materialized A and B edges"
-    return None
-
-
 def warp_a_columns(node: Fold, tile: TilePlan, inputs) -> str | None:
     """Whether a materialized A edge has the contiguous K columns an mma fragment loader reads.
 
@@ -192,13 +183,6 @@ def stage_target(stage: Stage, ctx) -> str | None:
         return f"STAGE {stage.spell()}: cp.async requires sm_80 or newer"
     if stage.transport == "smem-tma" and not ctx.has_tma:
         return f"STAGE {stage.spell()}: TMA requires sm_90 or newer"
-    return None
-
-
-def warp_atom_stage(atom, stage: Stage) -> str | None:
-    """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
-    if atom.materialized_edges_only and not (stage.transport == "smem" and atom.sync_copy_staging):
-        return f"STAGE {stage.spell()}: atom {atom.name} supports only the synchronous byte-copy staging"
     return None
 
 
@@ -343,8 +327,6 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     canonical-B, the gmem row stride N — must be 16-divisible."""
     atom = tile.atom
     sync_copy = stage.transport == "smem" and atom.sync_copy_staging
-    if atom.materialized_edges_only and not sync_copy:
-        return None
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
@@ -487,8 +469,6 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape."""
     atom = tile.atom
-    if atom.materialized_edges_only:
-        return None
     if atom.operand_dtype("a").nbytes < 2:
         return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
     bk_elems = tile.bk * atom.atom_k
@@ -585,8 +565,6 @@ __all__ = [
     "stage_target",
     "strip_width",
     "warp_k_step",
-    "warp_atom_edges",
-    "warp_atom_stage",
     "warp_atom_target",
     "warp_a_columns",
     "warp_operand_dtype",

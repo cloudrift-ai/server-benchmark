@@ -46,7 +46,6 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
     Operand,
-    SyncCopyTransport,
     SyncOperand,
     SyncTransport,
     TmaTransport,
@@ -631,43 +630,22 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    # One ``smem`` token, two fills — picked by the TERM, not the value: fully materialized
-    # edges on a sync-copy atom byte-copy into their slabs; a computed edge is evaluated into
-    # its slab (the synchronous thread fill converts on the store when dtypes differ).
-    smem_byte_copy = stage.transport == "smem" and tile.atom.sync_copy_staging and isinstance(c.a, Load) and isinstance(c.b, Load)
-    if smem_byte_copy:
-        assert len(ops.channels) == 1, "byte-copy staging is single-fold"
-        elems = ops.slab_elems()
-        operands = _slab_operands(
-            index_srcs=(c.a.index, c.b.index),
-            bufs=(c.a.input, c.b.input),
-            mn=mn,
-            k_axis=k_axis,
-            bk_elems=stage.bk_elems,
-            base=_tile_base(mn),
-            swizzles=ops.slab_swizzles(mn, elem.nbytes),
-            elems=elems,
-            b_trans=c.b_trans,
-        )
-        transport = SyncCopyTransport(
-            operands=operands,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=cta,
-        )
-    elif stage.transport == "smem":
-        # The synchronous compute fill: every inline edge is evaluated into its canonical slab;
-        # every materialized counterpart is copied asynchronously underneath that work.
-        operands, sync_ops, async_ops, stat_pro = _sync_operands(
+    if stage.transport == "smem":
+        # The synchronous fill: every inline edge is evaluated into its canonical slab (converting
+        # on the store when dtypes differ); every materialized counterpart is COPIED underneath
+        # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
+        # has none. A term with no inline edge at all lands here too: then it is only the copy.
+        operands, sync_ops, copy_ops, stat_pro = _sync_operands(
             c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
         )
         transport = SyncTransport(
             operands=sync_ops,
-            async_operands=async_ops,
+            copy_operands=copy_ops,
             slab_dtype=cuda_name(elem),
             elem_bytes=elem.nbytes,
             cta=cta,
             prologue_stmts=tuple(stat_pro),
+            copy_sync=tile.atom.sync_copy_staging,
         )
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"

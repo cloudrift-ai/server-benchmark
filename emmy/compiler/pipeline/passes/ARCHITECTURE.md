@@ -552,12 +552,15 @@ never a new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
-groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
-SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
-and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
-memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
-blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges
-and C-to-A repacking still decline this atom. Target capability predicates select this family below SM80 and
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. SM70 has no `ldmatrix`, so the same
+cooperative m8n8k4 lane map gathers fragments from shared memory, and every staged operand — a copied one and the
+materialized peers of a compute fill alike — moves through the blocking vector copy (`sync_copy_staging`: ordinary
+vector global loads and shared stores fill the existing slab ring). The atom takes a COMPUTED edge like any other:
+the compute fill writes the plain row-major slab the cooperative gather already reads, so a fused producer cone —
+and a materialized `a` whose dtype the atom cannot bind, through the converting fill — reaches the tier here exactly
+as it does on the newer families. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>`
+register-fragment pipelining; blocking copies make deeper shared rings correct but do not promise copy/compute
+overlap. C-to-A repacking still declines this atom. Target capability predicates select this family below SM80 and
 the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
 lowering through instructions the target cannot execute.
 

@@ -46,6 +46,16 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 
+def test_onboarding_consumes_versioned_recipe_inventory():
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
+
+    assert 'inventory_document.get("schema_version") != 1' in script
+    assert 'inventory = inventory_document["recipes"]' in script
+    assert 'deployment.get("gpu", deployment.get("deploy.gpu"))' in script
+    assert 'deployment.get("gpu_count", deployment.get("deploy.gpu_count"))' in script
+
+
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")

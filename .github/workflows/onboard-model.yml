@@ -46,7 +46,7 @@ jobs:
       REQUESTED_MODEL_ID: ${{ inputs.model_id }}
       REQUESTED_GPU: ${{ inputs.gpu }}
       REQUESTED_GPU_COUNT: ${{ inputs.gpu_count }}
-      CLOUDRIFT_TEAM_NAME: Robots
+      CLOUDRIFT_TEAM_ID: ${{ vars.CLOUDRIFT_TEAM_ID }}
       MULTIMODAL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.multimodal_mode || 'auto' }}
       PUBLISH_IMAGE: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_image) || (github.event_name == 'schedule' && vars.NIGHTLY_ONBOARD_PUBLISH_IMAGE == 'true') }}
       RUN_OWNER: ${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
@@ -182,19 +182,18 @@ jobs:
           from pathlib import Path
 
           from emmy.provisioning.candidates import iter_candidates
-          from emmy.provisioning.cloudrift import list_available_instance_types, resolve_team_id
+          from emmy.provisioning.cloudrift import list_available_instance_types, validate_team_id_access
 
           inventory = json.loads(Path(os.environ["RECIPE_INVENTORY"]).read_text())
-          available = asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"]))
           team_id = asyncio.run(
-              resolve_team_id(
+              validate_team_id_access(
                   os.environ["CLOUDRIFT_API_KEY"],
-                  os.environ["CLOUDRIFT_TEAM_NAME"],
-                  allow_implicit_team_key=True,
+                  os.environ.get("CLOUDRIFT_TEAM_ID"),
               )
           )
+          available = asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"]))
           with Path(os.environ["GITHUB_ENV"]).open("a") as output:
-              output.write(f"CLOUDRIFT_TEAM_ID={team_id or ''}\n")
+              output.write(f"CLOUDRIFT_TEAM_ID={team_id}\n")
 
           def available_deployment(deployment):
               gpu = deployment.get("deploy.gpu")
@@ -309,11 +308,8 @@ jobs:
         if: steps.selection.outputs.selected == 'true'
         run: |
           ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
-          if [ -n "$CLOUDRIFT_TEAM_ID" ]; then
-            printf 'providers:\n  cloudrift:\n    team_id: "%s"\n' "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
-          else
-            printf 'providers:\n  cloudrift: {}\n' > "$PROVIDER_CONFIG"
-          fi
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: false\n' \
+            "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
           chmod 600 "$PROVIDER_CONFIG"
 
       - name: Rent exact target VM
@@ -438,11 +434,6 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
           set +e
-          lease_status=0
-          if [ -f "$VM_LEASE" ]; then
-            ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
-            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
-          fi
           ./venv/bin/python - <<'PY'
           import asyncio
           import os
@@ -450,9 +441,25 @@ jobs:
           from emmy.provisioning.cloudrift import terminate_instances_by_tags
 
           tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
-          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          asyncio.run(
+              terminate_instances_by_tags(
+                  os.environ["CLOUDRIFT_API_KEY"],
+                  tags,
+                  audit_attempts=18,
+                  audit_delay=5,
+              )
+          )
           PY
           tag_status=$?
+          lease_status=0
+          if [ -f "$VM_LEASE" ]; then
+            ./venv/bin/emmy vm delete lease "$VM_LEASE" \
+              --owner "$RUN_OWNER" \
+              --retries 1 \
+              --audit-attempts 3 \
+              --audit-delay 5 || lease_status=$?
+            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
+          fi
           set -e
           if [ "$lease_status" -ne 0 ] || [ "$tag_status" -ne 0 ]; then
             echo "CloudRift cleanup or audit failed" >&2

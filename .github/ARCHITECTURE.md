@@ -76,12 +76,16 @@ priority. If none can run, it chooses a `maintained` recipe whose committed `RES
 timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
 ID breaks remaining ties. No eligible deployment is a successful no-op.
 
-The workflow accepts a Robots-scoped CloudRift team API key, whose authenticated principal makes every rent and tag
-query team-owned without a request `team_id`. With a user API key it instead resolves the exact visible team named
-`Robots` and includes its UUID in every rent request. It attaches `emmy`, workflow, and GitHub job tags, makes at most
-three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete tag set
-before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular team
-rental. The workflow never falls back to GCP or changes the selected GPU type/count.
+The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
+checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
+every rent then includes the UUID and disables public-IP allocation. It attaches `emmy`, workflow, and GitHub job tags,
+makes at most three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete
+tag set before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular
+team rental. The workflow never falls back to GCP or changes the selected GPU type/count.
+
+Unconditional teardown sends the complete tag-scoped terminate request before its bounded status audit and lease
+audit. This ordering gives cancellation cleanup a short critical path inside GitHub's cancellation grace period while
+retaining the owned lease as an independent verification handle.
 
 The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
@@ -158,6 +162,8 @@ Agent workflows use these repository secrets as applicable:
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
 `ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+`CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
+selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
 `https://inference.cloudrift.ai/v1`.
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE=true` authorizes a nightly qualification to publish an otherwise eligible image; it is

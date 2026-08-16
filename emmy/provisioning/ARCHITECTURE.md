@@ -49,11 +49,11 @@ Every CloudRift rental carries free-form tags for later filtering on listings. `
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
 var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
 
-`providers.cloudrift.team_id` assigns a user-key rental to that exact team UUID. Automation may resolve the UUID from
-one exact visible team name through `resolve_team_id`; a missing or ambiguous match fails before rent. A caller that
-explicitly permits implicit team-key ownership may accept the user-only team-list endpoint's 401 only after the key
-authenticates against a team-aware account endpoint. In that case the omitted request UUID makes CloudRift use the
-team API key's principal. Team selection does not depend on descriptive tags.
+`providers.cloudrift.team_id` assigns a rental to that exact team UUID, and `validate_team_id_access` proves the API
+key can act for the UUID through a team-scoped account request. Automation must pass an explicit UUID rather than
+inferring that a key rejected by the user-only team-list endpoint is necessarily team-scoped. `resolve_team_id` remains
+available for interactive user keys that can list one exact visible team name. `providers.cloudrift.with_public_ip`
+defaults to true for compatibility; callers on a reachable private network can disable public-IP allocation.
 
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 

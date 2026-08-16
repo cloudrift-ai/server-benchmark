@@ -3,7 +3,7 @@
 Response fixtures are captured from real CloudRift API calls.
 """
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -31,6 +31,7 @@ from emmy.provisioning.cloudrift import (
     resolve_team_id,
     select_image_url,
     terminate_instances_by_tags,
+    validate_team_id_access,
     wait_for_status,
 )
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
@@ -203,47 +204,26 @@ async def test_resolve_team_id_rejects_missing_team(mock_api):
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
-async def test_resolve_team_id_accepts_authenticated_implicit_team_key(mock_api):
-    request = httpx.Request("POST", f"{API_URL}/api/v1/teams/list")
-    unauthorized = httpx.HTTPStatusError(
-        "team keys cannot list teams",
-        request=request,
-        response=httpx.Response(401, request=request),
-    )
-    mock_api.side_effect = [unauthorized, {"balance": 100.0}]
+async def test_validate_team_id_access_uses_team_scoped_account_request(mock_api):
+    team_id = "f7b1d7c4-4b3b-4b3b-8b3b-4b3b4b3b4b3b"
+    mock_api.return_value = {"balance": 100.0}
 
-    result = await resolve_team_id(API_KEY, "Robots", API_URL, allow_implicit_team_key=True)
+    result = await validate_team_id_access(API_KEY, team_id, API_URL)
 
-    assert result is None
-    assert mock_api.await_args_list == [
-        call(
-            "POST",
-            "/api/v1/teams/list",
-            {"selector": "Mine", "with_members": False, "with_account_info": False},
-            API_KEY,
-            API_URL,
-        ),
-        call(
-            "POST",
-            "/api/v2/account/info",
-            {"selector": "ByToken", "with_auto_top_up": False},
-            API_KEY,
-            API_URL,
-        ),
-    ]
-
-
-@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
-async def test_resolve_team_id_keeps_implicit_team_key_opt_in(mock_api):
-    request = httpx.Request("POST", f"{API_URL}/api/v1/teams/list")
-    mock_api.side_effect = httpx.HTTPStatusError(
-        "unauthorized",
-        request=request,
-        response=httpx.Response(401, request=request),
+    assert result == team_id
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v2/account/info",
+        {"selector": {"ByTeam": team_id}, "with_auto_top_up": False},
+        API_KEY,
+        API_URL,
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await resolve_team_id(API_KEY, "Robots", API_URL)
+
+@pytest.mark.parametrize("team_id", [None, "", "Robots", "not-a-uuid"])
+async def test_validate_team_id_access_rejects_missing_or_invalid_uuid(team_id):
+    with pytest.raises(TerminalProvisionError, match="team ID must be a UUID"):
+        await validate_team_id_access(API_KEY, team_id, API_URL)
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
@@ -352,6 +332,22 @@ async def test_rent_instance_payload_includes_team(mock_api):
     )
 
     assert mock_api.await_args.args[2]["team_id"] == "team-robots"
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_can_disable_public_ip(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        with_public_ip=False,
+    )
+
+    assert mock_api.await_args.args[2]["with_public_ip"] is False
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
@@ -524,6 +520,14 @@ async def test_create_instance_tags_default_to_emmy(mock_wait, mock_rent, tmp_pa
     await _tagged_create(tmp_path, mock_rent, mock_wait)
 
     assert mock_rent.call_args.kwargs["tags"] == ["emmy"]
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_forwards_public_ip_choice(mock_wait, mock_rent, tmp_path):
+    await _tagged_create(tmp_path, mock_rent, mock_wait, with_public_ip=False)
+
+    assert mock_rent.call_args.kwargs["with_public_ip"] is False
 
 
 @patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)

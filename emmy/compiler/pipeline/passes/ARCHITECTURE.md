@@ -11,33 +11,49 @@ structurally, not a distinct kind.
 
 ## Performance is never a pass decision
 
-Passes enumerate; they do not prefer. Every semantically legal alternative is exposed to the search — as a fork
-option, an enumerated row, or a knob value — and the choice among alternatives is made in exactly two places,
-neither of which is a pass:
+**Passes enumerate under legality. Ranking belongs to evidence and to the fitted prior — and to nothing else.**
+Every semantically legal alternative is exposed as a fork option, an enumerated row, or a knob value, and the
+choice among them is made in exactly two places, neither of which is a pass:
 
 - a **deployed model** answers every choice from measured evidence — the box-local reservoir / tune-DB rows a
   local `emmy tune` produced, or a recorded golden row replayed exactly through its pins;
-- a **cold compile** of an arbitrary kernel answers through the deploy evidence hierarchy, whose last learned tier
-  is the prior — on a fresh machine, the offline model. Cold-deploy quality is the offline prior's responsibility.
+- everything else answers through the deploy evidence hierarchy, whose last learned tier is the fitted prior — on
+  a fresh machine, the offline model. Unmeasured-deploy quality is the prior's responsibility, and the way to
+  improve it is to fit it better or to measure the shape.
+
+Legality is the ONLY thing a pass may narrow by. A candidate is dropped because this term cannot realize it — the
+dtype the atom binds, a K-step that must divide a static extent, an smem budget, an epilogue the emitter cannot
+express — and for no other reason. Everything a hardware profitability argument would say belongs on the evidence
+side of that line.
 
 Concretely:
 
 - An enumeration never drops, caps, or truncates legal rows because some were measured slow somewhere. A ladder in
   `search/space.py` is a domain, not a preference history; a row set is a function of the term and its legality
   alone, never of a hardware profitability fact.
+- **No hand-written ordering, default, or filter may exist to improve an unmeasured pick.** Enumeration produces a
+  SET, and the position a row lands in is an implementation detail of whatever loop built it — never a policy,
+  never an assertion, never a thing to preserve across a refactor. There is no "conservative option-0", no family
+  whose leading value is its safe default, and no leaf withheld because nothing could price it.
+- **A bad unmeasured pick is an accepted outcome.** With no golden, no measurement and no useful prior, a compile
+  takes whatever the walk emitted first; that kernel may be far off the best one the space contains. It is not a
+  regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
+  replays exactly, and a `tune` turns it into evidence the hierarchy can use.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
-  boundedness reason (the compile must terminate with a tractable option set — fusion's work-growth cap is the
-  canonical instance). "Measured slower", "occupancy", "register pressure", and "profitability" are never refusal
-  reasons; they are the tuner's and the prior's vocabulary, and a fix for a slow configuration is new evidence — a
-  re-tune and a refreshed golden file — never a new compile-time condition.
+  boundedness reason (the compile must terminate with a tractable option set — fusion's work-growth cap and the
+  scheduler's `MAX_ROWS` are the canonical instances; both are raise-don't-truncate). "Measured slower",
+  "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the tuner's and the
+  prior's vocabulary, and a fix for a slow configuration is new evidence — a re-tune and a refreshed golden file —
+  never a new compile-time condition.
 - A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
-  Ordering options (which sibling is option-0) is legitimate pass policy — hiding siblings is not.
+  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default.
 - A misdeploy is debugged as an evidence problem: a missing or stale golden row, an unfitted prior, or a gap in the
   feature/key vocabulary that makes two different candidates indistinguishable. Fix the evidence path; do not fence
   the compiler.
 
-This boundary is a review judgment, not a scripted check: when a change wants to refuse, cap, or reorder for
-speed, move the decision to a fork plus evidence instead.
+This boundary is a review judgment, not a scripted check: when a change wants to refuse, cap, reorder, or default
+for speed, move the decision to a fork plus evidence instead. The same rule governs the PROSE — a rationale for a
+deleted gate is a template for its return, so it is deleted with the code rather than left behind as history.
 
 ## Quantization is not a concept past the decomposition band
 
@@ -115,8 +131,8 @@ Three layers own three different questions, and keeping them apart is what stops
   inner stride); the categorical ones (operand dtype, transport, a fragment-unrealizable gather epilogue) are plain
   predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
   decline — a size, not a yes/no. These are also the recursion's downward filter.
-- **CHOICE** is the walk itself: which families a SITE offers, the conservative option-0 each leads with, and how a
-  row becomes a `TileOp`. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
+- **CHOICE** is the walk itself: which families a SITE offers and how a row becomes a `TileOp` — which values are
+  legal here, never which of them is better. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
   strip) and `is_contraction(node)` (tile × stage × reduce), else the reduce partition. **Not `AxisRole`**: the role
   never selected a fourth arm, `TWISTED` is derived by matching the combine's operation family (an operation match
   wearing an algebraic name), and `PLANAR` is the residue. The role stays a loop annotation and a materializer read.
@@ -129,10 +145,10 @@ Three properties this shape enforces:
   `ops.seal_workers` stamps it. The producer band `+p<np>` is part of the inventory and is CHOSEN with it.
 - **Uniform key sets per fork, `""` a DECIDED empty.** The evidence pick's prefix-consistency depends on it: an
   absent key reads as "free" and would let a gmem-direct leaf inherit a staged row's measurement.
-- **Enumeration produces a SET; ranking is the prior's job.** The only ordering obligation is that each family's
-  FIRST value is its conservative default (per-family, not global — the reduce tier deliberately leads with its
-  cooperative pick). The recursion decides the row set; `build_fork_tree` decides the evidence hierarchy, and the
-  two are deliberately not the same shape.
+- **Enumeration produces a SET; ranking is evidence's and the prior's job.** There is no ordering obligation at
+  all: the order rows come out in is whatever the recursion's loops produce, it means nothing, and no family may
+  arrange its values so a particular one is taken when nothing has been measured. The recursion decides the row
+  set; `build_fork_tree` decides the evidence hierarchy, and the two are deliberately not the same shape.
 
 A predicate has ONE home and ONE severity: each legality function returns its refusal, and the caller picks
 raise-vs-drop from whether the family is PINNED (an unpinned warp move with an indivisible K-step is dropped;
@@ -201,10 +217,10 @@ byte-for-byte AND asserts the case's pins actually reached a kernel, so a role t
 scheduling cannot pass unnoticed.
 
 Three structural properties the enumeration rests on are asserted rather than trusted, all in
-`tests/compiler/passes/test_move_catalog.py`. **Option-0 is conservative PER FAMILY** — position still deploys a
-kernel on three prior-free paths, so the leading row must stamp each family's declared OFF, with the reduce tier the
-one encoded exception (it leads with its cooperative heuristic pick, and since step 7 that exception has two
-spellings, because the band's width moved into `WORK` — so the pair is checked together). **A row is its spelled
+`tests/compiler/passes/test_move_catalog.py`. **The all-OFF row is a member of every term's set** — the untiled /
+serial / gmem-direct schedule is legal wherever the walk can schedule at all, so it is always there to be picked by
+evidence or by a pin. (Membership is the property, NOT position: the tests assert what the set contains, never what
+leads it, because a leading row is not a policy any more.) **A row is its spelled
 knob dict**, so two candidate combinations spelling identically are one row, not two. And **the `WORK` pin's one
 non-narrowing branch is tracked**: a pin no candidate matches is offered beside the catalog's own inventories rather
 than replacing them. That is the PIN-BLEED rule — one env pin, several kernels in a graph, and this term is not the
@@ -386,7 +402,7 @@ failing several passes later:
   per step; the combine — SwiGLU — is projection, riding the wrapping zero-axis fold's `lift`. Channels whose B
   layouts disagree were never legally fusable, so they simply never product (a formation gate, not a node assert).
   It is offered as a fork SIBLING of the
-  cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
+  cooperative reduce form (the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
   `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
@@ -503,8 +519,8 @@ tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔chi
 through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
 decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
 bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
-STRUCTURAL fork — the fused form leads (option-0; a cold compile never changes kernel sets) and one cut fragment
-rides per legal seam, so tune discovers cuts and a warm compile prices them like any kernel-set choice. A chosen
+STRUCTURAL fork — the fused form beside one cut fragment per legal seam, so tune discovers cuts and a compile
+prices them like any kernel-set choice. Nothing holds the fused side ahead of the cuts. A chosen
 cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, recording the decision as the exact pin that
 replays it; the realizer itself consults no deploy evidence. The
 realizer (`lowering/tile/_cut.py`) splits the tree there: the child
@@ -517,8 +533,8 @@ consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal
 roots on the pass-scan restart —
 recursively: a deeper `PLACE` key can cut the cone piece again, yielding the cascade statistic + scale + plain
 matmul, every piece joining an EXISTING golden kind's evidence at its own schedule forks.
-**Fuse is option-0** — an unpinned greedy compile with no structural pricing keeps the recognized form
-byte-untouched.
+A compile that cannot price the fork (nothing measured, no useful prior) decides nothing here and ranks the cut
+fragments beside the fused form like any other leaves — the fused form is not held back for it.
 Cut legality is structural: single-component CLOSED children only (`_captured_values`
 in its demoted validation role — combine-derived material that captures carrier state is simply not cuttable), and
 the pure-copy degenerate
@@ -559,10 +575,10 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 
 **The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
 `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
-1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families
+1024`) with the per-cell `""` tile as one more member, crossed with the warp / reduce / stage move families
 for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
 contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
-The producer band is the fourth level (option-0 `""` = uniform SIMT — since step 7 a resolved band
+The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own

@@ -15,8 +15,10 @@ through a constructed ``Bound`` shares the currency in name only and costs a sec
 read ``k % step == 0``. If a legality rule ever does become a generated bound, constructing one is
 a line.
 
-What does NOT live here: anything that CHOOSES rather than checks. The conservative cooperative
-pick, the atom ladder and the stage catalog are the schedule's.
+What does NOT live here: anything that CHOOSES rather than checks. The coop / ILP partition catalog,
+the atom ladder and the stage catalog are the schedule's. Nothing here ranks either — a predicate
+answers "can this node realize the candidate", never "is it a good idea", which is why legality is
+the only thing allowed to narrow an enumeration at all.
 
 **With ONE stated exception: the stage RESOLVERS** (``resolve_warp_stage`` / ``resolve_scalar_stage``
 / ``resolve_fill_stage``). They return a SIZED :class:`Stage` rather

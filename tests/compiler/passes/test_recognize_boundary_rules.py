@@ -233,45 +233,61 @@ def _is_warp_row(row: dict) -> bool:
     return str(row.get("WORK", "")).startswith("w")
 
 
-def test_wide_m1_flinear_uses_single_warp_k_fold():
-    """A coalesced wide-K M=1 F.linear must not expose the dominated serial
-    reduction to deploy selection, while tune retains the complete fork."""
-    from dataclasses import replace
+def test_wide_m1_flinear_offers_the_warp_k_fold_and_a_pin_realizes_it(monkeypatch):
+    """A coalesced wide-K M=1 F.linear OFFERS the 32-wide cooperative K fold beside the serial
+    one, and a pin naming it realizes exactly that kernel.
 
-    from emmy.compiler.pipeline.knob import family_of
+    This used to assert that an unpinned deploy PICKED the coop fold — B's stored layout
+    classified the shape and promoted the band ahead of the serial row. That ordering is gone:
+    which of the two wins is measured evidence's answer, so an unpinned compile with none may take
+    either, and the enumeration's obligation is only that both are reachable."""
+    from emmy.compiler.pipeline.knob import family_of, family_value
 
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    monkeypatch.delenv("EMMY_REDUCE", raising=False)
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
+    rows, _ = _resolve(_m1_linear_graph(), ctx=ctx)
+    offered = {v for row in rows for k, v in row.items() if family_of(k) == "REDUCE"}
+    assert "" in offered and "coop" in offered, offered
+    assert any(row.get("WORK") == "t32" and family_value(row, "REDUCE") == "coop" for row in rows), rows
+
+    monkeypatch.setenv("EMMY_WORK", "t32")
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
-    # F1 site grammar: the coop WIDTH rides the ONE WORK entry; the REDUCE value is site-local.
-    reduce_specs = [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"]
-    assert reduce_specs == ["coop"]
+    assert [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"] == ["coop"]
     assert tile.knobs.get("WORK") == "t32"
-    tune_rows, _ = _resolve(_m1_linear_graph(), ctx=replace(ctx, validate_pins=False))
-    offered = {v for row in tune_rows for k, v in row.items() if family_of(k) == "REDUCE"}
-    assert "" in offered and "coop" in offered
-    assert any(row.get("WORK") == "t32" for row in tune_rows)
 
 
-def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
-    """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
-    lowerable everywhere), then the computed-A bilinear fold form's warp rows — every one riding a
+def test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows():
+    """The merged fork carries BOTH readings: the ``Map``-form reduce rows (lowerable everywhere)
+    and the computed-A bilinear fold form's warp rows — every one riding a
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
     split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
     single-kernel atomic ``g<w>a`` (the single-channel computed-A split-K family).
+
+    Membership, not position: this used to require the Map form's cooperative row to LEAD, because
+    that was the row a prior-free compile deployed. Nothing leads any more, so the assertion is
+    that each reading contributed rows and that each spells its own families correctly.
 
     Both readings spell the SAME key set — the contraction tree's, since that is the union's one
     namespace: bare ``TILE`` / ``STAGE`` / ``REDUCE`` for the product fold and ``@<stat axis>`` for
     the cone's statistic, each stamped as a DECIDED EMPTY where its reading has no such site."""
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
-    assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
-    # F1: a coop partition spells the site value ``coop`` with its width in the WORK entry.
-    assert any(isinstance(v, str) and v.startswith("coop") for v in rows[0].values()), "option-0 must cooperate on the stat reduce"
-    assert str(rows[0].get("WORK", "")).startswith("t"), "the coop width rides the WORK inventory"
-    assert rows[0]["TILE"] == "" and rows[0]["STAGE"] == "" and rows[0]["REDUCE"] == "", (
-        f"the Map reading must stamp the contraction's families as decided empties: {rows[0]}"
-    )
+    # The Map reading: the statistic fold cooperates (its width in WORK, F1 site grammar) and the
+    # contraction's own families are stamped as decided empties.
+    coop_map = [
+        r
+        for r in rows
+        if not _is_warp_row(r)
+        and any(isinstance(v, str) and v.startswith("coop") for v in r.values())
+        and str(r.get("WORK", "")).startswith("t")
+        and r["TILE"] == ""
+        and r["STAGE"] == ""
+        and r["REDUCE"] == ""
+    ]
+    assert coop_map, f"the Map reading contributed no cooperative stat-reduce row: {rows[:4]}"
     warp = [r for r in rows if _is_warp_row(r)]
     assert warp, "the bilinear fold form contributed no warp rows"
     stages_seen = set()
@@ -463,7 +479,7 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "o"
     assert any(_is_warp_row(r) for r in rows)
-    assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
+    assert any(not _is_warp_row(r) for r in rows), "the per-cell reading must stay reachable beside the warp rows"
 
 
 def _normed_sdpa_graph():

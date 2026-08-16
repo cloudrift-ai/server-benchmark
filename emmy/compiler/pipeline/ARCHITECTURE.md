@@ -125,8 +125,8 @@ rule matches a `LoopOp` and returns several tile options.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
 
-With no evidence and no prior at all, every fork falls to option-0 (env pins still apply — a pinned family never
-reaches a decide).
+With no evidence and no prior at all, every fork falls to the first emitted leaf — not a chosen default, just what
+is left when there is nothing to rank with (env pins still apply — a pinned family never reaches a decide).
 
 ### Terms used throughout
 
@@ -361,7 +361,7 @@ What a newcomer needs to know about the fit:
 - **Loading is strict.** A missing artifact, or one whose `feat_ver` does not match, is a hard error — refit it, never
   a silent fallback. The error comes from the artifact loader, and it surfaces in `tune` / `eval`, which load the
   prior directly. A greedy compile wraps `load_prior` best-effort, so there a bad artifact does not abort the compile:
-  it produces the no-prior resolve described under the hierarchy below (option-0, with the DB tier lost along with
+  it produces the no-prior resolve described under the hierarchy below (first leaf, with the DB tier lost along with
   the prior object). A weight key that is no longer used, inside an artifact of the current version, is
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
@@ -417,6 +417,14 @@ The names below recur throughout this document; together they are the whole publ
 `Run.resolve`) never explores: at each fork it picks once, working down the list below from the top. **This list is
 the authoritative order** — the summaries elsewhere in this file defer to it.
 
+**These four tiers are the whole ranking mechanism.** Three of them are recordings of something that ran and the
+fourth is a model fitted to such recordings; there is no fifth, hand-written tier anywhere below them. The passes
+that produced the candidates ordered nothing, defaulted to nothing and withheld nothing (see
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md)), so when all four tiers are silent the pick falls out of the
+enumeration's emission order, which carries no meaning. Such a pick can be far off the best kernel in the space,
+and that is an accepted outcome of the design — the fix is a measurement, a recorded golden, or a better-fitted
+prior, never a preference written into a pass or into this policy.
+
 1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
    `deploy_identity` — the recognized term's α/buffer-invariant algebra digest folded with the operand/output dtype
    fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
@@ -471,7 +479,9 @@ Three definitions the list leans on:
 checkpoint, or the strict offline-artifact load raising; the loader is best-effort and swallows any failure), and on
 `Pipeline.run`'s last-resort resolve that deliberately takes the rule's first option. The reservoir is carried by the
 prior object, and the DB tier is only consulted on the path where a prior exists, so a corrupt checkpoint costs the
-resolve its DB evidence too — every fork falls to option-0. Env pins still apply (they never reach a decide).
+resolve its DB evidence too — every fork falls to the first emitted leaf. That leaf is not a chosen default and
+nothing arranges the enumeration to make it a good one; it is simply what is left when there is nothing to rank
+with. Env pins still apply (they never reach a decide).
 
 **What is deliberately NOT in this hierarchy: the tune DB's `node` table** (Part 6). Node rows are never consulted at
 deploy. They feed the `emmy eval` diagnostics (Part 8), and they are what the offline fitter would train on if it
@@ -492,9 +502,11 @@ this fork, and did I expect that one?" means correlating those, not flipping one
 or does not split — the recognized work into kernels (`lowering/tile/_cut.py`): `PLACE@<label> = cut` says "split at
 the edge labelled `label`, so that sub-computation becomes its own kernel". A `PLACE` pin is authoritative — it cuts
 (or keeps fused) with no prior involved. UNPINNED, placement is an ordinary **structural fork**: recognition offers
-the fused form first (option-0) plus one cut fragment per legal seam, so `tune` discovers cuts and a warm compile
+the fused form plus one cut fragment per legal seam, so `tune` discovers cuts and a compile
 prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
-whichever prior is loaded; cold, structural options are filtered and the kernel set never changes. A chosen cut's
+whichever prior is loaded. That costing exists because a `Graph` leaf carries no knob row the ordinary ranking
+could score, not to defend the fused side: when some leaf cannot be priced the pricing decides nothing and every
+leaf, cuts included, goes on to the ordinary ranking. A chosen cut's
 parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut records and replays as the exact pin. A
 **routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
 schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
@@ -540,7 +552,7 @@ of the Spearman correlation between its predictions and its own reservoir labels
 grouped by their `S_*` signature, groups of fewer than 8 rows skipped, the verdict stored in the checkpoint). Below
 `CALIBRATION_MIN` (0.5 — a genuinely trained model scores ~+0.85, while the collapse where the model and its rows no
 longer share feature names scores ~0) the model is **quarantined**: it keeps training and checkpointing, but the
-deploy ranking calls, PUCT, and the structural cost estimate (`greedy._pick_structural`) all fall back to the offline
+deploy ranking calls, PUCT, and the structural cost estimate (`greedy._priced_pick`) all fall back to the offline
 half, and the verdict is logged. The reservoir evidence tier stays live under quarantine, because measured evidence
 needs no trusted model.
 
@@ -635,9 +647,9 @@ carries only a *partial* tile, and `features.knob_features` can't compute its ar
 pinned, so the prior would be blind at the `BM/BN` choice. Instead `greedy_decide` flattens each fork point to its
 complete leaves (`fork.flatten_leaves` expands branches depth-first; only knob dicts — materialization stays deferred
 to the chosen leaf) and picks the lowest `Prior.mean_scores` over the full `{H_*, S_*, complete-knob-row}` vector in
-one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePrior` ranks (including a positive
-`MMA_tier` warp preference); if `load_prior` returns nothing entirely every fork falls to option-0 (first leaf,
-emission order).
+one batched `predict`, invariant to the tree's level order. With no online prior the `OfflinePrior` ranks (including a
+positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing
+entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
 **And it flattens each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
@@ -658,14 +670,20 @@ can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image wi
 Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py` at every evidence tier; rendered
 bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
-**Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
-`_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
-pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key`.
-The cheaper kernel set wins, so an unpinned compile deploys the splits `tune` measured best. The nested resolve carries
-the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick (reservoir -O3, then the
-tune DB's -O1 ranking rows, model prediction only where unmeasured) — a pure sum-of-predictions comparison would be
-exposed to the model's absolute-µs error, which doesn't cancel across different kernel families. Cold, or when a side is
-unpriceable, the structural leaf is filtered — a cold compile never changes kernel sets.
+**Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
+score it; `greedy_decide`'s `_priced_pick` asks the same evidence a different way instead. It prices EVERY leaf of a
+structural fork — the cut fragments and the keep-fused side alike — by a nested `resolve` per kernel over a
+`lowering/tile`-only pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized
+per `Op.cache_key`, and takes the argmin. So an unpinned compile deploys the splits `tune` measured best. The nested
+resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick
+(reservoir -O3, then the tune DB's -O1 ranking rows, model prediction only where unmeasured) — a pure
+sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
+different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
+the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
+withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
+which is not about speed: it is how `Pipeline.run` retires a structural pick whose fragment kernel failed to LOWER
+(the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
+avoids re-splitting the slice it is pricing.
 
 **Evidence joins are drift-tolerant.** `Prior.sig_groups` is one contract for both the reservoir -O3 tier and the DB
 tier: a candidate's fork-time `S_*` base may carry scheduler stamps the persisted perf rows predate (#311's
@@ -687,11 +705,12 @@ structural picks wholesale and re-resolves the keep-fused branch before falling 
 leaves a node un-lowered, `Pipeline.run` blocklists that tile's `tile_identity` (its planner knobs) and re-resolves:
 `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
-the first in-budget one), `Pipeline.run` takes one last **option-0 (emission-order) resolve**
-(`greedy_decide(blocked=…, prior=None)`): the planner emits a budget-safe tile first, so it lowers whenever any
-in-budget tile exists, and the blocklist rides along so this last resolve can never re-pick a tile that already
-failed `validate(ctx)`. Only when even option-0 overflows does `_raise_on_unlowered` fire the
-loud `LoweringError`.
+the first in-budget one), `Pipeline.run` takes one last **emission-order resolve**
+(`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
+overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
+failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
+lands on, and the enumeration promises it no particular leaf. When that leaf overflows too, `_raise_on_unlowered`
+fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 
@@ -1305,6 +1324,12 @@ enumerates NO rows and stays unmapped rather than being guessed at — the guard
 contract. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for
 the design.
 
+**The enumerator ranks nothing.** It narrows by legality alone — this node's dtypes, extents, divisibilities and
+smem budget — and hands back a SET whose emission order is an artefact of the recursion. No family leads with a
+default, no shape's stored layout promotes a spelling, and no candidate is dropped for having measured slow
+somewhere. Everything above (the deploy evidence hierarchy) is what turns that set into one kernel, and a compile
+with no evidence taking a poor row from it is the accepted cost of keeping the scheduler free of judgment.
+
 ## Tunable knobs
 
 A **`Knob`** (`knob.py`) is the canonical schema for one tuning dimension: name, type (`INT` / `BOOL` / `BINMASK` /
@@ -1428,7 +1453,7 @@ producer/compute band split (`_stage._producer_band_kloop`).
 codec (bare/root-global; the fifth schedule-fork level): `gm<G>` iterates `G` M block-tiles fastest per
 launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the flat order streams B from DRAM once per
 M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
-(A streamed); empty = the flat N-fastest row-major order (option-0, byte-identical to historical codegen). Changes
+(A streamed); empty = the flat N-fastest row-major order. Changes
 no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
 shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.

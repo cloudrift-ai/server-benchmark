@@ -38,13 +38,14 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   The tile schedule maps the free
   axes onto the grid and decides the reduce `ReducePlan` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
-  decision hierarchy = env pin > search/prior fork > conservative
-  default). The knob is ephemeral — resolved here into the schedule's
+  decision hierarchy = env pin > the deploy evidence hierarchy, and nothing
+  else — there is no default partition). The knob is ephemeral — resolved here
+  into the schedule's
   `ReducePlan`; the combine stays the `Fold` node's stored program. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
-  full-row outputs); the default cooperates a wide reduce feeding an
-  under-occupied grid.
+  full-row outputs), and the schedule enumerates the serial fold beside every
+  band the reduce extent can feed, whatever the grid measures.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `ReducePlan` lowers the reduce as a

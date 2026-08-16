@@ -7,9 +7,8 @@ in their ``PATTERN`` op type, so the body lives here.
 
 The fold is an UNCONDITIONAL structural canonicalization: a parameter's
 layout op always dissolves into its load chain, on every capability and
-every consumer shape, so one weight has one stored form and downstream
-enumeration sees one layout fact (``k_contiguous``) it can order
-candidates by. The historical sub-sm_90 gate — and the M=1 matvec
+every consumer shape, so one weight has one stored form. The
+earlier sub-sm_90 gate — and the M=1 matvec
 carve-out punched through it for the ``.m1.t`` golden layout — were
 shape/hardware special-casing in a pass, exactly what the no-gates
 doctrine forbids: which realization of a layout wins is measured

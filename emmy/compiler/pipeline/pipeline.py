@@ -552,15 +552,16 @@ class Pipeline:
         # retry budget — an *online* prior can extrapolate a large tile onto a
         # small shape (e.g. one trained on big square matmuls picking an
         # over-smem-cap tile for a tiny projection), and the blocklist retry
-        # exhausts before reaching an in-budget leaf. Before giving up, take the
-        # conservative emission-order pick (``greedy_decide(prior=None)`` =
-        # option-0): it ignores the prior, and the planner emits a budget-safe
-        # tile first, so it lowers whenever any in-budget tile exists. The card's
+        # exhausts before reaching an in-budget leaf. Before giving up, re-resolve
+        # WITHOUT the prior (``greedy_decide(prior=None)``, the emission-order
+        # pick): the point is dropping the extrapolation that overflowed, not the
+        # quality of what emission order lands on — the enumeration promises no
+        # particular leaf and this fallback makes no claim about speed. The card's
         # recorded goldens still floor this resolve (they are prior-independent
         # evidence — one over-budget node must not cost every OTHER kernel its
         # verified golden), and ``blocked`` rides along so the floor can never
-        # re-pick a tile that already failed ``validate(ctx)``. When even
-        # option-0 overflows (the over-budget rule genuinely has no in-budget
+        # re-pick a tile that already failed ``validate(ctx)``. When that leaf
+        # overflows too (the over-budget rule genuinely has no in-budget
         # option — e.g. the single-option guardrail) the re-resolve stays
         # un-lowered and ``_raise_on_unlowered`` fires below, exactly as before.
         if _unlowered_tiles(terminal, rejections):

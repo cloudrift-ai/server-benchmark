@@ -105,12 +105,12 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # deeper pin key may cut a piece again). The fused (computed-A) view is the reference tree
     # when it binds — its seams (the `a` cone edge) are the ones a ``PLACE`` key spells.
     #
-    # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form leads (option-0 — a
-    # cold compile never changes kernel sets; ``greedy._pick_structural`` filters Graph options
-    # without a trusted prior) and one cut fragment rides per legal seam, so tune DISCOVERS cuts
-    # and a warm deploy prices them like any kernel-set choice. The chosen fragment's parent
-    # piece carries ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays
-    # as the exact pin.
+    # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form beside one cut fragment
+    # per legal seam, so tune DISCOVERS cuts and a deploy prices them like any kernel-set choice
+    # (``greedy._priced_pick``). Nothing holds the fused side ahead of the cuts — this list is a
+    # set of legal placements, not a ranking. The chosen fragment's parent piece carries
+    # ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays as the exact
+    # pin.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if verdict == "cut":

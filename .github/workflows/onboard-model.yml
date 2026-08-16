@@ -36,7 +36,9 @@ concurrency:
 
 jobs:
   onboard:
-    runs-on: [self-hosted, agents]
+    runs-on:
+      group: agent-runners
+      labels: agents
     timeout-minutes: 1440
     permissions:
       contents: read

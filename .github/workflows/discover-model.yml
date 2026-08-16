@@ -11,7 +11,9 @@ concurrency:
 
 jobs:
   discover:
-    runs-on: [self-hosted, agents]
+    runs-on:
+      group: agent-runners
+      labels: agents
     timeout-minutes: 60
     permissions:
       contents: read

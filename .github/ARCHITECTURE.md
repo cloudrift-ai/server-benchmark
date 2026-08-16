@@ -2,8 +2,8 @@
 
 GitHub Actions owns pull-request checks, package publication, and automated model discovery and onboarding. Workflows
 that only inspect or build the repository use GitHub-hosted runners. Agent-driven
-model work uses the self-hosted `agents` runner because it can exceed ordinary hosted-runner limits and needs the
-tracked skills and CloudRift inference endpoint.
+model work uses the organization-level `agent-runners` group with the `agents` label because it can exceed ordinary
+hosted-runner limits and needs the tracked skills and CloudRift inference endpoint.
 
 ## Workflow overview
 
@@ -11,8 +11,8 @@ tracked skills and CloudRift inference endpoint.
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted | Runs Ruff, the complete test suite, and a PyPI package dry run. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
-| **Verify or onboard model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
-| **Discover model** | Nightly schedule or manual dispatch | Self-hosted `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
+| **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
+| **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
 from a developer checkout through the tracked `.agents/skills/run-experiment` skill.

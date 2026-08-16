@@ -99,9 +99,33 @@ arithmetic failing loudly. Fixed by clamping dummy seq lens to max-model-len fro
 removed. Only vLLM 0.23's DEFAULT model runner has the defect (its newer opt-in runner — stock
 Llama/Mistral/Qwen3 only — builds dummy batches with legal per-request seq lens), and `EmmyGenModel` always
 rides the default runner. Engine-level validation on the 4080 (default runner forced): the 4128 capture's two
-over-model-len dummy runs were clamped 4128 → 4096, capture completed, greedy output correct. Remaining
-follow-ups: re-run the 4096-chunk-lane c64 cell on a 5090 with the clamp (the ~5 ms/step host-idle recovery),
-re-bench against a stock arm at a comparable admission shape, and upstream the report.
+over-model-len dummy runs were clamped 4128 → 4096, capture completed, greedy output correct.
+
+**2026-08-15/16 5090 validation of the clamp (rented vast.ai 5090):** the exact originally-faulting boot
+(gemma-4-12B-it @707f0a3b, fp16, TRITON_ATTN, mnbt 4128, decode bucket 32, mml 4096) now warms up and captures
+ALL 64 mixed-batch FULL rungs including 4128 (the clamp log line fires exactly at that warmup) and serves with
+greedy chat output byte-identical to stock vLLM. The 4096-chunk-lane c64 cell (decode bucket 64, mnbt 4160,
+rider-top rung 4160 > mml; bench client: 256 random prompts, 512 in / 128 out, concurrency 64, medians of 3):
+
+| arm | median TPOT ms | tok/s | median TTFT ms |
+| --- | --: | --: | --: |
+| capture ON (rungs to 4160) | 32.75 | 628 | 7125 |
+| capture OFF (decode-only) | 33.69 | 632 | 7040 |
+| stock vLLM (own defaults) | 24.93 | 589 | 9181 |
+
+Capture ON takes −0.94 ms/step TPOT over OFF on this lane (the projected ~5 ms/step applied to MIXED steps;
+this 512/128 workload is decode-dominated in steady state, so the mixed-step win dilutes — the full recovery
+needs the re-baseline's prefill-heavier mix). Emmy leads stock on throughput (+7%) and TTFT (−22%); stock
+leads TPOT — the same not-shape-comparable admission asymmetry as the 2048-lane row above. Greedy chat parity
+hashes are byte-identical across ON / OFF / stock.
+
+**Caveat — the clamp was 5090-validated on the fcbc-era tree (`bench/fcbc-clamp` = `bench/chunk-capture-fcbc880f`
++ the clamp commit), NOT on this branch:** trees containing main PRs #498–#503 (this branch's base) hang on the
+FIRST inference step on the 5090 (100% util / ~122 W spin-kernel signature, capture ON and OFF alike, eager
+prefill included) while stock vLLM and the fcbc-era tree serve fine — a pre-existing serving regression between
+fcbc880f and #503, unrelated to the clamp (which only touches dummy-run seq lens). Remaining follow-ups: bisect
+that regression on a 5090, re-bench against a stock arm at a comparable admission shape, and upstream the vLLM
+report.
 
 ## Target architecture
 

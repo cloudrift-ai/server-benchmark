@@ -49,6 +49,8 @@ jobs:
       gpu: ${{ steps.selection.outputs.gpu }}
       gpu_count: ${{ steps.selection.outputs.gpu_count }}
       mode: ${{ steps.selection.outputs.mode }}
+      deployment_summary: ${{ steps.artifacts.outputs.deployment_summary }}
+      performance_summary: ${{ steps.artifacts.outputs.performance_summary }}
       pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
     env:
       GH_REPO: ${{ github.repository }}
@@ -523,6 +525,7 @@ jobs:
           filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
           output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, and canonical golden YAML.
+          Include one-line deployment_summary and performance_summary values drawn from the exact selected recipe lane.
           """
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY
@@ -698,6 +701,7 @@ jobs:
           fi
 
       - name: Validate and stage model artifacts
+        id: artifacts
         if: steps.vm.outcome == 'success'
         env:
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
@@ -714,6 +718,10 @@ jobs:
             --mode "$ONBOARD_MODE" \
             --expected-tag "$EXPECTED_LIFECYCLE" \
             --stage
+          {
+            echo "deployment_summary=$(jq -r .deployment_summary "$ONBOARD_SUMMARY")"
+            echo "performance_summary=$(jq -r .performance_summary "$ONBOARD_SUMMARY")"
+          } >> "$GITHUB_OUTPUT"
           git lfs status
           git diff --cached --check
           if git diff --cached --quiet; then
@@ -854,6 +862,8 @@ jobs:
       TARGET_GPU: ${{ needs.onboard.outputs.gpu || inputs.gpu }}
       TARGET_GPU_COUNT: ${{ needs.onboard.outputs.gpu_count || inputs.gpu_count }}
       ONBOARD_MODE: ${{ needs.onboard.outputs.mode }}
+      DEPLOYMENT_SUMMARY: ${{ needs.onboard.outputs.deployment_summary }}
+      PERFORMANCE_SUMMARY: ${{ needs.onboard.outputs.performance_summary }}
       PR_NUMBER: ${{ needs.onboard.outputs.pr_number }}
     steps:
       - name: Checkout exact workflow source

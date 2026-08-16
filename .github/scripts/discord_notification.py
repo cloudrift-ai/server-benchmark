@@ -18,6 +18,14 @@ SUCCESS_COLOR = 5_763_719
 FAILURE_COLOR = 15_548_997
 CANCELLED_COLOR = 16_705_372
 NEUTRAL_COLOR = 9_807_270
+FIELD_VALUE_LIMIT = 1024
+
+LIFECYCLE_LABELS = {
+    "maintained": "Maintained",
+    "best-effort": "Best effort",
+    "obsolete": "Obsolete",
+    "onboarding": "Onboarding",
+}
 
 
 def _run_url(environment: Mapping[str, str]) -> str:
@@ -30,6 +38,51 @@ def _pull_request_field(environment: Mapping[str, str]) -> dict[str, Any] | None
         return None
     url = f"{environment['GITHUB_SERVER_URL']}/{environment['GITHUB_REPOSITORY']}/pull/{number}"
     return {"name": "Rolling PR", "value": f"[#{number}]({url})", "inline": True}
+
+
+def _line_fields(name: str, lines: list[str]) -> list[dict[str, Any]]:
+    fields = []
+    chunk = []
+    length = 0
+    for line in lines:
+        added = len(line) + (1 if chunk else 0)
+        if chunk and length + added > FIELD_VALUE_LIMIT:
+            fields.append({"name": name if not fields else f"{name} (continued)", "value": "\n".join(chunk), "inline": False})
+            chunk = []
+            length = 0
+        chunk.append(line[:FIELD_VALUE_LIMIT])
+        length += len(chunk[-1]) + (1 if len(chunk) > 1 else 0)
+    if chunk:
+        fields.append({"name": name if not fields else f"{name} (continued)", "value": "\n".join(chunk), "inline": False})
+    return fields
+
+
+def _modified_model_fields(raw_changes: str) -> list[dict[str, Any]]:
+    if not raw_changes:
+        return [{"name": "Modified models", "value": "None; the lifecycle review produced no recipe changes.", "inline": False}]
+    try:
+        changes = json.loads(raw_changes)
+    except json.JSONDecodeError:
+        changes = None
+    if not isinstance(changes, list):
+        return [{"name": "Modified models", "value": "Summary unavailable; open the rolling PR for the diff.", "inline": False}]
+    if not changes:
+        return [{"name": "Modified models", "value": "None; the lifecycle review produced no recipe changes.", "inline": False}]
+
+    grouped = {lifecycle: [] for lifecycle in LIFECYCLE_LABELS}
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        model_id = change.get("model_id")
+        lifecycle = change.get("lifecycle")
+        if isinstance(model_id, str) and lifecycle in grouped:
+            grouped[lifecycle].append(f"• `{model_id}`")
+
+    fields = []
+    for lifecycle, label in LIFECYCLE_LABELS.items():
+        if grouped[lifecycle]:
+            fields.extend(_line_fields(label, grouped[lifecycle]))
+    return fields or [{"name": "Modified models", "value": "Summary unavailable; open the rolling PR for the diff.", "inline": False}]
 
 
 def _onboard_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
@@ -64,6 +117,13 @@ def _onboard_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         {"name": "Model", "value": f"`{model_id[:1000]}`", "inline": False},
         {"name": "Target", "value": f"`{target[:1000]}`", "inline": False},
     ]
+    deployment_summary = environment.get("DEPLOYMENT_SUMMARY", "").strip()
+    performance_summary = environment.get("PERFORMANCE_SUMMARY", "").strip()
+    if result == "success" and selected != "false":
+        if deployment_summary:
+            fields.append({"name": "Deployment", "value": deployment_summary[:FIELD_VALUE_LIMIT], "inline": False})
+        if performance_summary:
+            fields.append({"name": "Performance", "value": performance_summary[:FIELD_VALUE_LIMIT], "inline": False})
     if mode:
         fields.append({"name": "Mode", "value": f"`{mode[:1000]}`", "inline": True})
     return title, description, color, fields
@@ -76,7 +136,7 @@ def _discover_summary(environment: Mapping[str, str]) -> tuple[str, str, int, li
             "Model discovery completed",
             "The maintained recipe set was reviewed and the rolling model lifecycle pull request was refreshed.",
             SUCCESS_COLOR,
-            [],
+            _modified_model_fields(environment.get("MODIFIED_MODELS", "")),
         )
     if result == "cancelled":
         return (
@@ -164,7 +224,8 @@ def main(environment: Mapping[str, str] | None = None) -> int:
     if not webhook_url:
         LOGGER.warning("::warning::DISCORD_EMMY_ROBOTS_WEBHOOK_URL is not configured; skipping Discord notification")
         return 0
-    send_notification(webhook_url, build_payload(values))
+    if send_notification(webhook_url, build_payload(values)):
+        LOGGER.info("Discord notification delivered")
     return 0
 
 

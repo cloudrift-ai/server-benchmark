@@ -122,15 +122,16 @@ requires each task-local timestamp directory to be a root member of the declared
 that ignored local directory; only the durable archive proceeds to staging.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
-model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,
-and updates or opens the rolling model lifecycle PR using renewable GitHub App credentials for the long-running push
-path.
+model, expected lifecycle tag, and compact deployment and measured-performance summaries from the selected recipe
+lane. The workflow then commits those artifacts, rebases on the latest default branch, and updates or opens the
+rolling model lifecycle PR using renewable GitHub App credentials for the long-running push path.
 
-Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery posts its result, run, and
-rolling PR; onboarding also includes the selected model, target, and operation mode. Because the notification job is
-independent of the self-hosted agent job, it still runs after a failure, cancellation, or timeout. Discord delivery
-retries three times, remains non-blocking, and disables all mentions; the workflow run and rolling PR retain the
-detailed evidence.
+Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery groups only recipe entries
+actually modified by the run under their resulting lifecycle and links the run and rolling PR. Onboarding includes the
+selected model, target, operation mode, serving deployment, and measured performance from its validated atomic
+summary. Because the notification job is independent of the self-hosted agent job, it still runs after a failure,
+cancellation, or timeout. Discord delivery retries three times, remains non-blocking, and disables all mentions; the
+workflow run, durable reports, and rolling PR retain the complete evidence.
 
 ### Discovery lifecycle PR
 

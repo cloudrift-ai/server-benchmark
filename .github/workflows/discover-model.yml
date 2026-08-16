@@ -20,6 +20,7 @@ jobs:
       pull-requests: read
     outputs:
       pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
+      modified_models: ${{ steps.lifecycle.outputs.modified_models }}
     env:
       GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
@@ -375,6 +376,7 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
       WORKFLOW_KIND: discover
       WORKFLOW_RESULT: ${{ needs.discover.result }}
+      MODIFIED_MODELS: ${{ needs.discover.outputs.modified_models }}
       PR_NUMBER: ${{ needs.discover.outputs.pr_number }}
     steps:
       - name: Checkout exact workflow source

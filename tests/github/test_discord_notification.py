@@ -28,6 +28,8 @@ def test_onboarding_success_payload_has_target_pr_and_no_mentions():
         "TARGET_GPU": "NVIDIA GeForce RTX 4090",
         "TARGET_GPU_COUNT": "1",
         "ONBOARD_MODE": "onboarding",
+        "DEPLOYMENT_SUMMARY": "vLLM 0.22.1, 32K context, concurrency 8",
+        "PERFORMANCE_SUMMARY": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
         "PR_NUMBER": "487",
     }
 
@@ -41,12 +43,52 @@ def test_onboarding_success_payload_has_target_pr_and_no_mentions():
     assert embed["fields"] == [
         {"name": "Model", "value": "`Qwen/Qwen3-Embedding-8B`", "inline": False},
         {"name": "Target", "value": "`NVIDIA GeForce RTX 4090 x1`", "inline": False},
+        {"name": "Deployment", "value": "vLLM 0.22.1, 32K context, concurrency 8", "inline": False},
+        {"name": "Performance", "value": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures", "inline": False},
         {"name": "Mode", "value": "`onboarding`", "inline": True},
         {
             "name": "Rolling PR",
             "value": "[#487](https://github.com/cloudrift-ai/emmy/pull/487)",
             "inline": True,
         },
+    ]
+
+
+def test_discovery_success_payload_groups_only_modified_models():
+    environment = {
+        **BASE_ENVIRONMENT,
+        "WORKFLOW_KIND": "discover",
+        "WORKFLOW_RESULT": "success",
+        "MODIFIED_MODELS": json.dumps(
+            [
+                {"model_id": "org/maintained", "lifecycle": "maintained"},
+                {"model_id": "org/best-effort", "lifecycle": "best-effort"},
+                {"model_id": "org/new", "lifecycle": "onboarding"},
+            ]
+        ),
+    }
+
+    payload = discord_notification.build_payload(environment)
+
+    assert payload["embeds"][0]["fields"] == [
+        {"name": "Maintained", "value": "• `org/maintained`", "inline": False},
+        {"name": "Best effort", "value": "• `org/best-effort`", "inline": False},
+        {"name": "Onboarding", "value": "• `org/new`", "inline": False},
+    ]
+
+
+def test_discovery_success_payload_reports_no_recipe_changes():
+    environment = {
+        **BASE_ENVIRONMENT,
+        "WORKFLOW_KIND": "discover",
+        "WORKFLOW_RESULT": "success",
+        "MODIFIED_MODELS": "[]",
+    }
+
+    payload = discord_notification.build_payload(environment)
+
+    assert payload["embeds"][0]["fields"] == [
+        {"name": "Modified models", "value": "None; the lifecycle review produced no recipe changes.", "inline": False}
     ]
 
 

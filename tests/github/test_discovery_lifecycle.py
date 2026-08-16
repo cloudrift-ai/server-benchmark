@@ -83,6 +83,17 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
     assert notification["run"] == "python3 .github/scripts/discord_notification.py"
     assert 'echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"' in lifecycle_pr["run"]
     assert lifecycle["outputs"]["pr_number"] == "${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}"
+    if workflow_kind == "discover":
+        assert lifecycle["outputs"]["modified_models"] == "${{ steps.lifecycle.outputs.modified_models }}"
+        assert notify["env"]["MODIFIED_MODELS"] == "${{ needs.discover.outputs.modified_models }}"
+    else:
+        artifacts = next(step for step in lifecycle["steps"] if step.get("id") == "artifacts")
+        assert lifecycle["outputs"]["deployment_summary"] == "${{ steps.artifacts.outputs.deployment_summary }}"
+        assert lifecycle["outputs"]["performance_summary"] == "${{ steps.artifacts.outputs.performance_summary }}"
+        assert notify["env"]["DEPLOYMENT_SUMMARY"] == "${{ needs.onboard.outputs.deployment_summary }}"
+        assert notify["env"]["PERFORMANCE_SUMMARY"] == "${{ needs.onboard.outputs.performance_summary }}"
+        assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
+        assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
     assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
 
 
@@ -335,7 +346,15 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    assert result == {"changed": True}
+    assert result == {
+        "changed": True,
+        "modified_models": [
+            {"model_id": "org/first", "lifecycle": "maintained"},
+            {"model_id": "org/second", "lifecycle": "best-effort"},
+            {"model_id": "org/third", "lifecycle": "obsolete"},
+            {"model_id": "org/new-model", "lifecycle": "onboarding"},
+        ],
+    }
     assert first.read_text().startswith("# Keep this qualification note.\ntags:\n  - maintained\n")
     assert yaml.safe_load(second.read_text())["tags"] == ["best-effort"]
     assert yaml.safe_load(third.read_text())["tags"] == ["obsolete"]
@@ -355,6 +374,23 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     summary = (tmp_path / "summary.md").read_text()
     assert "`org/new-model`" in summary
     assert "`org/third` → `org/first`" in summary
+
+
+def test_discovery_outputs_modified_models_as_compact_json(tmp_path, monkeypatch):
+    output_path = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+
+    discovery_lifecycle._write_outputs(
+        {
+            "changed": True,
+            "modified_models": [{"model_id": "org/model", "lifecycle": "maintained"}],
+        }
+    )
+
+    assert output_path.read_text().splitlines() == [
+        "changed=true",
+        'modified_models=[{"lifecycle":"maintained","model_id":"org/model"}]',
+    ]
 
 
 def test_extracts_one_lifecycle_object_from_reasoning_text():

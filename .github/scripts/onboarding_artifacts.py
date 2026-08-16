@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
+from emmy.recipe.lifecycle import validate_recipe_tags
+
 ALLOWED_ARTIFACT_PREFIXES = (
     "docker/vllm-emmy-serve/models/",
     "emmy/compiler/pipeline/search/goldens/",
@@ -60,12 +64,16 @@ def validate_summary(
     gpu: str,
     gpu_count: int,
     ssh_target: str,
+    mode: str,
+    expected_tag: str,
 ) -> tuple[dict, list[Path]]:
     summary = json.loads(summary_path.read_text())
     if summary.get("status") != "success":
         raise ValueError(f"Onboarding did not succeed: {summary.get('failure')}")
     if summary.get("model_id") != model_id:
         raise ValueError(f"Summary model mismatch: {summary.get('model_id')} != {model_id}")
+    if summary.get("mode") != mode:
+        raise ValueError(f"Summary mode mismatch: {summary.get('mode')} != {mode}")
     target = summary.get("target") or {}
     expected_target = {"gpu": gpu, "gpu_count": gpu_count, "ssh": ssh_target}
     if target != expected_target:
@@ -75,6 +83,15 @@ def validate_summary(
         raise ValueError(f"Remote workload or Docker credential cleanup is incomplete: {cleanup}")
 
     recipe = _relative_file(workspace, summary.get("recipe") or "", ("recipes/",))
+    recipe_config = yaml.safe_load((workspace / recipe).read_text()) or {}
+    recipe_model_id = (recipe_config.get("model") or {}).get("huggingface")
+    if recipe_model_id != model_id:
+        raise ValueError(f"Recipe model mismatch: {recipe_model_id} != {model_id}")
+    recipe_tags = validate_recipe_tags(recipe_config.get("tags"))
+    if expected_tag not in recipe_tags:
+        raise ValueError(f"Recipe must retain lifecycle tag {expected_tag!r}: {recipe_tags}")
+    if mode == "onboarding" and ({"onboarding", "untested"} & set(recipe_tags)):
+        raise ValueError(f"Onboarding recipe still has pending lifecycle tags: {recipe_tags}")
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
     if report != recipe.with_name("RESULTS.md"):
         raise ValueError(f"Report must be RESULTS.md beside the final recipe: {report}")
@@ -143,6 +160,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu", required=True)
     parser.add_argument("--gpu-count", type=int, required=True)
     parser.add_argument("--ssh-target", required=True)
+    parser.add_argument("--mode", choices=("onboarding", "verification"), required=True)
+    parser.add_argument("--expected-tag", choices=("maintained", "best-effort"), required=True)
     parser.add_argument("--stage", action="store_true")
     return parser
 
@@ -157,6 +176,8 @@ def main() -> int:
             args.gpu,
             args.gpu_count,
             args.ssh_target,
+            args.mode,
+            args.expected_tag,
         )
         if args.stage:
             stage_artifacts(args.workspace.resolve(), artifacts)

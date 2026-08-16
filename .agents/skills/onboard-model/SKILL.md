@@ -1,15 +1,16 @@
 ---
 name: onboard-model
 description: >-
-  Onboard and benchmark a Hugging Face model on an exact target GPU platform. Use when asked to add a model recipe,
-  validate a new model on a supplied GPU server, benchmark serving, create reproducible experiments and a durable
-  results report, fully qualify and tune the model's Emmy compiler inventory even when serving is blocked, or publish
-  a prebuilt CloudRiftAI serving image.
+  Onboard or periodically reverify and benchmark a Hugging Face model on an exact target GPU platform. Use when asked
+  to add a model recipe, refresh a maintained recipe on a supplied GPU server, benchmark serving, create reproducible
+  experiments and a durable results report, fully qualify and tune the model's Emmy compiler inventory even when
+  serving is blocked, or publish a prebuilt CloudRiftAI serving image.
 ---
 
-# Onboard a model
+# Onboard or reverify a model
 
-Turn a Hugging Face model ID and an exact `(GPU name, GPU count)` into reviewed repository artifacts:
+Turn a Hugging Face model ID, an operation mode, and an exact `(GPU name, GPU count)` into reviewed repository
+artifacts:
 
 - one recommended serving recipe under `recipes/<model>/recipe.yaml`;
 - reproducible qualification or comparison configurations under `experiments/<model>/`, without committed run output;
@@ -32,14 +33,15 @@ to rescue a failed run.
 
 Require:
 
-1. the exact Hugging Face model ID;
-2. the exact hardware name used by `emmy/hardware.py` and GPU count;
-3. an SSH target accepted by `emmy deploy ssh` / `emmy bench --ssh`;
-4. a wall-clock deadline;
-5. whether publication is authorized and, when needed, Docker Hub credentials supplied without logging them;
-6. whether a multimodal model should be qualified as multimodal, text-only, or `auto` (infer the advertised modality
+1. an operation mode, exactly `onboarding` or `verification`;
+2. the exact Hugging Face model ID;
+3. the exact hardware name used by `emmy/hardware.py` and GPU count;
+4. an SSH target accepted by `emmy deploy ssh` / `emmy bench --ssh`;
+5. a wall-clock deadline;
+6. whether publication is authorized and, when needed, Docker Hub credentials supplied without logging them;
+7. whether a multimodal model should be qualified as multimodal, text-only, or `auto` (infer the advertised modality
    from the checkpoint and qualify that path);
-7. for a non-interactive run, an absolute output path for the machine-readable summary.
+8. for a non-interactive run, an absolute output path for the machine-readable summary.
 
 In an interactive run, ask only for missing inputs. In a non-interactive run, fail immediately on a missing or
 ambiguous input. The workflow-dispatch request is the publication authorization in CI: do not add a conversational
@@ -51,8 +53,15 @@ no overlay was supplied; never guess an overlay file. Check whether required var
 their values, and never echo a token.
 
 Before changing files, verify that the model exists on Hugging Face, the target host reports exactly the requested
-GPU name and count, and the checkout is on a feature branch. If `recipes/<model>/` already exists, use it as a
-starting point only when the caller explicitly allowed updates; otherwise fail instead of overwriting it.
+GPU name and count, and the checkout is on a feature branch. Model and GPU selection, VM rental, VM cleanup, git, and
+pull-request operations belong to the caller, not this skill.
+
+In `onboarding` mode, use the existing `onboarding`/`untested` recipe shell when present; a direct caller may instead
+authorize a new recipe. Replace those pending tags with `best-effort` only after qualification and artifact completion.
+In `verification` mode, begin with the existing active recipe, refresh its measurements and durable artifacts, and
+preserve its supplied lifecycle tag. The mode explicitly authorizes updates to that recipe; never use verification to
+silently change its model checkpoint, target GPU/count, or lifecycle. For any other existing recipe update, require
+explicit caller authorization or fail instead of overwriting it.
 
 ## 1. Research the serving path
 
@@ -287,13 +296,15 @@ In the summary, `cleanup.docker_logout: true` means no Docker credential remains
 login, or no Docker login was performed because the stock-only path did not require one.
 
 Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
-final line. List every repository file created, modified, or deleted by the onboarding run in `artifacts`. List only a
-complete repository golden in `compiler_artifacts`, and only retained experiment recipe YAML in
+final line. Include the requested mode on success and failure. List every repository file created, modified, or deleted
+by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`, and only
+retained experiment recipe YAML in
 `experiment_artifacts`. Do not list or commit raw measurement output.
 
 ```json
 {
   "status": "success",
+  "mode": "onboarding",
   "model_id": "org/model",
   "target": {"gpu": "exact hardware.py name", "gpu_count": 1, "ssh": "user@host"},
   "recipe": "recipes/<model>/recipe.yaml",

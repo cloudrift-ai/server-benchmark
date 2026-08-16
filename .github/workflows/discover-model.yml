@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: model-discovery
+  group: model-lifecycle
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +52,7 @@ jobs:
           }
           matches=$(retry_gh gh pr list --state open --limit 100 \
             --json number,headRefName,isCrossRepository,labels \
-            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or (.headRefName | startswith("agents/model-discovery-"))))]')
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or ([.labels[].name] | index("model-onboarding")) or (.headRefName | startswith("agents/model-discovery-"))))]')
           count=$(jq length <<< "$matches")
           if [ "$count" -gt 1 ]; then
             echo "Expected at most one rolling model discovery PR, found $count" >&2

@@ -25,8 +25,12 @@ from emmy.provisioning.cloudrift import (
     _rent_instance,
     _terminate_instance,
     create_instance,
+    list_available_instance_types,
+    list_instances_by_tags,
     resolve_node_id,
+    resolve_team_id,
     select_image_url,
+    terminate_instances_by_tags,
     wait_for_status,
 )
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
@@ -139,6 +143,127 @@ async def test_api_request_dry_run(caplog):
     assert '"foo": "bar"' in caplog.text
 
 
+# ── availability and tag ownership ────────────────────────────────
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_list_available_instance_types_uses_vm_capacity(mock_api):
+    mock_api.return_value = {
+        "instance_types": [
+            {
+                "name": "rtx49",
+                "variants": [
+                    {"name": "rtx49.1", "available_nodes": 2},
+                    {"name": "rtx49.4", "available_nodes": 0},
+                ],
+            },
+            {"name": "h200", "variants": [{"name": "h200.8", "available_nodes": 1}]},
+        ]
+    }
+
+    result = await list_available_instance_types(API_KEY, API_URL)
+
+    assert result == {"rtx49.1", "h200.8"}
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/instance-types/list",
+        {"selector": {"ByServiceAndLocation": {"services": ["vm"]}}},
+        API_KEY,
+        API_URL,
+    )
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_requires_one_exact_visible_team(mock_api):
+    mock_api.return_value = {
+        "teams": [
+            {"id": "team-robots", "name": "Robots"},
+            {"id": "team-research", "name": "Research"},
+        ]
+    }
+
+    result = await resolve_team_id(API_KEY, "Robots", API_URL)
+
+    assert result == "team-robots"
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/teams/list",
+        {"selector": "Mine", "with_members": False, "with_account_info": False},
+        API_KEY,
+        API_URL,
+    )
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_rejects_missing_team(mock_api):
+    mock_api.return_value = {"teams": [{"id": "team-research", "name": "Research"}]}
+
+    with pytest.raises(TerminalProvisionError, match="cannot access team 'Robots'"):
+        await resolve_team_id(API_KEY, "Robots", API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_list_instances_by_tags_requires_all_tags(mock_api):
+    mock_api.return_value = {"instances": [{"id": "inst-1", "status": "Active"}]}
+
+    result = await list_instances_by_tags(API_KEY, ["emmy", "gh-job:7", "emmy"], API_URL)
+
+    assert result == [{"id": "inst-1", "status": "Active"}]
+    data = mock_api.await_args.args[2]
+    assert data["selector"] == {"ByTags": {"all": ["emmy", "gh-job:7"], "any": []}}
+    assert data["mask"] == {
+        "with_connection_info": False,
+        "with_hardware_info": False,
+        "with_usage_info": False,
+    }
+
+
+@pytest.mark.parametrize("tags", [[], [""], ["emmy", "  "]])
+async def test_list_instances_by_tags_rejects_unsafe_selection(tags):
+    with pytest.raises(ValueError, match="at least one non-empty tag"):
+        await list_instances_by_tags(API_KEY, tags, API_URL)
+
+
+@patch("emmy.provisioning.cloudrift.asyncio.sleep", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.list_instances_by_tags", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_terminate_instances_by_tags_terminates_every_active_match(mock_api, mock_list, mock_sleep):
+    mock_list.side_effect = [
+        [
+            {"id": "inst-1", "status": "Active"},
+            {"id": "inst-2", "status": "Initializing"},
+            {"id": "inst-old", "status": "Terminated"},
+        ],
+        [{"id": "inst-1", "status": "Deactivating"}],
+        [{"id": "inst-1", "status": "Terminated"}, {"id": "inst-2", "status": "Inactive"}],
+    ]
+
+    result = await terminate_instances_by_tags(API_KEY, ["emmy", "gh-job:7"], API_URL, audit_delay=0)
+
+    assert result == ["inst-1", "inst-2"]
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/instances/terminate",
+        {"selector": {"ById": ["inst-1", "inst-2"]}},
+        API_KEY,
+        API_URL,
+    )
+    mock_sleep.assert_awaited_once_with(0)
+
+
+@patch("emmy.provisioning.cloudrift.asyncio.sleep", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.list_instances_by_tags", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_terminate_instances_by_tags_fails_when_audit_stays_active(mock_api, mock_list, mock_sleep):
+    mock_list.return_value = [{"id": "inst-1", "status": "Active"}]
+
+    with pytest.raises(RuntimeError, match="inst-1"):
+        await terminate_instances_by_tags(API_KEY, ["gh-job:7"], API_URL, audit_attempts=2, audit_delay=0)
+
+    assert mock_sleep.await_count == 2
+    mock_api.assert_awaited_once()
+
+
 # ── _rent_instance ────────────────────────────────────────────────
 
 
@@ -167,6 +292,22 @@ async def test_rent_instance_payload(mock_api):
     }
     assert call_data["with_public_ip"] is True
     assert result["instance_ids"] == ["c4bf5e16-1063-11f1-9096-5f6ae8f8983f"]
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_payload_includes_team(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        team_id="team-robots",
+    )
+
+    assert mock_api.await_args.args[2]["team_id"] == "team-robots"
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)

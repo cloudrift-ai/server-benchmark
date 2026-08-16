@@ -21,7 +21,10 @@ def _write_artifacts(workspace):
     for raw_path in paths:
         path = workspace / raw_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("result\n")
+        if raw_path == paths[0]:
+            path.write_text("tags: [best-effort]\nmodel:\n  huggingface: org/Model\n")
+        else:
+            path.write_text("result\n")
     return paths
 
 
@@ -32,6 +35,7 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
                 "recipe": paths[0],
@@ -51,6 +55,8 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
         "NVIDIA H200 141GB",
         1,
         "user@host",
+        "onboarding",
+        "best-effort",
     )
 
     assert artifacts == [Path(path) for path in paths]
@@ -66,6 +72,7 @@ def test_validate_summary_rejects_experiment_result(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
                 "recipe": paths[0],
@@ -86,6 +93,8 @@ def test_validate_summary_rejects_experiment_result(tmp_path):
             "NVIDIA H200 141GB",
             1,
             "user@host",
+            "onboarding",
+            "best-effort",
         )
 
 
@@ -99,6 +108,7 @@ def test_validate_summary_rejects_recipe_run_result(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
                 "recipe": paths[0],
@@ -119,6 +129,8 @@ def test_validate_summary_rejects_recipe_run_result(tmp_path):
             "NVIDIA H200 141GB",
             1,
             "user@host",
+            "onboarding",
+            "best-effort",
         )
 
 
@@ -132,6 +144,7 @@ def test_validate_summary_rejects_report_outside_final_recipe_dir(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
                 "recipe": paths[0],
@@ -152,6 +165,74 @@ def test_validate_summary_rejects_report_outside_final_recipe_dir(tmp_path):
             "NVIDIA H200 141GB",
             1,
             "user@host",
+            "onboarding",
+            "best-effort",
+        )
+
+
+def test_validate_summary_rejects_mode_mismatch(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": [paths[2]],
+                "artifacts": paths,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Summary mode mismatch"):
+        onboarding_artifacts.validate_summary(
+            summary_path,
+            tmp_path,
+            "org/Model",
+            "NVIDIA H200 141GB",
+            1,
+            "user@host",
+            "verification",
+            "best-effort",
+        )
+
+
+def test_validate_summary_rejects_lifecycle_change(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "verification",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": [paths[2]],
+                "artifacts": paths,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="retain lifecycle tag 'maintained'"):
+        onboarding_artifacts.validate_summary(
+            summary_path,
+            tmp_path,
+            "org/Model",
+            "NVIDIA H200 141GB",
+            1,
+            "user@host",
+            "verification",
+            "maintained",
         )
 
 

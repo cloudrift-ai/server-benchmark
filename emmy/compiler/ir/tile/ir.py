@@ -96,7 +96,7 @@ from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import digest
 
 
-def _splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
+def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
     """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
     that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
     TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
@@ -314,7 +314,7 @@ class Fold(Stmt):
     unroll: bool = False
     # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
-    # needs. ``lower`` splices each edge's body before its first use (:func:`_splice_operands`).
+    # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
     operands: tuple = ()
     # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
     # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
@@ -622,10 +622,10 @@ class Fold(Stmt):
         ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
         loop-in-body form the scalar tier expands): ONE structural rule for a reduce whose per-step
         partial composes other nodes. Operand edges splice in ahead of the first read of their
-        bound param (:func:`_splice_operands` — positional binding names the edges, ties in
+        bound param (:func:`splice_operands` — positional binding names the edges, ties in
         operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
         that carried them in its body."""
-        stmts = _splice_operands(self._splice_edges(), _flatten_nodes(Body(self.step_stmts())))
+        stmts = splice_operands(self._splice_edges(), _flatten_nodes(Body(self.step_stmts())))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
@@ -633,7 +633,7 @@ class Fold(Stmt):
         stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
         :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
         consumed (a twisted fold's head node / expectation Load) never splice twice."""
-        return _splice_operands(self._splice_edges(), self.step_stmts())
+        return splice_operands(self._splice_edges(), self.step_stmts())
 
     @property
     def out(self) -> str:
@@ -997,6 +997,7 @@ __all__ = [
     "operand_body",
     "operand_name",
     "refs_axis",
+    "splice_operands",
     "split_effects",
     "stmt_axis_names",
 ]

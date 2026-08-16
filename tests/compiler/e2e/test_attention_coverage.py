@@ -14,7 +14,14 @@ softmax reduce. This file pins every tier of it:
   ``softmax·V`` half of SDPA is one contraction over the KV axis and takes the warp/mma tier, the
   staged transports and split-K wherever the target's atoms admit a compute-filled ``a`` edge
   (sm_80+; Volta's atoms are materialized-edges-only). The score contraction still lands in its own
-  kernel — a SINGLE-kernel flash additionally needs the score contraction inside the A cone.
+  kernel. The TERM for the single-kernel form needs nothing new — a score contraction on the cone's
+  per-cell edge lowers, schedules and runs (``test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice``) —
+  but the fill EVALUATES that edge per slab cell, so the score is computed scalar, and twice (once
+  for the row statistic, once for the weight). Measured on a V100 that fused form is 5× slower than
+  the two-kernel split at S=32/D=16 and far worse as S grows, which is why loop fusion still refuses
+  to nest the score reduce inside the softmax reduce. What closes the gap is RESIDENCE, not algebra:
+  the block's score must stay in C fragments across both consumers (the reference kernel below) —
+  the chained-mma realization the flash deletion removed.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →

@@ -122,9 +122,16 @@ requires each task-local timestamp directory to be a root member of the declared
 that ignored local directory; only the durable archive proceeds to staging.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
-model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,
-and updates or opens the rolling model lifecycle PR using renewable GitHub App credentials for the long-running push
-path.
+model, expected lifecycle tag, and compact deployment and measured-performance summaries from the selected recipe
+lane. The workflow then commits those artifacts, rebases on the latest default branch, and updates or opens the
+rolling model lifecycle PR using renewable GitHub App credentials for the long-running push path.
+
+Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery groups only recipe entries
+actually modified by the run under their resulting lifecycle and links the run and rolling PR. Onboarding includes the
+selected model, target, operation mode, serving deployment, and measured performance from its validated atomic
+summary. Because the notification job is independent of the self-hosted agent job, it still runs after a failure,
+cancellation, or timeout. Discord delivery retries three times, remains non-blocking, and disables all mentions; the
+workflow run, durable reports, and rolling PR retain the complete evidence.
 
 ### Discovery lifecycle PR
 
@@ -183,6 +190,7 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 Agent workflows use these repository secrets as applicable:
 
 - `CLOUDRIFT_API_KEY` for model discovery, Robots-team resolution, availability, and CloudRift provisioning;
+- `DISCORD_EMMY_ROBOTS_WEBHOOK_URL` for non-pinging model discovery, verification, and onboarding summaries;
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 

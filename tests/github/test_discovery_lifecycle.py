@@ -54,6 +54,49 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 
+@pytest.mark.parametrize(
+    ("workflow", "primary_job", "workflow_kind", "notification_name"),
+    [
+        ("discover-model.yml", "discover", "discover", "Send discovery summary"),
+        ("onboard-model.yml", "onboard", "onboard", "Send onboarding summary"),
+    ],
+)
+def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workflow, primary_job, workflow_kind, notification_name):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text())
+    lifecycle = document["jobs"][primary_job]
+    notify = document["jobs"]["notify"]
+    lifecycle_pr = next(step for step in lifecycle["steps"] if step.get("id") == "lifecycle-pr")
+    checkout, notification = notify["steps"]
+
+    assert notify["needs"] == primary_job
+    assert notify["if"] == "${{ always() }}"
+    assert notify["runs-on"] == "ubuntu-latest"
+    assert notify["permissions"] == {"contents": "read"}
+    assert notify["env"]["DISCORD_WEBHOOK_URL"] == "${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}"
+    assert notify["env"]["WORKFLOW_KIND"] == workflow_kind
+    assert notify["env"]["WORKFLOW_RESULT"] == f"${{{{ needs.{primary_job}.result }}}}"
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert notification["name"] == notification_name
+    assert notification["continue-on-error"] is True
+    assert notification["run"] == "python3 .github/scripts/discord_notification.py"
+    assert 'echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"' in lifecycle_pr["run"]
+    assert lifecycle["outputs"]["pr_number"] == "${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}"
+    if workflow_kind == "discover":
+        assert lifecycle["outputs"]["modified_models"] == "${{ steps.lifecycle.outputs.modified_models }}"
+        assert notify["env"]["MODIFIED_MODELS"] == "${{ needs.discover.outputs.modified_models }}"
+    else:
+        artifacts = next(step for step in lifecycle["steps"] if step.get("id") == "artifacts")
+        assert lifecycle["outputs"]["deployment_summary"] == "${{ steps.artifacts.outputs.deployment_summary }}"
+        assert lifecycle["outputs"]["performance_summary"] == "${{ steps.artifacts.outputs.performance_summary }}"
+        assert notify["env"]["DEPLOYMENT_SUMMARY"] == "${{ needs.onboard.outputs.deployment_summary }}"
+        assert notify["env"]["PERFORMANCE_SUMMARY"] == "${{ needs.onboard.outputs.performance_summary }}"
+        assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
+        assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
+    assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
+
+
 def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     workspace = Path(__file__).parents[2]
     document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
@@ -323,6 +366,29 @@ def test_applies_lifecycle_and_creates_onboarding_shell(tmp_path):
     summary = (tmp_path / "summary.md").read_text()
     assert "`org/new-model`" in summary
     assert "`org/third` → `org/first`" in summary
+
+
+def test_discovery_workflow_summarizes_tracked_and_new_recipe_changes(tmp_path):
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    existing = _recipe(tmp_path, "existing", "org/existing", tags=["best-effort"])
+    subprocess.run(["git", "add", "recipes"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=tmp_path, check=True)
+    existing.write_text(existing.read_text().replace("best-effort", "maintained"))
+    _recipe(tmp_path, "new", "org/new", tags=["onboarding", "untested"])
+
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in workflow["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
+    source = script.split("./venv/bin/python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    output_path = tmp_path / "github-output"
+    env = {**os.environ, "GITHUB_OUTPUT": str(output_path)}
+
+    subprocess.run([sys.executable, "-"], cwd=tmp_path, env=env, input=source, text=True, check=True)
+
+    assert output_path.read_text().splitlines() == [
+        'modified_models=[{"lifecycle":"maintained","model_id":"org/existing"},{"lifecycle":"onboarding","model_id":"org/new"}]'
+    ]
 
 
 def test_extracts_one_lifecycle_object_from_reasoning_text():

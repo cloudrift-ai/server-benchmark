@@ -39,6 +39,20 @@ def _init_repo(workspace):
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
 
 
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "non-empty deployment_summary"),
+        ("", "non-empty deployment_summary"),
+        ("line one\nline two", "one line"),
+        ("x" * 1001, "at most 1000"),
+    ],
+)
+def test_summary_text_requires_compact_notification_evidence(value, message):
+    with pytest.raises(ValueError, match=message):
+        onboarding_artifacts._summary_text({"deployment_summary": value}, "deployment_summary")
+
+
 def test_validate_summary_accepts_exact_manifest(tmp_path):
     paths = _write_artifacts(tmp_path)
     summary_path = tmp_path / "summary.json"
@@ -49,6 +63,8 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -83,6 +99,8 @@ def test_validate_summary_includes_separately_declared_artifacts(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -117,6 +135,8 @@ def test_validate_summary_requires_exact_platform_archive(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -153,6 +173,8 @@ def test_validate_summary_rejects_other_platform_archive(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -189,6 +211,8 @@ def test_validate_summary_rejects_experiment_result(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -225,6 +249,8 @@ def test_validate_summary_rejects_recipe_run_result(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -261,6 +287,8 @@ def test_validate_summary_rejects_report_outside_final_recipe_dir(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": str(nested_report.relative_to(tmp_path)),
                 "experiment": paths[2],
@@ -294,6 +322,8 @@ def test_validate_summary_rejects_mode_mismatch(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -327,6 +357,8 @@ def test_validate_summary_rejects_lifecycle_change(tmp_path):
                 "mode": "verification",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
@@ -445,6 +477,8 @@ def test_platform_update_preserves_other_platform_snapshot(tmp_path):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],

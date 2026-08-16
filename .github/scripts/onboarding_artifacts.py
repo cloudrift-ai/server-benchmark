@@ -20,6 +20,16 @@ ALLOWED_ARTIFACT_PREFIXES = (
     "experiments/",
     "recipes/",
 )
+SUMMARY_TEXT_LIMIT = 1000
+
+
+def _summary_text(summary: dict, field: str) -> str:
+    value = summary.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Summary must include a non-empty {field}")
+    if "\n" in value or "\r" in value or len(value) > SUMMARY_TEXT_LIMIT:
+        raise ValueError(f"Summary {field} must be one line of at most {SUMMARY_TEXT_LIMIT} characters")
+    return value
 
 
 def _relative_file(workspace: Path, raw_path: str, prefixes: tuple[str, ...]) -> Path:
@@ -107,6 +117,8 @@ def validate_summary(
     expected_target = {"gpu": gpu, "gpu_count": gpu_count, "ssh": ssh_target}
     if target != expected_target:
         raise ValueError(f"Summary target mismatch: {target} != {expected_target}")
+    _summary_text(summary, "deployment_summary")
+    _summary_text(summary, "performance_summary")
     cleanup = summary.get("cleanup") or {}
     if cleanup.get("workloads") != "complete" or cleanup.get("docker_logout") is not True:
         raise ValueError(f"Remote workload or Docker credential cleanup is incomplete: {cleanup}")

@@ -306,6 +306,13 @@ Also verify:
 In the summary, `cleanup.docker_logout: true` means no Docker credential remains: either logout completed after a
 login, or no Docker login was performed because the stock-only path did not require one.
 
+For a successful run, include one-line `deployment_summary` and `performance_summary` values of at most 1000
+characters each. The deployment summary names the selected engine/image and the important serving configuration.
+The performance summary reports the selected recipe lane's measured workload and key throughput/latency/failure
+numbers. Use only measurements from the same exact successful lane that supports the final recipe; never estimate or
+copy numbers from a competing lane. These values are used in the workflow notification and do not replace either
+durable `RESULTS.md` report.
+
 Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
 final line. Include the requested mode on success and failure. List every repository file created, modified, or deleted
 by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`. In
@@ -319,6 +326,8 @@ in `experiment_artifacts`. Do not list unchanged artifacts from other platforms 
   "mode": "onboarding",
   "model_id": "org/model",
   "target": {"gpu": "exact hardware.py name", "gpu_count": 1, "ssh": "user@host"},
+  "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+  "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, p50 TPOT 7.1 ms, 0 failures",
   "recipe": "recipes/<model>/recipe.yaml",
   "experiment": "experiments/<model>/serving/recipe.yaml",
   "artifacts": [
@@ -353,11 +362,12 @@ in `experiment_artifacts`. Do not list unchanged artifacts from other platforms 
 }
 ```
 
-Use `status: "failed"`, nullable serving artifact fields, `report: null`, and a `failure` object with `gate` and
-`message` when no valid serving recipe is produced. Keep a complete golden populated if compiler qualification
-succeeded. Put partial inventories and useful diagnostics in the external output location, not the repository. Always
-write the summary, then return nonzero for a failed run. Do not delete the VM. The caller uses the SSH target and its
-separately captured provider/instance handle to perform and verify VM cleanup.
+Use `status: "failed"`, nullable serving artifact fields, `deployment_summary: null`, `performance_summary: null`,
+`report: null`, and a `failure` object with `gate` and `message` when no valid serving recipe is produced. Keep a
+complete golden populated if compiler qualification succeeded. Put partial inventories and useful diagnostics in the
+external output location, not the repository. Always write the summary, then return nonzero for a failed run. Do not
+delete the VM. The caller uses the SSH target and its separately captured provider/instance handle to perform and
+verify VM cleanup.
 
 On any failure, tear down workloads, report the first failed gate and external diagnostic paths, remove task-owned
 measurement output from the checkout, and return nonzero. Never claim partial onboarding as success.

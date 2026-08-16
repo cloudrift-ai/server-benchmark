@@ -128,8 +128,10 @@ def _emit(op, ctx: Ctx) -> Frag:
     ``step`` so nested contractions are reached as nodes. Scalar-nested: a node's body is its
     lowered loop-IR (byte-identical to ``Fold.lower``)."""
     if isinstance(op, Fold) and op.axis is None:
-        src = _emit(op.operands[0], ctx) if op.operands else None
-        prefix = list(src.body) if src is not None else []
+        # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
+        # edge per computed input: the row statistic, plus (attention) the per-cell score
+        # contraction its ``exp(s − m)`` reads.
+        prefix = [s for e in op.operands for s in _emit(e, ctx).body]
         return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)

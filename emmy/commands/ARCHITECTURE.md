@@ -337,14 +337,15 @@ emmy
 with nothing installed).
 
 Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` via `--recipe`, and `bench`'s
-positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
-installed package, copying it into the current directory first. An existing path always wins over a bundled name.
+positional arguments — a bare name with no path component instead selects one of the recipes from the automatically
+detected editable checkout or installed bundle, copying it into the current directory first. An existing path wins.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
 
 ### `emmy recipe`
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
-Repeat `--tag` to require several tags. `--bundled` reads the runnable recipe set shipped in the installed wheel.
+Without a root it detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use
+their packaged runnable set. Repeat `--tag` to require several tags. `--bundled` forces the packaged set.
 `--json` emits the versioned catalog object documented in the recipe architecture; each record includes matrix-
 expanded GPU/count/context metadata and whether the recipe is runnable. Machine consumers reject unknown versions.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
@@ -352,7 +353,7 @@ table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and n
 directory.
 
 ```bash
-emmy recipe list [ROOT | --bundled] [--tag TAG]... [--json]
+emmy recipe list [ROOT] [--bundled] [--tag TAG]... [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```

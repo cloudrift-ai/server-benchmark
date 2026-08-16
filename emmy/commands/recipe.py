@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from emmy.recipe.bundled import bundled_root
+from emmy.recipe.bundled import bundled_root, default_recipe_root
 from emmy.recipe.catalog import create_recipe_stub, recipe_inventory_document
 
 logger = logging.getLogger(__name__)
@@ -14,13 +14,14 @@ def _handle_list(args) -> None:
     try:
         if args.bundled and args.root is not None:
             raise ValueError("recipe list accepts either ROOT or --bundled, not both")
-        if args.bundled:
-            with bundled_root() as root:
-                if root is None:
-                    raise ValueError("this Emmy installation does not contain bundled recipes")
-                document = recipe_inventory_document(root, tuple(args.tag))
+        if args.root is not None:
+            document = recipe_inventory_document(args.root, tuple(args.tag))
         else:
-            document = recipe_inventory_document(args.root or Path("recipes"), tuple(args.tag))
+            root_context = bundled_root() if args.bundled else default_recipe_root()
+            with root_context as root:
+                if root is None:
+                    raise ValueError("this Emmy installation does not contain recipes")
+                document = recipe_inventory_document(root, tuple(args.tag))
     except (OSError, ValueError) as exc:
         logger.error(str(exc))
         raise SystemExit(2) from exc
@@ -46,8 +47,13 @@ def register_recipe_command(subparsers) -> None:
     actions = parser.add_subparsers(dest="recipe_action", required=True)
 
     list_parser = actions.add_parser("list", help="List recipe metadata")
-    list_parser.add_argument("root", nargs="?", type=Path, help="Recipe root (default: recipes)")
-    list_parser.add_argument("--bundled", action="store_true", help="List recipes shipped with this Emmy installation")
+    list_parser.add_argument(
+        "root",
+        nargs="?",
+        type=Path,
+        help="Recipe root (default: editable checkout recipes or installed wheel bundle)",
+    )
+    list_parser.add_argument("--bundled", action="store_true", help="Force recipes shipped with this installation")
     list_parser.add_argument("--tag", action="append", default=[], help="Require a tag; repeat to require multiple tags")
     list_parser.add_argument("--json", action="store_true", help="Print the versioned JSON recipe catalog")
     list_parser.set_defaults(func=_handle_list)

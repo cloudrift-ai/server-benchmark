@@ -218,7 +218,11 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Recipe
 
 ```bash
-# Inspect recipe metadata or count one lifecycle group in automation.
+# Automatically inspect live source recipes for an editable install, or the
+# runnable recipes bundled in an installed wheel.
+emmy recipe list --json
+
+# Inspect an explicit recipe root or count one lifecycle group in automation.
 emmy recipe list recipes --tag maintained --json
 
 # Inspect only the runnable recipes shipped by an installed Emmy wheel.
@@ -233,7 +237,8 @@ emmy recipe create org/model-name --rationale "Why this model should be onboarde
 each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, and matrix-expanded
 deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
 schema version, but existing fields are not removed or redefined. `--bundled` reads the recipes inside the installed
-wheel instead of a source-tree root.
+wheel even for an editable install. With neither `ROOT` nor `--bundled`, Emmy detects its installation: an editable
+checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged runnable recipe bundle.
 
 ```yaml
 tags:

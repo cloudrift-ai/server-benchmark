@@ -59,8 +59,9 @@ does not affect engine arguments, deployment, or benchmark behavior.
 versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
 state, and each matrix-expanded deployment's effective context length to the identity, tags, task, and rationale.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
-may add fields without removing or redefining fields in the current version. `emmy recipe list --bundled --json`
-applies the same catalog contract to the runnable recipes shipped in the installed wheel.
+may add fields without removing or redefining fields in the current version. With no explicit root, editable installs
+read the checkout's live top-level `recipes/` and wheel installs read their packaged runnable recipes.
+`emmy recipe list --bundled --json` forces the packaged set for release-artifact inspection.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 

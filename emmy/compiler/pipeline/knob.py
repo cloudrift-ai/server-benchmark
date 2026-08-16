@@ -628,6 +628,14 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
         bare = out.get(family)
         if bare == "":
             out.pop(family)
+    # The MIRROR rule: a scoped OFF names a site that DECLINED, which is exactly what stamping
+    # nothing at that site says — realization drops the key entirely, so keeping it would spell one
+    # configuration two ways (the row would never equal its own realized stamp) and, beside a bare
+    # non-OFF value, would even contradict it (a bare pin fans out over every eligible site —
+    # ``pin_key_matches`` — so the same site would be pinned twice with different values). An OFF
+    # value carries no site information; the family-level OFF fill below says all of it.
+    for name in [n for n in out if "@" in n and out[n] == ""]:
+        out.pop(name)
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:

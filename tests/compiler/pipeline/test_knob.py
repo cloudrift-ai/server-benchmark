@@ -660,8 +660,16 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     assert restamped["REDUCE@a0"] == "coop"
     assert "REDUCE" not in restamped
 
-    # A non-OFF bare value names a real primary-site decision. Keep it visible so a
-    # repository promotion can reject or explicitly re-key it rather than lose work.
+    # The MIRROR of the bare-OFF rule: a scoped OFF names a site that declined, which is what
+    # stamping nothing there already says — realization drops the key, so keeping it would spell
+    # one configuration two ways, and beside a bare non-OFF value it contradicts it (a bare pin
+    # fans out over every eligible site). The bare decision survives alone.
     primary_and_scoped = stamp_schedule_families({"REDUCE": "g2k", "REDUCE@a0": ""})
     assert primary_and_scoped["REDUCE"] == "g2k"
-    assert primary_and_scoped["REDUCE@a0"] == ""
+    assert "REDUCE@a0" not in primary_and_scoped
+
+    # …and a row whose family is ONLY declined scoped keys collapses to the family-level OFF —
+    # exactly the realized stamp of that configuration (the sm_89 restored-row replay class).
+    declined_only = stamp_schedule_families({"STAGE@a1": "", "REDUCE@a1": "", "WORK": "w1x16"})
+    assert declined_only["STAGE"] == "" and declined_only["REDUCE"] == ""
+    assert not any("@" in key for key in declined_only)

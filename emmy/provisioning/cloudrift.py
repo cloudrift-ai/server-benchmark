@@ -183,10 +183,26 @@ async def list_available_instance_types(api_key, api_url=DEFAULT_API_URL):
     return available
 
 
-async def resolve_team_id(api_key, team_name, api_url=DEFAULT_API_URL):
-    """Resolve one exact team name visible to the API key into its UUID."""
+async def resolve_team_id(api_key, team_name, api_url=DEFAULT_API_URL, allow_implicit_team_key=False):
+    """Resolve one exact team name, or accept ownership implicit in a team API key."""
     data = {"selector": "Mine", "with_members": False, "with_account_info": False}
-    result = await _api_request("POST", "/api/v1/teams/list", data, api_key, api_url)
+    try:
+        result = await _api_request("POST", "/api/v1/teams/list", data, api_key, api_url)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 401 or not allow_implicit_team_key:
+            raise
+        # Team API keys are intentionally rejected by the user-only teams/list
+        # endpoint. Verify the key against a team-aware endpoint before relying
+        # on CloudRift to infer the owning team from the authenticated principal.
+        await _api_request(
+            "POST",
+            "/api/v2/account/info",
+            {"selector": "ByToken", "with_auto_top_up": False},
+            api_key,
+            api_url,
+        )
+        logger.info(f"CloudRift team API key supplies implicit ownership for configured team {team_name!r}")
+        return None
     matches = [team.get("id") for team in result.get("teams", []) if team.get("name") == team_name and team.get("id")]
     if not matches:
         raise TerminalProvisionError(f"CloudRift API key cannot access team {team_name!r}")

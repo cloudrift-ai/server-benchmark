@@ -28,8 +28,15 @@ Three layers, each with one job:
   the coop partitions, the raster orders);
 - per-node LEGALITY — what a domain cannot know because it depends on this term's K, N, dtype and
   smem cap — is :mod:`._legality`, one predicate per rule, raise-vs-drop chosen by ``pinned``;
-- THIS module chooses: which families a SITE offers, the conservative option-0 each leads with, and
-  how a row becomes a ``TileOp``.
+- THIS module decides which families a SITE offers and how a row becomes a ``TileOp``.
+
+**Legality is the only limit, and this module ranks nothing.** Every partition a site can legally
+spell is enumerated; no default, ordering or filter here exists to make an unmeasured compile land
+on a particular row. The result is a SET, and its emission order is an implementation detail of the
+recursion — the deploy evidence hierarchy (recorded goldens, then measurements, then the fitted
+prior) is what ranks it. A compile with no evidence and no prior therefore takes whatever row the
+walk emitted first, and that row being slow is an accepted outcome, never a reason to add a rule
+back.
 
 **Dispatch is two stored-param predicates on the node, never the** :class:`AxisRole`: ``axis is
 None`` selects the register-strip values, :func:`is_contraction` the tile × stage × reduce product,
@@ -40,7 +47,8 @@ What the walk covers:
 
 - the pointwise cell: the register-strip ladder (``TILE=f<r>``, a TERM VARIANT applied at
   materialization);
-- the reduce partition (``REDUCE``): the conservative heuristic pick, then the coop / ILP catalog;
+- the reduce partition (``REDUCE``): the serial fold plus every legal partition in the coop / ILP
+  catalog;
 - the contraction: the ``TILE × STAGE × REDUCE × RASTER`` legal product over the scalar and warp
   (mma) tiers, split-K rows routing through the structural ``Fold ⊃ Fold`` composition that
   ``030_split_reduce`` consumes;
@@ -63,7 +71,6 @@ import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product
-from math import prod
 from types import MappingProxyType
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
@@ -91,7 +98,6 @@ from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
-from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.search.space import (
@@ -186,7 +192,8 @@ def _hint_extent(ax) -> int:
 def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
     """The hint-resolved extents of the term's SYMBOLIC axes, in walk order. ``Dim.hint`` is
     deliberately excluded from identity (``Op.cache_key`` stays hint-independent), but the
-    enumeration SIZES against it (:func:`_hint_extent` → the free-cell cap, the coop bands), so
+    enumeration SIZES against it (:func:`_hint_extent` → which coop bands the reduce extent can
+    feed), so
     the pool cache's key must carry it — two same-key ops traced at different ``--seq-len``
     hints enumerate different pools."""
     out: list[int] = []
@@ -238,52 +245,12 @@ def _extent_fingerprint(tile: TileOp) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _free_cells(place: Placement) -> int:
-    """How many output cells the kernel's free grid covers (hint-resolved)."""
-    return prod(_hint_extent(a) for a in place.free) if place.free else 1
-
-
 def _inner_free(place: Placement) -> Axis | None:
     """The innermost NON-UNIT free axis — the m1 recognizer's synthesized unit axis can sit
     innermost, and it is not the axis the transposed emitter sweeps."""
     if not place.free:
         return None
     return next((a for a in reversed(place.free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
-
-
-def _matvec_b_kstride(term: _Term, carrier) -> int | None:
-    """B's gmem stride along the reduce axis at the per-cell MATVEC tier, or ``None`` when B
-    cannot be classified. A contraction demoted to PLANAR carries BOTH a vector operand (a load
-    along the reduce axis touching no non-unit free axis — A) and a matrix operand indexed by the
-    reduce axis AND a non-unit free axis (B); only that two-operand shape classifies. ``1`` means the
-    reduce axis is B's fastest-varying dimension (the serving ``F.linear`` N×K layout); ``>1`` is
-    k-major (canonical ``B[k, n]``)."""
-    nonunit = {a.name for a in term.place.free if not (a.extent.is_static and a.extent.as_static() == 1)}
-    k_name = carrier.axis.name
-    a_seen = False
-    strides = set()
-    for ld in _node_loads(term.tile.op):
-        used = set().union(*(e.free_vars() for e in ld.index)) if ld.index else set()
-        if k_name not in used:
-            continue
-        if used & nonunit:
-            strides.add(gmem_row_stride(ld, k_name, term.tile.inputs))
-        else:
-            a_seen = True
-    return strides.pop() if a_seen and len(strides) == 1 else None
-
-
-def _k_contiguous(term: _Term, node) -> bool | None:
-    """Whether B stores its reduce axis FASTEST — one question, two ways to answer it because the
-    two node shapes carry different evidence. A contraction has a B EDGE, so ``b_trans`` reads its
-    index directly; a matvec DEMOTED to a plain fold keeps its loads inline in the lift (the
-    formation fact), so there is no edge and the classifier walks the loads instead. ``None`` when
-    B cannot be classified. The answer feeds only the cold option ORDER (which band spelling leads
-    the list); every orientation stays enumerated and evidence-rankable."""
-    if is_contraction(node):
-        return node.b_trans
-    stride = _matvec_b_kstride(term, node)
-    return None if stride is None else stride == 1
 
 
 def _shared_row_buf(carrier_loads, tail, grid_vars, raxis: Axis, inputs) -> str | None:
@@ -404,7 +371,6 @@ class _Term:
         self.proj = _projection(tile.op)
         self.tree = _site_tree(tile.op, self.key)
         self._tiles: dict[int, dict[str, list[TilePlan]]] = {}
-        self._k_contig: dict[int, bool | None] = {}
         #: The refusal a schedule PIN drew, kept until the walk is done. One inventory declining
         #: a pin is ordinary (the widths are read OFF the inventory, so the pin names a different
         #: plan under each); a pin NO inventory could spell is malformed, and that is loud.
@@ -442,17 +408,6 @@ class _Term:
         key = self.key(family, node)
         element = key.partition("@")[2] if key is not None else ""
         return _KNOBS[family].pin_at(element) if element else None
-
-    def k_contiguous(self, node) -> bool | None:
-        """Whether B stores the reduce axis FASTEST (:func:`_k_contiguous`), memoized per node.
-
-        Asked once per TILE CANDIDATE by ``_contraction_reduces``, and the demoted-matvec answer
-        walks every load in the term to get there — so on a wide contraction the enumeration paid
-        for one whole-term scan per candidate. The term is immutable during the walk, so the answer
-        cannot move."""
-        if id(node) not in self._k_contig:
-            self._k_contig[id(node)] = _k_contiguous(self, node)
-        return self._k_contig[id(node)]
 
     def tiles(self, node) -> dict[str, list[TilePlan]]:
         """The contraction node's ``TILE`` catalog, grouped by the ``WORK`` spelling each candidate
@@ -702,7 +657,7 @@ def _strip_width(plan: TilePlan) -> int:
 
 
 def _strip_values(term: _Term, node) -> list[dict]:
-    """The register-strip values: the flat per-cell tile (option-0), then the catalog's ladder.
+    """The register-strip values: the flat per-cell tile and every ladder width the cell can carry.
     ``r`` IS the spelled ``TILE=f<r>`` — the strip is a TERM VARIANT applied at materialization, a
     function of the ROW, not a member of a pre-enumerated variant set."""
     pin = term.pin("TILE", node)
@@ -712,17 +667,17 @@ def _strip_values(term: _Term, node) -> list[dict]:
     except ValueError as e:
         # A pin the strip site cannot SPELL — a warp atom, which needs an inventory a pointwise
         # cell never has. Same rule as everywhere: the candidate is simply not in
-        # ``values(site, work)``, so the cell degrades to option-0. This is PIN BLEED (one env pin,
-        # several kernels in the graph, and this is not the one it was written for), which is why
-        # it degrades rather than emptying the fork; ``_enumerate`` still raises the recorded error
-        # if NOTHING in the term could spell it.
+        # ``values(site, work)``, so the cell degrades to the flat per-cell tile. This is PIN BLEED
+        # (one env pin, several kernels in the graph, and this is not the one it was written for),
+        # which is why it degrades rather than emptying the fork; ``_enumerate`` still raises the
+        # recorded error if NOTHING in the term could spell it.
         term.pin_error = e
         plans = []
     out = []
     for plan in plans:
         # A strip WIDTH the cell cannot carry (a stateful / sweep body, a symbolic or indivisible
         # inner extent, a warp codec on a pointwise cell) drops the row; the flat per-cell base
-        # below is always offered, so a narrowing pin degrades to option-0.
+        # below is always offered, so a narrowing pin degrades to it.
         if legal.enforce(legal.strip_width(ext, _strip_width(plan)), pinned=False):
             out.append({"TILE": plan})
     return out or [{"TILE": TilePlan()}]
@@ -730,59 +685,23 @@ def _strip_values(term: _Term, node) -> list[dict]:
 
 # --- the reduce partition ---
 
-# Conservative cooperative-reduce selection constants (the default when REDUCE is unpinned).
-_COOP_MIN_EXTENT = 128  # only cooperate when the reduce axis is at least this wide
-_SERIAL_TARGET = 8  # aim for ~this many serial steps per cooperating thread
-_MAX_COOP = 256  # cap on cooperative threads per CTA (power of two)
-_FREE_CAP = 256  # only cooperate when the output grid is at most this many cells
-
-
-def _prevpow2(n: int) -> int:
-    p = 1
-    while p * 2 <= n:
-        p *= 2
-    return p
-
-
-def _pick_coop(extent: int, free: int, *, has_tail: bool = False) -> int:
-    """The conservative whole-CTA cooperative-thread count for a reduce of static ``extent`` over
-    ``free`` output cells, or ``1`` (stay serial). Cooperate only on a wide reduce feeding a small
-    grid — otherwise the scalar tier already saturates the GPU; ``has_tail`` lifts the grid cap (a
-    fused contraction tail multiplies each cell's work by its column extent)."""
-    if extent < _COOP_MIN_EXTENT or (free > _FREE_CAP and not has_tail):
-        return 1
-    coop = min(_prevpow2(extent // _SERIAL_TARGET), _MAX_COOP)
-    return coop if coop >= 2 else 1
-
 
 def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
-    """The reduce-partition candidates for a non-contraction fold — option-0 is the conservative
-    heuristic pick (:func:`_pick_coop`, so a cold greedy compile keeps its historical deploy), then
-    the legal :func:`coop_reduce_moves` catalog + serial as fork siblings. The catalog rows are what
-    keep the 16- / 32-wide reduce goldens reachable. An env pin is authoritative."""
+    """Every reduce partition a non-contraction fold can legally spell: the serial fold, plus each
+    :func:`coop_reduce_moves` entry this node admits. No candidate is preferred, promoted or
+    dropped for speed — the catalog is filtered by LEGALITY alone (the band's geometry, its
+    epilogue, and a width the reduce extent can actually feed), so the 16- / 32-wide reduce
+    goldens and the wide normalizer bands are all reachable and the evidence hierarchy ranks them.
+    An env pin is authoritative."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
         return [ReducePlan.parse(pin, Workers.parse(WORK.raw()))]
     extent = _hint_extent(node.axis)
-    free = _free_cells(term.place)
-    tail = projection_tail(term.tile)
-    coop = _pick_coop(extent, free, has_tail=has_contraction_tail(tail))
-    # B's layout orders the cold option-0 only: at the matvec tier each coop band orientation is
-    # coalesced on one B orientation (the plain band interleaves lanes along K, the transposed band
-    # sweeps the output axis), so the classified layout picks which spelling LEADS. Every
-    # orientation stays in the row set for evidence to rank.
-    k_contig = term.k_contiguous(node)
-    if k_contig and extent >= _COOP_MIN_EXTENT and free >= _FREE_CAP:
-        # The wide-K COALESCED matvec: a 32-wide band is the measured deploy, and option-0 is what
-        # the prior-free paths take. It is a RANKING decision, so it leads the list rather than
-        # replacing it — the row SET stays a function of the term alone, never of a context flag.
-        coop = 32
-    elif coop > 1 and k_contig is False:
-        coop = 1  # the heuristic option-0 is a plain band too — uncoalesced on a k-major B
-    cands = [ReducePlan.of(coop=coop)]
+    cands = [ReducePlan()]
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
-    epilogue = legal.coop_band_epilogue(tail)  # term-wide, so it is asked ONCE, not per candidate
+    # Term-wide, so it is asked ONCE, not per candidate.
+    epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
     for p in coop_reduce_moves():
         if p.needs_split and not p.coop_transposed:
             # A cross-CTA split is offered on this tier only in COMPOSITE with the transposed band
@@ -798,8 +717,6 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
                 continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
-    if ReducePlan() not in cands:
-        cands.append(ReducePlan())
     return cands
 
 
@@ -870,9 +787,10 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
     that clamps under the smem budget spells identically to its shallower sibling and must yield
     ONE row, or the fork carries two leaves naming one kernel.
 
-    ``gmem_direct`` seeds the conservative option-0 (``None``, no slab). The compute-fill tier has
-    no gmem-direct sibling — a computed ``a`` edge must land somewhere — so it seeds nothing, and a
-    caller that declines every move returns the empty list rather than a silent fallback."""
+    ``gmem_direct`` seeds the no-intermediate candidate (``None``, no slab) — a legality fact about
+    the tier, not a preference. The compute-fill tier has no gmem-direct sibling — a computed ``a``
+    edge must land somewhere — so it seeds nothing, and a caller that declines every move returns
+    the empty list rather than a silent fallback."""
     out: list[Stage | None] = [None] if gmem_direct else []
     spelled = {""} if gmem_direct else set()
     for move in moves:
@@ -934,8 +852,8 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
 
 
 def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
-    """The contraction's ``REDUCE`` candidates — serial first (option-0), then the legal coop / ILP
-    moves (per-cell tier only — the non-output-tiled contract) and the divisor-legal split-K
+    """The contraction's ``REDUCE`` candidates — the serial fold, the legal coop / ILP moves
+    (per-cell tier only — the non-output-tiled contract) and the divisor-legal split-K
     moves. An ATOMIC split is offered only on a single-channel node whose FULL
     projection tail distributes over the add; the deferred kernel finalize stays legal for any
     epilogue."""
@@ -1193,15 +1111,14 @@ def _work_holds(row: _Row, work: Workers | None) -> bool:
 
 
 def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> list[Workers | None]:
-    """The inventories the subtree rooted at ``node`` can spell a value against, **its own option-0
-    first** — which is what makes the enumeration's leading row the conservative one every
-    prior-free path deploys."""
+    """Every inventory the subtree rooted at ``node`` can spell a value against. The list is a SET
+    of legal candidates; the position an entry lands in carries no meaning."""
     site = node.site
     out: list[Workers | None] = []
     if site.node.axis is None:
         out.append(None)
     elif is_contraction(site.node):
-        out.append(None)  # the per-cell tile and the serial fold — the contraction's option-0
+        out.append(None)  # the derived per-cell geometry — the per-cell tile beside a serial fold
         out.extend(Workers.parse(spell) for spell in term.tiles(site.node) if spell)
         # The non-output-tiled tier folds K across a cooperative band, so a contraction claims
         # those inventories too — at the per-cell tile, where the coop moves are offered.
@@ -1214,11 +1131,10 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
 
 
 def _inventories(terms: list[_Term]) -> list[Workers | None]:
-    """The kernel's ``WORK`` candidates — every inventory any VIEW's catalogs imply, the OPTION-0
-    one leading (the reduce tier's conservative cooperative band, or ``None`` for the per-cell /
-    chain / pure-reduce tiers — a first-class inventory), then the ``+p`` producer bands a warp
-    inventory can carry. CHOSEN at the root: every site of every view resolves against it, so
-    three of the parent/child couplings stop being rules at all.
+    """The kernel's ``WORK`` candidates — every inventory any VIEW's catalogs imply (``None``, the
+    derived per-cell / pure-reduce geometry, is one of them and a first-class inventory), plus the
+    ``+p`` producer bands a warp inventory can carry. CHOSEN at the root: every site of every view
+    resolves against it, so three of the parent/child couplings stop being rules at all.
 
     Kernel-global means kernel-global: the list spans the VIEWS (a fork has ONE ``WORK`` level),
     which is also what makes the pin fallback below a single decision instead of one per view."""

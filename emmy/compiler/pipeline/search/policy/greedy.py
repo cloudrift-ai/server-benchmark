@@ -25,7 +25,17 @@ full feature vector the prior trained on: the ``H_*`` host/hardware regime + the
 op's ``S_*`` structural knobs (read off the offer op) + the leaf's complete knob
 row. The pick equals scoring the flat candidate set, invariant to the tree's
 level order. With no trained prior the model is unfit → it falls back to the first
-emitted sibling (option-0).
+emitted sibling.
+
+**Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
+goldens, then measurements, then the fitted prior — every one of them a
+recording of something that ran. There is no hand-written tier: no leaf is
+promoted, demoted, withheld or given a head start here, and no fallback
+default is chosen for being safe. Where all three tiers are silent the pick
+degenerates to the enumeration's first leaf, which carries no meaning and can
+be arbitrarily slow. That is the accepted cost of the rule, not a defect to
+patch: a bad unmeasured pick is fixed by measuring (a tune, a recorded golden)
+or by fitting the prior better, never by teaching this module a preference.
 """
 
 from __future__ import annotations
@@ -263,47 +273,40 @@ def _price_op_leaf(fp: ForkPoint, leaf: object, prior, memo: dict[str, float | N
     return _price_graph(sub, fp.ctx, prior, memo, db)
 
 
-def _pick_structural(
-    fp: ForkPoint, leaves: list, prior, memo: dict[str, float | None], price_structural: bool, db: object | None = None
-) -> object | None:
-    """Price the structural (``Graph``-splicing) leaves of one fork against
-    the keep-fused ``Op`` side and return the winning structural leaf, or
-    ``None`` to keep the op-variant path (cold prior, unpriceable option, or
-    fused priced faster).
+def _priced_pick(fp: ForkPoint, leaves: list, prior, memo: dict[str, float | None], db: object | None = None) -> object | None:
+    """The priced argmin over a kernel-set fork's leaves — the structural
+    (``Graph``-splicing) options and the keep-fused ``Op`` side alike — or
+    ``None`` when some leaf cannot be priced.
 
-    Both sides are priced the same way: the best µs at each kernel's partition
+    This exists because the per-op prior scores ONE kernel's knob row, so its
+    score for a multi-kernel ``Graph`` option is meaningless: the leaf carries
+    no row of its own. It is a way of ASKING the evidence about a leaf the
+    ordinary ranking cannot featurize, not a rule about which leaf should win.
+    Every leaf is priced the same way: the best µs at each kernel's partition
     fork, obtained by a nested deterministic resolution of the kernel's
     single-node slice (``lowering/tile`` only, no backend, CPU-only —
     :func:`_price_kernel`); a structural option's price is the Σ over its
     fragment's kernels. The nested pick follows the deploy evidence hierarchy
     (``db`` threads the tune DB down), so each side's price is a *measurement*
-    wherever the tune benched that kernel, and a structure the tune measured
-    slower cannot displace a measured-faster fused config on a model
-    extrapolation alone — a Σ-of-predictions comparison across two different
-    kernel families is exposed to the model's absolute-µs error, which doesn't
-    cancel across sides the way it does among siblings of one fork. Any loaded
-    prior prices the unmeasured remainder — including the offline cold-start
-    model on a cold deploy: fusion is greedy-maximal and algebra-only, so the
-    fused option can be a work-duplicating maximal region, and the offline
-    prior is the designated owner of keeping a cold kernel-set choice sane.
-    Its Σ-comparison quality is a fitting requirement, not a reason to freeze
-    the kernel set at option-0."""
+    wherever the tune benched that kernel, and the loaded prior prices the
+    unmeasured remainder. A Σ-of-predictions comparison across two different
+    kernel families is exposed to the model's absolute-µs error, which does not
+    cancel across sides the way it does among siblings of one fork — that is a
+    fitting requirement on the prior, and it is the prior's problem to fix.
+
+    ``None`` (an unpriceable leaf) hands the fork back to the ordinary leaf
+    ranking with EVERY leaf still in it, structural ones included: an option
+    nothing can price is just an option, and greedy is not shielded from
+    picking it."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    if not price_structural or prior is None:
+    priced = [
+        (o, _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db) if _is_structural_option(o) else _price_op_leaf(fp, o, prior, memo, db))
+        for o in leaves
+    ]
+    if any(us is None for _, us in priced):
         return None
-    op_leaves = [o for o in leaves if not _is_structural_option(o)]
-    if not op_leaves:
-        return None  # nothing to compare against — the no-op-variant edge keeps today's scoring path
-    fused_prices = [_price_op_leaf(fp, o, prior, memo, db) for o in op_leaves]
-    if any(p is None for p in fused_prices):
-        return None
-    split_prices = [(o, _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db)) for o in leaves if _is_structural_option(o)]
-    split_prices = [(o, p) for o, p in split_prices if p is not None]
-    if not split_prices:
-        return None
-    best_split, best_split_us = min(split_prices, key=lambda op_us: op_us[1])
-    return best_split if best_split_us < min(fused_prices) else None
+    return min(priced, key=lambda op_us: op_us[1])[0]
 
 
 # The default nvcc flags of the tune ranking pass (``emmy/commands/tune.py``'s
@@ -650,16 +653,16 @@ def greedy_decide(
     benches-and-skips an unviable tile; greedy benches nothing, so the
     validity signal must come from the retry).
 
-    Structural (``Graph``-splicing) options are priced with the trained prior
-    grounded in measured DB evidence — :func:`_pick_structural` — so an
-    unpinned ``compile`` / ``run`` can deploy the kernel sets ``tune`` measured
-    best (the demoted-matmul split); cold, the structural leaf is filtered and
-    kernel sets stay unchanged.
-    ``price_structural=False`` keeps the filter behavior — used by
-    ``Pipeline.run``'s retry after a structural pick failed to lower, and by
-    the nested pricing probes themselves (no recursive splitting inside a
-    price probe). The price memo is per-factory-call (one compile attempt),
-    keyed by ``Op.cache_key``."""
+    Structural (``Graph``-splicing) options are priced against the fused side
+    with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
+    carries no knob row the ordinary ranking could score; when a leaf cannot
+    be priced, all of them go on to that ranking anyway. Nothing withholds a
+    structural leaf to keep a kernel set unchanged.
+    ``price_structural=False`` withdraws the splices for reasons that are not
+    about speed — ``Pipeline.run``'s retry after a structural pick failed to
+    LOWER, and the nested pricing probes, which must not re-split the slice
+    they are pricing. The price memo is per-factory-call (one compile
+    attempt), keyed by ``Op.cache_key``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
@@ -723,22 +726,27 @@ def greedy_decide(
         leaves = flatten_leaves(fp.options)
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a
-        # multi-kernel Graph option is meaningless. With the *trained* prior
-        # loaded, :func:`_pick_structural` prices the option properly — Σ of
-        # nested per-kernel predicted-bests vs the keep-fused side — and
-        # returns the split when it predicts faster. Cold (offline / no
-        # prior), or when an option can't be priced, the structural leaf is
-        # filtered so a cold compile never changes kernel sets. ``tune``
-        # explores them regardless (MCTS walks every sibling); an env pin
-        # makes the Graph the rule's only option, which applies inline and
+        # multi-kernel Graph option is meaningless. :func:`_priced_pick` asks
+        # the same evidence about them properly — Σ of nested per-kernel
+        # bests, every leaf priced the same way — and returns the argmin. When
+        # it cannot price some leaf it decides nothing and every leaf, the
+        # structural ones included, goes on to the ordinary ranking below.
+        # ``tune`` explores them regardless (MCTS walks every sibling); an env
+        # pin makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
         if any(_is_structural_option(o) for o in leaves):
-            pick = _pick_structural(fp, leaves, the_prior, memo, price_structural, db)
-            if pick is not None:
-                return pick
-            op_leaves = [o for o in leaves if not _is_structural_option(o)]
-            if op_leaves:
-                leaves = op_leaves
+            if not price_structural:
+                # Structural RETIREMENT, not a ranking rule: a fragment kernel
+                # that failed to lower cannot be blocklisted at the fork site
+                # (the splice minted fresh node ids), so ``Pipeline.run``
+                # re-resolves with the splices withdrawn — the same role
+                # ``blocked`` plays for a tile. It is also what stops a nested
+                # price probe from re-splitting the slice it is pricing.
+                leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
+            else:
+                pick = _priced_pick(fp, leaves, the_prior, memo, db)
+                if pick is not None:
+                    return pick
         if len(leaves) <= 1:
             return leaves[0] if leaves else _first_leaf(fp.options[0])
         # The constant base under this fork's deltas: the offer op's knobs

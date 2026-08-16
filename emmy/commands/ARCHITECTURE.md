@@ -10,6 +10,7 @@ commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
 commands/recipe ─► recipe (catalog queries and onboarding shell creation)
+recipe/query ───► provisioning (read-only CloudRift availability and team access)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
@@ -320,6 +321,7 @@ emmy
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
+|   +-- query     -- filter and order normalized recipe or deployment rows
 |   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
@@ -345,15 +347,24 @@ See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy 
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
 It detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use their packaged
-runnable set. Repeat `--tag` to require several tags.
+runnable set.
 `--json` emits the versioned catalog object documented in the recipe architecture; each record includes matrix-
 expanded GPU/count/context metadata and whether the recipe is runnable. Machine consumers reject unknown versions.
+`recipe query` applies repeatable constrained predicates and stable sort keys to normalized catalog rows. A
+`deployment.*` field expands recipes into deployment rows. CloudRift availability, Robots-team access, and committed
+results history are lazy computed fields, so ordinary catalog-only queries perform no provider or Git work.
+`--candidate MODEL GPU COUNT` supplies one exact external deployment; a matching recipe contributes its lifecycle
+metadata, while an absent model becomes onboarding work. `--root` exists on this automation-oriented interface so
+callers can run control code from one checkout against recipe data in another; without it, query and list use the same
+installation-aware catalog.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
 directory.
 
 ```bash
-emmy recipe list [--tag TAG]... [--json]
+emmy recipe list [--json]
+emmy recipe query [--filter EXPRESSION]... [--sort EXPRESSION]... [--limit N] \
+  [--candidate MODEL GPU COUNT] [--root ROOT] [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```

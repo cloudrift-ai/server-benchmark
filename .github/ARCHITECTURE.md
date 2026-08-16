@@ -52,8 +52,8 @@ lifecycle decision. It keeps at most three total onboarding shells for open-weig
 contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
 consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
 ignores otherwise valid new candidates beyond the remaining shell slots. `emmy recipe list --json` supplies the
-versioned compact agent inventory under its `recipes` field, and tag-filtered list queries enforce the maintained and
-onboarding counts after application.
+versioned compact agent inventory under its `recipes` field, and recipe queries enforce the maintained and onboarding
+counts after application.
 The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
 validates and applies its lifecycle manifest. The helper
 tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
@@ -72,16 +72,20 @@ expose the same packages through OpenCode's native skill tool.
 
 ### Nightly verification and direct onboarding
 
-**Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its mechanical selector reads
-the recipe inventory and CloudRift VM variant availability, without filtering on public-IP supply. It considers only
-declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the first
-priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest last-change
-timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments, and model
-ID breaks remaining ties. No eligible deployment is a successful no-op.
+**Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its selector uses the
+`emmy recipe query` command against the rolling branch's recipe root, with the command implementation loaded from the
+exact workflow SHA. Manual dispatch supplies one exact external candidate; scheduled dispatch queries declared
+deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
+The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
+only declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the
+first priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest
+last-change timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments,
+and model ID breaks remaining ties. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
-every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches `emmy`, workflow, and GitHub job tags,
+every rent then includes the UUID and requests a public IP so the GitHub runner can reach the VM over SSH. It attaches
+`emmy`, workflow, and GitHub job tags,
 makes at most three workflow-level rental attempts for the same selection, and sweeps a failed attempt by the complete
 tag set before retrying. Only V100 rentals set CloudRift's admin-only billing exemption; every other GPU is a regular
 team rental. The workflow never falls back to GCP or changes the selected GPU type/count.

@@ -223,124 +223,66 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          ./venv/bin/python - <<'PY'
-          import asyncio
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          from emmy.provisioning.candidates import iter_candidates
-          from emmy.provisioning.cloudrift import list_available_instance_types, validate_team_id_access
-          from emmy.recipe.catalog import recipe_inventory_document
-
-          inventory_document = recipe_inventory_document(Path("recipes"))
-          if inventory_document.get("schema_version") != 1 or not isinstance(inventory_document.get("recipes"), list):
-              raise SystemExit("Unsupported `emmy recipe list --json` schema")
-          inventory = inventory_document["recipes"]
-          team_id = asyncio.run(
-              validate_team_id_access(
-                  os.environ["CLOUDRIFT_API_KEY"],
-                  os.environ.get("CLOUDRIFT_TEAM_ID"),
-              )
+          query=(
+            recipe query
+            --root recipes
+            --filter 'provider.cloudrift.team_access == true'
+            --limit 1
+            --json
           )
-          available = asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"]))
-          with Path(os.environ["GITHUB_ENV"]).open("a") as output:
-              output.write(f"CLOUDRIFT_TEAM_ID={team_id}\n")
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            query+=(
+              --candidate "$REQUESTED_MODEL_ID" "$REQUESTED_GPU" "$REQUESTED_GPU_COUNT"
+              --filter 'lifecycle != "obsolete"'
+              --filter 'deployment.availability.cloudrift == true'
+            )
+          else
+            query+=(
+              --filter 'lifecycle in ["onboarding", "maintained"]'
+              --filter 'deployment.availability.cloudrift == true'
+              --sort 'lifecycle order ["onboarding", "maintained"]'
+              --sort 'results.last_run_at asc nulls-first'
+              --sort 'model_id asc'
+              --sort 'deployment.index asc'
+            )
+          fi
 
-          def available_deployment(deployment):
-              gpu = deployment.get("gpu", deployment.get("deploy.gpu"))
-              count = deployment.get("gpu_count", deployment.get("deploy.gpu_count"))
-              try:
-                  candidates = iter_candidates(gpu, count, "cloudrift", exact_gpu_count=True)
-              except (TypeError, ValueError):
-                  return False
-              return any(candidate.instance_type in available for candidate in candidates)
+          selection=$(./venv/bin/emmy "${query[@]}")
+          if [ "$(jq -r '.schema_version' <<< "$selection")" != "1" ]; then
+            echo "Unsupported emmy recipe query schema" >&2
+            exit 1
+          fi
+          row=$(jq -c '.rows[0] // empty' <<< "$selection")
+          if [ -z "$row" ]; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "Manual candidate is obsolete or has no available exact CloudRift VM." >&2
+              exit 1
+            fi
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            echo "No onboarding or maintained recipe has an available exact CloudRift VM." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
-          def write_selection(record, deployment, mode, lifecycle):
-              gpu = deployment.get("gpu", deployment.get("deploy.gpu"))
-              gpu_count = deployment.get("gpu_count", deployment.get("deploy.gpu_count"))
-              values = {
-                  "selected": "true",
-                  "model_id": record["model_id"],
-                  "gpu": gpu,
-                  "gpu_count": str(gpu_count),
-                  "mode": mode,
-                  "lifecycle": lifecycle,
-              }
-              with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-                  for key, value in values.items():
-                      output.write(f"{key}={value}\n")
-              with Path(os.environ["GITHUB_ENV"]).open("a") as output:
-                  for key, value in {
-                      "MODEL_ID": values["model_id"],
-                      "TARGET_GPU": values["gpu"],
-                      "TARGET_GPU_COUNT": values["gpu_count"],
-                      "ONBOARD_MODE": values["mode"],
-                      "EXPECTED_LIFECYCLE": values["lifecycle"],
-                  }.items():
-                      output.write(f"{key}={value}\n")
-
-          if os.environ["EVENT_NAME"] == "workflow_dispatch":
-              model_id = os.environ["REQUESTED_MODEL_ID"]
-              gpu = os.environ["REQUESTED_GPU"]
-              try:
-                  gpu_count = int(os.environ["REQUESTED_GPU_COUNT"])
-              except ValueError as exc:
-                  raise SystemExit("gpu_count must be positive") from exc
-              if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", model_id):
-                  raise SystemExit("model_id must be an exact Hugging Face owner/repository ID")
-              if gpu_count < 1:
-                  raise SystemExit("gpu_count must be positive")
-              deployment = {"gpu": gpu, "gpu_count": gpu_count}
-              if not available_deployment(deployment):
-                  raise SystemExit(f"CloudRift has no available exact {gpu} x{gpu_count} VM")
-              existing = next((record for record in inventory if record["model_id"] == model_id), None)
-              if existing and "obsolete" in existing["tags"]:
-                  raise SystemExit(f"Refusing to run an obsolete recipe: {model_id}")
-              if existing and "maintained" in existing["tags"]:
-                  mode, lifecycle = "verification", "maintained"
-              elif existing and "best-effort" in existing["tags"]:
-                  mode, lifecycle = "verification", "best-effort"
-              else:
-                  mode, lifecycle = "onboarding", "best-effort"
-              write_selection(existing or {"model_id": model_id}, deployment, mode, lifecycle)
-              raise SystemExit(0)
-
-          ranked = []
-          for record in inventory:
-              tags = set(record["tags"])
-              if {"onboarding", "untested"}.issubset(tags):
-                  tier, mode, lifecycle = 0, "onboarding", "best-effort"
-              elif "maintained" in tags:
-                  tier, mode, lifecycle = 1, "verification", "maintained"
-              else:
-                  continue
-              deployment = next((item for item in record["deployments"] if available_deployment(item)), None)
-              if deployment is None:
-                  continue
-              report = str(Path(record["path"]).with_name("RESULTS.md"))
-              result = subprocess.run(
-                  ["git", "log", "-1", "--format=%ct", "--", report],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              )
-              last_run = int(result.stdout.strip() or 0)
-              ranked.append((tier, last_run, record["model_id"], record, deployment, mode, lifecycle))
-
-          if not ranked:
-              with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-                  output.write("selected=false\n")
-              summary = os.environ.get("GITHUB_STEP_SUMMARY")
-              if summary:
-                  with Path(summary).open("a") as output:
-                      output.write("No onboarding or maintained recipe has an available exact CloudRift VM.\n")
-              raise SystemExit(0)
-
-          _, _, _, record, deployment, mode, lifecycle = min(ranked, key=lambda item: item[:3])
-          write_selection(record, deployment, mode, lifecycle)
-          PY
+          model_id=$(jq -r '.model_id' <<< "$row")
+          gpu=$(jq -r '.deployment.gpu' <<< "$row")
+          gpu_count=$(jq -r '.deployment.gpu_count' <<< "$row")
+          mode=$(jq -r '.operation' <<< "$row")
+          lifecycle=$(jq -r '.expected_lifecycle' <<< "$row")
+          {
+            echo "selected=true"
+            echo "model_id=$model_id"
+            echo "gpu=$gpu"
+            echo "gpu_count=$gpu_count"
+            echo "mode=$mode"
+            echo "lifecycle=$lifecycle"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "MODEL_ID=$model_id"
+            echo "TARGET_GPU=$gpu"
+            echo "TARGET_GPU_COUNT=$gpu_count"
+            echo "ONBOARD_MODE=$mode"
+            echo "EXPECTED_LIFECYCLE=$lifecycle"
+          } >> "$GITHUB_ENV"
 
       - name: Prepare artifact branch
         id: branch

@@ -101,9 +101,11 @@ manual dispatch test a workflow PR without leaking that PR's implementation comm
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. Unmanifested or exploratory output is rejected.
-The validator also checks the requested mode, exact recipe model, and expected lifecycle tag. The workflow then
-commits those artifacts, rebases on the latest default branch, and updates or opens the rolling model lifecycle PR
-using renewable GitHub App credentials for the long-running push path.
+The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
+the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
+model, and expected lifecycle tag. The workflow then commits those artifacts, rebases on the latest default branch,
+and updates or opens the rolling model lifecycle PR using renewable GitHub App credentials for the long-running push
+path.
 
 ### Discovery lifecycle PR
 

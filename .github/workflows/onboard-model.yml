@@ -444,6 +444,11 @@ jobs:
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
             "$AGENT_EVENTS" > "$AGENT_OUTPUT"
+          if [ -s "$AGENT_OUTPUT" ]; then
+            sed 's/^/onboard-model: /' "$AGENT_OUTPUT"
+          else
+            echo "::error::Onboarding agent produced no final text output"
+          fi
           exit "$agent_status"
 
       - name: Delete workflow-owned CloudRift VMs

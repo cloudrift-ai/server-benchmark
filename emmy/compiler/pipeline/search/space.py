@@ -481,11 +481,11 @@ def coop_reduce_moves() -> list[ReducePlan]:
     (the coop reduce spec's contract — the per-cell tier folds K across the coop threads / ILP
     register chains). These EXTEND the serial fold the scheduler offers beside them. The 16- /
     32-wide coop folds are recorded reduce-golden winners (the wide-row folds) — kept enumerable so
-    the reduce goldens stay reachable. The 64–512-wide folds are the memory-bound normalizer band: a wide-K softmax /
-    rms_norm saturates bandwidth only with a full-block coop row (``softmax.k2048`` wants 512 —
-    2.6× over 32). The scheduler's coop reduce spec declines a band wider than the row has
-    work for, so enumerating them is safe on small K. The TRANSPOSED band is the k-major-B matvec
-    partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix). The
+    the reduce goldens stay reachable. The 64–512-wide folds are the memory-bound normalizer band:
+    a wide-K softmax / rms_norm saturates bandwidth only with a full-block coop row
+    (``softmax.k2048`` wants 512 — 2.6× over 32). The scheduler's coop reduce spec declines a band
+    wider than the row has work for, so enumerating them is safe on small K. The TRANSPOSED band is
+    the k-major-B matvec partition (warp lanes sweep the output axis — the M=1 gemv coalescing). The
     scheduler's reduce spec gates candidates STRUCTURALLY only (plain contraction, 32-divisible
     inner free axis). Both lane orientations are always enumerated: B's stored layout decides
     which one coalesces, and that is a question for measured evidence, not for the catalog or for

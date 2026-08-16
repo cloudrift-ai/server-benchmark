@@ -1,5 +1,6 @@
 """Recipe catalog inventory and onboarding-stub creation."""
 
+import pytest
 import yaml
 
 from emmy.recipe.catalog import CATALOG_SCHEMA_VERSION, create_recipe_stub, recipe_inventory, recipe_inventory_document
@@ -47,6 +48,7 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
                 {"gpu": "NVIDIA B200", "gpu_count": 2, "context_length": 16384},
             ],
             "rationale": "Useful model.",
+            "heat": None,
         }
     ]
 
@@ -59,6 +61,15 @@ def test_recipe_inventory_document_is_versioned(tmp_path):
 
     assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 1
     assert [recipe["name"] for recipe in document["recipes"]] == ["ready"]
+
+
+def test_recipe_inventory_rejects_invalid_heat(tmp_path):
+    root = tmp_path / "recipes"
+    recipe = _write_recipe(root, "ready", "org/ready", ["maintained"])
+    recipe.write_text(recipe.read_text().replace("  rationale: Useful model.\n", "  rationale: Useful model.\n  heat: 101\n"))
+
+    with pytest.raises(ValueError, match="heat must be an integer from 0 to 100"):
+        recipe_inventory(root)
 
 
 def test_disabled_recipe_is_not_runnable_but_keeps_proposed_deployments(tmp_path):
@@ -91,6 +102,7 @@ def test_create_recipe_stub_writes_native_deployment_matrix(tmp_path):
         "model": {
             "huggingface": "org/new-model",
             "rationale": "Strong current serving demand.",
+            "heat": 0,
             "task": "generate",
         },
         "matrices": [
@@ -99,6 +111,21 @@ def test_create_recipe_stub_writes_native_deployment_matrix(tmp_path):
         ],
     }
     assert list(config["model"])[:2] == ["huggingface", "rationale"]
+
+
+@pytest.mark.parametrize("heat", [-1, 101, True, "90"])
+def test_create_recipe_stub_rejects_invalid_heat(tmp_path, heat):
+    root = tmp_path / "recipes"
+
+    with pytest.raises(ValueError, match="heat must be an integer from 0 to 100"):
+        create_recipe_stub(
+            root,
+            "org/new-model",
+            "Strong current serving demand.",
+            "generate",
+            [{"deploy.gpu": GPU, "deploy.gpu_count": 1}],
+            heat,
+        )
 
 
 def test_create_recipe_stub_uses_organization_when_checkpoint_directory_exists(tmp_path):

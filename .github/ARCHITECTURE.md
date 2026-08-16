@@ -48,22 +48,28 @@ leaving a release behind.
 
 All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
 recipes for the maintained set, classifies the remaining complete recipes, and supplies a rationale for every
-lifecycle decision. It keeps at most three total onboarding shells for open-weight Hugging Face models. Each shell
-contains one to three proposed deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; existing shells
-consume the three-shell limit and must retain a valid deployment matrix. Discovery remains read-only: the workflow
-ignores otherwise valid new candidates beyond the remaining shell slots. `emmy recipe list --json` supplies the
-versioned compact agent inventory under its `recipes` field, and recipe queries enforce the maintained and onboarding
-counts after application.
-The workflow checks that the agent did not modify the checkout, then `.github/scripts/discovery_lifecycle.py`
-validates and applies its lifecycle manifest. The helper
-tolerates a model reasoning wrapper around the JSON object, but requires exactly the four expected top-level fields
-before validating their contents. The named OpenCode discovery agent denies repository edits and subagents, permits
-only the tracked discovery skill, public-web tools, repository reads, and read-only Git inspection, and caps work at 48
-agentic steps. The last complete lifecycle object in OpenCode's final completed text event becomes the temporary
-manifest; the repository validator remains
-the authoritative completion gate. The project provider configuration selects the configurable CloudRift model through
-an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking mode for the concise
-JSON result. Discovery never provisions hardware.
+lifecycle decision. Every existing recipe and selected new model receives a 0-100 heat score for current onboarding
+priority. Each promising new open-weight Hugging Face model becomes an onboarding shell with one to three proposed
+deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; there is no shell-count limit. Existing shells
+remain in the manifest and must retain their task and deployment matrix while discovery refreshes their heat and
+rationale. The exact-SHA catalog helper reads the rolling `recipes/` root to supply the versioned compact agent
+inventory under its `recipes` field, and an exact-SHA recipe query against the same root enforces the maintained count
+after application.
+The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
+artifact worktree remains on the rolling lifecycle branch, while the catalog, lifecycle helper, OpenCode agent and
+plugin directory, and attached discovery skill come from the exact `github.sha` that started the run. This lets a
+manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or silently
+using an older manifest contract. The helper tolerates a model reasoning wrapper around the JSON object, but requires
+exactly the four expected top-level fields before validating their contents. The named OpenCode discovery agent denies
+repository edits, permits only the tracked discovery skill, public-web tools, repository reads, read-only Git
+inspection, and the three named read-only source subagents, and caps parent work at 64 agentic steps. The Reddit,
+Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit can surface a candidate
+before an exact Hugging Face identity is known. The parent agent alone reconciles identities, assigns heat, and writes
+the lifecycle manifest. The last complete lifecycle object in OpenCode's final completed text event becomes the
+temporary manifest and is logged before validation so a rejected decision remains inspectable; the repository
+validator remains the authoritative completion gate. The project provider configuration selects the configurable
+CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking
+mode for the concise JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
 provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
@@ -78,9 +84,9 @@ exact workflow SHA. Manual dispatch supplies one exact external candidate; sched
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
 only declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the
-first priority. If none can run, it chooses a `maintained` recipe whose committed `RESULTS.md` has the oldest
-last-change timestamp; a missing report is oldest. Declaration order chooses among one recipe's available deployments,
-and model ID breaks remaining ties. No eligible deployment is a successful no-op.
+first priority, ordered by descending heat, then model ID and deployment declaration order. If none can run, the
+selector performs a second generic query for a `maintained` recipe whose committed `RESULTS.md` has the oldest
+last-change timestamp; a missing report is oldest. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
@@ -97,13 +103,15 @@ retaining the owned lease as an independent verification handle.
 The workflow passes the resulting SSH target and an explicit `onboarding` or `verification` mode to the tracked
 `onboard-model` skill. Onboarding replaces the discovery shell and changes `onboarding`/`untested` to `best-effort`.
 Verification begins from the active recipe, refreshes measurements and durable artifacts, and preserves its existing
-lifecycle tag. Before the agent starts, the workflow installs the small remote Python/rsync prerequisite set and
+lifecycle tag. Both modes preserve discovery-managed `model.heat`. Before the agent starts, the workflow installs the
+small remote Python/rsync prerequisite set and
 requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
-the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment retains one LFS archive and top-level row-record set per exact GPU
-platform plus one cumulative `RESULTS.md`; a run replaces only its platform snapshot. Ignored dated run directories,
-loose benchmark output, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image is
-produced only when every release gate passes. Nightly image publication is disabled unless
+the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment
+retains one LFS archive and top-level row-record set per exact GPU platform plus one cumulative `RESULTS.md`; a run
+replaces only its platform snapshot. Ignored dated run directories, loose benchmark output, and qualification
+summaries are not repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes.
+Nightly image publication is disabled unless
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
 The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
@@ -111,8 +119,8 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
-The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills as authoritative agent inputs;
-older copies on the rolling branch cannot silently override a proposed artifact contract.
+The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills as authoritative
+agent inputs; older copies on the rolling branch cannot silently override a proposed artifact contract.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe, experiment, serving-image, and canonical-golden paths. The validator requires the shared experiment
@@ -131,11 +139,12 @@ lane. The workflow then commits those artifacts, rebases on the latest default b
 rolling model lifecycle PR using renewable GitHub App credentials for the long-running push path.
 
 Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery groups only recipe entries
-actually modified by the run under their resulting lifecycle and links the run and rolling PR. Onboarding includes the
-selected model, target, operation mode, serving deployment, and measured performance from its validated atomic
-summary. Because the notification job is independent of the self-hosted agent job, it still runs after a failure,
-cancellation, or timeout. Discord delivery retries three times, remains non-blocking, and disables all mentions; the
-workflow run, durable reports, and rolling PR retain the complete evidence.
+actually modified by the run under their resulting lifecycle, includes each current heat score, and links the run and
+rolling PR. Onboarding includes the selected model, target, operation mode, serving deployment, and measured
+performance from its validated atomic summary. Because the notification job is independent of the self-hosted agent
+job, it still runs after a failure, cancellation, or timeout. Discord delivery retries three times, remains
+non-blocking, and disables all mentions; the workflow run, durable reports, and rolling PR retain the complete
+evidence.
 
 ### Discovery lifecycle PR
 
@@ -151,27 +160,28 @@ run before any lifecycle changes are applied.
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
 `best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
 best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
-reason the recipe should no longer be used. The manifest must classify every complete recipe at most once; the validator
-conservatively assigns an omitted complete recipe to `best-effort`. For decisions with a replacement, it compares
+reason the recipe should no longer be used. The manifest must classify and score every complete recipe exactly once.
+For decisions with a replacement, the validator compares
 qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
 and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. A
 replacement described as merely comparable, or whose recipe reduces configured context or concurrency, also defaults
-to `best-effort`. Unknown or malformed lower-priority model IDs are ignored so the corresponding real, omitted recipes
-also default to `best-effort`. A checkpoint name is normalized across a missing or incorrect organization only when it
-uniquely identifies one existing recipe; ambiguous or unknown maintained IDs still fail validation because all ten
-selections must resolve exactly. The agent must use
+to `best-effort` while retaining the supplied heat. Unknown or malformed lower-priority model IDs cannot stand in for
+an omitted recipe because every real recipe must still be scored. A checkpoint name is normalized across a missing or
+incorrect organization only when it uniquely identifies one existing recipe; ambiguous or unknown maintained IDs
+still fail validation because all ten selections must resolve exactly. The agent must use
 `best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
-the current rationale immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be deployed,
-benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort set.
+the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be
+deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort
+set.
 
-The workflow creates `onboarding`/`untested` shells up to the three-shell total through the same catalog library that
-backs `emmy recipe create`. Each shell stores its rationale under `model` and a list of one to three candidate
-deployment entries under `matrices`; subsequent runs validate and report the same setups while the shell remains
-pending. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and uses
-the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It never
-rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained history,
-and final output within the inference endpoint's context limit. The lifecycle helper retains only classification
-policy and manifest application.
+The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
+`emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate
+deployment entries under `matrices`; subsequent runs validate the same task and setups while refreshing heat and
+rationale. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and
+uses the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It
+never rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained
+history, and final output within the inference endpoint's context limit. The lifecycle helper retains only
+classification policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 

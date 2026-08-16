@@ -16,6 +16,17 @@ HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DEPLOYMENT_FIELDS = frozenset({"deploy.gpu", "deploy.gpu_count"})
 MAX_STUB_DEPLOYMENTS = 3
 CATALOG_SCHEMA_VERSION = 1
+MIN_MODEL_HEAT = 0
+MAX_MODEL_HEAT = 100
+
+
+def validate_model_heat(value: object, model_id: str, *, required: bool = False) -> int | None:
+    """Return a valid 0-100 model heat score."""
+    if value is None and not required:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not MIN_MODEL_HEAT <= value <= MAX_MODEL_HEAT:
+        raise ValueError(f"Model {model_id} heat must be an integer from {MIN_MODEL_HEAT} to {MAX_MODEL_HEAT}")
+    return value
 
 
 def recipe_catalog(root: str | Path) -> dict[str, dict]:
@@ -32,6 +43,7 @@ def recipe_catalog(root: str | Path) -> dict[str, dict]:
             continue
         if not isinstance(model_id, str) or not HF_ID.fullmatch(model_id):
             raise ValueError(f"Invalid Hugging Face model ID in {path}: {model_id!r}")
+        validate_model_heat((config.get("model") or {}).get("heat"), model_id)
         if model_id in records:
             raise ValueError(f"Multiple recipes use Hugging Face model ID {model_id}")
         records[model_id] = {"path": path, "config": config, "tags": tags}
@@ -118,6 +130,7 @@ def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]
                 "runnable": recipe_is_runnable(config) and has_inference_engine and task in ("generate", "embed"),
                 "deployments": _inventory_deployments(config),
                 "rationale": model.get("rationale"),
+                "heat": model.get("heat"),
             }
         )
     return inventory
@@ -161,6 +174,7 @@ def create_recipe_stub(
     rationale: str,
     task: str,
     deployments: list[dict[str, object]],
+    heat: int = MIN_MODEL_HEAT,
 ) -> Path:
     """Create an onboarding/untested recipe stub and return its recipe path."""
     root = Path(root)
@@ -172,6 +186,7 @@ def create_recipe_stub(
         raise ValueError(f"Onboarding model {model_id} needs a rationale")
     if task not in ("generate", "embed"):
         raise ValueError(f"Invalid task for {model_id}: {task!r}")
+    heat = validate_model_heat(heat, model_id, required=True)
     deployments = validate_stub_deployments(deployments, model_id)
 
     organization, name = model_id.split("/", 1)
@@ -187,7 +202,7 @@ def create_recipe_stub(
     recipe = directory / "recipe.yaml"
     config = {
         "tags": [ONBOARDING_TAG, UNTESTED_TAG],
-        "model": {"huggingface": model_id, "rationale": rationale.strip(), "task": task},
+        "model": {"huggingface": model_id, "rationale": rationale.strip(), "heat": heat, "task": task},
         "matrices": deployments,
     }
     recipe.write_text(yaml.safe_dump(config, sort_keys=False, width=116))

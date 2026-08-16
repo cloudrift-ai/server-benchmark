@@ -33,6 +33,9 @@ source lives outside the package:
 | `scripts/` | tests for executable helpers under the repository's `scripts/` directory |
 | `architecture/` | repository-wide dependency and layering invariants |
 
+The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
+as loading discovery and onboarding control code from the exact workflow commit while editing the rolling branch.
+
 Three small organizing directories are also intentional:
 
 | Directory | Purpose |
@@ -106,12 +109,13 @@ directly; they never import from another test module or from `conftest.py`.
   validation. Catalog and command tests cover the versioned JSON inventory, effective deployment metadata,
   query-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
   materialization, and validated shell creation. Repository-automation tests validate required lifecycle rationales
-  and the one-to-three-entry onboarding deployment matrix through that shared library. Notification tests cover the
-  modified-model lifecycle groups and validated deployment/performance summaries. Query tests cover constrained
-  expression parsing, implicit deployment expansion, external candidates, lifecycle ordering, and the versioned row
-  result. Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved
-  lifecycle tag, compact notification evidence, current-platform archive and row records, and isolation from other
-  platform results before artifacts may be staged.
+  and heat scores, the unbounded set of onboarding shells, each shell's one-to-three-entry deployment matrix, and the
+  bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
+  validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
+  expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
+  Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved lifecycle tag
+  and heat, compact notification evidence, current-platform archive and row records, and isolation from other platform
+  results before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

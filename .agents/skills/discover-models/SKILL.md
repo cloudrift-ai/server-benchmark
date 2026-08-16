@@ -11,9 +11,9 @@ description: >-
 
 Turn "what models are worth our GPU hours?" into either a concrete shortlist or a refresh of Emmy's recipe
 lifecycle. New open-weight models are filtered to the ones with real demand, then mapped to the GPU configurations
-they fit. Existing recipes are ranked by current community and serving value so the small maintained set stays
-focused, useful lower-priority recipes stay available on a best-effort basis, and only technically superseded or
-unusable models become obsolete.
+they fit. Every recipe receives a 0-100 heat score for current discovery priority. Existing recipes are ranked by
+current community and serving value so the small maintained set stays focused, useful lower-priority recipes stay
+available on a best-effort basis, and only technically superseded or unusable models become obsolete.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
 endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
@@ -37,9 +37,9 @@ successfully rebased checkout.
 ## Pipeline
 
 ```
-scripts/new_models.py  →  per-model news/hype search  →  rank by demand  →  VRAM fit calc  →  hardware → model matrix
-   (candidates +            (qualitative signal)          (pick finalists)    (params×quant)     (the deliverable)
-    HF popularity + Elo)
+HF/OpenRouter data ─┐
+Reddit discussions ─┼→ reconcile exact models → score heat → VRAM fit calc → hardware → model matrix
+OpenRouter/Arena ───┘       (parent agent)          (0-100)     (params×quant)    (the deliverable)
 ```
 
 ## Step 0 — Choose the output mode
@@ -86,15 +86,20 @@ merely because a larger or unquantized recipe exists. An obsolete decision witho
 technical reason the recipe should no longer be used. Prefer best-effort whenever evidence is ambiguous or the model
 has a useful advantage.
 
-Run the discovery script with arena enrichment, capturing JSON for parsing and the table for a human view.
-Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts; don't re-run in a loop):
+In survey mode or a local interactive run, run the discovery script with arena enrichment, capturing JSON for parsing
+and the table for a human view. Use `--workers 4` to stay gentle on the HF metadata endpoint (it rate-limits bursts;
+don't re-run in a loop):
 
 ```bash
 ./venv/bin/python scripts/new_models.py --arena --workers 4 --json > /tmp/new_models.json
 ./venv/bin/python scripts/new_models.py --arena --workers 4          # readable table for the user
 ```
 
-The script already does the hard part: it lists open-weight models OpenRouter hosts (catalog entries with a
+In automated lifecycle mode, the read-only discovery agent cannot run repository scripts. Use the Hugging Face and
+OpenRouter source investigators from Step 2 for the equivalent public catalog evidence instead; do not attempt a
+denied shell command.
+
+The script supplies one quantitative source: it lists open-weight models OpenRouter hosts (catalog entries with a
 `hugging_face_id`), **excludes active families already in `recipes/`**, drops anything older than `--since`, verifies
 each on HuggingFace, and ranks by HF momentum. Each JSON row in `models[]` carries:
 
@@ -115,10 +120,20 @@ Obsolete recipes are deliberately not excluded, which lets a renewed model resur
 Take the top ~8–12 by `trending` (tie-break `elo`, then `downloads`) into Step 2. The script's full flag list is
 documented in `AGENTS.md` (scripts section).
 
-## Step 2 — Research news & hype per candidate (web search required)
+## Step 2 — Investigate independent demand sources (web search required)
 
-The script gives *quantitative* demand (HF momentum, arena Elo). Layer on *qualitative* mindshare — what people
-are actually saying. For each top candidate, web-search in parallel:
+Do not use Reddit only to validate candidates already returned by the script. Inspect recent high-engagement Reddit
+threads as an independent source, then merge those model names with the Hugging Face and OpenRouter/Arena candidate
+lists. Resolve an exact open-weight Hugging Face ID before accepting a Reddit-only discovery.
+
+In automated lifecycle mode, invoke the named `discover-reddit`, `discover-huggingface`, and `discover-openrouter`
+subagents once and in parallel. Each investigator stays read-only, uses at most three public-web calls, and returns a
+compact source-specific candidate list. The parent discovery agent alone deduplicates identities, compares evidence,
+assigns heat, classifies lifecycle state, and writes the manifest. Source investigators never edit recipes or choose
+the final lifecycle.
+
+Layer quantitative demand with qualitative mindshare — what people are actually saying. For each top candidate,
+search for:
 
 - `"<model name>" release` / `"<model name>" benchmark` — official announcement, benchmark claims (MMLU, GPQA,
   LiveCodeBench, SWE-bench, AIME).
@@ -130,6 +145,19 @@ are actually saying. For each top candidate, web-search in parallel:
 Distill each into a one-line **demand read**: *strong* (benchmark wins + active discussion + reputable lab),
 *moderate*, or *niche/quiet*. Cross-check against the script signals — a model high on HF trend **and** loud
 online is a strong pick; high downloads but silent is often a small fine-tuning base, not a flagship.
+
+Assign an integer **heat score** from 0 through 100 to every existing recipe and every selected new model. Heat is
+current onboarding priority, not measured model quality:
+
+- `90-100` — breakout attention across independent current sources;
+- `70-89` — strong current attention;
+- `40-69` — moderate or established interest;
+- `20-39` — niche or cooling interest;
+- `0-19` — little current evidence.
+
+Weight recent community attention and Hugging Face momentum most heavily. OpenRouter availability, arena evidence,
+technical novelty, and serving value are supporting signals. Compare all scores within the run before returning them;
+do not give an unsupported model a high score merely because it is new.
 
 ## Step 3 — Classify recipes and select onboarding models
 
@@ -150,15 +178,18 @@ In lifecycle mode:
 - choose exactly the requested number of existing, fully configured recipes as maintained;
 - classify every other fully configured recipe as best-effort or obsolete, with every complete recipe appearing in
   exactly one of the three lifecycle lists;
-- give every maintained, best-effort, obsolete, and onboarding decision a concise evidence-backed rationale;
+- give every maintained, best-effort, obsolete, and onboarding decision a heat score and concise evidence-backed
+  rationale;
 - prefer best-effort whenever a recipe remains useful; use obsolete only when a named maintained or best-effort
   replacement is all-around better for the same task at a comparable or lower practical VRAM footprint, or when a
   technical limitation means the recipe should no longer be used;
 - include that replacement and a concise technical rationale with the qualified target VRAM comparison and why the
   old recipe retains no material advantage for every superseded obsolete decision; otherwise explain why the recipe
   should be dropped without a replacement;
-- choose only enough genuinely new models to keep at most three total onboarding shells; existing
-  onboarding/untested shells consume the available slots;
+- keep every existing onboarding/untested shell in `onboarding_models`, refreshing its heat and rationale without
+  changing its task or proposed deployment matrix;
+- add every genuinely promising new model supported by the bounded investigation; there is no onboarding-shell count
+  limit;
 - propose one to three deployment setups for each new model using only canonical `deploy.gpu` and positive
   `deploy.gpu_count` values;
 - use exact `model.huggingface` IDs from recipe YAML for maintained entries;
@@ -228,7 +259,9 @@ Flag any model with **no engine support yet** or **no suitable quant** as "watch
 
 ## Step 6 — Return the lifecycle manifest
 
-When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. If the
+When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. Every
+lifecycle entry includes an integer `heat` from 0 through 100, every existing recipe appears exactly once across the
+four lists, and `onboarding_models` contains both existing shells and selected new models. If the
 prompt supplies a manifest path, use `write_file` to store the JSON there before the final response. Every lifecycle
 row needs a rationale. Each new onboarding row needs `generate` or `embed` and a `deployments` list containing one to
 three objects with exactly `deploy.gpu` and `deploy.gpu_count`. Empty `best_effort_models`, `obsolete_models`, and
@@ -237,8 +270,8 @@ workflow validates exact model IDs, the maintained count, the complete lifecycle
 obsolete recipes, canonical hardware, deployment counts, duplicates, and rationales before making any change. It
 demotes a superseded obsolete decision to best-effort unless the replacement is active, serves the same task, and its
 smallest known qualified deployment uses no more total physical GPU memory than the old recipe's smallest deployment.
-If the agent omits a complete recipe, the workflow also assigns it to best-effort rather than guessing that it is
-obsolete.
+If the agent omits a complete recipe, the workflow rejects the manifest because that recipe did not receive a heat
+score or lifecycle decision.
 
 ## Step 7 — Hand off in survey mode
 

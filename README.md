@@ -227,12 +227,19 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the oldest runnable onboarding or maintained deployment. Referencing deployment.* expands each recipe into
-# deployment rows; the CloudRift availability and Git history fields are resolved only because this query uses them.
+# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
+# rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
-  --filter 'lifecycle in ["onboarding", "maintained"]' \
+  --filter 'lifecycle == "onboarding"' \
   --filter 'deployment.availability.cloudrift == true' \
-  --sort 'lifecycle order ["onboarding", "maintained"]' \
+  --sort 'heat desc nulls-last' \
+  --sort 'model_id asc' \
+  --limit 1 --json
+
+# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+emmy recipe query \
+  --filter 'lifecycle == "maintained"' \
+  --filter 'deployment.availability.cloudrift == true' \
   --sort 'results.last_run_at asc nulls-first' \
   --limit 1 --json
 
@@ -246,10 +253,11 @@ emmy recipe create org/model-name --rationale "Why this model should be onboarde
 ```
 
 `recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
-each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, and matrix-expanded
-deployments with effective context lengths. Consumers must reject unknown schema versions. Fields may be added to a
-schema version, but existing fields are not removed or redefined. Emmy always detects its installation: an editable
-checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged runnable recipe bundle.
+each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score, and
+matrix-expanded deployments with effective context lengths. Consumers must reject unknown schema versions. Fields
+may be added to a schema version, but existing fields are not removed or redefined. Emmy always detects its
+installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
+runnable recipe bundle.
 `recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its
 optional `--candidate MODEL GPU COUNT` source hydrates lifecycle metadata from an existing recipe or represents a new
 model as onboarding work. CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require
@@ -262,6 +270,7 @@ tags:
 model:
   huggingface: "org/model-name"
   rationale: "Why this model belongs at its current lifecycle level."
+  heat: 75
 
 engine:
   llm:
@@ -292,10 +301,10 @@ matrices:
       benchmark.max_concurrency: [128, 512]
 ```
 
-Discovery keeps ten tested recipes tagged `maintained` and records a rationale under every recipe's `model` block.
-Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become
-`obsolete`. New model shells use `onboarding` plus `untested` and propose up to three deployment matrix entries.
-Disabled recipes are not deployable or bundled.
+Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
+every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
+unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
+three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
 
 Generic workload (run any tool on the VM, pull back result files):
 

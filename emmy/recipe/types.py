@@ -104,6 +104,8 @@ class ModelConfig:
     huggingface: str = ""
     # Why this model belongs in the recipe inventory at its current lifecycle level.
     rationale: str | None = None
+    # Current discovery priority on a 0-100 scale. It does not affect serving behavior.
+    heat: int | None = None
     # Immutable Hugging Face revision used by both model prefetch and the serving engine.
     revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
@@ -205,6 +207,7 @@ class Recipe:
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
             rationale=model_dict.get("rationale"),
+            heat=model_dict.get("heat"),
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),

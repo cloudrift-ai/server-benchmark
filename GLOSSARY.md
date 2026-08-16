@@ -143,6 +143,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Recipe** — A version-controlled plan describing what model or command to run, how to deploy it, which hardware
   and benchmark settings to use, and which variants to compare. Commands such as `emmy deploy` and `emmy bench`
   consume recipes; a recipe does not execute by itself.
+- **Heat score** — A 0-100 model-discovery priority based on current community attention, Hugging Face momentum, and
+  supporting serving evidence. It orders onboarding work; it is not a measured model-quality or performance score.
 - **Variant** — One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
 - **Matrix** — A recipe section that describes several values to test. `cross` creates every combination; `zip`
   pairs values by position.

@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from emmy.hardware import gpu_short_name
+from emmy.recipe.catalog import validate_model_heat
 from emmy.recipe.lifecycle import validate_recipe_tags
 
 ALLOWED_ARTIFACT_PREFIXES = (
@@ -105,6 +106,7 @@ def validate_summary(
     ssh_target: str,
     mode: str,
     expected_tag: str,
+    expected_heat: int | None = None,
 ) -> tuple[dict, list[Path]]:
     summary = json.loads(summary_path.read_text())
     if summary.get("status") != "success":
@@ -125,9 +127,14 @@ def validate_summary(
 
     recipe = _relative_file(workspace, summary.get("recipe") or "", ("recipes/",))
     recipe_config = yaml.safe_load((workspace / recipe).read_text()) or {}
-    recipe_model_id = (recipe_config.get("model") or {}).get("huggingface")
+    recipe_model = recipe_config.get("model") or {}
+    recipe_model_id = recipe_model.get("huggingface")
     if recipe_model_id != model_id:
         raise ValueError(f"Recipe model mismatch: {recipe_model_id} != {model_id}")
+    if expected_heat is not None:
+        validate_model_heat(expected_heat, model_id, required=True)
+        if recipe_model.get("heat") != expected_heat:
+            raise ValueError(f"Recipe must preserve model heat {expected_heat}: {recipe_model.get('heat')!r}")
     recipe_tags = validate_recipe_tags(recipe_config.get("tags"))
     if expected_tag not in recipe_tags:
         raise ValueError(f"Recipe must retain lifecycle tag {expected_tag!r}: {recipe_tags}")
@@ -250,6 +257,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ssh-target", required=True)
     parser.add_argument("--mode", choices=("onboarding", "verification"), required=True)
     parser.add_argument("--expected-tag", choices=("maintained", "best-effort"), required=True)
+    parser.add_argument("--expected-heat", type=int)
     parser.add_argument("--stage", action="store_true")
     return parser
 
@@ -266,6 +274,7 @@ def main() -> int:
             args.ssh_target,
             args.mode,
             args.expected_tag,
+            args.expected_heat,
         )
         if args.stage:
             archive_name = f"results_{_platform_name(args.gpu, args.gpu_count)}.tar.gz"

@@ -348,8 +348,9 @@ See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
 It detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use their packaged
 runnable set.
-`--json` emits the versioned catalog object documented in the recipe architecture; each record includes matrix-
-expanded GPU/count/context metadata and whether the recipe is runnable. Machine consumers reject unknown versions.
+`--json` emits the versioned catalog object documented in the recipe architecture; each record includes the current
+heat score, matrix-expanded GPU/count/context metadata, and whether the recipe is runnable. Machine consumers reject
+unknown versions.
 `recipe query` applies repeatable constrained predicates and stable sort keys to normalized catalog rows. A
 `deployment.*` field expands recipes into deployment rows. CloudRift availability, Robots-team access, and committed
 results history are lazy computed fields, so ordinary catalog-only queries perform no provider or Git work.
@@ -359,7 +360,7 @@ callers can run control code from one checkout against recipe data in another; w
 installation-aware catalog.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
-directory.
+directory. A manually created shell starts with `model.heat: 0` until discovery refreshes it.
 
 ```bash
 emmy recipe list [--json]

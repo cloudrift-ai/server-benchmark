@@ -43,26 +43,32 @@ optimization. `best-effort` is a useful runnable recipe outside that periodic se
 git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
 the same task is available at a comparable or lower practical VRAM footprint, or when a technical limitation means
 the recipe should no longer be used. Low demand or age alone is not enough. Discovery stores every lifecycle reason in
-`model.rationale`. A new discovery shell carries both `onboarding` and `untested`; it contains the model ID, task,
-rationale, and one to three proposed `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until
-onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for backward
-compatibility and are classified by the next discovery lifecycle run.
+`model.rationale` and every current onboarding-priority score in `model.heat`. A new discovery shell carries both
+`onboarding` and `untested`; it contains the model ID, task, rationale, heat, and one to three proposed
+`deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until onboarding replaces it with a qualified
+`best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
+discovery lifecycle run.
 
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
-does not affect engine arguments, deployment, or benchmark behavior.
+does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0
+through 100 that discovery refreshes for every recipe. It records current community and serving interest for ordering
+onboarding work; it is not a benchmark score and does not affect serving behavior. Missing heat remains valid for
+legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
-state, and each matrix-expanded deployment's effective context length to the identity, tags, task, and rationale.
+state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
+heat.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
 no catalog-selection arguments, so its consumers observe the same installation-aware behavior.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
+Manual creation starts at heat zero; discovery supplies and later refreshes the evidence-based value.
 
 `emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
 expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.
@@ -75,7 +81,7 @@ The row fields are grouped by ownership:
 
 | Fields | Meaning |
 |---|---|
-| `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale` | Compact catalog metadata |
+| `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
 | `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |

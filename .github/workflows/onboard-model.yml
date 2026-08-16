@@ -459,6 +459,8 @@ jobs:
           records; preserve every other platform archive, record, and RESULTS.md section. Do not retain the ignored
           dated run directory or onboarding summaries. Update the final recipe's RESULTS.md for this platform while
           preserving still-valid measurements for its other platforms.
+          Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
+          filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
           output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, and canonical golden YAML.
           """

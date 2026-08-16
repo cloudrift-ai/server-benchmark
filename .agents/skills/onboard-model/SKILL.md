@@ -24,8 +24,9 @@ Repository storage retains reproducibility input and durable evidence for each q
 serving experiment root, commit `recipe.yaml`, one cumulative `RESULTS.md`, top-level system-only experiment records,
 and `results_<gpu-short>x<gpu-count>.tar.gz` for each measured exact GPU name/count. Derive `<gpu-short>` with
 `emmy.hardware.gpu_short_name`; for example, a single RTX 4090 uses `results_rtx4090x1.tar.gz`. Track these archives
-with Git LFS. Do not commit the ignored dated run directory, loose benchmark JSON/TXT/logs, plots, compiler run
-summaries, partial working goldens, or onboarding-summary files.
+with Git LFS. When the caller says LFS is configured locally, verify the archive attribute but do not modify or list
+`.gitattributes`; the caller owns that infrastructure file. Do not commit the ignored dated run directory, loose
+benchmark JSON/TXT/logs, plots, compiler run summaries, partial working goldens, or onboarding-summary files.
 
 Use one serving experiment root for all GPU platforms that share the protocol. On a platform-specific run, replace
 only that platform's archive and top-level records, update only its section of the shared experiment `RESULTS.md`, and

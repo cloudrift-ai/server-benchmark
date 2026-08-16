@@ -67,6 +67,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "preserve every other platform archive" in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
+    assert "do not modify or list .gitattributes" in agent_script
     assert "git lfs status" in validation_script
     assert "experiments/**/results_*.tar.gz filter=lfs" in (workspace / ".gitattributes").read_text()
 

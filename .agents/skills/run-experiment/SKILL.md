@@ -76,13 +76,16 @@ reported value and conclusion back to the raw files and protocol.
 Force-stage only the requested experiments' durable snapshot because `experiments/` is ignored by default:
 
 ```bash
-git lfs track "experiments/**/results_*.tar.gz"
-git add .gitattributes
+git check-attr filter -- experiments/<model>/<experiment>/results_<gpu-short>x<gpu-count>.tar.gz
 git add -f -A -- experiments/<model>/<experiment>/recipe.yaml \
   experiments/<model>/<experiment>/results_<gpu-short>x<gpu-count>.tar.gz \
   ':(glob)experiments/<model>/<experiment>/<gpu-short>x<gpu-count>*.experiment.yaml' \
   experiments/<model>/<experiment>/RESULTS.md
 ```
+
+The archive must report `filter: lfs`. If the repository pattern is missing and the caller permits infrastructure
+changes, add it with `git lfs track "experiments/**/results_*.tar.gz"` and stage `.gitattributes`. If the caller says
+LFS is configured locally, do not modify or list `.gitattributes`; the caller owns that file.
 
 Stage harness edits normally, review the staged diff, and commit once with a concise subject such as
 `Record <experiment> run`. Never stage the timestamped raw directory. Do not push or open a pull request unless the

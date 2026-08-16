@@ -82,9 +82,11 @@ and its offer-signal special cases are what was junk, and they are gone); `evide
 principled prefix consistency for multi-pass decisions — keep; the `goldens_for_live_gpu` union
 fallback serves explicit cross-card `--golden` replay (re-benched live) — keep; QuantSpec retirement
 verified already landed (quant is in-graph algebra from birth, no IR metadata).
-Documented hardcoded exceptions (99% rule): `_softmax` streaming, the stat-fill partition,
-`_pick_coop` ordering constants, the derived codegen constants (pads, `setmaxnreg` split,
-swizzle picks, the f16-acc promote cadence — precision, not perf), the bit-identical peepholes.
+Documented hardcoded exceptions (99% rule): `_softmax` streaming, the stat-fill partition, the
+derived codegen constants (pads, `setmaxnreg` split, swizzle picks, the f16-acc promote cadence —
+precision, not perf), the bit-identical peepholes. The reduce tier's `_pick_coop` ordering
+constants were on this list and are now DELETED — greedy takes no hand-written help at all, so
+there is no ordering exception left to document.
 
 ## One algebra recognizer (LANDED on this PR)
 

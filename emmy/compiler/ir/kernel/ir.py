@@ -1576,10 +1576,12 @@ class LdmatrixLoad(Stmt):
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f8e4m3")
             frag_dt = ctx.ssa_dtypes.get(self.frag) or "f16"
             if self.scale_buffer is not None:
-                # Packed-pair (NVFP4) B: each byte decodes to two f16 values through the e2m1
-                # value table and both take the k block's scale, read from the companion slab.
+                # Packed-pair (NVFP4) B: each byte decodes to two values through the e2m1 value
+                # table and both take the k block's scale, read from the companion slab. The scale
+                # slab carries the fragment's own dtype, so it names which drain form to call.
+                scale_dt = ctx.buffer_dtypes.get(self.scale_buffer, "f16")
                 scale_flat = render_index(self.scale_buffer, self.scale_index, ctx)
-                call = "emmy_mma_load_b_smem_trans_f4s_f16"
+                call = f"emmy_mma_load_b_smem_trans_f4s_{scale_dt}"
                 args = f"&{self.src_buffer}[{flat}], {ldm}, &{self.scale_buffer}[{scale_flat}], {self.scale_ldm}"
                 return [f"{_pad(ctx.indent)}{call}({self.frag}, {args});"]
             k_contig = self.role == "a" or self.b_trans  # each lane's K run is slab-contiguous

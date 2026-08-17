@@ -316,14 +316,17 @@ threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per b
 exactly the block-invariance the matcher proved.
 
 The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
-`emmy_mma_load_b_smem_trans_f4s_f16`): per fragment element pair it reads one byte, looks both 4-bit codes up in an
-f16 value table (`render._F4_STAGED_PRELUDE`, generated from `dtype.F4_VALUES` so the kernel and the numpy decode
-stay one table — every e2m1 value is exact in f16), and multiplies each by the block's scale. The mma B fragment's
-own lane map is what makes the byte read whole: a lane's two adjacent K positions ARE a stored pair. Legality
-(`resolve_warp_stage`'s packed arm) scopes it to what that loader is written for — `cp.async`, an N-major weight of
-16-value blocks under a 16-bit atom whose K step is that same 16, an A already at the atom's dtype, and the byte
-row's 16-divisibility for the same chunking reason the fp8 slab has. The budget carries the padded byte rows per
-ring slot plus the one scale slab. Everything outside the scope declines and keeps the general reading.
+`emmy_mma_load_b_smem_trans_f4s_<dtype>`): per fragment element pair it reads one byte, looks both 4-bit codes up in
+a constant value table, and multiplies each by the block's scale. The mma B fragment's own lane map is what makes
+the byte read whole: a lane's two adjacent K positions ARE a stored pair. `render._f4_staged_prelude` emits one
+loader per fragment dtype the kernel actually drains — f16 and bf16, since every e2m1 value is exact in both (the
+format's largest magnitude is 6 and its finest step 0.5, so one mantissa bit carries it). The tables are generated
+from `dtype.F4_VALUES`, so the kernels and the numpy decode stay one table of values, and an f16 kernel never
+carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the stage to what those loaders are
+written for — `cp.async`, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that same
+16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8 slab
+has. The budget carries the padded byte rows per ring slot plus the one scale slab. Everything outside the scope
+declines and keeps the general reading.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two

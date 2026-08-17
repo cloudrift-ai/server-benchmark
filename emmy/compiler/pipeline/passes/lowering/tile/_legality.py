@@ -352,13 +352,17 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: i
 # step and this constant are all the same 16; a different block or atom keeps the generic reading.
 _PACKED_BLOCK = 16
 
+#: The fragment dtypes the packed drain is spelled for. Both hold every e2m1 value exactly, so the
+#: decode is a constant-table read in either; a wider or narrower operand has no such table.
+_PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
+
 
 def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packed, inputs) -> Stage | None:
     """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
 
     The scoped shape, which is what the fragment drain is written for: cp.async transport, an
-    N-major packed weight of 16-value blocks under a 16-bit atom whose K step is that same 16, and
-    an A already carrying the atom's dtype. Everything outside it declines and stays on the generic
+    N-major packed weight of 16-value blocks under an f16 or bf16 atom whose K step is that same
+    16, and an A already carrying the atom's dtype. Everything outside it declines and stays on the generic
     computed-B reading, which computes the same values through the sync compute-fill.
 
     The sizing is the fp8 byte slab's rule restated in the format's own units. One stored byte is
@@ -375,8 +379,8 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     if packed.block != _PACKED_BLOCK or atom.atom_k != _PACKED_BLOCK or atom.fragment_layout != "m16n8k16":
         return None
     a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
-    if a_dtype.name != "f16" or b_dtype.name != "f16":
-        return None  # the drain's value table and its scale multiply are f16
+    if a_dtype != b_dtype or a_dtype.name not in _PACKED_FRAGMENT_DTYPES:
+        return None  # the drain has one value table and one scale multiply, both at the operand dtype
     bits, a_tensor = inputs.get(packed.bits.input), inputs.get(c.a.input)  # A is a Load — the match requires it
     if bits is None or a_tensor is None or a_tensor.dtype != a_dtype:
         return None

@@ -184,7 +184,9 @@ materializes between kernels, but the weight crosses global memory as 16-bit val
 recognizes the cone (a packed-pair bits load feeding a value-pair gather, times a factor whose every contraction-axis
 reference is block-guarded), the weight's bits then copy VERBATIM into a byte slab at half a 16-bit slab's traffic,
 its block scales decode once per block into a small companion slab, and one fragment loader reads both — decoding
-each byte's two codes through an f16 value table and applying the block's scale. The W8A16 mul-hoist (the scale
+each byte's two codes through a constant value table and applying the block's scale. That table exists for f16 and
+bf16 fragments alike — every e2m1 value is exact in both — so a bf16 trace, which is what Qwen models produce,
+takes the same path. The W8A16 mul-hoist (the scale
 multiply moved out of the reduction loop onto the accumulator) still does not apply: an NVFP4 scale varies along the
 contraction axis, so it does not commute out of the fold. The packed stage's scope is the shape its loader is
 written for — cp.async, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that same 16;

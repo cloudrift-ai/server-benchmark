@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F8E4M3, F16, F32, F4E2M1x2
+from emmy.compiler.dtype import BF16, F8E4M3, F16, F32, F4E2M1x2
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
@@ -31,6 +31,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_s
 from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
+K16_BF16 = "mma_m16n8k16_bf16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
 
 
@@ -118,11 +119,13 @@ def test_match_packed_b_node_declines_a_computed_a():
 # ===================================================================
 
 
-def test_packed_b_resolves_the_cp_async_byte_slab():
+@pytest.mark.parametrize(("atom", "a_dtype"), [(K16, F16), (K16_BF16, BF16)])
+def test_packed_b_resolves_the_cp_async_byte_slab(atom, a_dtype):
     """cp.async resolves and carries the chunk's LOGICAL K width — the byte halving is the slab's
-    geometry, not the schedule's K step."""
-    node, inputs, axes = _node()
-    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    geometry, not the schedule's K step. Both 16-bit float fragments hold every e2m1 value
+    exactly, so both resolve."""
+    node, inputs, axes = _node(a_dtype=a_dtype)
+    tile = _tile(atom, "f2x2/k2", "w1x4", axes)
     for spec in ("d1/cp", "d2/cp", "d2/cp/p2"):
         st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
         assert st is not None, spec
@@ -169,10 +172,17 @@ def test_packed_b_declines_a_block_the_drain_does_not_read():
     assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is None
 
 
-def test_packed_b_declines_a_non_f16_atom():
-    """The value table and the scale multiply are f16. The fp8 k32 atoms are neither f16 nor k16."""
+def test_packed_b_declines_a_non_16_bit_atom():
+    """The value table and the scale multiply are 16-bit floats. The fp8 atoms are neither."""
     node, inputs, axes = _node()
     assert resolve_warp_stage(node, _tile(K32, "f2x2/k2", "w1x4", axes), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+
+
+def test_packed_b_declines_when_a_and_the_atom_disagree():
+    """A is byte-copied into the atom's own slab; a bf16 A under an f16 atom would deposit the
+    wrong bits, and the two dtypes are the same width so nothing else catches it."""
+    node, inputs, axes = _node(a_dtype=BF16)
+    assert resolve_warp_stage(node, _tile(K16, "f2x2/k2", "w1x4", axes), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_a_mismatched_a():
@@ -244,8 +254,11 @@ def test_a_cp_pin_names_the_byte_slab_and_a_sync_pin_the_compute_fill():
 # ===================================================================
 
 
-def _nvfp4_matmul_graph(tmp_path, *, m, n, k):
-    """``x[m, k] @ dequant(w)ᵀ`` over a synthetic NVFP4 checkpoint; returns the graph + weights."""
+def _nvfp4_matmul_graph(tmp_path, *, m, n, k, dtype="f16"):
+    """``x[m, k] @ dequant(w)ᵀ`` over a synthetic NVFP4 checkpoint; returns the graph + weights.
+
+    ``dtype`` is the element type the trace promises — the weight constant's, the activation's and
+    the output's, exactly as a checkpoint's own config would set it. Qwen models trace bf16."""
     import torch
 
     from emmy.compiler.graph import Graph
@@ -268,27 +281,32 @@ def _nvfp4_matmul_graph(tmp_path, *, m, n, k):
         quant_config={**_FP4_MODELOPT_QC, "ignore": ["lm_head"]},
     )
     g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), dtype), node_id="x")
     w = g.add_node(
-        op=ConstantOp(name="w", source_path="layer.weight", source_shape=(n, k), source_dtype="f16"),
+        op=ConstantOp(name="w", source_path="layer.weight", source_shape=(n, k), source_dtype=dtype),
         inputs=[],
-        output=Tensor("w", (n, k), "f16"),
+        output=Tensor("w", (n, k), dtype),
         node_id="w",
     )
-    wt = g.add_node(op=TransposeOp(axes=(1, 0)), inputs=[w], output=Tensor("wt", (k, n), "f16"))
-    y = g.add_node(op=MatmulOp(), inputs=["x", wt], output=Tensor("y", (m, n), "f16"), node_id="y")
+    wt = g.add_node(op=TransposeOp(axes=(1, 0)), inputs=[w], output=Tensor("wt", (k, n), dtype))
+    y = g.add_node(op=MatmulOp(), inputs=["x", wt], output=Tensor("y", (m, n), dtype), node_id="y")
     g.inputs, g.outputs = ["x"], [y]
     assert spell_quantized_constants(g, str(tmp_path)) == 1
     return g, (packed, scale_bits, s2)
 
 
-PACKED_PINS = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": "d2/cp"}
+def _packed_pins(dtype="f16"):
+    atom = K16 if dtype == "f16" else K16_BF16
+    return {"TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": "d2/cp"}
+
+
+PACKED_PINS = _packed_pins()
 
 
 def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
     """The whole path, structurally: a spelled NVFP4 matmul under the packed pins emits three
     slabs — the f16 A tile, the raw packed bytes, the decoded block scales — and a drain that
-    reads the last two together. No dequantized weight is ever materialized."""
+    reads the last two together. No decoded weight is ever materialized."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -298,7 +316,8 @@ def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
         lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
     src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
     assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
-    assert "EMMY_F4_LUT" in src
+    assert "EMMY_F4_LUT_F16" in src
+    assert "EMMY_F4_LUT_BF16" not in src, "an f16 kernel must not carry the bf16 drain"
     assert "emmy_mma_load_b_smem_trans_f8_f16" not in src, "the fp8 drain helpers must not ride along"
     # tile_n=64 rows of (bk_elems/2 = 16) bytes + the 16 B pad, two ring slots; the scale slab is
     # 64 rows of bk = 2, single-buffer.
@@ -306,31 +325,70 @@ def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
     assert "__half _bs_smem[128]" in src
 
 
+def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
+    """The same path at bf16, which is what Qwen models trace: the bf16 drain, its own value
+    table, and a bf16 scale slab. The value table differs only in its constants — every e2m1
+    value is exact in bf16 too."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_matmul_graph(tmp_path, m=32, n=128, k=128, dtype="bf16")
+    with pinned_knobs(_packed_pins("bf16")):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
+    src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
+    assert "emmy_mma_load_b_smem_trans_f4s_bf16" in src
+    assert "EMMY_F4_LUT_BF16" in src and "EMMY_F4_LUT_F16" not in src
+    assert "__nv_bfloat16 _bs_smem[128]" in src
+    # 1.0 is 0x3F80 in bf16 and 0x3C00 in f16 — the table really is the other format's.
+    assert "0x3F80" in src
+
+
 @requires_cuda
-@pytest.mark.parametrize(("m", "n", "k"), [(32, 128, 128), (4, 2048, 2048)])
+@pytest.mark.parametrize(
+    ("dtype", "m", "n", "k", "tol"),
+    [("f16", 32, 128, 128, 1e-3), ("f16", 4, 2048, 2048, 1e-3), ("bf16", 32, 128, 128, 6e-3)],
+)
 @pytest.mark.xdist_group("cuda")
-def test_the_packed_drain_matches_the_dequant_oracle(tmp_path, m, n, k):
-    """Numerical parity on the device: the packed kernel equals ``x @ dequantize_nvfp4(w)ᵀ`` at
-    the f16 tier's tolerance. Both a compute-shaped and a decode-shaped matmul, since the decode
-    shape is where the weight traffic dominates."""
+def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, tol):
+    """Numerical parity on the device: the packed kernel equals ``x @ dequantize_nvfp4(w)ᵀ``.
+
+    Both a compute-shaped and a decode-shaped matmul at f16, since the decode shape is where the
+    weight traffic dominates, plus the bf16 fragment. Each bound is roughly 3x the measured error
+    on a 4090 (f16 2.5e-4, bf16 2.1e-3); bf16's is the looser one because bf16 carries 8 mantissa
+    bits against f16's 11 — the format's own precision, not the drain's."""
+    import torch
+
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import dequantize_nvfp4
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k)
-    x = (np.random.default_rng(11).standard_normal((m, k)) * 0.05).astype(np.float16)
+    g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k, dtype=dtype)
+    rng = np.random.default_rng(11)
+    # numpy has no bf16, so a bf16 activation crosses as its uint16 bits and the output comes back
+    # the same way — the convention every bf16 device test here follows.
+    if dtype == "bf16":
+        xt = (torch.from_numpy(rng.standard_normal((m, k))) * 0.05).to(torch.bfloat16)
+        x, x_ref = xt.view(torch.uint16).numpy(), xt.float().numpy()
+    else:
+        x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
+        x_ref = x.astype(np.float32)
 
     backend = CudaBackend()
-    with pinned_knobs(PACKED_PINS):
+    with pinned_knobs(_packed_pins(dtype)):
         compiled = backend.compile(g)
     src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
+    assert f"emmy_mma_load_b_smem_trans_f4s_{dtype}" in src, "the packed pins did not reach the byte-slab drain"
 
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
-    y = result.outputs[compiled.outputs[0]].reshape(m, n).astype(np.float32)
+    out = result.outputs[compiled.outputs[0]].reshape(m, n)
+    if dtype == "bf16":
+        y = torch.from_numpy(np.asarray(out).astype(np.uint16)).view(torch.bfloat16).float().numpy()
+    else:
+        y = out.astype(np.float32)
 
-    ref = x.astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
+    ref = x_ref @ dequantize_nvfp4(packed, scale_bits, s2).T
     denom = max(float(np.abs(ref).max()), 1e-9)
-    assert float(np.abs(y - ref).max()) / denom < 2e-3
+    assert float(np.abs(y - ref).max()) / denom < tol

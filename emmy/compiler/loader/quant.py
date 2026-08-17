@@ -127,60 +127,87 @@ def dequantize_nvfp4(packed: np.ndarray, scale_bits: np.ndarray, scale_2: np.nda
     return dequantize(decode_f4x2(packed), fuse_nvfp4_scales(scale_bits, scale_2).astype(np.float32))
 
 
-def _fp8_quant_config(model_dir: Path) -> dict | None:
-    """The checkpoint's ``quantization_config`` when it declares an FP8 weight scheme.
+def _quantization_config(model_dir: str | Path) -> dict | None:
+    """The checkpoint's declared ``quantization_config``, or ``None`` when it declares none.
 
-    Two formats in the wild (see the FP8 plan): ``quant_method: "fp8"`` (official
-    releases) and ``quant_method: "compressed-tensors"`` whose ``config_groups``
-    quantize weights as 8-bit float (FP8 / FP8_DYNAMIC / FP8_BLOCK schemes). Any
-    other scheme (int quants, no config) → ``None``, and stamping is a no-op.
-    """
-    cfg_path = model_dir / "config.json"
+    Takes the directory either way round — every recognizer reads the config through here, and a
+    caller holding a plain string is the ordinary case."""
+    cfg_path = Path(model_dir) / "config.json"
     if not cfg_path.exists():
         return None
     qc = json.loads(cfg_path.read_text()).get("quantization_config")
-    if not isinstance(qc, dict):
+    return qc if isinstance(qc, dict) else None
+
+
+def _quantizes_weights_at(qc: dict, num_bits: int, group_size: int | None = None) -> bool:
+    """Whether ANY ``config_groups`` entry quantizes weights as float at this width.
+
+    A checkpoint's groups are per-scheme, not per-scheme-per-checkpoint: one may hold the
+    8-bit leaves and another the 4-bit ones. So this asks "is this scheme present", never
+    "is this scheme the only one" — which leaf gets which is a per-tensor question that the
+    stored sibling signatures answer, not a config one.
+    """
+    for group in (qc.get("config_groups") or {}).values():
+        weights = group.get("weights") if isinstance(group, dict) else None
+        if not isinstance(weights, dict) or weights.get("type") != "float":
+            continue
+        if int(weights.get("num_bits") or 0) != num_bits:
+            continue
+        if group_size is not None and int(weights.get("group_size") or 0) != group_size:
+            continue
+        return True
+    return False
+
+
+def _fp8_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to FP8.
+
+    Three conventions in the wild: ``quant_method: "fp8"`` (official releases);
+    ``quant_method: "compressed-tensors"`` (llm-compressor) with an 8-bit float weight group;
+    and ``quant_method: "modelopt"`` at ``quant_algo: "MIXED_PRECISION"`` with one — the
+    TensorRT Model Optimizer form for a checkpoint whose schemes differ by leaf. Any other
+    scheme (int quants, no config) → ``None``, and stamping is a no-op.
+    """
+    qc = _quantization_config(model_dir)
+    if qc is None:
         return None
     method = qc.get("quant_method")
     if method == "fp8":
         return qc
-    if method == "compressed-tensors":
-        for group in (qc.get("config_groups") or {}).values():
-            weights = group.get("weights") if isinstance(group, dict) else None
-            if isinstance(weights, dict) and weights.get("type") == "float" and int(weights.get("num_bits") or 0) == 8:
-                return qc
+    if method == "modelopt" and qc.get("quant_algo") != "MIXED_PRECISION":
+        return None  # a pure modelopt scheme names itself in quant_algo; only the mixed one groups
+    if method in ("compressed-tensors", "modelopt") and _quantizes_weights_at(qc, 8):
+        return qc
     return None
 
 
 def _fp4_quant_config(model_dir: Path) -> dict | None:
-    """The checkpoint's ``quantization_config`` when it declares the NVFP4 weight scheme.
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4.
 
-    Two config conventions in the wild: ``quant_method: "modelopt"`` with ``quant_algo:
-    "NVFP4"`` (TensorRT Model Optimizer — the nvidia/* checkpoints) and ``quant_method:
-    "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize weights as
-    4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
+    Three conventions in the wild: ``quant_method: "modelopt"`` with ``quant_algo: "NVFP4"``
+    (TensorRT Model Optimizer — the nvidia/* checkpoints); the same method at
+    ``quant_algo: "MIXED_PRECISION"`` carrying a 4-bit float weight group; and
+    ``quant_method: "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize
+    weights as 4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
     group-size condition keeps 32-element-block 4-bit families (MXFP4) out — same e2m1
     values, different scale dtype and block. Anything else → ``None``.
+
+    A MIXED_PRECISION checkpoint answers BOTH this and :func:`_fp8_quant_config`, by design:
+    nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP in
+    NVFP4, so both spellers must run over it and each takes the leaves whose stored siblings are
+    its own. The two recognizers still decline each other's PURE checkpoints.
     """
-    cfg_path = model_dir / "config.json"
-    if not cfg_path.exists():
-        return None
-    qc = json.loads(cfg_path.read_text()).get("quantization_config")
-    if not isinstance(qc, dict):
+    qc = _quantization_config(model_dir)
+    if qc is None:
         return None
     method = qc.get("quant_method")
     if method == "modelopt":
-        return qc if qc.get("quant_algo") == "NVFP4" else None
+        algo = qc.get("quant_algo")
+        if algo == "NVFP4":
+            return qc
+        return qc if algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16) else None
     if method == "compressed-tensors":
-        for group in (qc.get("config_groups") or {}).values():
-            weights = group.get("weights") if isinstance(group, dict) else None
-            if (
-                isinstance(weights, dict)
-                and weights.get("type") == "float"
-                and int(weights.get("num_bits") or 0) == 4
-                and int(weights.get("group_size") or 0) == 16
-            ):
-                return qc
+        return qc if _quantizes_weights_at(qc, 4, 16) else None
     return None
 
 
@@ -319,10 +346,15 @@ def checkpoint_quant_summary(model_dir) -> str:
     model_dir = Path(model_dir)
     if (qc := _exl3_quant_config(model_dir)) is not None:
         return f"exl3 {qc.get('bits')} bpw (head {qc.get('head_bits')})"
-    if (qc := _fp4_quant_config(model_dir)) is not None:
-        return f"nvfp4 {qc.get('quant_method')}"
-    if (qc := _fp8_quant_config(model_dir)) is not None:
-        return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
+    fp4, fp8 = _fp4_quant_config(model_dir), _fp8_quant_config(model_dir)
+    if fp4 is not None and fp8 is not None:
+        # Both recognizers answering is the MIXED form, not a contradiction: the checkpoint holds
+        # leaves of each scheme, and a boot log that named only one would misreport half the model.
+        return f"mixed fp8+nvfp4 {fp4.get('quant_method')}"
+    if fp4 is not None:
+        return f"nvfp4 {fp4.get('quant_method')}"
+    if fp8 is not None:
+        return f"fp8 {fp8.get('fmt') or fp8.get('quant_method')}"
     if (qc := _awq_quant_config(model_dir)) is not None:
         return f"awq int{qc.get('bits')} g{qc.get('group_size', qc.get('q_group_size'))} {qc.get('version', 'gemm')}"
     return "unquantized"

@@ -918,11 +918,128 @@ def test_fp4_quant_config_rejects_other_schemes(tmp_path):
 
 
 def test_fp4_and_fp8_recognizers_do_not_cross_match(tmp_path):
-    # A family system fails at the seams: each recognizer must decline the other's checkpoints.
+    """A family system fails at the seams: each recognizer must decline the other's PURE
+    checkpoints — one whose every quantized leaf is the other scheme. That is the whole contract;
+    a checkpoint that really does hold both is the MIXED case below, where both must answer."""
     fp4_dir = _config_dir(tmp_path, "fp4", _FP4_CT_QC)
     fp8_dir = _config_dir(tmp_path, "fp8", _FP8_QC)
     assert _fp8_quant_config(fp4_dir) is None
     assert _fp4_quant_config(fp8_dir) is None
+    assert _fp4_quant_config(_config_dir(tmp_path, "modelopt-nvfp4", _FP4_MODELOPT_QC)) is not None
+    assert _fp8_quant_config(_config_dir(tmp_path, "modelopt-nvfp4-b", _FP4_MODELOPT_QC)) is None
+
+
+# ===================================================================
+# MIXED_PRECISION: one checkpoint, two schemes, sorted per leaf
+# ===================================================================
+
+# modelopt's form for a checkpoint whose schemes differ by leaf (nvidia/Qwen3.6-27B-NVFP4): the
+# algo names no single scheme, and one config group per scheme carries the widths instead.
+_MIXED_QC = {
+    "quant_method": "modelopt",
+    "quant_algo": "MIXED_PRECISION",
+    "ignore": ["lm_head"],
+    "config_groups": {
+        "group_0": {"weights": {"type": "float", "num_bits": 8}, "input_activations": {"type": "float", "num_bits": 8}, "targets": ["a"]},
+        "group_1": {"weights": {"type": "float", "num_bits": 4, "group_size": 16}, "targets": ["b"]},
+    },
+}
+
+
+def _mixed_checkpoint(dirpath):
+    """One checkpoint holding a leaf of each scheme plus an unquantized one — the three sibling
+    signatures the per-leaf sort has to tell apart. Returns the oracle values."""
+    dirpath.mkdir(exist_ok=True)
+    f8_bits = _finite_bits((8, 16))
+    f8_scale = np.float32(0.25).reshape(())
+    packed = rng.integers(0, 256, (8, 16)).astype(np.uint8)  # 8 x 32 logical
+    blk = rng.integers(0, 0x7F, (8, 2)).astype(np.uint8)
+    s2 = np.array(0.5, dtype=np.float32)
+    plain = rng.standard_normal((8, 16)).astype(np.float16)
+    _write_checkpoint(
+        dirpath,
+        {
+            "f8.weight": _fp8_tensor(f8_bits),
+            "f8.weight_scale": torch.from_numpy(np.asarray(f8_scale)),
+            "f4.weight": torch.from_numpy(packed),
+            "f4.weight_scale": _fp8_tensor(blk),
+            "f4.weight_scale_2": torch.tensor(float(s2), dtype=torch.float32),
+            "plain.weight": torch.from_numpy(plain),
+        },
+        quant_config=_MIXED_QC,
+    )
+    return {
+        "f8": decode_f8(f8_bits, "f8e4m3").astype(np.float32) * f8_scale,
+        "f4": dequantize_nvfp4(packed, blk, s2),
+        "plain": plain,
+    }
+
+
+def test_mixed_precision_answers_both_recognizers(tmp_path):
+    """The declaration names no single scheme, so each recognizer reads the config groups for its
+    own width — and both are present, which is what MIXED means."""
+    d = _config_dir(tmp_path, "mixed", _MIXED_QC)
+    assert _fp8_quant_config(d) is not None
+    assert _fp4_quant_config(d) is not None
+
+
+def test_mixed_precision_summary_names_both_schemes(tmp_path):
+    """A boot log naming one scheme would misreport half the model."""
+    from emmy.compiler.loader.quant import checkpoint_quant_summary
+
+    d = _config_dir(tmp_path, "mixed", _MIXED_QC)
+    assert checkpoint_quant_summary(d) == "mixed fp8+nvfp4 modelopt"
+
+
+def test_mixed_precision_declines_when_only_one_scheme_is_declared(tmp_path):
+    """The arm reads the GROUPS, not the algo string: a MIXED declaration carrying only 8-bit
+    groups is an fp8 checkpoint and must not pull in the NVFP4 speller."""
+    only8 = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 8}}}}
+    only4 = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 4, "group_size": 16}}}}
+    mx = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 4, "group_size": 32}}}}
+    assert _fp4_quant_config(_config_dir(tmp_path, "only8", only8)) is None
+    assert _fp8_quant_config(_config_dir(tmp_path, "only8b", only8)) is not None
+    assert _fp8_quant_config(_config_dir(tmp_path, "only4", only4)) is None
+    assert _fp4_quant_config(_config_dir(tmp_path, "only4b", only4)) is not None
+    assert _fp4_quant_config(_config_dir(tmp_path, "mx", mx)) is None, "32-element blocks are MXFP4, not NVFP4"
+
+
+def test_mixed_precision_sorts_leaves_by_their_stored_siblings(tmp_path):
+    """The load-bearing claim: widening the recognizers is ENOUGH, because which speller takes a
+    leaf was never a config question. The fp8 pair, the NVFP4 trio and the bare tensor sort
+    themselves, and each decodes to its own oracle."""
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    d = tmp_path / "mixed"
+    want = _mixed_checkpoint(d)
+    sd = load_dequantized_state_dict(d)
+    np.testing.assert_allclose(sd["f8.weight"], want["f8"], rtol=1e-6)
+    np.testing.assert_array_equal(sd["f4.weight"], want["f4"])
+    np.testing.assert_array_equal(sd["plain.weight"], want["plain"])
+    for gone in ("f8.weight_scale", "f4.weight_scale", "f4.weight_scale_2"):
+        assert gone not in sd, f"{gone} survived as its own entry"
+
+
+def test_mixed_precision_spells_each_leaf_into_its_own_cone(tmp_path):
+    """The graph side of the same sort: the fp8 leaf spells the fp8 decode cone, the packed leaf
+    the NVFP4 one, and the plain leaf is left alone — one pass over one checkpoint."""
+    d = tmp_path / "mixed"
+    want = _mixed_checkpoint(d)
+    g = Graph()
+    leaves = (("w8", "f8.weight", (8, 16), "f32"), ("w4", "f4.weight", (8, 32), "f32"), ("wp", "plain.weight", (8, 16), "f16"))
+    for name, path, shape, dt in leaves:
+        op = ConstantOp(name=name, source_path=path, source_shape=shape, source_dtype=dt)
+        g.add_node(op=op, inputs=[], output=Tensor(name, shape, dt), node_id=name)
+    g.inputs, g.outputs = [], ["w8", "w4", "wp"]
+    assert spell_quantized_constants(g, str(d)) == 2, "both quantized leaves spell; the plain one does not"
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    data = load_constants_from_safetensors(g, str(d))
+    result, _ = NumpyBackend().run(g, input_data=data)
+    np.testing.assert_allclose(result.outputs["w8"], want["f8"], rtol=1e-6)
+    np.testing.assert_array_equal(result.outputs["w4"], want["f4"])
+    np.testing.assert_allclose(result.outputs["wp"], want["plain"].astype(np.float16))
 
 
 def _nvfp4_checkpoint(dirpath, *, prefix="layer", ignore=("lm_head",)):

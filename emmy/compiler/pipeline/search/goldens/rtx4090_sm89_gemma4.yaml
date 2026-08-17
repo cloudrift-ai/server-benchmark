@@ -6775,13 +6775,27 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
       REDUCE: ''
       STAGE: ''
       RASTER: ''
     measurements:
-      emmy_us: 75.8
-      reference_us: 96.6
+      emmy_us: 75.54
+      reference_us: 80.34
+      reference_backend: emmy-greedy
+  - name: gemma4_12b.attention.hd512.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 75.62
+      reference_us: 80.64
       reference_backend: emmy-greedy
 - program: 146
   target:
@@ -6792,14 +6806,28 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a2: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      STAGE: d2/smem
       RASTER: ''
     measurements:
-      emmy_us: 967.7
-      reference_us: 1036.3
+      emmy_us: 50.35
+      reference_us: 1035.26
+      reference_backend: emmy-greedy
+  - name: gemma4_12b.attention.hd512.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 50.33
+      reference_us: 1035.26
       reference_backend: emmy-greedy
 - program: 147
   target:

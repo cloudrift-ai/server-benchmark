@@ -29,10 +29,10 @@ jobs:
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       WORKFLOW_SOURCE: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}
       OPENCODE_CONFIG_DIR: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
-      AGENT_PROMPT: /tmp/emmy-discovery-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_TASK: /tmp/emmy-discovery-task-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
+      AGENT_SELECTION: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
-      AGENT_INVENTORY: /tmp/emmy-discovery-inventory-${{ github.run_id }}-${{ github.run_attempt }}.json
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
       - name: Generate GitHub App token
@@ -93,7 +93,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ steps.rolling.outputs.branch || github.ref_name }}
+          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -166,109 +166,16 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/python - <<'PY' > "$AGENT_INVENTORY"
-          import json
-
-          from emmy.recipe.catalog import recipe_inventory_document
-
-          print(json.dumps(recipe_inventory_document("recipes"), sort_keys=True))
-          PY
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          inventory = Path(os.environ["AGENT_INVENTORY"]).read_text()
-          Path(os.environ["AGENT_PROMPT"]).write_text(f"""Use the discover-models skill read-only.
-
-          The attached exact-workflow-SHA copy of the discover-models skill is authoritative. Follow it instead of
-          any older skill copy in the rolling lifecycle worktree.
-
-          Review the existing recipes and current demand for both supported and newly released open-weight models.
-          Start by invoking the discover-reddit, discover-huggingface, and discover-openrouter subagents in parallel.
-          Treat each result as an independent candidate source: Reddit must be able to surface a model that is absent
-          from the initial Hugging Face or OpenRouter lists. Merge and deduplicate their results, then use at most three
-          parent-agent public-web calls for targeted identity or capability verification. A Reddit mention is discovery
-          evidence, not proof of an exact open-weight checkpoint; verify every new model's exact Hugging Face ID.
-
-          Assign every existing recipe and every selected new model an integer heat score from 0 through 100. Heat is
-          current onboarding priority, based primarily on recent community attention and Hugging Face momentum, with
-          OpenRouter availability, arena evidence, technical novelty, and serving value as supporting evidence. Use
-          these stable bands: 90-100 breakout attention across sources; 70-89 strong current attention; 40-69 moderate
-          or established interest; 20-39 niche or cooling interest; 0-19 little current evidence. Compare all scores
-          within this run before returning them. Do not give an unsupported model a high score merely because it is
-          new. A score does not claim that the model has been deployed or benchmarked.
-
-          Select exactly {os.environ['MAINTAINED_MODEL_COUNT']} existing, fully configured recipes for periodic
-          testing and optimization. Prefer current community demand, serving value, architecture coverage, and a
-          useful spread of model sizes. Classify every other complete recipe as best-effort or obsolete. Best-effort
-          means the model remains useful and runnable, but is not selected for periodic optimization. Obsolete is a
-          strict technical judgment: use it when a named all-around better replacement for the same task is available
-          at a comparable or lower practical VRAM footprint, or a concrete technical limitation means the recipe
-          should no longer be used. When naming a replacement, compare the qualified deployment targets in the
-          recipes: its smallest target must use no more total physical GPU memory than the old recipe's smallest
-          target. All-around means the old model has no material advantage in quality, context, supported hardware,
-          latency or throughput, operating cost, modality, or licensing. A smaller or quantized recipe is not obsolete
-          merely because a larger or unquantized recipe exists. A replacement that is merely comparable is not
-          all-around better. Before proposing an obsolete replacement, read both recipe files and confirm that the old
-          recipe retains no advantage in configured context, concurrency, quantization, hardware support, or model
-          capability. If evidence is ambiguous or the model retains a useful advantage, use best-effort. Low demand,
-          age, or exclusion from the maintained set is not sufficient. A previously obsolete recipe may become
-          maintained or best-effort when the evidence changes. Keep every existing onboarding/untested shell in
-          onboarding_models and refresh its heat and rationale without changing its task or deployment matrix. The
-          exhaustive compact repository inventory is included below; do not rebuild it or read individual recipes
-          except for the required obsolete comparison or when another entry needs closer inspection. Do not keep
-          researching once the source investigations and targeted verification support a complete classification.
-          Existing obsolete tags are prior proposals, not evidence: reassess them from best-effort and keep them
-          obsolete only when the replacement is strictly better under this policy. "Comparable reasoning" is evidence
-          for best-effort, not obsolete.
-
-          <repository-inventory>
-          {inventory}
-          </repository-inventory>
-
-          Give every maintained, best-effort, obsolete, and onboarding decision a concise, one-sentence,
-          evidence-backed rationale of at most 20 words. Every decision must include heat. Every existing recipe must
-          appear exactly once across the four lists so every heat score is refreshed.
-          Copy every existing model_id exactly from repository-inventory, including its organization; never
-          abbreviate or reconstruct an existing ID.
-          For an obsolete recipe, include the exact replacement_model_id literally in the rationale too, or omit
-          replacement_model_id and explain the technical reason the recipe should be dropped when no successor is
-          appropriate. Add every genuinely promising new model found by the source investigations to onboarding_models;
-          there is no onboarding-model count limit. For each new model, propose one to three useful deployment setups
-          using only canonical deploy.gpu and positive deploy.gpu_count values. These become untested onboarding recipe
-          shells. Do not claim shells have been deployed or benchmarked. Do not edit the repository, rent hardware, or
-          deploy anything.
-
-          Your final response must be exactly one JSON object without a Markdown fence:
-          {{
-            "maintained_models": [
-              {{"model_id": "exact/org-model ID for an existing recipe", "rationale": "why it is maintained", "heat": 75}}
-            ],
-            "best_effort_models": [
-              {{"model_id": "exact/org-model ID", "rationale": "why it remains useful on a best-effort basis", "heat": 45}}
-            ],
-            "obsolete_models": [
-              {{"model_id": "org/old-model", "replacement_model_id": "org/better-model",
-                "rationale": "name replacement, compare target VRAM, explain why no advantage remains", "heat": 10}},
-              {{"model_id": "org/drop-model", "rationale": "technical reason to drop it without a successor", "heat": 5}}
-            ],
-            "onboarding_models": [
-              {{"model_id": "org/model", "task": "generate", "rationale": "why it is worth onboarding", "heat": 95,
-                "deployments": [
-                  {{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}}
-                ]}}
-            ]
-          }}
-          maintained_models must contain exactly {os.environ['MAINTAINED_MODEL_COUNT']} entries. Use task "embed" only
-          for an embedding model. Copy each deployment's gpu value exactly from repository-inventory.
-          Return an empty onboarding_models list only when the inventory has no existing onboarding shell and no new
-          model is suitable. The manifest file is required; do not edit any repository file. When OpenCode requires
-          your final response, return the best manifest supported by the evidence already gathered without making
-          another tool call. Before returning, check every key letter for letter: maintained_models and
-          best_effort_models entries contain exactly model_id, rationale, and heat; replacement_model_id is allowed
-          only in obsolete_models.
-          """)
-          PY
+          ./venv/bin/emmy recipe query \
+            --root recipes \
+            --sort 'model_id asc' \
+            --sort 'deployment.index asc' \
+            --json \
+            | jq \
+                --argjson maintained_count "$MAINTAINED_MODEL_COUNT" \
+                --argjson batch_size 6 \
+                -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
+            > "$AGENT_TASK"
           set +e
           opencode run \
             "Complete the attached lifecycle task exactly." \
@@ -276,19 +183,25 @@ jobs:
             --model cloudrift/agent \
             --format json \
             --file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md" \
-            --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
+            --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
+            --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
+            --file "$AGENT_TASK" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
-            "$AGENT_EVENTS" > "$AGENT_MANIFEST"
-          if [ -s "$AGENT_MANIFEST" ]; then
-            sed 's/^/discover-models: /' "$AGENT_MANIFEST"
+            "$AGENT_EVENTS" > "$AGENT_SELECTION"
+          if [ -s "$AGENT_SELECTION" ]; then
+            sed 's/^/discover-models: /' "$AGENT_SELECTION"
           else
             echo "::error::Discovery agent produced no final text output"
           fi
-          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_MANIFEST" ]; then
+          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_SELECTION" ]; then
             exit "$agent_status"
           fi
+          jq \
+            --rawfile selection "$AGENT_SELECTION" \
+            -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
+            "$AGENT_TASK" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ]; then
             echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
           fi
@@ -299,7 +212,7 @@ jobs:
       - name: Validate and apply model lifecycle
         id: lifecycle
         run: |
-          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/discovery_lifecycle.py" \
+          ./venv/bin/python "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_lifecycle.py" \
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
           maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --json | jq '.rows | length')"
@@ -441,9 +354,9 @@ jobs:
         run: |
           rm -f \
             "$AGENT_EVENTS" \
-            "$AGENT_PROMPT" \
+            "$AGENT_TASK" \
+            "$AGENT_SELECTION" \
             "$AGENT_MANIFEST" \
-            "$AGENT_INVENTORY" \
             "$DISCOVERY_SUMMARY"
           case "$WORKFLOW_SOURCE" in
             /tmp/emmy-discovery-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;

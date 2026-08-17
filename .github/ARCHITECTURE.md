@@ -23,10 +23,10 @@ from a developer checkout through the tracked `.agents/skills/run-experiment` sk
 **Tests** runs three parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the
 previous run for the same pull request. The GitHub-hosted lint job runs Ruff check and format verification. The
 compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/github/` coverage for helpers under
-`.github/scripts/`. Hugging Face downloads used by tests are cached because anonymous shared-runner traffic is
-rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact non-publishing build path used
-by the release workflow, and requires one wheel and one source distribution. This workflow has no write permission
-and does not use deployment credentials.
+`.github/scripts/` and `.github/workflows/scripts/`. Hugging Face downloads used by tests are cached because anonymous
+shared-runner traffic is rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact
+non-publishing build path used by the release workflow, and requires one wheel and one source distribution. This
+workflow has no write permission and does not use deployment credentials.
 
 ## Package publication
 
@@ -46,30 +46,38 @@ leaving a release behind.
 
 ## Model discovery and onboarding
 
-All discovery paths use the tracked `discover-models` skill. The agent selects exactly ten existing, fully configured
-recipes for the maintained set, classifies the remaining complete recipes, and supplies a rationale for every
-lifecycle decision. Every existing recipe and selected new model receives a 0-100 heat score for current onboarding
-priority. Each promising new open-weight Hugging Face model becomes an onboarding shell with one to three proposed
-deployment entries made only from `deploy.gpu` and `deploy.gpu_count`; there is no shell-count limit. Existing shells
-remain in the manifest and must retain their task and deployment matrix while discovery refreshes their heat and
-rationale. The exact-SHA catalog helper reads the rolling `recipes/` root to supply the versioned compact agent
-inventory under its `recipes` field, and an exact-SHA recipe query against the same root enforces the maintained count
-after application.
+All discovery paths use the tracked `discover-models` skill. The agent scores every existing recipe, selects exactly
+ten complete recipes for the maintained set, makes conservative obsolete proposals, and proposes new onboarding
+models. Repository code derives every remaining complete recipe as best-effort and restores every existing onboarding
+shell from inventory with its task and deployment matrix unchanged. Every existing recipe and selected new model
+receives a 0-100 heat score for current onboarding priority. Each promising new open-weight Hugging Face model becomes
+an onboarding shell with one to three proposed deployment entries made only from `deploy.gpu` and
+`deploy.gpu_count`; there is no shell-count limit.
+
+An exact-SHA `emmy recipe query` reads the rolling `recipes/` root and expands its deployment rows. The workflow's
+tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
+lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
+prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
+deterministic batches without selecting lifecycle states. The parent returns only scores, maintained IDs, obsolete
+proposals, and new onboarding models. The tracked `discovery_manifest.jq` filter validates exact score coverage,
+ignores already-inventoried IDs repeated as new candidates, and mechanically assembles the four-list manifest before
+the lifecycle validator applies policy. An exact-SHA recipe query against the rolling root enforces the maintained
+count after application.
+
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
-artifact worktree remains on the rolling lifecycle branch, while the catalog, lifecycle helper, OpenCode agent and
-plugin directory, and attached discovery skill come from the exact `github.sha` that started the run. This lets a
-manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or silently
-using an older manifest contract. The helper tolerates a model reasoning wrapper around the JSON object, but requires
-exactly the four expected top-level fields before validating their contents. The named OpenCode discovery agent denies
-repository edits, permits only the tracked discovery skill, public-web tools, repository reads, read-only Git
-inspection, and the three named read-only source subagents, and caps parent work at 64 agentic steps. The Reddit,
-Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit can surface a candidate
-before an exact Hugging Face identity is known. The parent agent alone reconciles identities, assigns heat, and writes
-the lifecycle manifest. The last complete lifecycle object in OpenCode's final completed text event becomes the
-temporary manifest and is logged before validation so a rejected decision remains inspectable; the repository
-validator remains the authoritative completion gate. The project provider configuration selects the configurable
-CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the model's chat-template thinking
-mode for the concise JSON result. Discovery never provisions hardware.
+artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
+plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.
+This lets a manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or
+silently using an older manifest contract. The manifest filter tolerates a model reasoning wrapper around the JSON
+object, but requires exactly the four expected selection fields before assembling the manifest. The named discovery
+agent denies repository edits and permits only the tracked discovery skill, public-web tools, repository reads,
+read-only Git inspection, the three named read-only source subagents, and the tool-free batch scorer. Parent work caps
+at 64 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources;
+Reddit can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
+OpenCode's final completed text event is logged before deterministic assembly so a rejected decision remains
+inspectable; the repository validator remains the authoritative completion gate. The project provider configuration
+selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
+model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
 provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
@@ -190,12 +198,13 @@ set.
 
 The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
 `emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate
-deployment entries under `matrices`; subsequent runs validate the same task and setups while refreshing heat and
-rationale. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and
+deployment entries under `matrices`; subsequent runs preserve the task and setups mechanically while refreshing heat
+and rationale. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and
 uses the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It
-never rents a VM. Network operations use bounded retries, and discovery keeps research, prompt inventory, retained
-history, and final output within the inference endpoint's context limit. The lifecycle helper retains only
-classification policy and manifest application.
+never rents a VM. Network operations use bounded retries, and discovery keeps source evidence, batched recipe context,
+retained history, and final output within the inference endpoint's context limit. The workflow filters perform only
+structural batching and manifest assembly; the lifecycle validator retains classification policy and manifest
+application.
 
 ## Credentials, VM ownership, and cleanup
 

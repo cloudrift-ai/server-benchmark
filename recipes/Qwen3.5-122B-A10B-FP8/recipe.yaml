@@ -1,6 +1,10 @@
+tags:
+  - best-effort
+
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-
+  rationale: "FP8 122B MoE with H200, Pro6000 TP8, and MI350X coverage complements the BF16 path."
+  heat: 52
 engine:
   llm:
     pipeline_parallel_size: 1

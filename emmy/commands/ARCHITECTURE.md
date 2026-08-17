@@ -418,8 +418,11 @@ handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-l
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
 vLLM *and* reaches the emmy runner** — the plugin composes `<repo>@<revision>` and every checkpoint read inside emmy
 resolves that commit (see `serving/ARCHITECTURE.md`); without it a repo publishing several branches warns loudly and
-takes its default. `emmy pull` and `emmy compile` / `emmy run` accept the same `<repo>@<revision>` spelling directly,
-so a served rung can be reproduced off the CLI. Generative serving
+takes its default. `MODEL` itself also accepts the `<repo>@<revision>` spelling `emmy pull` / `compile` / `run` use:
+the handler splits it into the bare id plus `--revision` before building either command, because vLLM takes the two
+apart and, left joined, the id resolves nowhere — every local config probe then returns `None` and the checkpoint
+special cases those feed (the coded-checkpoint unquantized override, the MoE capture-size cap) silently no-op. An
+explicit `--revision` wins. So a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when

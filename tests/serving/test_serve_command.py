@@ -99,6 +99,29 @@ def test_verbatim_passthrough_after_double_dash(capsys):
     assert "http://localhost:8222" in out[1]  # bench targets the passthrough port
 
 
+def test_pinned_revision_splits_off_the_model_id(capsys):
+    """``<repo>@<revision>`` is emmy's pin spelling, not vLLM's.
+
+    Leaving the two joined does more than lose the pin: the id resolves nowhere, so every local
+    config probe returns ``None`` and each checkpoint special case it feeds — the coded-checkpoint
+    unquantized override, the MoE capture cap — silently no-ops. Both the server and the bench
+    client must see the bare repo, and the bench client must match what vLLM serves under."""
+    args = _parse(["serve", f"{MODEL}@abc123", "--bench", "--dry-run"])
+    handle_serve(args)
+    serve_line, bench_line = capsys.readouterr().out.strip().splitlines()
+    assert serve_line.startswith(f"vllm serve {MODEL} ")
+    assert "--revision abc123" in serve_line
+    assert "@abc123 " not in serve_line and not serve_line.endswith("@abc123")
+    assert f"--model {MODEL} " in f"{bench_line} " and "@abc123" not in bench_line
+
+
+def test_explicit_revision_flag_wins_over_the_pin_suffix(capsys):
+    args = _parse(["serve", f"{MODEL}@abc123", "--dry-run", "--revision", "def456"])
+    handle_serve(args)
+    line = capsys.readouterr().out.strip()
+    assert "--revision def456" in line and "abc123" not in line
+
+
 def test_dry_run_serve_only(capsys):
     args = _parse(["serve", MODEL, "--dry-run"])
     handle_serve(args)

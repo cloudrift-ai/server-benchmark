@@ -78,7 +78,9 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
     pointers = {name: head.program.arrays[name].data.ptr for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
     x = (torch.randn(2, 128, device="cuda") * 0.1).half()
     got = head(x)
-    reference = x.float() @ torch.from_numpy(decoded[:, :251]).float().cuda()
+    # ``exl3_linear_tensors`` hands back the reference in checkpoint ``(out, in)`` orientation,
+    # so the logical-vocab slice takes the ROW axis and the matmul takes the transpose.
+    reference = x.float() @ torch.from_numpy(np.ascontiguousarray(decoded[:251].T)).float().cuda()
     torch.testing.assert_close(got, reference, rtol=2e-2, atol=2e-2)
     assert pointers == {name: head.program.arrays[name].data.ptr for name in pointers}
 

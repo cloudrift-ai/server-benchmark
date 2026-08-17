@@ -220,16 +220,28 @@ def _nest(stmts: list[Stmt], axes: list[Axis]) -> list[Stmt]:
 def _ws_dtype(child, inputs: dict):
     """The seam workspace dtype: a fold child bridges raw carrier STATE — **f32**, the
     split-reduce workspace rule (a reduced statistic must not round-trip through the output
-    dtype) — while a value seam (a zero-axis ``Fold`` child — the cone's per-cell normalize) keeps its leaf
-    operand's dtype: the same bytes the fused form's A slab stored, so numerics match. In the
-    one-kind IR "fold child" means the child FOLDS AN AXIS: a zero-axis projection is the value
-    seam, whatever reduces ride inside its operands. (``isinstance(child, Fold)`` alone matches
-    every node since the ``Map``/``Contraction`` merge — that spelling made every seam f32, and
-    an f32 A cannot ride the warp atoms bare, so every cut consumer re-wrapped into a demoting
-    cone, keyed ``fused``, and deployed the parent's fused golden instead of its own matmul row.)"""
+    dtype) — while a value seam (a zero-axis ``Fold`` child — the cone's per-cell normalize) holds
+    the seam VALUE, so it takes that value's dtype: the same bytes the fused form's A slab stored,
+    so numerics match. In the one-kind IR "fold child" means the child FOLDS AN AXIS: a zero-axis
+    projection is the value seam, whatever reduces ride inside its operands. (``isinstance(child,
+    Fold)`` alone matches every node since the ``Map``/``Contraction`` merge — that spelling made
+    every seam f32, and an f32 A cannot ride the warp atoms bare, so every cut consumer re-wrapped
+    into a demoting cone, keyed ``fused``, and deployed the parent's fused golden instead of its
+    own matmul row.)
+
+    The value's own dtype is the defining statement's when it CONVERTS (a coded-weight decode
+    cone reads integer tables and produces f16 — reading the leaf dtype there stores the fp16
+    value through an ``int`` workspace and rounds every element to an integer). Only a
+    conversion carries an explicit dtype this early; everything else passes its leaf operand
+    through unconverted, which is what the leaf lookup below answers.
+    """
     if isinstance(child, Fold) and child.axis is not None:
         return F32
-    for s in child.lower():
+    lowered = child.lower()
+    seam = Body(tuple(lowered)).definitions.get(operand_name(child))
+    if (converted := getattr(seam, "dtype", None)) is not None:
+        return converted
+    for s in lowered:
         for ld in Body(tuple([s])).loads:
             t = (inputs or {}).get(ld.input)
             if t is not None:

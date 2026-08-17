@@ -713,6 +713,67 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     )
 
 
+@requires_cuda
+def test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone():
+    """The birth-time spelling runs off its PLAN, fed nothing but the checkpoint leaves.
+
+    The coded head (``serving.exl3_head``) binds exactly this way: the Hadamard factor and the
+    coordinate tables fold into deterministic bind records, so nothing outside the plan can
+    supply them and an unfilled constant buffer would make every logit zero. Two rows, not one:
+    the multi-row shape is what routes the core contraction through a cut seam, whose workspace
+    must carry the decode cone's f16 value rather than its integer leaf tables.
+    """
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.loader.trellis import spell_factored_linear
+
+    m, n, k = 2, 256, 128
+    tensors, decoded = exl3_linear_tensors("w", n, k, K=2, cb=2)
+    leaves = {}
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (m, k), "f16"), node_id="x")
+    for leaf, dtype in (("trellis", "i16"), ("suh", "f16"), ("svh", "f16")):
+        nid, value = f"w_{leaf}", np.ascontiguousarray(tensors[f"w.{leaf}"].numpy())
+        leaves[nid] = value
+        graph.add_node(
+            ConstantOp(name=nid, source_path=f"w.{leaf}", source_shape=value.shape, source_dtype=dtype),
+            [],
+            Tensor(nid, value.shape, dtype),
+            node_id=nid,
+        )
+    out = spell_factored_linear(
+        graph,
+        "w_trellis",
+        "w_suh",
+        "w_svh",
+        cb=2,
+        weight_shape=(n, k),
+        x="x",
+        bias=None,
+        out=Tensor("y", (m, n), "f32"),
+        weight_name="w",
+    )
+    graph.inputs, graph.outputs = ["x"], [out]
+
+    # Default greedy — no pinned lane, so this covers whatever the deploy path picks.
+    plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    generated = {nid for nid, weight in plan.weights.items() if weight.generated is not None}
+    assert generated and not (generated & set(leaves))
+
+    x = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, {"x": x, **leaves})
+        program.run_once()
+        got = np.asarray(program.outputs()["y"], dtype=np.float32).reshape(m, n)
+    ref = x.astype(np.float32) @ np.ascontiguousarray(decoded.T).astype(np.float32)
+    assert np.any(got)
+    assert np.max(np.abs(got - ref)) / max(np.max(np.abs(ref)), 1e-12) < 2e-2
+
+
 def _trellis_linear_graph(m: int = 16, tensors=None, cb: int = 0):
     """The streamed computed-B linear: ``x @ decode(trellis)ᵀ``, its two spelling boundaries kept
     observable so index-map fusion cannot replace the computed-B contraction with a planar one."""

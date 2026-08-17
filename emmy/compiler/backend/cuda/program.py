@@ -32,7 +32,7 @@ from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
 from emmy.compiler.backend.cuda.dtype import cupy_dtype
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
-from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
 from emmy.compiler.graph import Graph
 
@@ -204,6 +204,27 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
         vals = (0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)).astype(np_dtype)
         return cp.asarray(vals.reshape(shape))
     return cp.zeros(shape, dtype=cp_dtype)
+
+
+def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
+
+    A deterministic source-free bind record is evaluated once while the graph is projected and
+    its bytes ride the plan (``PLAN_FORMAT_GENERATED``) — a coded linear's Hadamard factor and
+    its coordinate tables are exactly that. Nothing outside the plan can supply them, and an
+    unsupplied constant buffer materializes as ZEROS, so the runtime must read them here.
+    Caller-supplied arrays win: serving binds the same specs through ``assemble_source`` and
+    shares one device copy across its twins.
+    """
+    from emmy.compiler.loader.binder import assemble_source  # noqa: PLC0415
+
+    feed = dict(input_data)
+    for nid, w in plan.weights.items():
+        # ``load_ops is None`` marks a weight the plan cannot rebind at all (see ``WeightSpec``).
+        if w.generated is None or w.load_ops is None or nid in feed:
+            continue
+        feed[nid] = apply_weight_loads(assemble_source(w, {}), w.load_ops)
+    return feed
 
 
 @dataclass
@@ -754,7 +775,8 @@ class CompiledProgram:
         arena: BufferArena | None = None,
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
-        buffer, pre-build TMA descriptors. ``compile_timeout_s`` bounds the
+        buffer (the plan's generated constants fill themselves — see
+        :func:`_with_generated_constants`), pre-build TMA descriptors. ``compile_timeout_s`` bounds the
         setup phase at a C-call boundary: if compile + alloc + descriptor work
         overruns, raise ``RuntimeError`` before the caller proceeds to launches
         so no in-flight kernels are left queued. ``arena`` pools the
@@ -765,7 +787,8 @@ class CompiledProgram:
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
         compiled = _load_plan(plan)
-        sym_values = _resolve_symbolic(compiled, input_data or {})
+        input_data = _with_generated_constants(plan, input_data or {})
+        sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0

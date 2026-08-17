@@ -106,7 +106,11 @@ role via `graph.buffer_role`), scalar/runtime constants, the launch list (`Launc
 buffer a launch produces; the slab planner's first-write test reads it, falling back to `node_id` for plans
 stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
-with pure numpy). `plan_from_graph` is the seam the whole runtime builds from: after it runs,
+with pure numpy). A deterministic source-free bind record is the third binding kind: `plan_from_graph`
+evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
+`build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
+unsupplied constant buffer would otherwise allocate as ZEROS and run a silently weightless program.
+`plan_from_graph` is the seam the whole runtime builds from: after it runs,
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression

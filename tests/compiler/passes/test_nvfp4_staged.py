@@ -237,6 +237,14 @@ def test_the_offer_puts_the_byte_slab_beside_the_compute_fill():
     assert "sync" in rows[0], rows
 
 
+def test_the_offer_adds_no_compute_fill_depth_the_fill_did_not_ask_for():
+    """A cp move the byte slab declines falls through to the compute fill at that move's depth, so
+    a packed node was picking up d3 and d4 fills nobody offers. The fill names its own depths."""
+    node, inputs, axes = _node()
+    fills = {r for r in _rows(node, inputs, axes) if "sync" in r}
+    assert fills and all(r.startswith(("d1", "d2")) for r in fills), sorted(fills)
+
+
 def test_a_generic_cone_offers_only_the_compute_fill():
     """A cone the byte slab declines is unchanged: its rows are the compute-fill depths alone."""
     node, inputs, axes = _node(block=32)

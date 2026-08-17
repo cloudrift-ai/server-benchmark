@@ -1016,13 +1016,6 @@ def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     byte slab declines included — names a compute-fill depth."""
     packed = match_packed_b_node(node, term.tile.inputs) is not None
     pin = term.pin("STAGE", node)
-    if pin:
-        want = Stage.parse(pin)
-        moves = [want] if packed and want.transport == "cp.async" else [Stage(depth=want.depth)]
-    else:
-        moves = [Stage(depth=1), Stage(depth=2)]
-        if packed:
-            moves += [m for m in stage_moves(warp=True) if m.transport == "cp.async"]
 
     def resolve(st: Stage) -> Stage | None:
         r = _resolve_stage(term, node, tile, st)
@@ -1030,7 +1023,22 @@ def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
             legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=bool(pin))
         return r
 
-    return _resolved(moves, resolve, gmem_direct=False)
+    if pin:
+        want = Stage.parse(pin)
+        return _resolved([want] if packed and want.transport == "cp.async" else [Stage(depth=want.depth)], resolve, gmem_direct=False)
+    fill = _resolved((Stage(depth=d) for d in (1, 2)), resolve, gmem_direct=False)
+    if not packed:
+        return fill
+
+    def resolve_byte_slab(st: Stage) -> Stage | None:
+        """The byte slab alone. A cp move it declines falls THROUGH to the compute fill at that
+        move's depth (``_resolve_stage``'s one dispatch), which would offer fill depths nobody
+        asked for — d3 and d4 among them. The fill names its own depths above; here a transport
+        that changed on the way back means the byte slab said no."""
+        r = _resolve_stage(term, node, tile, st)
+        return r if r is not None and r.transport == st.transport else None
+
+    return fill + _resolved((m for m in stage_moves(warp=True) if m.transport == "cp.async"), resolve_byte_slab, gmem_direct=False)
 
 
 def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:

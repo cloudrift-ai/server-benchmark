@@ -7,9 +7,9 @@ import json
 import numpy as np
 import pytest
 
+from emmy.compiler.dtype import F8E4M3, decode_f4x2
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.dtype import F8E4M3, decode_f4x2
 from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
@@ -1046,9 +1046,7 @@ def test_load_dequantized_state_dict_nvfp4(tmp_path):
     )
 
     sd = load_dequantized_state_dict(d)
-    np.testing.assert_array_equal(
-        sd["layer.weight"], dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32))
-    )
+    np.testing.assert_array_equal(sd["layer.weight"], dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32)))
     assert "layer.weight_scale" not in sd and "layer.weight_scale_2" not in sd
     assert sd["layer.input_scale"] == np.float32(1.5)
     assert sd["emb.weight"].shape == (4, 8)

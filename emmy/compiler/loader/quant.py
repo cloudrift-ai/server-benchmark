@@ -52,7 +52,7 @@ from pathlib import Path
 
 import numpy as np
 
-from emmy.compiler.dtype import F4E2M1x2, F8E4M3, decode_f4x2, decode_f8  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+from emmy.compiler.dtype import F8E4M3, F4E2M1x2, decode_f4x2, decode_f8  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.loader.exl3 import HAD_BLOCK, decode_trellis, fold_hadamard
@@ -713,9 +713,7 @@ def _spell_fp4_one(
         inputs=[],
         output=Tensor(f"{out.name}_f4_pairs", (256, 2), out.dtype),
     )
-    pairs = frag.add_node(
-        op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{out.name}_pairs", packed_shape + (2,), out.dtype)
-    )
+    pairs = frag.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{out.name}_pairs", packed_shape + (2,), out.dtype))
     vals = frag.add_node(op=ReshapeOp(shape=shape), inputs=[pairs], output=Tensor(f"{out.name}_vals", shape, out.dtype))
 
     s2_decl = (1,) * len(scale_shape)
@@ -745,9 +743,7 @@ def _spell_fp4_one(
     # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
     fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{out.name}_fused", scale_shape, "f16"))
     if out.dtype != "f16":
-        fused = frag.add_node(
-            op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{out.name}_fused_cast", scale_shape, out.dtype)
-        )
+        fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{out.name}_fused_cast", scale_shape, out.dtype))
 
     interleaved = shape[:-1] + (k // 16, 16)
     blk = frag.add_node(op=ReshapeOp(shape=interleaved), inputs=[vals], output=Tensor(f"{out.name}_blk", interleaved, out.dtype))
@@ -757,9 +753,7 @@ def _spell_fp4_one(
         output=Tensor(f"{out.name}_fused_r", scale_shape + (1,), out.dtype),
     )
     f_bc = broadcast_to(frag, fused_r, interleaved)
-    scaled = frag.add_node(
-        op=ElementwiseOp(op="multiply"), inputs=[blk, f_bc], output=Tensor(f"{out.name}_sblk", interleaved, out.dtype)
-    )
+    scaled = frag.add_node(op=ElementwiseOp(op="multiply"), inputs=[blk, f_bc], output=Tensor(f"{out.name}_sblk", interleaved, out.dtype))
     final = frag.add_node(op=ReshapeOp(shape=shape), inputs=[scaled], output=Tensor(out.name, shape, out.dtype))
     frag.outputs = [final]
     graph.splice(frag, consumed=[nid], output=nid)

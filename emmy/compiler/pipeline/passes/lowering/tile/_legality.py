@@ -360,7 +360,8 @@ _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
 def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packed, inputs) -> Stage | None:
     """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
 
-    The scoped shape, which is what the fragment drain is written for: cp.async transport, an
+    The scoped shape, which is what the fragment drain is written for: a copy transport (cp.async or
+    TMA), an
     N-major packed weight of 16-value blocks under an f16 or bf16 atom whose K step is that same
     16, and an A already carrying the atom's dtype. Everything outside it declines and stays on the generic
     computed-B reading, which computes the same values through the sync compute-fill.
@@ -374,8 +375,8 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     and ringing a compute fill buys no overlap.
     """
     atom = tile.atom
-    if stage.transport != "cp.async" or stage.split:
-        return None  # the sync compute fill has nothing to copy under, and no TMA descriptor is built for this
+    if stage.transport not in ("cp.async", "tma") or stage.split:
+        return None  # the sync compute fill has nothing to copy under, and split cuts a group this fold has one of
     if packed.block != _PACKED_BLOCK or atom.atom_k != _PACKED_BLOCK or atom.fragment_layout != "m16n8k16":
         return None
     a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
@@ -393,7 +394,17 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     k, bk_elems = c.axis.extent.as_static(), tile.bk * atom.atom_k
     if tile.n.mask or k % bk_elems or (bk_elems // 2) % 16 or (k // 2) % 16:
         return None
-    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
+    # A TMA box deposits DENSE, so the byte rows carry no pad — the same split the fp8 byte slab
+    # makes. Its extra demands are the hardware's: every box dim within the 256 limit, and a
+    # 16 B-aligned inner span and gmem row stride per operand at its OWN width. The byte side is
+    # already 16-divisible by the rule above; A's is ``bk_elems`` and ``k`` at two bytes each.
+    pad = 0 if stage.transport == "tma" else BYTE_SLAB_PAD
+    if stage.transport == "tma":
+        if max(tile.m.tile, tile.n.tile, bk_elems, bk_elems // 2) > _TMA_MAX_BOX:
+            return None
+        if (bk_elems * a_dtype.nbytes) % _TMA_ALIGN or (k * a_dtype.nbytes) % _TMA_ALIGN:
+            return None
+    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // 2 + pad)
     scale_bytes = tile.n.tile * (bk_elems // packed.block) * b_dtype.nbytes
     if scale_bytes + slot_bytes > budget:
         return None

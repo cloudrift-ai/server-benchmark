@@ -51,6 +51,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncTransport,
     TmaTransport,
     pick_swizzle_atom,
+    pipelined_kloop,
     staged_kloop,
     sync_stat_fill,
 )
@@ -637,7 +638,7 @@ def _sync_operands(
 
 
 def _packed_operands(
-    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype
+    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype, *, pad: int
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...]]:
     """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
 
@@ -656,6 +657,10 @@ def _packed_operands(
     :attr:`~...tile._atomize.PackedKBlockB.factor`, evaluated at the block's own k. That the cone
     may be evaluated at ONE k per block — instead of at every k — is exactly the block-invariance
     the matcher proved.
+
+    ``pad`` is the bits slab's row pad in bytes — ``BYTE_SLAB_PAD`` under cp.async, whose fill
+    wants the bank spread, and zero under TMA, whose box deposits dense. The drain reads it back
+    off ``Operand.pad_cols``, so the two cannot disagree.
 
     Returns ``(drain-ordered operands, sync operands, async operands)``. The scale slab is absent
     from the drain order: it is not a fragment source of its own, it is the bits drain's second
@@ -701,7 +706,7 @@ def _packed_operands(
         coords=lambda k0: (col_base, BinaryExpr("/", k0, two)),
         index=bits_index,
         trans=True,
-        pad_cols=BYTE_SLAB_PAD,
+        pad_cols=pad,
         dtype=cuda_name(bits_dtype),
         elem_bytes=bits_dtype.nbytes,
         scale=(scale_op.slab, block),
@@ -726,22 +731,41 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    packed = match_packed_b_node(c, ops.inputs) if stage.transport == "cp.async" else None
+    packed = match_packed_b_node(c, ops.inputs) if stage.transport in ("cp.async", "tma") else None
     if packed is not None:
         # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
         # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
-        # A compute fill sits in the transport, so this is the ``sync`` producer with the two
-        # copied slabs as its asynchronous peers — the same shape the fused norm→linear edge takes.
+        tma = stage.transport == "tma"
         operands, sync_ops, async_ops = _packed_operands(
-            c, packed, stage.bk_elems, mn, ops.slab_swizzles(mn, elem.nbytes)[0], ops.inputs[packed.bits.input].dtype
+            c,
+            packed,
+            stage.bk_elems,
+            mn,
+            ops.slab_swizzles(mn, elem.nbytes)[0],
+            ops.inputs[packed.bits.input].dtype,
+            pad=0 if tma else BYTE_SLAB_PAD,
         )
-        transport = SyncTransport(
-            operands=sync_ops,
-            async_operands=async_ops,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=cta,
-        )
+        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        if tma:
+            # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
+            # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
+            # mbarrier by one elected thread and waited on by parity, which no compute fill can be
+            # folded into. The K-loop skeleton already schedules a LIST of groups, so the copies
+            # and the scale fill are simply two of them over one drain segment: the box copies ring
+            # at the stage's depth, the compute fill stays single-buffer as it always is.
+            copies = TmaTransport(operands=async_ops, **common)
+            fill = SyncTransport(operands=sync_ops, **common)
+            slabs = frozenset(op.slab for op in (*async_ops, *sync_ops))
+            return pipelined_kloop(
+                operands=((copies, stage.depth), (fill, 1)),
+                build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
+                bk_elems=stage.bk_elems,
+                n_chunks=K // stage.bk_elems,
+                k_extent=K,
+            )
+        # cp.async: one ``sync`` producer whose asynchronous peers are the two copied slabs — the
+        # same shape the fused norm→linear edge takes.
+        transport = SyncTransport(operands=sync_ops, async_operands=async_ops, **common)
     elif stage.transport == "sync" and tile.atom.sync_copy_staging:
         assert isinstance(c.a, Load) and isinstance(c.b, Load), "sync-copy staging requires materialized A and B edges"
         assert len(ops.channels) == 1, "sync-copy staging is single-fold"

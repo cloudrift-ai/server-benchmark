@@ -963,7 +963,7 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     if want is not None and tile.is_warp and legal.warp_atom_stage(tile.atom, want) is not None:
         return None
     if _has_computed_operand(node):
-        if want is not None and want.transport == "cp.async" and tile.is_warp:
+        if want is not None and want.transport in ("cp.async", "tma") and tile.is_warp:
             # ONE computed edge has a copy transport: a packed-pair weight cone, whose bits stage
             # as raw bytes beside a small compute-filled block-scale slab (the mma resolver's
             # packed arm). Every other cone declines there and lands on the compute fill below.
@@ -1006,14 +1006,14 @@ def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row.
 
-    A PACKED-PAIR k-block B (an NVFP4 weight's decode cone) offers the cp.async BYTE-SLAB rows
-    beside them: the weight copies as raw packed bytes with a small decoded block-scale slab, and
-    the fragment drain does the decode. They are fork SIBLINGS of the compute fill, so a shape the
-    byte slab declines simply keeps the generic reading.
+    A PACKED-PAIR k-block B (an NVFP4 weight's decode cone) offers the BYTE-SLAB rows beside them,
+    on either copy transport: the weight copies as raw packed bytes with a small decoded block-scale
+    slab, and the fragment drain does the decode. They are fork SIBLINGS of the compute fill, so a
+    shape the byte slab declines simply keeps the generic reading.
 
     A ``STAGE`` pin is authoritative and names ONE row, its transport saying which family it means:
-    a ``cp`` pin on a packed node is the byte slab; every other pin — a ``cp`` one on a node the
-    byte slab declines included — names a compute-fill depth."""
+    a ``cp`` or ``tma`` pin on a packed node is the byte slab; every other pin — and either of those
+    on a node the byte slab declines — names a compute-fill depth."""
     packed = match_packed_b_node(node, term.tile.inputs) is not None
     pin = term.pin("STAGE", node)
 
@@ -1025,7 +1025,8 @@ def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
 
     if pin:
         want = Stage.parse(pin)
-        return _resolved([want] if packed and want.transport == "cp.async" else [Stage(depth=want.depth)], resolve, gmem_direct=False)
+        one = [want] if packed and want.transport in ("cp.async", "tma") else [Stage(depth=want.depth)]
+        return _resolved(one, resolve, gmem_direct=False)
     fill = _resolved((Stage(depth=d) for d in (1, 2)), resolve, gmem_direct=False)
     if not packed:
         return fill
@@ -1038,7 +1039,8 @@ def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
         r = _resolve_stage(term, node, tile, st)
         return r if r is not None and r.transport == st.transport else None
 
-    return fill + _resolved((m for m in stage_moves(warp=True) if m.transport == "cp.async"), resolve_byte_slab, gmem_direct=False)
+    copies = (m for m in stage_moves(warp=True) if m.transport in ("cp.async", "tma"))
+    return fill + _resolved(copies, resolve_byte_slab, gmem_direct=False)
 
 
 def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:

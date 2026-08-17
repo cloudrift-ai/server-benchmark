@@ -132,13 +132,37 @@ def test_packed_b_resolves_the_cp_async_byte_slab(atom, a_dtype):
         assert st.bk_elems == tile.bk * 16 and st.transport == "cp.async"
 
 
-def test_packed_b_declines_sync_and_tma():
-    """Only cp.async is built. A ``sync`` or ``tma`` spelling keeps the generic computed-B
-    reading, whose compute fill evaluates the same cone."""
+def test_packed_b_declines_sync_and_the_transport_split():
+    """The compute fill has nothing to copy under, and ``split`` cuts a fold's edges into one
+    transport group each — a contraction consumes both in one multiply, so there is nothing to cut."""
     node, inputs, axes = _node()
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    for spec in ("d1/sync", "d2/tma", "d1/cp/split"):
+    for spec in ("d1/sync", "d1/cp/split", "d1/tma/split"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None, spec
+
+
+def test_packed_b_resolves_tma_with_dense_byte_rows():
+    """A TMA box deposits dense, so the byte slab carries no row pad — and the budget must size it
+    that way, or the stage claims smem it does not use."""
+    node, inputs, axes = _node()
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    bk_elems = tile.bk * 16
+    dense = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2)
+    scale = tile.n.tile * (bk_elems // 16) * 2
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/tma"), 100 * 1024, inputs)
+    assert st is not None and st.transport == "tma" and st.bk_elems == bk_elems
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/tma"), scale + 2 * dense, inputs).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/tma"), scale + 2 * dense - 1, inputs).depth == 1
+    # The cp.async sibling needs strictly more for the same depth — that is exactly the pad.
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), scale + 2 * dense, inputs).depth == 1
+
+
+def test_packed_b_declines_tma_beyond_the_box_limit():
+    """Every TMA box dim must fall inside the hardware's 256; a wide N tile does not."""
+    node, inputs, axes = _node()
+    wide = _tile(K16, "f2x8/k2", "w1x8", axes)  # tile_n = 8*8*8 = 512
+    assert wide.n.tile > 256
+    assert resolve_warp_stage(node, wide, Stage.parse("d2/tma"), 400 * 1024, inputs) is None
 
 
 def test_packed_b_budget_carries_the_row_pad_and_the_scale_slab():
@@ -303,9 +327,9 @@ def _nvfp4_matmul_graph(tmp_path, *, m, n, k, dtype="f16"):
     return g, (packed, scale_bits, s2)
 
 
-def _packed_pins(dtype="f16"):
+def _packed_pins(dtype="f16", stage="d2/cp"):
     atom = K16 if dtype == "f16" else K16_BF16
-    return {"TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": "d2/cp"}
+    return {"TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": stage}
 
 
 PACKED_PINS = _packed_pins()
@@ -373,15 +397,22 @@ def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, pac
 
 @requires_cuda
 @pytest.mark.parametrize(
-    ("dtype", "m", "n", "k", "tol"),
-    [("f16", 32, 128, 128, 1e-3), ("f16", 4, 2048, 2048, 1e-3), ("bf16", 32, 128, 128, 6e-3)],
+    ("dtype", "m", "n", "k", "tol", "stage"),
+    [
+        ("f16", 32, 128, 128, 1e-3, "d2/cp"),
+        ("f16", 4, 2048, 2048, 1e-3, "d2/cp"),
+        ("bf16", 32, 128, 128, 6e-3, "d2/cp"),
+        ("f16", 32, 128, 128, 1e-3, "d2/tma"),
+        ("bf16", 32, 128, 128, 6e-3, "d2/tma"),
+    ],
 )
 @pytest.mark.xdist_group("cuda")
-def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, tol):
+def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, tol, stage):
     """Numerical parity on the device: the packed kernel equals ``x @ dequantize_nvfp4(w)ᵀ``.
 
     Both a compute-shaped and a decode-shaped matmul at f16, since the decode shape is where the
-    weight traffic dominates, plus the bf16 fragment. Each bound is roughly 3x the measured error
+    weight traffic dominates, the bf16 fragment, and both copy transports — a TMA box deposits
+    dense where cp.async pads, so the two drains read different row strides. Each bound is roughly 3x the measured error
     on a 4090 (f16 2.5e-4, bf16 2.1e-3); bf16's is the looser one because bf16 carries 8 mantissa
     bits against f16's 11 — the format's own precision, not the drain's."""
     import torch
@@ -403,10 +434,12 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
         x_ref = x.astype(np.float32)
 
     backend = CudaBackend()
-    with pinned_knobs(_packed_pins(dtype)):
+    with pinned_knobs(_packed_pins(dtype, stage)):
         compiled = backend.compile(g)
     src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
     assert f"emmy_mma_load_b_smem_trans_f4s_{dtype}" in src, "the packed pins did not reach the byte-slab drain"
+    if stage.endswith("tma"):
+        assert "cp.async.bulk.tensor" in src and "emmy_cp_async" not in src, "the TMA pin must box-copy, not cp.async"
 
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})

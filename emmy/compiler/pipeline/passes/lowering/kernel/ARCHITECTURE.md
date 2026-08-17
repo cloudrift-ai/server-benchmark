@@ -323,10 +323,19 @@ loader per fragment dtype the kernel actually drains — f16 and bf16, since eve
 format's largest magnitude is 6 and its finest step 0.5, so one mantissa bit carries it). The tables are generated
 from `dtype.F4_VALUES`, so the kernels and the numpy decode stay one table of values, and an f16 kernel never
 carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the stage to what those loaders are
-written for — `cp.async`, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that same
-16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8 slab
-has. The budget carries the padded byte rows per ring slot plus the one scale slab. Everything outside the scope
-declines and keeps the general reading.
+written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
+same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
+slab has. Everything outside the scope declines and keeps the general reading.
+
+Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
+drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row
+stride — the same split the fp8 byte slab makes, and the budget sizes each accordingly. TMA adds the hardware's own
+demands: every box dim within 256, and 16 B-aligned inner spans and gmem row strides per operand at its own width.
+The two also compose differently with the scale fill. cp.async rides INSIDE the `sync` producer as an asynchronous
+peer, because both are issued by the same threads under one CTA barrier. A TMA copy is armed on an mbarrier by one
+elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
+groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
+stage's depth, the compute-filled scale slab stays single-buffer.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two

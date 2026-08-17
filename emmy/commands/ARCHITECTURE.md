@@ -23,8 +23,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
   trace and eval
-- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
-  INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
+- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), which suppresses routine HTTP request INFO
+  records so versioned JSON remains parseable, plus `ensure_plugin_logging()` — makes emmy INFO logs visible when
+  nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
   (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
   …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence

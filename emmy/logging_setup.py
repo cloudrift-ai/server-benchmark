@@ -19,6 +19,10 @@ def setup_cli_logging():
     handler.setFormatter(logging.Formatter("%(message)s"))
     install_redaction(handler)
     root.addHandler(handler)
+    # httpx logs every successful request at INFO. That routine transport noise
+    # otherwise precedes versioned JSON emitted by commands such as
+    # ``recipe query --json`` and breaks their machine-readable stdout contract.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def ensure_plugin_logging():

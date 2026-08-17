@@ -18,7 +18,6 @@ from emmy.recipe.lifecycle import validate_recipe_tags
 
 ALLOWED_ARTIFACT_PREFIXES = (
     "docker/vllm-emmy-serve/models/",
-    "emmy/compiler/pipeline/search/goldens/",
     "emmy/",
     "experiments/",
     "recipes/",
@@ -87,10 +86,7 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
     normalized = path.as_posix()
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Artifact path is not repository-relative: {raw_path}")
-    is_golden = normalized.startswith("emmy/compiler/pipeline/search/goldens/")
-    allowed_implementation_file = (
-        is_golden or path.parts[0] not in {"emmy", "tests"} or path.suffix == ".py" or path.name == "ARCHITECTURE.md"
-    )
+    allowed_implementation_file = path.parts[0] not in {"emmy", "tests"} or path.suffix == ".py" or path.name == "ARCHITECTURE.md"
     if (
         normalized.startswith(ALLOWED_ARTIFACT_PREFIXES)
         and allowed_implementation_file
@@ -101,6 +97,9 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
 
 
 def _invalid_result_artifacts(workspace: Path, artifacts: list[Path]) -> list[Path]:
+    def is_recipe_golden(path: Path) -> bool:
+        return len(path.parts) == 4 and path.parts[0] == "recipes" and path.parts[2] == "golden" and path.suffix == ".yaml"
+
     return [
         path
         for path in artifacts
@@ -109,7 +108,7 @@ def _invalid_result_artifacts(workspace: Path, artifacts: list[Path]) -> list[Pa
             and not _is_durable_experiment_artifact(path)
             and not (path.name.endswith(".experiment.yaml") and _is_tracked_deletion(workspace, path))
         )
-        or (path.parts[0] == "recipes" and path.name not in {"recipe.yaml", "RESULTS.md"})
+        or (path.parts[0] == "recipes" and path.name not in {"recipe.yaml", "RESULTS.md"} and not is_recipe_golden(path))
     ]
 
 
@@ -132,9 +131,7 @@ def _archive_platform_records(workspace: Path, archive: Path, platform: str) -> 
 
 
 def _is_implementation_artifact(path: Path) -> bool:
-    return (
-        bool(path.parts) and path.parts[0] in {"emmy", "tests"} and not path.as_posix().startswith("emmy/compiler/pipeline/search/goldens/")
-    )
+    return bool(path.parts) and path.parts[0] in {"emmy", "tests"}
 
 
 def _validate_implementation_patch(workspace: Path, changed: set[str]) -> None:

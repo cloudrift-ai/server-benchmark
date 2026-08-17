@@ -1,11 +1,12 @@
 """Resolve recipes from an editable checkout or installed package.
 
-`pip install emmy-ml` has no repo checkout, so the wheel bundles every
-`recipes/<model>/recipe.yaml` under `emmy/recipes/` (staged at build time by
-`scripts/prepare_dist.py`). A bundled recipe is read-only — it lives in
-site-packages, while `deploy` writes its compose file into the recipe directory
-and `bench` creates a timestamped run directory — so referring to one by name
-materializes a working copy in the current directory first.
+`pip install emmy-ml` has no repo checkout, so the wheel bundles every runnable
+`recipes/<model>/recipe.yaml` and every `recipes/<model>/golden/*.yaml` under
+`emmy/recipes/` (staged at build time by `scripts/prepare_dist.py`). A bundled
+recipe is read-only — it lives in site-packages, while `deploy` writes its
+compose file into the recipe directory and `bench` creates a timestamped run
+directory — so referring to one by name materializes a working copy in the
+current directory first. Recipe-local goldens stay in the read-only catalog.
 """
 
 import shutil

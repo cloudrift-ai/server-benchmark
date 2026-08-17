@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
@@ -23,8 +24,10 @@ from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
+from emmy.recipe.bundled import default_recipe_root
 
-_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -651,7 +654,7 @@ def _recognized_target(record: GoldenRecord):
 
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
-    failure reason. This is the replayability contract the corpus is gated on: the persisted
+    failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
     program selects exactly one kernel; a ROUTING record's ``PLACE`` keys resolve to legal cut
     seams on the recognized tree; a SCHEDULE record's spelled row equals EXACTLY ONE enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
@@ -764,7 +767,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     derived through the exact recognition core the live compile uses (``_lift.recognized_tile``).
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
     (a schedule row decorates exactly one), or the selector/recognition fails — best-effort here
-    (a corpus row must never break a compile); the decode tripwire is where failure is loud."""
+    (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
     global _IDENTITY_STORE_DIRTY
     key = _record_cache_key(record)
     if key in _IDENTITY_CACHE:
@@ -903,8 +906,27 @@ def dump_golden_file(
 
 def is_repository_golden_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
-    repository = _GOLDENS_DIR.resolve()
-    return resolved == repository or repository in resolved.parents
+    hardware_root = _HARDWARE_GOLDENS_DIR.resolve()
+    if resolved == hardware_root or hardware_root in resolved.parents:
+        return True
+    with default_recipe_root() as recipe_root:
+        if recipe_root is None:
+            return False
+        try:
+            relative = resolved.relative_to(recipe_root.resolve())
+        except ValueError:
+            return False
+        return len(relative.parts) >= 2 and relative.parts[1] == _RECIPE_GOLDEN_DIR
+
+
+@contextmanager
+def _repository_golden_paths():
+    """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
+    with default_recipe_root() as recipe_root:
+        paths = list(_HARDWARE_GOLDENS_DIR.glob("*.yaml"))
+        if recipe_root is not None:
+            paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.yaml"))
+        yield sorted(paths)
 
 
 def _file_gpu_name(path: Path) -> str | None:
@@ -937,11 +959,12 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
     if RECORDS_OVERRIDE is not None:
         return [r for r in RECORDS_OVERRIDE if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap)]
     records: list[GoldenRecord] = []
-    for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
-        head_gpu = _file_gpu_name(path)
-        if head_gpu is not None and head_gpu != gpu_name:
-            continue
-        records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
+    with _repository_golden_paths() as paths:
+        for path in paths:
+            head_gpu = _file_gpu_name(path)
+            if head_gpu is not None and head_gpu != gpu_name:
+                continue
+            records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
     return records
 
 
@@ -958,8 +981,9 @@ def _records_of(path: Path) -> list[GoldenRecord]:
 
 def _load_goldens() -> list[GoldenRecord]:
     records: list[GoldenRecord] = []
-    for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
-        records.extend(_records_of(path))
+    with _repository_golden_paths() as paths:
+        for path in paths:
+            records.extend(_records_of(path))
     return records
 
 

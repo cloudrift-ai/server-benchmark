@@ -13,10 +13,11 @@ Use one golden YAML format throughout the workflow. Keep its two trust levels se
 - A **working golden** is an untracked experiment artifact. Each structural target contains a `realizations` array;
   each realization has named dimension `bindings`, explicit registered input `pins`, and optional knob proposals,
   measurements, or `ranking` feedback written by `emmy tune`.
-- A **canonical golden** is reviewed deploy evidence under
-  `emmy/compiler/pipeline/search/goldens/`. Every realization requires an explicit knobs mapping (empty for a
-  forkless anchor) and paired positive deployable `emmy_us` / `reference_us` measurements with a named
-  `reference_backend`. Never write search feedback into a canonical file.
+- A **canonical golden** is reviewed deploy evidence under `recipes/<model>/golden/`, with one file per exact GPU
+  model and compute capability. Every realization requires an explicit knobs mapping (empty for a forkless anchor)
+  and paired positive deployable `emmy_us` / `reference_us` measurements with a named `reference_backend`. Never
+  write search feedback into a canonical file. Model-agnostic hardware goldens remain under
+  `emmy/compiler/pipeline/search/goldens/`.
 
 `pins` and `knobs` are both registered knob mappings with different times of application: `pins` constrains candidate
 enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special YAML field; write
@@ -242,7 +243,8 @@ When the calling workflow has proved that its model inventory covers every requi
 required output, including a correct measured greedy fallback for every search miss. Withhold the repository golden
 only when model tracing is incomplete; preserve that successful subset as a partial working golden instead.
 
-Validate any proposed canonical edit with the golden schema tests before presenting it.
+Repository-validate and strictly decode every realization in a proposed canonical edit before presenting it. The
+nightly `onboard-model` workflow owns this checked-in golden gate and the exact-GPU file audit and replay.
 
 ## 7. Diagnose and report
 

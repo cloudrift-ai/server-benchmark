@@ -28,18 +28,6 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
     return f"torch.randn({shape})"
 
 
-def _working_golden_for_live_gpu(name: str) -> Path:
-    from emmy import gpu
-    from emmy.compiler.pipeline.search import golden
-
-    live_name = gpu.live_name()
-    for path in sorted((Path(golden.__file__).parent / "goldens").glob("*.yaml")):
-        records = golden.load_golden_records(golden.load_golden_file(path))
-        if any(record.name == name and record.gpu_name == live_name for record in records):
-            return path
-    pytest.skip(f"no {name} working golden for {live_name}")
-
-
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
@@ -227,19 +215,6 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
     fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
 
     assert "torch.compile" not in fns
-
-
-@requires_cuda
-def test_run_golden_bench_shows_benched_golden_row(run_cli):
-    """A selected working-golden target compiles and benches its recorded knobs,
-    then prints it as a ``golden NAME``-labeled row in the kernel table, plus the
-    ``greedy (isolated)`` twin — the greedy graph re-benched through the pinned-row path,
-    the baseline the golden rows compare against."""
-    path = _working_golden_for_live_gpu("matmul.square.512")
-    rc, stdout, stderr = run_cli("run", "--golden", str(path), "--target", "matmul.square.512", "--bench")
-    assert rc == 0, f"stderr: {stderr}"
-    assert "golden matmul.square.512" in stdout, stdout
-    assert "greedy (isolated)" in stdout, stdout
 
 
 def test_run_ab_requires_bench(run_cli):
@@ -673,45 +648,6 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     # The filter a sweep applies: only same-lane rows are comparable to the greedy.
     same_lane = [p for p in rec["pinned"] if p["lane"] == rec["greedy"]["lane"]]
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
-
-
-@requires_cuda
-def test_run_golden_bench_json_record(run_cli, tmp_path):
-    """A working-golden benchmark writes the machine-readable A/B record:
-    backends, the greedy kernel rows, and one pinned entry per recorded golden config with
-    its integrity ``flags`` field and recorded reference latencies."""
-    import json
-
-    out = tmp_path / "ab.json"
-    path = _working_golden_for_live_gpu("matmul.square.512")
-    rc, stdout, stderr = run_cli(
-        "run",
-        "--golden",
-        str(path),
-        "--target",
-        "matmul.square.512",
-        "--bench",
-        "--warmup",
-        "2",
-        "--iters",
-        "5",
-        "--json",
-        str(out),
-    )
-    assert rc == 0, f"stderr: {stderr}"
-    rec = json.loads(out.read_text())
-    assert rec["golden"] == "matmul.square.512"
-    assert rec["greedy"]["kernels"] and rec["greedy"]["total_us"] > 0
-    # The pinned-comparable greedy baseline: the same graph re-benched emmy-only.
-    assert rec["greedy"]["isolated"]["status"] == "ok" and rec["greedy"]["isolated"]["total_us"] > 0
-    assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
-    assert rec["greedy"]["lane"] in ("fm", "std")
-    for p in rec["pinned"]:
-        assert "flags" in p and p["total_us"] > 0 and p["pinned_knobs"]
-        assert p["lane"] in ("fm", "std")
-        assert p["recorded_emmy_us"] > 0 and p["recorded_ref_us"] > 0
-    # Eager + emmy backend rows made it into the record.
-    assert any("Eager" in k for k in rec["backends"])
 
 
 _NCU_CSV = """"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"

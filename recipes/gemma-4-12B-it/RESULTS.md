@@ -41,7 +41,7 @@ Hybrid accumulation held relative L2 error near `3.3e-4` across the measured K r
 `0.695 ± 0.033` exact match on the 200-question GSM8K check, with no measured quality regression. The deployed
 inventory had 226 of 276 measured realizations at or above eager performance and a 1.30× geometric-mean ratio.
 
-The current [RTX 5090 Gemma 4 golden](../../emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml) contains
+The current [RTX 5090 Gemma 4 golden](golden/rtx5090_sm120.yaml) contains
 281 self-contained programs. Representative selected FAST_MATH projection times at sequence length 512 were 61.5 µs
 for Q, 36.4 µs for KV, 64.1 µs for output, 362.4 µs for gate/up, and 214.2 µs for down projection.
 

@@ -22,12 +22,13 @@ validation.
 
 ### Bundled Recipes Are Copied Out Before Use
 
-A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
-`recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
-site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a timestamped
-run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the
-recipe selected from the live editable checkout or installed bundle into the current directory and returns that path.
-An existing directory always takes precedence, so a matching edited copy is never clobbered.
+A wheel carries every runnable `recipes/<model>/recipe.yaml` and every recipe-local `golden/*.yaml` under
+`emmy/recipes/`, staged at build time because `recipes/` sits outside the package (see `scripts/prepare_dist.py`).
+Goldens ship even when their recipe is disabled because they remain compiler evidence. These copies are read-only —
+they live in site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a
+timestamped run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it
+copies the recipe YAML selected from the live editable checkout or installed bundle into the current directory and
+returns that path. An existing directory always takes precedence, so a matching edited copy is never clobbered.
 
 ### Recipe Lifecycle Tags
 

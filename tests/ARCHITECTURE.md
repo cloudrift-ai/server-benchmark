@@ -96,9 +96,8 @@ directly; they never import from another test module or from `conftest.py`.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
-- **Do not load the repository golden corpus for unrelated tests.** The index is lazy so ordinary CLI startup and
-  commands that never consult deploy evidence do not parse every checked-in program. Golden format tests load one
-  file at a time and perform all per-file schema assertions in that pass.
+- **Do not load checked-in golden YAML in the per-commit suite.** Unit tests use synthetic records and working files.
+  The nightly `onboard-model` workflow owns repository schema validation, strict decode, and exact-GPU replay.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
@@ -139,11 +138,10 @@ directly; they never import from another test module or from `conftest.py`.
 ## Running
 
 ```bash
-pytest tests/ -v                       # all tests (skips `perf`- and `corpus`-marked tests)
+pytest tests/ -v                       # all tests (skips `perf`-marked tests)
 pytest tests/deploy/test_recipe.py -v  # single file
 pytest tests/planner/ -v               # single directory
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
-make test-goldens                      # whole-corpus golden decode (`corpus` marker)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -195,14 +193,9 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
-The `corpus` marker gates the same way and exists for a different cost. `test_golden_decode.py` proves every stored
-golden row still decodes to exactly one enumerated leaf, so proving one row enumerates its whole schedule fork and the
-gate's cost is record count **times** fork size. Warm it is a memo lookup; cold it is minutes per golden file, and cold
-is every CI run because the memo lives in `~/.cache/emmy`. It is a corpus tripwire rather than a code test — only a
-golden edit or a change to the codec, recognition, or legality can move a verdict — so it runs from `make test-goldens`,
-one file per process (the biggest set needs ~21 GB in a single worker). Run it before landing any of those; a change
-that touches none of them cannot invalidate a row. Reserve `corpus` for whole-corpus sweeps: a test that reads a
-handful of records belongs in the default lane, unmarked.
+Repository golden validation is intentionally outside pytest. Model goldens are GPU-specific qualification evidence,
+so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every row, and
+replays it on the named GPU. This keeps expensive model/card qualification out of the per-commit suite.
 
 Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and

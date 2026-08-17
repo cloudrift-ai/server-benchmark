@@ -37,7 +37,8 @@ score rationale. When no successor is appropriate, the rationale must state the 
 Add every genuinely promising newly discovered model to `new_onboarding_models`; there is no candidate-count limit.
 Use task `embed` only for embedding models. Give each new model one to three useful deployments containing only
 canonical `deploy.gpu` and positive `deploy.gpu_count` values. Do not claim an onboarding shell was deployed or
-benchmarked.
+benchmarked. Never put an existing recipe ID in `new_onboarding_models`, including an existing onboarding shell; an
+existing ID appears only in `scores`.
 
 ## Output
 

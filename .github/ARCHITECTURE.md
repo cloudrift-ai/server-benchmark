@@ -59,8 +59,9 @@ into bounded recipe batches. The skill's lifecycle and scoring prompts are attac
 commit, so the skill and GitHub Actions share one prompt source. Three source investigators collect independent demand
 evidence, then hidden scorer subagents score the deterministic batches without selecting lifecycle states. The parent
 returns only scores, maintained IDs, obsolete proposals, and new onboarding models. The helper validates exact score
-coverage and mechanically assembles the four-list manifest before the existing lifecycle validator applies policy.
-An exact-SHA recipe query against the rolling root enforces the maintained count after application.
+coverage, ignores already-inventoried IDs repeated as new candidates, and mechanically assembles the four-list manifest
+before the existing lifecycle validator applies policy. An exact-SHA recipe query against the rolling root enforces
+the maintained count after application.
 
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, lifecycle helper, OpenCode agent and

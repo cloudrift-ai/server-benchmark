@@ -157,6 +157,9 @@ def assemble_manifest(task: dict, selection_text: str) -> dict:
     new_onboarding = selection["new_onboarding_models"]
     if not isinstance(new_onboarding, list):
         raise ValueError("new_onboarding_models must be a list")
+    new_onboarding = [
+        candidate for candidate in new_onboarding if not isinstance(candidate, dict) or candidate.get("model_id") not in recipe_ids
+    ]
 
     maintained_set = set(maintained_ids)
     manifest = {

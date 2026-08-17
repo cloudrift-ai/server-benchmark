@@ -113,8 +113,9 @@ directly; they never import from another test module or from `conftest.py`.
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Discovery-agent tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
-  shells, derived best-effort decisions, and the bounded tool-free scoring subagent. Qualification-manifest tests also
-  pin the requested operation mode, exact model ID, target, preserved lifecycle tag
+  shells, filtering of repeated existing candidates, derived best-effort decisions, and the bounded tool-free scoring
+  subagent. Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved
+  lifecycle tag
   and heat, compact notification evidence, current-platform records inside the named archive, bounded compatibility
   fixes, regression notices, and isolation from other platform results before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.

@@ -60,7 +60,19 @@ def test_assembles_existing_onboarding_from_task_instead_of_agent_output(tmp_pat
     _recipe(tmp_path, "ready", "org/ready")
     _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"], task="embed")
     task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=1, batch_size=1)
-    selection = _selection([_score("org/ready", 70), _score("org/pending", 85)], ["org/ready"])
+    selection = _selection(
+        [_score("org/ready", 70), _score("org/pending", 85)],
+        ["org/ready"],
+        new_onboarding=[
+            {
+                "model_id": "org/pending",
+                "task": "generate",
+                "rationale": "Agent repeated an existing onboarding shell.",
+                "heat": 85,
+                "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 2}],
+            }
+        ],
+    )
 
     manifest = discovery_agent.assemble_manifest(task, selection)
 

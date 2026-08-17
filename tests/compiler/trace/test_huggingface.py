@@ -964,3 +964,71 @@ def test_linear_attention_split_pre_traces_a_dynamic_token_count():
     )
     dims = {str(d) for out in graph.outputs for d in graph.nodes[out].output.shape}
     assert any(not str(d).isdigit() for d in dims), f"no symbolic token axis survived: {dims}"
+
+
+# --- checkpoint keys vs twin parameter names ---------------------------------------------------
+# A checkpoint may store its tensors under names the config-built twin does not have, and the
+# mismatch is silent — the parameters simply stay on the meta device. Transformers registers the
+# per-family translation and applies it inside ``from_pretrained``; emmy's shard-streamed loader
+# does not take that path, so it reads the same table.
+
+
+def _qwen3_5_multimodal_config():
+    import pytest
+
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+
+    return Qwen3_5Config(text_config=_QWEN3_5_TINY)
+
+
+def test_checkpoint_key_renamer_bridges_a_multimodal_prefix():
+    """The Qwen3.5 releases are vision-language wrappers, so the text decoder's weights sit one
+    module deeper in the checkpoint than in a text-only twin. The renamer closes that gap, and the
+    name it produces is one the twin actually has."""
+    import torch
+
+    from emmy.compiler.trace.huggingface import _auto_model_from_config, _checkpoint_key_renamer
+
+    with torch.device("meta"):
+        twin = _auto_model_from_config(_qwen3_5_multimodal_config())
+    rename = _checkpoint_key_renamer(twin)
+    assert rename is not None, "the registered qwen3_5_text mapping must be found"
+
+    owned = dict(twin.named_parameters())
+    checkpoint_key = "model.language_model.layers.0.input_layernorm.weight"
+    assert checkpoint_key not in owned, "the fixture must reproduce the mismatch, not hide it"
+    assert rename(checkpoint_key) in owned
+    # Already-canonical keys and model-level ones pass through untouched.
+    assert rename("model.layers.0.input_layernorm.weight") == "model.layers.0.input_layernorm.weight"
+    assert rename("lm_head.weight") == "lm_head.weight"
+
+
+def test_checkpoint_key_renamer_leaves_a_plain_text_model_alone():
+    """A family whose checkpoint names already are its parameter names gets no translation, so
+    every existing loader path is byte-identical."""
+    import torch
+    import transformers
+
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    with torch.device("meta"):
+        twin = transformers.Qwen3ForCausalLM(config)
+    rename = _checkpoint_key_renamer(twin)
+    key = "model.layers.0.self_attn.q_proj.weight"
+    assert rename is None or rename(key) == key
+
+
+def test_checkpoint_to_model_key_composes_the_two_translations():
+    """The Laguna literal substitutions and the registered family mapping both apply, in that
+    order — the hand-written ones name modules the mapping never mentions."""
+    from emmy.compiler.trace.huggingface import _checkpoint_to_model_key
+
+    laguna = "model.layers.0.mlp.shared_expert.gate_proj.weight"
+    assert _checkpoint_to_model_key(laguna) == "model.layers.0.mlp.shared_experts.gate_proj.weight"
+    assert _checkpoint_to_model_key(laguna, lambda k: k.replace("model.", "model.x.", 1)).startswith("model.x.")
+    assert _checkpoint_to_model_key("a.weight") == "a.weight"

@@ -1438,11 +1438,48 @@ def _stack_exl3_experts(layer: int, by_name: dict, model) -> dict:
     return out
 
 
-def _checkpoint_to_model_key(key: str) -> str:
-    """Translate original Laguna checkpoint names to built-in Transformers names."""
+def _checkpoint_to_model_key(key: str, rename=None) -> str:
+    """Translate a checkpoint tensor name to the twin's own parameter name.
+
+    Two translations compose. ``rename`` is the model-family one Transformers itself would apply
+    (:func:`_checkpoint_key_renamer`); the two literal substitutions below are original Laguna
+    checkpoint names, which have no registered mapping upstream.
+    """
     key = key.replace(".mlp.shared_expert.", ".mlp.shared_experts.")
     key = key.replace(".mlp.experts.e_score_correction_bias", ".mlp.gate.e_score_correction_bias")
-    return key
+    return key if rename is None else rename(key)
+
+
+def _checkpoint_key_renamer(model):
+    """The checkpoint-key → parameter-name translation Transformers would apply to ``model``.
+
+    A checkpoint may store its tensors under names the twin's own modules do not have, and the
+    mismatch is silent: every parameter simply stays on the meta device, so the twin holds no
+    values at all. Qwen3.5 is the live case. Its releases are vision-language wrappers, so the text
+    decoder's weights are stored under ``model.language_model.layers.N.*``, while the text-only
+    twin built from the config has ``model.layers.N.*`` — on nvidia/Qwen3.6-27B-NVFP4 exactly one
+    of 851 parameter names matched.
+
+    Transformers registers these translations per model type and applies them inside
+    ``from_pretrained``, a path this shard-streamed loader deliberately does not take (it never
+    materializes the whole dequantized dict). So read the same table instead of hand-writing one
+    family's rule: every family with a registered mapping becomes loadable here on the same terms
+    upstream loads it on, and a family without one gets the identity.
+
+    RENAMINGS ONLY. The table also carries converters, which combine or split the tensors
+    themselves (stacking a per-expert stack, concatenating a convolution's halves) — work this
+    loader does not do, so firing their renames would produce a name whose tensor was never
+    assembled. Their keys stay unmatched, exactly as they are today.
+    """
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping  # noqa: PLC0415
+        from transformers.core_model_loading import WeightRenaming, rename_source_key  # noqa: PLC0415
+    except ImportError:
+        return None  # an older Transformers without the conversion table: nothing to read
+    renamings = [t for t in get_model_conversion_mapping(model) if isinstance(t, WeightRenaming)]
+    if not renamings:
+        return None
+    return lambda key: rename_source_key(key, renamings, [])[0]
 
 
 def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
@@ -1599,6 +1636,10 @@ def load_quantized_split(
         delattr(config, "quantization_config")
     with torch.device("meta"):
         model = _auto_model_from_config(config)
+    # Checkpoint names are not the twin's parameter names for every family — a vision-language
+    # release stores its text decoder one module deeper than a text-only twin has it. Read the
+    # translation off the model rather than assuming identity (:func:`_checkpoint_key_renamer`).
+    rename = _checkpoint_key_renamer(model)
 
     qc = _fp8_quant_config(model_dir) or {}
     awq = _awq_quant_config(model_dir)
@@ -1639,7 +1680,7 @@ def load_quantized_split(
                 key
                 for key in sorted(by_shard[shard_path])
                 if _quantized_stage_owns(
-                    _checkpoint_to_model_key(key),
+                    _checkpoint_to_model_key(key, rename),
                     layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
@@ -1654,7 +1695,7 @@ def load_quantized_split(
                     qzeros_key, scales_key = base + ".qzeros", base + ".scales"
                     if qzeros_key not in index or scales_key not in index:
                         raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
-                    model_key = _checkpoint_to_model_key(base + ".weight")
+                    model_key = _checkpoint_to_model_key(base + ".weight", rename)
                     if compress_trunk:
                         coded_trunk.add(model_key)
                     else:
@@ -1703,11 +1744,11 @@ def load_quantized_split(
                         logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
                         continue
                     if compress_trunk:
-                        coded_trunk.add(_checkpoint_to_model_key(base + ".weight"))  # placeholder; real bytes stay coded
+                        coded_trunk.add(_checkpoint_to_model_key(base + ".weight", rename))  # placeholder; real bytes stay coded
                         continue
                     w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
-                    state[_checkpoint_to_model_key(base + ".weight")] = torch.from_numpy(w).to(dtype)
+                    state[_checkpoint_to_model_key(base + ".weight", rename)] = torch.from_numpy(w).to(dtype)
                     continue
                 if k.endswith(("_scale", "_scale_inv", "_scale_2")) and k[: k.rfind("_scale")] in index:
                     continue  # consumed by its base weight's dequant
@@ -1719,9 +1760,9 @@ def load_quantized_split(
                             _sibling(k + "_scale").view(torch.uint8).numpy(),
                             _sibling(k + "_scale_2").float().numpy(),
                         )
-                        state[_checkpoint_to_model_key(k)] = torch.from_numpy(vals).to(dtype)
+                        state[_checkpoint_to_model_key(k, rename)] = torch.from_numpy(vals).to(dtype)
                         continue
-                    state[_checkpoint_to_model_key(k)] = t.to(dtype) if t.is_floating_point() else t
+                    state[_checkpoint_to_model_key(k, rename)] = t.to(dtype) if t.is_floating_point() else t
                     continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
@@ -1729,10 +1770,10 @@ def load_quantized_split(
                     if scale_key is not None and not _is_skipped(k, patterns):
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_key.endswith("_inv"))
-                        state[_checkpoint_to_model_key(k)] = torch.from_numpy(vals).to(dtype)
+                        state[_checkpoint_to_model_key(k, rename)] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                state[_checkpoint_to_model_key(k)] = t.to(dtype) if t.is_floating_point() else t
+                state[_checkpoint_to_model_key(k, rename)] = t.to(dtype) if t.is_floating_point() else t
 
     # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB

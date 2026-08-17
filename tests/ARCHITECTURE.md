@@ -158,6 +158,17 @@ without it the markers land too late and CUDA tests silently scatter across work
 LPT-bucketed across the remaining workers by cost, so the makespan approaches the load of the heaviest bucket
 rather than whatever an arbitrary split produced.
 
+Routing every CUDA test onto one chain is what makes a faulting kernel expensive: an illegal or misaligned access
+leaves the context in a STICKY error state that no in-process caller can clear, so every later CUDA call in that
+worker returns the same status. One fault therefore takes the whole chain down, and the reports name the innocent
+tests that followed rather than the one that faulted — the run that motivated the guard showed 1 failure and 51
+errors. A fault does not even have to fail anything: an `xfail(strict=False)` swallows it and the context stays
+poisoned regardless. So the root `conftest.py` probes the context after every test (the `deviceSynchronize` probe the
+bench worker already relies on in `_bench_worker._context_dirty`) and stops the process at the NEXT test's setup —
+deferred deliberately, because dying mid-test leaves the controller re-queueing the poisoning test onto a fresh worker
+and poisoning that one too. Under xdist the controller respawns the worker on a clean context and reschedules only
+what it had not reached, so the run still finishes and reports exactly one failure, named.
+
 Those costs come from `tests/durations.json` — a checked-in nodeid → seconds map — with the box's own pytest cache
 overlaid on top. The committed file exists because CI starts every job with an empty cache: without a baseline the
 bucketing never fired there and the long poles landed wherever chance put them. It records only entries at or above

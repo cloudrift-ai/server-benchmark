@@ -411,10 +411,6 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    strict=False,
-    reason="pre-existing on clean main: the SDPA consumer projection misses the mma tier",
-)
 def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     """The attention output projection — ``linear(reshape(transpose(sdpa(q, k, v))))`` over a
     **symbolic seq axis, causal**: gemma's o_proj composition — must reach the mma tier under a

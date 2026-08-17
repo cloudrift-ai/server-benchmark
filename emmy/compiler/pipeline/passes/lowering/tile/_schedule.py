@@ -93,7 +93,7 @@ from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_row_stride
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction, make_cone
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction, make_cone, match_packed_b_node
 from emmy.compiler.pipeline.search.space import (
     RASTER,
     REDUCE,
@@ -963,6 +963,13 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     if want is not None and tile.is_warp and legal.warp_atom_stage(tile.atom, want) is not None:
         return None
     if _has_computed_operand(node):
+        if want is not None and want.transport == "cp.async" and tile.is_warp:
+            # ONE computed edge has a copy transport: a packed-pair weight cone, whose bits stage
+            # as raw bytes beside a small compute-filled block-scale slab (the mma resolver's
+            # packed arm). Every other cone declines there and lands on the compute fill below.
+            resolved = legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
+            if resolved is not None:
+                return resolved
         return legal.resolve_sync_stage(node, tile, budget, want.depth if want is not None else 1)
     if want is None or (want.transport == "tma" and not term.ctx.has_tma):
         return None
@@ -990,23 +997,40 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
     return out
 
 
-def _sync_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
-    """The RESOLVED compute-fill stages a COMPUTED operand offers — its depths, and nothing else:
-    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no copy transport can
-    evaluate a cone), so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer
-    prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
+def _computed_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
+    """The RESOLVED stages a COMPUTED-operand warp contraction offers.
+
+    The compute fill is the general answer and it is MANDATORY (there is no gmem-direct ``None``
+    sibling, and no copy transport can evaluate a cone), so its rows are its DEPTHS: ``d1`` and the
+    asynchronous-peer prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
     :func:`_legality.resolve_sync_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
-    budget spells identically, so it dedupes to one row."""
+    budget spells identically, so it dedupes to one row.
+
+    A PACKED-PAIR k-block B (an NVFP4 weight's decode cone) offers the cp.async BYTE-SLAB rows
+    beside them: the weight copies as raw packed bytes with a small decoded block-scale slab, and
+    the fragment drain does the decode. They are fork SIBLINGS of the compute fill, so a shape the
+    byte slab declines simply keeps the generic reading.
+
+    A ``STAGE`` pin is authoritative and names ONE row, its transport saying which family it means:
+    a ``cp`` pin on a packed node is the byte slab; every other pin — a ``cp`` one on a node the
+    byte slab declines included — names a compute-fill depth."""
+    packed = match_packed_b_node(node, term.tile.inputs) is not None
     pin = term.pin("STAGE", node)
-    depths = [Stage.parse(pin).depth] if pin else [1, 2]
+    if pin:
+        want = Stage.parse(pin)
+        moves = [want] if packed and want.transport == "cp.async" else [Stage(depth=want.depth)]
+    else:
+        moves = [Stage(depth=1), Stage(depth=2)]
+        if packed:
+            moves += [m for m in stage_moves(warp=True) if m.transport == "cp.async"]
 
     def resolve(st: Stage) -> Stage | None:
         r = _resolve_stage(term, node, tile, st)
-        if r is None:  # per DECLINED depth, so a pin that fits no depth names its own budget
-            legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=pin is not None)
+        if r is None and st.transport == "sync":  # per DECLINED depth, so a pin that fits no depth names its own budget
+            legal.enforce(f"the sync compute-fill slabs exceed the {term.ctx.max_dynamic_smem} B smem budget", pinned=bool(pin))
         return r
 
-    return _resolved((Stage(depth=d) for d in depths), resolve, gmem_direct=False)
+    return _resolved(moves, resolve, gmem_direct=False)
 
 
 def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
@@ -1018,7 +1042,7 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         return [None]  # per-cell / unbindable — no operand slab to stage
     tile = plan.placed_on(term.place)
     if plan.is_warp and _has_computed_operand(node):
-        return _sync_values(term, node, tile)
+        return _computed_values(term, node, tile)
 
     def resolve(st: Stage) -> Stage | None:
         return _resolve_stage(term, node, tile, st)

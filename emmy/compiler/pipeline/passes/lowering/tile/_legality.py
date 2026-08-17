@@ -39,6 +39,7 @@ from emmy.compiler.ir.tile import Fold
 from emmy.compiler.ir.tile.ir import is_contraction, operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import match_packed_b_node
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -346,6 +347,56 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: i
     return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
+# The packed byte-slab stage's fixed geometry. The drain decodes an N-major slab through the k16
+# f16 B fragment map and reads one scale per 16 K elements, so the format's block, the atom's K
+# step and this constant are all the same 16; a different block or atom keeps the generic reading.
+_PACKED_BLOCK = 16
+
+
+def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packed, inputs) -> Stage | None:
+    """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
+
+    The scoped shape, which is what the fragment drain is written for: cp.async transport, an
+    N-major packed weight of 16-value blocks under a 16-bit atom whose K step is that same 16, and
+    an A already carrying the atom's dtype. Everything outside it declines and stays on the generic
+    computed-B reading, which computes the same values through the sync compute-fill.
+
+    The sizing is the fp8 byte slab's rule restated in the format's own units. One stored byte is
+    two K elements, so the bits row is ``bk_elems / 2`` BYTES plus the cp.async row pad, and it
+    must be 16-divisible for the same reason the fp8 one is: the fill copies 16 B chunks and a
+    chunk never straddles a row. The gmem rows those chunks stride are ``K / 2`` bytes, so that
+    span is 16-divisible too. On top of the ring the budget carries ONE scale slab, ``tile_n ×
+    bk_elems / block`` at the atom's element width — single-buffer, because it is compute-filled
+    and ringing a compute fill buys no overlap.
+    """
+    atom = tile.atom
+    if stage.transport != "cp.async" or stage.split:
+        return None  # the sync compute fill has nothing to copy under, and no TMA descriptor is built for this
+    if packed.block != _PACKED_BLOCK or atom.atom_k != _PACKED_BLOCK or atom.fragment_layout != "m16n8k16":
+        return None
+    a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
+    if a_dtype.name != "f16" or b_dtype.name != "f16":
+        return None  # the drain's value table and its scale multiply are f16
+    bits, a_tensor = inputs.get(packed.bits.input), inputs.get(c.a.input)  # A is a Load — the match requires it
+    if bits is None or a_tensor is None or a_tensor.dtype != a_dtype:
+        return None
+    if bits.dtype.logical_elems != 2 or len(bits.shape) != 2 or len(packed.bits.index) != 2:
+        return None
+    if c.axis.name not in packed.bits.index[-1].free_vars():
+        return None  # a K-strided packed weight is not the N-major layout the drain reads
+    if not c.axis.extent.is_static:
+        return None
+    k, bk_elems = c.axis.extent.as_static(), tile.bk * atom.atom_k
+    if tile.n.mask or k % bk_elems or (bk_elems // 2) % 16 or (k // 2) % 16:
+        return None
+    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
+    scale_bytes = tile.n.tile * (bk_elems // packed.block) * b_dtype.nbytes
+    if scale_bytes + slot_bytes > budget:
+        return None
+    depth = clamp_depth(stage, slot_bytes, budget - scale_bytes)
+    return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+
+
 def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
@@ -365,7 +416,18 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
     per element (the same rule flash's ``stageable`` flag states). A byte slab's fill runs 16 B
     chunks and its cp.async row pad is 16 B (``_addr.BYTE_SLAB_PAD``), so its inner span — and,
-    canonical-B, the gmem row stride N — must be 16-divisible."""
+    canonical-B, the gmem row stride N — must be 16-divisible.
+
+    A PACKED-PAIR B (an NVFP4 weight's decode cone) is the one COMPUTED edge that resolves here,
+    through :func:`_packed_warp_stage`: its bits copy verbatim like any byte slab, and the block
+    scales the cone would otherwise recompute per element ride a small compute-filled slab beside
+    them. Every other computed edge declines — a copy transport cannot evaluate a producer cone —
+    and takes :func:`resolve_sync_stage` instead."""
+    packed = match_packed_b_node(c, inputs)
+    if packed is not None:
+        return _packed_warp_stage(c, tile, stage, budget, packed, inputs)
+    if not isinstance(c.a, Load) or any(not isinstance(ch.b, Load) for ch in c.channels):
+        return None
     if stage.split and stage_split_groups(c) is not None:
         return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom

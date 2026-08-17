@@ -174,11 +174,21 @@ f16 tensor, the format's single rounding point. At graph birth, `spell_quantized
 weight constant into its decode cone. The packed-bits constant feeds a pair-table gather; the e4m3 block-scale
 constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale that multiplies the gathered
 values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
-`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. No kernel-lowering rule knows the packed dtype yet. The fp8 fast paths — byte-slab staging (raw quantized bytes
-staged through shared memory) and the W8A16 mul-hoist (the scale multiply moved out of the reduction loop onto
-the accumulator) — apply only to fp8. A contraction (the matmul-shaped node) that consumes the cone's output
-still compiles and runs: loop fusion merges the decode into the contraction's own loop nest, so no decoded
-weight materializes between kernels, but the packed operand reaches no tensor-core fragment path.
+`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph.
+
+A contraction (the matmul-shaped node) consuming that cone reads two ways, both fork siblings on the tensor-core
+tier. The general one is the computed-B reading every producer cone gets: loop fusion merges the decode into the
+contraction's own loop nest and the sync compute-fill evaluates it per shared-memory cell, so no decoded weight
+materializes between kernels, but the weight crosses global memory as 16-bit values. The specialized one is the
+**packed byte-slab stage**, and it is where the format's size advantage survives to the fragment: `_atomize`
+recognizes the cone (a packed-pair bits load feeding a value-pair gather, times a factor whose every contraction-axis
+reference is block-guarded), the weight's bits then copy VERBATIM into a byte slab at half a 16-bit slab's traffic,
+its block scales decode once per block into a small companion slab, and one fragment loader reads both — decoding
+each byte's two codes through an f16 value table and applying the block's scale. The W8A16 mul-hoist (the scale
+multiply moved out of the reduction loop onto the accumulator) still does not apply: an NVFP4 scale varies along the
+contraction axis, so it does not commute out of the fold. The packed stage's scope is the shape its loader is
+written for — cp.async, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that same 16;
+anything else declines to the general reading, which computes the same values.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

@@ -132,10 +132,13 @@ on `canonical_row_key` and RAISING on a collision (the fix would be an `S_*` sta
 **Coverage, as it stands.** The recursion carries the single-site terms — the pointwise cell plus the register-strip
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
 warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
-the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `sync`
+the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the resolved `sync`
 compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
-statistic site is a nested site under the same inventory. The **flash streaming pair** is carried too, and it is why
+statistic site is a nested site under the same inventory. The compute fill is MANDATORY for a computed edge with ONE
+exception, the packed-pair (NVFP4) weight cone, which additionally offers the `cp.async` byte-slab rows as fork
+siblings — its bits copy verbatim and only its block scales are compute-filled. A `STAGE` pin picks between the two
+families by its transport. The **flash streaming pair** is carried too, and it is why
 the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.

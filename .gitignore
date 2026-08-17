@@ -42,7 +42,7 @@ _test_data
 recipes/*/20??-??-??_*/
 recipes/**/benchmark*.log
 
-# Claude Code per-user local settings (skills/agents under .claude/ are tracked)
+# Claude Code per-user local settings (.claude/skills contains tracked compatibility links)
 .claude/settings.local.json
 *-dump/
 .claude/scheduled_tasks.lock

@@ -10,6 +10,7 @@ commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
 commands/recipe ─► recipe (catalog queries and onboarding shell creation)
+recipe/query ───► provisioning (read-only CloudRift availability and team access)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
@@ -124,8 +125,9 @@ keeps the existing Transformers path. `dit` delegates to the Diffusers block ada
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
 and Emmy always rebuild the same module and example inputs. Inductor compiles with
-`fullgraph=True, mode="max-autotune"`; its output must match eager on the same inputs at `rtol=atol=1e-3` before its
-latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+`fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
+has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
+before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
 Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
@@ -319,6 +321,7 @@ emmy
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
+|   +-- query     -- filter and order normalized recipe or deployment rows
 |   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
@@ -336,20 +339,33 @@ emmy
 with nothing installed).
 
 Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` via `--recipe`, and `bench`'s
-positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
-installed package, copying it into the current directory first. An existing path always wins over a bundled name.
+positional arguments — a bare name with no path component instead selects one of the recipes from the automatically
+detected editable checkout or installed bundle, copying it into the current directory first. An existing path wins.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
 
 ### `emmy recipe`
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
-Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+It detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use their packaged
+runnable set.
+`--json` emits the versioned catalog object documented in the recipe architecture; each record includes the current
+heat score, matrix-expanded GPU/count/context metadata, and whether the recipe is runnable. Machine consumers reject
+unknown versions.
+`recipe query` applies repeatable constrained predicates and stable sort keys to normalized catalog rows. A
+`deployment.*` field expands recipes into deployment rows. CloudRift availability, Robots-team access, and committed
+results history are lazy computed fields, so ordinary catalog-only queries perform no provider or Git work.
+`--candidate MODEL GPU COUNT` supplies one exact external deployment; a matching recipe contributes its lifecycle
+metadata, while an absent model becomes onboarding work. `--root` exists on this automation-oriented interface so
+callers can run control code from one checkout against recipe data in another; without it, query and list use the same
+installation-aware catalog.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
-directory.
+directory. A manually created shell starts with `model.heat: 0` until discovery refreshes it.
 
 ```bash
-emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe list [--json]
+emmy recipe query [--filter EXPRESSION]... [--sort EXPRESSION]... [--limit N] \
+  [--candidate MODEL GPU COUNT] [--root ROOT] [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```
@@ -632,15 +648,15 @@ emmy fit --folds 0 --out _tune/fits/ab    # full-train only, fixed run dir for a
 ## Experiments
 
 Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory keeps the recipe and
-one durable snapshot of its last run:
+one durable snapshot per exact GPU platform:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
   <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
-  results.tar.gz          # Git LFS archive of the last run
-  <row>.experiment.yaml
-  RESULTS.md
+  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run
+  rtx5090x1_<row>.experiment.yaml
+  RESULTS.md                # one interpretation across retained platforms
 ```
 
 ```bash
@@ -648,9 +664,9 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
 Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
-the raw-results archive, assemble the system-only records and a thoughtful `RESULTS.md` interpretation, and commit the
-complete last-run snapshot. The CLI and experiment code do not interpret measurements; the skill performs the
-intelligent review and the CLI itself performs no Git operation.
+the platform's named raw-results archive and system-only records, update its section in the shared `RESULTS.md`, and
+commit the complete platform snapshot without changing other platform results. The CLI and experiment code do not
+interpret measurements; the skill performs the intelligent review and the CLI itself performs no Git operation.
 
 ## Adding a New VM Provider
 

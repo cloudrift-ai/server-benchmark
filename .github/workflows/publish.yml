@@ -76,14 +76,10 @@ jobs:
           fi
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
-      # Bundle the recipes into the package, and point the README's repo-relative
-      # links at GitHub — PyPI renders the README detached from the repo.
-      - name: Stage the source tree for distribution
-        run: python scripts/prepare_dist.py --recipes --readme
-
-      - run: pip install build
-
-      - run: python -m build
+      # Installs the minimal build dependencies before staging. Pull-request CI
+      # dry-runs this exact target so the publishing path cannot drift untested.
+      - name: Build the PyPI distribution
+        run: make pypi-dist
 
       - uses: actions/upload-artifact@v4
         with:

@@ -9,10 +9,12 @@ def test_laguna_v100_recipe_matches_the_measured_experiment(project_root) -> Non
     """The recommended recipe stays identical to the measured lane except for workload and lifecycle metadata."""
     production = yaml.safe_load(Path(project_root, "recipes/Laguna-S-2.1-FP8/recipe.yaml").read_text())
     experiment = yaml.safe_load(Path(project_root, "experiments/Laguna-S-2.1-FP8/serving_v100_sxm3/recipe.yaml").read_text())
+    production["model"].setdefault("heat", 50)
 
     assert "benchmark" not in production
     serving_config = {key: value for key, value in production.items() if key != "tags"}
     serving_config["model"].pop("rationale", None)
+    serving_config["model"].pop("heat", None)
     assert serving_config == {key: value for key, value in experiment.items() if key != "benchmark"}
 
     llm = production["engine"]["llm"]

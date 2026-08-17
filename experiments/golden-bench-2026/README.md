@@ -15,6 +15,7 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
+| Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -60,7 +61,7 @@ The directly searched winner must match its measured knob map exactly. The recip
 `emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.
 Each ordinary invocation is an independent process; the CLI contains no repetition or child-process wrapper. It records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
-`mode="max-autotune"` with `fullgraph=True`.
+`mode="max-autotune-no-cudagraphs"` with `fullgraph=True`; the benchmark harness supplies the shared outer CUDA graph.
 Inductor must compile the full graph and match eager output on the same inputs before its latency is accepted. Any
 failed, ambiguous, unmatched, uncaptured, or non-whole-program winner fails after archiving diagnostics.
 
@@ -198,6 +199,76 @@ negligible at single-token decode. The same calibrations define the per-kernel h
 latency over max(weight-streaming floor, compute floor) for that kernel's weight bytes and token width — which
 decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
 This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
+
+## Neptune compiler comparison
+
+`compiler_neptune_emmy_pytorch_a100` owns both parts of the A100 comparison and produces one artifact archive for one
+eventual `RESULTS.md`. Its pinned container first runs Neptune's published A100 attention matrix on an A100 80GB:
+Global prefill; Causal, GQA, ALiBi, and SoftCap in both prefill and decode; and Window prefill. Every operator runs in
+FP16 at batch 1 and sequence lengths 256 through 32768 in powers of two, for 80 setups. Each eligible Neptune
+scheduler receives 128 tuning trials. The unmodified artifact then performs its one warmup and 15 profiled calls for
+every supported runner. The immutable Neptune image and its upstream source are pinned and checked before the first
+setup. Neptune published its A100 results on the 40GB model, so this is the same software and operator protocol on a
+different-memory A100 rather than an exact hardware reproduction.
+
+A failed tuning setup does not suppress its manual Neptune and registered-baseline profile, and a failed profile does
+not suppress later setups. `neptune-setup-status.tsv` records both outcomes. Missing or failed rows remain missing
+evidence; the results assembler must report them rather than treating the experiment's eventual archive as full
+coverage. The status also flags a zero-record tune, output mismatch, or runner exception that the pinned CLI otherwise
+logs only as a warning.
+
+The artifact recognizes only the product string `NVIDIA A100-SXM4-40GB`. The experiment's narrow launcher maps the
+80GB product string to that name only inside the Neptune CLI process so the artifact selects its existing `sm_80`
+A100 target; it does not modify Neptune's source. The surrounding evidence records the actual 80GB product name,
+memory, clocks, and driver. The pinned CLI also contains a truncated `NeptuneGQARunner.e(...)` call that prevents
+module import. The launcher supplies that missing name as an alias of the existing `create_flex_from_schedulers`
+factory, matching current upstream Neptune while leaving the checked source unchanged.
+
+Do not use an ALiBi speedup unless its outputs pass an independent oracle. In the pinned source, prefill FlexAttention
+constructs a causal mask but its override never installs that mask, while decode Neptune reuses a constructor that
+applies a causal mask to a one-token query. The first makes FlexAttention noncausal; the second makes Neptune attend
+only the first KV token. An A100 80GB smoke check against a dense FP32 PyTorch oracle confirmed the respective errors.
+The experiment keeps these published registrations for provenance and surfaces their mismatch; it does not patch them.
+
+The paper prose says 128 through 32768 while also specifying eight lengths and 320 total setups. The checked-in
+artifact sweep uses 256 through 32768, which is the eight-point range reproduced here; preserve this discrepancy in
+any report rather than silently adding a ninth setup.
+
+This lane deliberately applies no patch to Neptune. It retains every compiler and optimized-library baseline that the
+artifact registers, including FlexAttention's `torch.compile(flex_attention)` path. That is an Inductor comparison,
+but it uses the artifact's pinned PyTorch 2.6.0 rather than a recent PyTorch release. The direct PyTorch SDPA runners
+are library paths, not current-Inductor arms, and the artifact's dormant `UNFUSED_COMPILED` helper is not registered.
+After the container exits, the same recipe runs the current-PyTorch and Emmy subset in a separate host environment
+pinned to PyTorch 2.13.0. Do not present those results as part of the artifact-exact reproduction.
+
+Nsight Systems preserves the raw NVTX ranges and CUDA traces. Any comparison with a multi-kernel compiler invocation
+must use total CUDA device time within its measured range, not the fastest individual kernel. The artifact arm is not
+an Emmy result and is not part of the common-kernel geometric mean.
+
+The current-PyTorch and Emmy arm covers the five native-SDPA operators that Emmy can reconstruct without changing
+their mathematics: Global, Causal, and GQA prefill; and Causal and GQA decode. The same eight sequence lengths produce
+40 setups on the same A100 80GB. ALiBi, SoftCap, and windowed-SoftCap remain outside this starter denominator; do not
+treat their absence as support or silently replace their score modifications with plain SDPA.
+
+Each setup runs in a fresh `emmy run` process with FP16 inputs, batch 1, one warmup, and 15 measured iterations.
+`--strict` requires eager PyTorch, `torch.compile`, and Emmy to execute with captured timing and requires Emmy and
+`torch.compile` to match eager output. PyTorch is pinned to 2.13.0; Emmy invokes it with `fullgraph=True` and
+`mode="max-autotune-no-cudagraphs"`, then captures it in the same outer CUDA graph used for every backend. The compiled
+wrapper may select a fused SDPA library backend, so report this arm as current
+PyTorch `torch.compile`/SDPA rather than claiming that every timed kernel was generated by Inductor.
+
+A setup that fails strict correctness or exceeds ten minutes is recorded in `setup-status.tsv` and skipped so one hard
+Emmy case does not discard later PyTorch/Emmy rows. Such a row is unsupported evidence, not a performance result.
+
+Decode GQA spells its eight query heads per KV head as a broadcast batch dimension. This is mathematically equivalent
+to `enable_gqa=True`, avoids materializing repeated K/V tensors, and keeps decode noncausal after PyTorch export drops
+the explicit false causal flag while retaining the true GQA flag.
+
+The CLI records the minimum of its 15 captured measurement windows. A direct Neptune comparison must therefore
+extract the same statistic from Neptune's 15 raw NVTX calls, match rows by operator and sequence length, and keep the
+artifact's PyTorch 2.6.0 results separate from the current-PyTorch arm. The combined experiment remains planned
+evidence until its common archive exists and passes intelligent review; it is not part of the common-kernel geometric
+mean.
 
 ## Intelligent publication review
 

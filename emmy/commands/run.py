@@ -2737,7 +2737,10 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             import torch._dynamo  # noqa: PLC0415
 
             torch._dynamo.reset()
-            compiled_torch_module = torch.compile(module, fullgraph=True, mode="max-autotune")
+            # The benchmark owns one outer CUDA graph for every backend. Letting
+            # Inductor create its own graph here makes that capture nested and
+            # invalidates it on recent PyTorch releases.
+            compiled_torch_module = torch.compile(module, fullgraph=True, mode="max-autotune-no-cudagraphs")
             for _ in range(warmup + 5):
                 with torch.no_grad():
                     compiled_torch_module(*args, **kwargs)

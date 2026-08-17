@@ -209,7 +209,7 @@ flowchart LR
     class headroom,gold,warm,verify gpu
 ```
 
-The `release-serving-image` skill (`.claude/skills/release-serving-image/`) automates this whole session — rental or
+The `release-serving-image` skill (`.agents/skills/release-serving-image/`) automates this whole session — rental or
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
 The full release session on a rented card (each step from the repo checkout; host prereqs for steps 0–4:

@@ -15,10 +15,10 @@ here for lifecycle continuity, but their tags disable deployment. The recipe for
 `cross`/`zip`, deep merge, `extra_args` validation, `docker_options`, command recipes — is documented in
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md); this file is about **what belongs here** and why.
 
-Every runnable `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without
-a checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
-that. Obsolete recipes and onboarding shells remain repository-only. Only the recipe files travel — `RESULTS.md` and
-local benchmark output do not.
+Every runnable `recipe.yaml` here also ships inside the published wheel. `--recipe <model>` (a bare name, no path)
+copies from this live tree in an editable install or from the packaged catalog in a wheel install, then uses that
+working copy. Obsolete recipes and onboarding shells remain repository-only. Only the recipe files travel —
+`RESULTS.md` and local benchmark output do not.
 
 ## Lifecycle
 
@@ -29,8 +29,10 @@ lower practical VRAM footprint and no retained material advantage in capability 
 reason the recipe should no longer be used. Discovery compares the smallest qualified deployment targets when a
 replacement is named and demotes an invalid obsolete proposal to `best-effort`; it cannot obsolete a recipe in favor
 of one that needs more total physical GPU memory. Each lifecycle decision records its current rationale directly under
-`model`. Obsolete recipes are retained rather than deleted, so their configuration and evidence stay available and a
-later reassessment can return one to the maintained or best-effort set. New discoveries start as minimal shells:
+`model`. Discovery also refreshes each recipe's 0-100 `model.heat`, which ranks current onboarding interest without
+changing serving behavior. Obsolete recipes are retained rather than deleted, so their configuration and evidence
+stay available and a later reassessment can return one to the maintained or best-effort set. New discoveries start as
+minimal shells:
 
 ```yaml
 tags:
@@ -39,6 +41,7 @@ tags:
 model:
   huggingface: org/model
   rationale: Brief evidence-backed reason.
+  heat: 90
   task: generate
 matrices:
   - deploy.gpu: NVIDIA H200 141GB
@@ -47,9 +50,10 @@ matrices:
     deploy.gpu_count: 2
 ```
 
-The one to three matrix entries are proposed qualification setups, not measured targets. The shell is a handoff to
-model onboarding, not a serving claim. It becomes runnable only after qualification replaces the shell with a
-complete configuration and the `best-effort` lifecycle tag.
+The one to three matrix entries are proposed qualification setups, not measured targets. There is no onboarding-shell
+count limit; scheduled onboarding chooses the available shell with the highest heat. The shell is a handoff to model
+onboarding, not a serving claim. It becomes runnable only after qualification replaces the shell with a complete
+configuration and the `best-effort` lifecycle tag, while preserving its heat until discovery refreshes it.
 
 ## recipes/ vs experiments/
 

@@ -17,7 +17,7 @@ provisioning/
   lease.py        # durable allocation ownership, deletion, and audit
   candidates.py   # iter_candidates: ordered list of allocation attempts
   errors.py       # CapacityExhausted, TerminalProvisionError
-  cloudrift.py    # CloudRift API wrapper (create/delete/wait)
+  cloudrift.py    # CloudRift API wrapper (availability/team resolution/create/delete/wait)
   gcp.py          # gcloud-compute wrapper
   ssh.py          # generic wait_for_ssh
   host.py         # RemoteHost abstraction over an existing SSH target
@@ -49,6 +49,12 @@ Every CloudRift rental carries free-form tags for later filtering on listings. `
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
 var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
 
+`providers.cloudrift.team_id` assigns a rental to that exact team UUID, and `validate_team_id_access` proves the API
+key can act for the UUID through a team-scoped account request. Automation must pass an explicit UUID rather than
+inferring that a key rejected by the user-only team-list endpoint is necessarily team-scoped. `resolve_team_id` remains
+available for interactive user keys that can list one exact visible team name. `providers.cloudrift.with_public_ip`
+defaults to true for compatibility; callers on a reachable private network can disable public-IP allocation.
+
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 
 | Provider raises | Orchestrator does |
@@ -74,7 +80,13 @@ after allocation.
 `emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
 deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
 lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
-is always a hard refusal.
+is always a hard refusal. CloudRift's `Deactivating` state acknowledges that termination is scheduled, so cleanup and
+lease audit accept it without waiting for the provider's asynchronous transition to a terminal state.
+
+Run-unique automation may add a second ownership check with `terminate_instances_by_tags()`. It requires at least one
+non-empty tag, lists instances carrying every supplied tag across the caller's visible personal/team scope, terminates
+all nonterminal matches in one request, and polls until none remain. The complete run-specific tag set is the safety
+boundary; broad or empty tag cleanup is invalid.
 
 **Timing:** `bench` (`benchmark/execution.py`) wraps `provision_cloud_vm()` → `vm_provision` and `provision_remote()`
 → `remote_provision` in a timer. These run once per `ExecutionGroup` (shared VM) but are seeded into each task's timer,
@@ -133,7 +145,12 @@ to `2026-08-05`, the current public generation for the instance endpoints used h
 `~upcoming` (CloudRift's own client default) so a future server
 release can't change request/response shapes under us.
 
-Two v059-era behaviours the client relies on:
+CloudRift API behaviours the client relies on:
+
+* **Availability.** `instance-types/list` exposes per-variant `available_nodes`. Automated selection treats a variant
+  as available when that count is positive and does not use public-IP capacity as a selection constraint.
+* **Team ownership.** `instances/rent.team_id` makes the team account own the rental. A user API key must belong to the
+  selected team; CloudRift rejects a mismatched team rather than falling back to the user's personal account.
 
 * **`instances/list` mask.** v058 added a `mask` (`with_connection_info` / `with_hardware_info` / `with_usage_info`,
   all default-false) and honours it for v058+ callers — older callers were force-fed `ALL`. `_get_instance_info` sends

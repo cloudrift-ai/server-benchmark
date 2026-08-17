@@ -12,10 +12,11 @@ validation.
   `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
 - `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
 - `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
+- `query.py` — constrained predicates, deployment-row expansion, ordering, and the versioned query result
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
-- `bundled.py` — `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an installed wheel
+- `bundled.py` — automatic editable-checkout/wheel catalog selection and bare-name materialization
 
 ## Key Design Decisions
 
@@ -25,9 +26,8 @@ A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes
 `recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
 site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a timestamped
 run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the
-bundled recipe into the current directory and returns that path. An existing directory always takes precedence, so a
-name that matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never
-clobbered.
+recipe selected from the live editable checkout or installed bundle into the current directory and returns that path.
+An existing directory always takes precedence, so a matching edited copy is never clobbered.
 
 ### Recipe Lifecycle Tags
 
@@ -43,21 +43,64 @@ optimization. `best-effort` is a useful runnable recipe outside that periodic se
 git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
 the same task is available at a comparable or lower practical VRAM footprint, or when a technical limitation means
 the recipe should no longer be used. Low demand or age alone is not enough. Discovery stores every lifecycle reason in
-`model.rationale`. A new discovery shell carries both `onboarding` and `untested`; it contains the model ID, task,
-rationale, and one to three proposed `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until
-onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for backward
-compatibility and are classified by the next discovery lifecycle run.
+`model.rationale` and every current onboarding-priority score in `model.heat`. A new discovery shell carries both
+`onboarding` and `untested`; it contains the model ID, task, rationale, heat, and one to three proposed
+`deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until onboarding replaces it with a qualified
+`best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
+discovery lifecycle run.
 
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
-does not affect engine arguments, deployment, or benchmark behavior.
+does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0
+through 100 that discovery refreshes for every recipe. It records current community and serving interest for ordering
+onboarding work; it is not a benchmark score and does not affect serving behavior. Missing heat remains valid for
+legacy recipes and sorts as null until the next discovery run.
 
-`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
-records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
+versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
+state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
+heat.
+This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
+may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
+live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
+no catalog-selection arguments, so its consumers observe the same installation-aware behavior.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
+Manual creation starts at heat zero; discovery supplies and later refreshes the evidence-based value.
+
+`emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
+expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.
+`--candidate MODEL GPU COUNT` instead supplies one exact external deployment. The query hydrates its
+model metadata from the catalog when present and represents a missing model as onboarding work. Every row carries its
+lifecycle-derived operation (`onboarding` or `verification`) and expected post-run lifecycle so automation does not
+reproduce those rules.
+
+The row fields are grouped by ownership:
+
+| Fields | Meaning |
+|---|---|
+| `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
+| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
+| `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
+| `results.path`, `results.last_run_at` | Sibling report path and its last committed change |
+| `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
+
+The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+`FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
+AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
+and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.
+
+Computed fields are resolved only when a predicate or sort references them. `deployment.availability.cloudrift`
+queries current CloudRift capacity and requires `CLOUDRIFT_API_KEY`; it uses the hardware table and requires the exact
+GPU count. `provider.cloudrift.team_access` validates `CLOUDRIFT_TEAM_ID` with the same key before capacity is queried.
+`results.last_run_at` reads the last committed change to the recipe's sibling `RESULTS.md`; a missing report is `null`,
+while requesting the field outside a Git checkout is an error. These annotations are read-only: the query never rents
+hardware, writes workflow outputs, or changes recipes. Computed values that the query does not reference remain
+`null` in its output.
 
 ### Matrix Expansion for Benchmark Sweeps
 

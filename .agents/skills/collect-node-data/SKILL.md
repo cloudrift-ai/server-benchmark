@@ -1,7 +1,9 @@
 ---
 name: collect-node-data
-description: Use this skill when the user wants to populate or refresh the autotune DB's node table (the cross-hardware search-tree node store) with data measured on a SPECIFIC GPU — e.g. "collect node data for an H200", "run the node sweep on a rented <GPU> and merge the nodes back", "collect node data on this server", "gather cross-hardware node-store data", "populate / update the node table from <hardware>". Uses an existing GPU server the user provides, or rents a fresh single-GPU one (via start-remote-server); rsyncs + sets up emmy there, runs the budgeted three-slice golden sweep (`remote_node_collect.py` → `golden_neighbor_bench.py`: every golden kind's candidate pool, sliced own-neighborhood / cross-card exchange / uniform tail at 60/25/15 budget shares, kind-stratified within each slice, paired -O1/-O3 pinned benches, ledger-resumed) — all remote processes inside tmux sessions — merges the remote node rows into the local `~/.cache/emmy/autotune.db` (nodes table only, GPU-keyed so cards never collide), backs the DB up locally, and tears the server down (only if it rented it).
-version: 0.4.0
+description: >-
+  Populate or refresh the autotune DB's cross-hardware node table with measurements from a specific GPU. Use when the
+  user asks to collect node data on an existing or rented GPU, run the budgeted three-slice golden sweep, merge the
+  GPU-keyed node rows into the local tuning DB, back up the DB, and tear down any server rented for the run.
 ---
 
 # Collect node-store data from specific hardware

@@ -105,7 +105,7 @@ def handle_bench(args):
             key, pattern = f.split("=", 1)
             parsed_filters.append((key, pattern))
 
-    # Enumerate tasks from recipe dirs (a bare name resolves to a bundled recipe)
+    # Enumerate tasks from recipe dirs (a bare name resolves through the installation's catalog)
     args.recipes = [resolve_recipe_dir(r) for r in args.recipes]
     tasks = enumerate_tasks(args.recipes, filters=parsed_filters)
     if not tasks:

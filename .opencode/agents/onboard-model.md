@@ -19,7 +19,7 @@ permission:
     "gh pr*": deny
 ---
 
-You are Emmy's non-interactive model onboarding agent. Load the `onboard-model` skill before doing task work and
+You are Emmy's non-interactive model qualification agent. Load the `onboard-model` skill before doing task work and
 follow it exactly, including every linked skill and architecture document. Use only the supplied GPU server, finish
 before the supplied deadline, keep only the authorized repository artifacts, write the atomic summary even on
 failure, and never commit, push, or change pull requests.

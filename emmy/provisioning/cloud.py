@@ -290,6 +290,8 @@ async def _provision_cloudrift(
     image_url = cr_config.get("image_url")
     billing_exempt = cr_config.get("billing_exempt", False)
     network = cr_config.get("network")
+    team_id = cr_config.get("team_id")
+    with_public_ip = cr_config.get("with_public_ip", True)
 
     return await cr_provider.create_instance(
         api_key=api_key or "",
@@ -304,6 +306,8 @@ async def _provision_cloudrift(
         ssh_private_key_path=ssh_key,
         billing_exempt=billing_exempt,
         network=network,
+        team_id=team_id,
+        with_public_ip=with_public_ip,
         extra_public_keys=extra_authorized_keys,
         allocation_observer=allocation_observer,
     )

@@ -143,6 +143,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Recipe** — A version-controlled plan describing what model or command to run, how to deploy it, which hardware
   and benchmark settings to use, and which variants to compare. Commands such as `emmy deploy` and `emmy bench`
   consume recipes; a recipe does not execute by itself.
+- **Heat score** — A 0-100 model-discovery priority based on current community attention, Hugging Face momentum, and
+  supporting serving evidence. It orders onboarding work; it is not a measured model-quality or performance score.
 - **Variant** — One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
 - **Matrix** — A recipe section that describes several values to test. `cross` creates every combination; `zip`
   pairs values by position.
@@ -151,7 +153,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   row identity and matrix parameters, Git revision and dirty flag, execution lifecycle, and generic system
   information. It never contains interpreted or parsed experiment measurements.
 - **Raw experiment results** — Logs and declared measurement files preserved in an ignored timestamped local run
-  directory. The last run is committed as an LFS-backed `results.tar.gz`, not as a second structured result format.
+  directory. Each exact GPU platform's last run is committed as an LFS-backed
+  `results_<gpu-short>x<gpu-count>.tar.gz`, not as a second structured result format.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is

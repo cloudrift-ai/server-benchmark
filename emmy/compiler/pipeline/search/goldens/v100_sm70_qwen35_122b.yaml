@@ -632,14 +632,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 950.272
-      reference_us: 201.728
+      emmy_us: 316.0746693611145
+      reference_us: 213.33332856496176
       reference_backend: cublas
 - program: 1
   target:
@@ -655,12 +655,12 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 1938.432
-      reference_us: 386.56
+      emmy_us: 398.8479971885681
+      reference_us: 403.4560024738312
       reference_backend: cublas
 - program: 2
   target:
@@ -673,15 +673,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 8181.76
-      reference_us: 656.896
+      emmy_us: 1439.743995666504
+      reference_us: 680.9599995613098
       reference_backend: cublas
 - program: 3
   target:
@@ -693,15 +693,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m8n8k4_f16_f32/f4x4/k2
-      REDUCE: g2a
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 7615.488
-      reference_us: 668.16
+      emmy_us: 1129.472017288208
+      reference_us: 663.5519862174988
       reference_backend: cublas
 - program: 4
   target:
@@ -714,15 +714,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x4
-      TILE: mma_m8n8k4_f16_f32/f2x1/k8
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: g8a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 78.297
-      reference_us: 12.53
+      emmy_us: 36.25718531785188
+      reference_us: 12.074666718641916
       reference_backend: cublas
 - program: 5
   target:
@@ -735,15 +735,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w8x1
-      TILE: mma_m8n8k4_f16_f32/f1x4/k8
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: g8a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 214.835
-      reference_us: 20.864
+      emmy_us: 42.963478876196824
+      reference_us: 18.17599982023239
       reference_backend: cublas
 - program: 6
   target:
@@ -756,15 +756,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x2
+      WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
-      REDUCE: ''
-      STAGE: ''
+      REDUCE: g8a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 604.672
-      reference_us: 47.36
+      emmy_us: 123.26399981975555
+      reference_us: 42.422856603349956
       reference_backend: cublas
 - program: 7
   target:
@@ -776,15 +776,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x2
-      TILE: mma_m8n8k4_f16_f32/f4x2/k2
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: g2a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 720.896
-      reference_us: 49.664
+      emmy_us: 101.47839784622192
+      reference_us: 43.2640016078949
       reference_backend: cublas
 - program: 8
   target:
@@ -797,15 +797,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g4a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 984.064
-      reference_us: 90.624
+      emmy_us: 159.061332543691
+      reference_us: 79.5306662718455
       reference_backend: cublas
 - program: 9
   target:
@@ -820,13 +820,13 @@ configs:
     knobs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
-      REDUCE: g2a
-      STAGE: ''
+      REDUCE: g8a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 1110.016
-      reference_us: 140.8
+      emmy_us: 364.54399426778156
+      reference_us: 120.83200365304947
       reference_backend: cublas
 - program: 10
   target:
@@ -840,14 +840,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: g2a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 4080.64
-      reference_us: 317.44
+      emmy_us: 688.1279945373535
+      reference_us: 318.4640109539032
       reference_backend: cublas
 - program: 11
   target:
@@ -860,14 +860,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: g2a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 5706.752
-      reference_us: 326.144
+      emmy_us: 574.9760270118713
+      reference_us: 292.35199093818665
       reference_backend: cublas
 - program: 12
   target:
@@ -880,15 +880,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
+      WORK: w1x4
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
-      REDUCE: ''
-      STAGE: ''
+      REDUCE: g2a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 777.216
-      reference_us: 127.488
+      emmy_us: 242.43199825286865
+      reference_us: 121.85599654912949
       reference_backend: cublas
 - program: 13
   target:
@@ -902,14 +902,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
-      RASTER: gm8
+      RASTER: ''
     measurements:
-      emmy_us: 2586.624
-      reference_us: 311.296
+      emmy_us: 363.8613224029541
+      reference_us: 294.22932863235474
       reference_backend: cublas
 - program: 14
   target:
@@ -922,15 +922,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 6203.392
-      reference_us: 486.4
+      emmy_us: 985.0879907608032
+      reference_us: 497.6640045642853
       reference_backend: cublas
 - program: 15
   target:
@@ -942,15 +942,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
+      WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 6154.24
-      reference_us: 485.888
+      emmy_us: 848.8960266113281
+      reference_us: 496.63999676704407
       reference_backend: cublas
 - program: 16
   target:
@@ -963,15 +963,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x2/k4
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g2a
+      STAGE: d2/smem
       LOOPIFY: '0'
-      RASTER: gm8
+      RASTER: ''
     measurements:
-      emmy_us: 813.056
-      reference_us: 121.344
+      emmy_us: 166.05866948763529
+      reference_us: 92.67200032869975
       reference_backend: cublas
 - program: 17
   target:
@@ -984,15 +984,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x8/k8
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 2098.176
-      reference_us: 234.496
+      emmy_us: 292.86400477091473
+      reference_us: 234.49599742889404
       reference_backend: cublas
 - program: 18
   target:
@@ -1006,14 +1006,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13952.0
-      reference_us: 351.744
+      emmy_us: 794.6239709854126
+      reference_us: 330.7519853115082
       reference_backend: cublas
 - program: 19
   target:
@@ -1026,14 +1026,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
-      REDUCE: ''
-      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: g2a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 4360.192
-      reference_us: 361.984
+      emmy_us: 796.671986579895
+      reference_us: 317.440003156662
       reference_backend: cublas
 - program: 20
   target:
@@ -1053,8 +1053,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 12.48
-      reference_us: 7.332
+      emmy_us: 10.852173618648363
+      reference_us: 7.101935244375659
       reference_backend: cublas
 - program: 21
   target:
@@ -1074,8 +1074,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 38.321
-      reference_us: 9.183
+      emmy_us: 33.24586749076843
+      reference_us: 8.900923224595877
       reference_backend: cublas
 - program: 22
   target:
@@ -1091,12 +1091,12 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: g8a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 96.461
-      reference_us: 13.163
+      emmy_us: 38.1636917591095
+      reference_us: 11.962182142517783
       reference_backend: cublas
 - program: 23
   target:
@@ -1109,14 +1109,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f1x2/k8
+      REDUCE: g2k
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 159.232
-      reference_us: 14.643
+      emmy_us: 32.59733319282532
+      reference_us: 9.668669475506304
       reference_backend: cublas
 - program: 24
   target:
@@ -1130,14 +1130,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1/k8
-      REDUCE: g8a
-      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f2x1/k8
+      REDUCE: g4a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 46.127
-      reference_us: 9.194
+      emmy_us: 35.401142069271636
+      reference_us: 9.216000254337605
       reference_backend: cublas
 - program: 25
   target:
@@ -1150,15 +1150,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: g8a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 144.677
-      reference_us: 17.566
+      emmy_us: 38.20307667438801
+      reference_us: 14.736695134121438
       reference_backend: cublas
 - program: 26
   target:
@@ -1171,15 +1171,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1/k4
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g4a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 531.968
-      reference_us: 39.168
+      emmy_us: 81.4933329820633
+      reference_us: 30.105599761009216
       reference_backend: cublas
 - program: 27
   target:
@@ -1192,14 +1192,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: g2a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 529.92
-      reference_us: 44.288
+      emmy_us: 63.29599767923355
+      reference_us: 29.40342894622258
       reference_backend: cublas
 - program: 28
   target:
@@ -1212,15 +1212,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x8
+      WORK: w1x4
       TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: g8a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 180.053
-      reference_us: 40.875
+      emmy_us: 58.84988167706658
+      reference_us: 40.89599847793579
       reference_backend: cublas
 - program: 29
   target:
@@ -1233,15 +1233,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
+      WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: g4a
-      STAGE: ''
+      STAGE: d2/smem/p2
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 365.909
-      reference_us: 63.829
+      emmy_us: 138.09371846062797
+      reference_us: 57.51466751098633
       reference_backend: cublas
 - program: 30
   target:
@@ -1254,15 +1254,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k4
-      REDUCE: g2a
-      STAGE: ''
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 999.424
-      reference_us: 135.68
+      emmy_us: 290.8160090446472
+      reference_us: 125.26933352152507
       reference_backend: cublas
 - program: 31
   target:
@@ -1274,15 +1274,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
+      WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: g2a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 1141.76
-      reference_us: 138.752
+      emmy_us: 235.52000522613525
+      reference_us: 119.55200135707855
       reference_backend: cublas
 - program: 32
   target:
@@ -1295,15 +1295,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g4a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 125.952
-      reference_us: 18.432
+      emmy_us: 36.370963961989794
+      reference_us: 17.749333133300144
       reference_backend: cublas
 - program: 33
   target:
@@ -1317,14 +1317,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 234.752
-      reference_us: 32.256
+      emmy_us: 52.65515729000693
+      reference_us: 27.166117640102613
       reference_backend: cublas
 - program: 34
   target:
@@ -1340,12 +1340,12 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 500.736
-      reference_us: 73.728
+      emmy_us: 117.30489465925429
+      reference_us: 60.80000102519989
       reference_backend: cublas
 - program: 35
   target:
@@ -1358,14 +1358,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 503.296
-      reference_us: 73.472
+      emmy_us: 113.55022589365642
+      reference_us: 61.43999844789505
       reference_backend: cublas
 - program: 36
   target:
@@ -1378,15 +1378,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: g8a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 164.352
-      reference_us: 20.147
+      emmy_us: 46.0334528576244
+      reference_us: 19.456000791655647
       reference_backend: cublas
 - program: 37
   target:
@@ -1399,15 +1399,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t16x16
-      TILE: f4x8
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: g8a
-      STAGE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 385.707
-      reference_us: 31.744
+      emmy_us: 86.57454360615122
+      reference_us: 29.440000653266907
       reference_backend: cublas
 - program: 38
   target:
@@ -1421,14 +1421,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f8x2
-      REDUCE: g4a
-      STAGE: ''
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 746.496
-      reference_us: 83.456
+      emmy_us: 171.17865880330405
+      reference_us: 69.22240257263184
       reference_backend: cublas
 - program: 39
   target:
@@ -1440,15 +1440,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f4x4
-      REDUCE: ''
-      STAGE: ''
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: g2a
+      STAGE: d2/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 624.128
-      reference_us: 77.824
+      emmy_us: 155.648003021876
+      reference_us: 67.58399804433186
       reference_backend: cublas
 - program: 40
   target:

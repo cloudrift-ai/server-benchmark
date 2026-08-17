@@ -238,6 +238,30 @@ def test_warp_row_full_vector_matches_hand_computed_encoding():
         assert math.isclose(got[key], val, rel_tol=0, abs_tol=1e-9), (key, got[key], val)
 
 
+def test_stored_b_width_separates_the_packed_byte_slab():
+    """A packed-pair (NVFP4) weight staged as raw bytes moves a quarter of a 16-bit weight's
+    traffic at the SAME atom, tile and transport spelling, so every other feature on the two rows
+    ties. ``MMA_b_store_bits`` is the one that separates them."""
+    pin = ("mma_m16n8k16_f16/f2x2", "w2x4")
+    packed = _warp_feats(pin, **{"STAGE@a1": "d2/cp", "S_dtype_f4e2m1x2": 1.0})
+    plain = _warp_feats(pin, **{"STAGE@a1": "d2/cp"})
+    assert packed["MMA_b_store_bits"] == 4.0
+    assert "MMA_b_store_bits" not in plain
+    assert packed["MMA_a_bits"] == plain["MMA_a_bits"] == 16.0, "the fragment width is the same — that is the point"
+    shared = lambda f: {k: v for k, v in f.items() if k not in ("MMA_b_store_bits", "S_dtype_f4e2m1x2")}  # noqa: E731
+    assert shared(packed) == shared(plain)
+
+
+def test_stored_b_width_needs_both_the_packed_weight_and_the_async_stage():
+    """Neither fact alone is the packed byte slab: the packed dtype is a whole-kernel fact its
+    compute-fill sibling rows share, and an async stage is what every 16-bit matmul spells too."""
+    pin = ("mma_m16n8k16_f16/f2x2", "w2x4")
+    fill = _warp_feats(pin, **{"STAGE@a1": "d1/sync", "S_dtype_f4e2m1x2": 1.0})
+    ordinary = _warp_feats(pin, **{"STAGE@a1": "d2/cp"})
+    assert "MMA_b_store_bits" not in fill
+    assert "MMA_b_store_bits" not in ordinary
+
+
 def test_tma_interactions_fire_only_on_tma_stage():
     """The TMA-conditioned geometry terms are the one-weight-set stand-in for a per-arch split:
     they must mirror the geometry on a TMA-staged row and stay absent under cp.async, so

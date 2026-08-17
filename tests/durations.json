@@ -127,6 +127,8 @@
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_packed_drain_matches_the_decoded_oracle[bf16-32-128-128]": 1.2,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_packed_drain_matches_the_decoded_oracle[f16-32-128-128]": 20.87,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_packed_drain_matches_the_decoded_oracle[f16-4-2048-2048]": 0.16,
+ "tests/compiler/passes/test_nvfp4_staged.py::test_the_row_features_the_width_the_weight_really_moves[d1/sync-False]": 0.09,
+ "tests/compiler/passes/test_nvfp4_staged.py::test_the_row_features_the_width_the_weight_really_moves[d2/cp-True]": 0.09,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_spelled_checkpoint_lowers_to_the_packed_drain": 0.09,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade": 6.92,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_mlp_gate_up_nodifies_as_two_channel_product_contraction": 1.27,

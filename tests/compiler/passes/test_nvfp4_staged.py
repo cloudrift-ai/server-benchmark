@@ -344,6 +344,25 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
     assert "0x3F80" in src
 
 
+@pytest.mark.parametrize(("stage", "packed"), [("d2/cp", True), ("d1/sync", False)])
+def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, packed):
+    """What tells the priors these two rows are not one kernel with a different transport: on the
+    byte slab the weight reaches the slab 4 bits per element, on the compute fill 16. The packed
+    dtype alone cannot say it — both rows carry it — so the feature is its product with the
+    row's async stage."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.features import knob_features
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_matmul_graph(tmp_path, m=32, n=128, k=128)
+    with pinned_knobs({**PACKED_PINS, "STAGE": stage}):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
+    knobs = next(k for node in lowered.nodes.values() if (k := getattr(node.op, "knobs", None)) and "TILE" in k)
+    assert knobs["S_dtype_f4e2m1x2"] == 1.0, "the kernel reads the packed weight either way"
+    assert knob_features(knobs).get("MMA_b_store_bits") == (4.0 if packed else None)
+
+
 @requires_cuda
 @pytest.mark.parametrize(
     ("dtype", "m", "n", "k", "tol"),

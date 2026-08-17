@@ -195,7 +195,7 @@ anything else declines to the general reading, which computes the same values.
 **Mixed-scheme checkpoints.** A checkpoint may quantize different leaves differently, and the two
 recognizers answer independently rather than exclusively: each asks whether ANY declared weight group is
 its own scheme. modelopt spells this as `quant_algo: "MIXED_PRECISION"` with one `config_groups` entry per
-scheme (nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP in NVFP4);
+scheme (nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and lm_head in NVFP4);
 compressed-tensors spells it by simply carrying groups of both widths, which already worked. Both spellers
 then run over the checkpoint and each takes the leaves whose STORED SIBLINGS are its own — the NVFP4 trio
 (`<key>` + `<key>_scale` + `<key>_scale_2`, checked first because its `<key>_scale` would otherwise shadow

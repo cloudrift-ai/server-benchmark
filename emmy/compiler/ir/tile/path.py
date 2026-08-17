@@ -43,16 +43,20 @@ from dataclasses import dataclass
 from emmy.compiler.ir.tile.ir import Fold, edge_refs_axis, is_contraction
 
 #: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
-#: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
-#: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
-#: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.
+#: root-global and bare).
 #: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
 SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
-#: What a tree path may address: the slice families plus ``PLACE``, the placement seam, which keys
-#: no slice of its own.
-PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
+#: The ROUTING families: they key no slice of their own and decide the KERNEL SET rather than a
+#: schedule, so they resolve before any schedule fork exists and record as routing golden entries.
+#: ``PLACE`` is the per-seam edge property — its sites are every NON-ROOT node, each in-tree child
+#: naming its parent↔child seam, values ``cut | fuse``. ``SPLIT`` partitions a reducing fold's axis
+#: across kernels — its sites are the STATIC-extent reduces, values ``g<w>[a|k]``.
+ROUTING_FAMILIES = ("PLACE", "SPLIT")
+
+#: What a tree path may address: the slice families plus the routing families.
+PATH_FAMILIES = (*SLICE_FAMILIES, *ROUTING_FAMILIES)
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
@@ -205,6 +209,12 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
     if family == "PLACE":
         return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
+    if family == "SPLIT":
+        # A cross-CTA partition factors a STATIC extent into ``w`` contiguous blocks, so a symbolic
+        # reduce has no split site at all — the width would have no divisor to check against.
+        return tuple(
+            s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None and not s.inline and s.node.axis.extent.is_static
+        )
     if family in ("REDUCE", "STAGE"):
         return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None and not s.inline)
     out = []

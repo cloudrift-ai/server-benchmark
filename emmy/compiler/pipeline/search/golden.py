@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy.compiler.ir.tile.path import ROUTING_FAMILIES
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -275,7 +276,7 @@ class GoldenRecord:
 
     @property
     def is_routing(self) -> bool:
-        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+        return bool(self.knobs) and all(str(key).split("@", 1)[0] in ROUTING_FAMILIES for key in self.knobs)
 
     @property
     def dynamic(self) -> bool:
@@ -422,8 +423,12 @@ def validate_golden_file(
                         f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
                     )
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
-                if "PLACE" in families and families != {"PLACE"}:
-                    raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
+                routing = families & set(ROUTING_FAMILIES)
+                if routing and families - routing:
+                    raise ValueError(
+                        f"{realization_where} mixes {'/'.join(sorted(routing))} routing knobs with schedule knobs — "
+                        "a routing entry decides the kernel set, and each resulting kernel records its own schedule row"
+                    )
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
@@ -660,6 +665,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._split import legal_moves, parse_move, splittable_sites  # noqa: PLC0415
 
     try:
         tile = _recognized_target(record)
@@ -677,21 +683,36 @@ def decode_record(record: GoldenRecord) -> str | None:
         )
         seams = cuttable_seams(route_tree, route_stores, route_free)
         all_sites = sites(route_tree)
+        splits = splittable_sites(route_tree, route_free)
         for key, value in record.knobs.items():
-            if str(value) != "cut":
-                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
-            if str(key) == "PLACE":
-                # The bare family key IS the codec's "shallowest cuttable seam" spelling
-                # (``route_cut``'s pin semantics) — it decodes iff any seam is legal.
-                if not seams:
-                    return _remember_verdict(verdict_key, "bare PLACE=cut recorded, but the recognized tree has no legal cut seam")
-                continue
-            try:
-                site = resolve(route_tree, str(key), all_sites=all_sites)
-            except ValueError as exc:
-                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or site not in seams:
-                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
+            family = str(key).split("@", 1)[0]
+            # Each routing family answers two questions the same way: does the value decode, and
+            # does the key name a site this family may legally route on THIS tree.
+            if family == "PLACE":
+                legal, what = seams, "cut seam"
+                if str(value) != "cut":
+                    return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
+            else:
+                legal, what = splits, "splittable reduce"
+                try:
+                    width, arm = parse_move(str(value))
+                except ValueError as exc:
+                    return _remember_verdict(verdict_key, f"routing value {key}={value!r} does not decode: {exc}")
+            if str(key) == family:
+                # The bare family key names the primary site (the pin semantics ``route_cut`` /
+                # ``route_split`` implement) — it decodes iff any site is legal for that family.
+                if not legal:
+                    return _remember_verdict(verdict_key, f"bare {key}={value} recorded, but the recognized tree has no legal {what}")
+                site = legal[0]
+            else:
+                try:
+                    site = resolve(route_tree, str(key), all_sites=all_sites)
+                except ValueError as exc:
+                    return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
+                if site is None or site not in legal:
+                    return _remember_verdict(verdict_key, f"routing key {key!r} names no legal {what} on the recognized tree")
+            if family == "SPLIT" and (width, arm) not in legal_moves(site, route_tree, route_stores):
+                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a legal move on {site.axis!r}")
         return _remember_verdict(verdict_key, None)
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
     store = _identity_store()

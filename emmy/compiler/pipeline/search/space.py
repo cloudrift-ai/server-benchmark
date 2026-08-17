@@ -460,22 +460,6 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     return [*smems, *depths, Stage.parse("d2/smem-async/p2")]
 
 
-# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width
-# must divide K, and the per-CTA remainder must tile the warp K-step — is the scheduler's.
-SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
-
-
-def splitk_moves() -> list[ReducePlan]:
-    """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize
-    (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
-    ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
-    packed-pair red). The scheduler's ``atomic_ok`` gate keeps atomic rows
-    off multi-fold / non-distributive-projection nodes. These EXTEND the serial fold the scheduler
-    offers beside them. Both tiers share the catalog — per-node legality lives with the
-    enumeration's gates, not here."""
-    return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
-
-
 def coop_reduce_moves() -> list[ReducePlan]:
     """The cooperative / ILP K-partition ``REDUCE`` candidates for a NON-output-tiled contraction
     (the coop reduce spec's contract — the per-cell tier folds K across the coop threads / ILP
@@ -495,10 +479,10 @@ def coop_reduce_moves() -> list[ReducePlan]:
         ReducePlan.of(reg=2),
         ReducePlan.of(reg=4),
         ReducePlan.of(coop=4, reg=2),
-        # The transposed band + its grid-split composites: a bare transposed fold is latency-bound
-        # on long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
-        # deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on k-major B).
+        # The TRANSPOSED band is the k-major-B matvec partition (warp lanes sweep the output axis —
+        # the M=1 gemv coalescing). A bare transposed fold is latency-bound on long-K matvecs (120
+        # CTAs of serial K); pairing it with a cross-kernel split is what recovered the row-major
+        # floor there, and that pairing is now expressed by ROUTING the kernel (``SPLIT``) and
+        # scheduling the partial with this band — one decision each, instead of a composite value.
         *(ReducePlan.of(coop=n, coop_transposed=True) for n in (32, 64, 128, 256)),
-        ReducePlan.of(cta=8, coop=128, coop_transposed=True),
-        *(ReducePlan.of(cta=w, coop=256, coop_transposed=True) for w in (8, 16, 32)),
     ]

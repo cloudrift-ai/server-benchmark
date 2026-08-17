@@ -6,6 +6,7 @@ import contextlib
 import os
 
 from emmy import config
+from emmy.compiler.ir.tile.path import ROUTING_FAMILIES
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
 
@@ -21,8 +22,8 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)
-        if fam == "PLACE":
-            continue  # a realized cut is visible structurally, not as a knob stamp
+        if fam in ROUTING_FAMILIES:
+            continue  # a realized cut / split is visible structurally, not as a schedule knob stamp
         others: list[str] = []
         saw_off = False
         hit = False

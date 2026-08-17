@@ -312,13 +312,14 @@ def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatc
     a SEMIRING matmul split-K, an additive ``Accum`` ``sum`` split-reduce, and the twisted flash
     ``(m, l, O)`` split-KV (Flash-Decoding) all split their contraction axis across CTAs through
     the SAME fork — the matmul is the 1-component instantiation, flash the N-component twisted one.
-    Each is accurate vs torch and emits the matching kernel set: ATOMIC (``c2a``) = one kernel with
-    ``atomicAdd`` (additive only — illegal for the twisted carrier); deferred KERNEL (``c2k``) = a
+    Each is accurate vs torch and emits the matching kernel set: ATOMIC (``g2a``) = one kernel with
+    ``atomicAdd`` (additive only — illegal for the twisted carrier); deferred KERNEL (``g2k``) = a
     second ``__global__`` combine kernel writing/reading a ``__partial`` workspace, no ``atomicAdd``.
-    The finalize is the native ``REDUCE`` codec's ``c`` letter — one knob owns split + finalize."""
+    The split and its finalize arm are the ``SPLIT`` ROUTING decision — it changes the kernel set,
+    so it is resolved at recognition and never a schedule slice."""
     spec = _CROSS_CTA[carrier]
     code, ref_fn = _OPS[spec["op"]]
-    env = {"EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
+    env = {"EMMY_SPLIT": "g2a" if finalize == "atomic" else "g2k"}
     got, xs, src = _compile_run(code, env, monkeypatch)
     want = ref_fn(xs).reshape(got.shape)
     diff = float(np.abs(got - want).max())
@@ -356,7 +357,7 @@ def test_split_reduce_projection_epilogue(op, finalize, monkeypatch):
     ``sqrt`` does not, so the atomic finalize REFUSES (``NotImplementedError`` → pin ``g<n>k``).
     The deferred-kernel finalize projects once after the combine and is accurate for both."""
     code, ref_fn = _OPS[op]
-    env = {"EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
+    env = {"EMMY_SPLIT": "g2a" if finalize == "atomic" else "g2k"}
     if finalize == "atomic" and not _PROJECTION_DISTRIBUTES[op]:
         with pytest.raises(NotImplementedError, match="non-distributive projection"):
             _compile_run(code, env, monkeypatch)

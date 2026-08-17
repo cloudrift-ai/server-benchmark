@@ -462,7 +462,7 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     (M=32) is where this split pays: the un-split cone grid starves the SMs."""
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x4")
-    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    monkeypatch.setenv("EMMY_SPLIT", "g4k")
     monkeypatch.setenv("EMMY_STAGE", stage)
     S, H, inter = 32, 1024, 3072
     # CANONICAL-B matmul (w shaped (H, inter)) rather than the transposed-B linear: a
@@ -501,7 +501,7 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x4")
-    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    monkeypatch.setenv("EMMY_SPLIT", "g4k")
     S, H, inter = 32, 256, 512
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")

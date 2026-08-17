@@ -98,8 +98,6 @@ def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
     async load half) on a kernel that is not split across CTAs."""
     if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
-    if reduce.needs_split:
-        return "a producer band and a cross-CTA split-K are not co-representable"
     return None
 
 
@@ -122,8 +120,6 @@ def coop_band_geometry(plan: ReducePlan, k: int | None, inner: Axis | None) -> s
         return f"the transposed coop band sweeps whole warps — coop={plan.coop} is not a multiple of {WARP_LANES}"
     if inner is None:
         return "the transposed coop band needs an innermost free axis to sweep; this term has none"
-    if plan.needs_split and (k is None or k % plan.cta):
-        return f"the transposed split composite g{plan.cta} must divide a static K"
     return None
 
 
@@ -212,51 +208,6 @@ def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
         f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
         f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
     )
-
-
-def splitk_slice_k_step(node: Fold, plan: TilePlan, width: int) -> str | None:
-    """After a cross-CTA split the inner contraction sees ``K/width``, which must still be a
-    multiple of the mma K-step."""
-    if not plan.is_warp:
-        return None
-    step = plan.atom.atom_k * plan.bk
-    ks = node.axis.extent.as_static() // width
-    if ks % step == 0:
-        return None
-    return (
-        f"split-K slice K={ks} (K/{width}) is not a multiple of the mma K-step {step} "
-        f"(atom_k={plan.atom.atom_k}*bk={plan.bk}); pick a split width whose slice is divisible."
-    )
-
-
-def splitk_computed_b_site(node: Fold) -> str | None:
-    """Whether a COMPUTED B cone survives the split's σ-reindex with its schedule intact.
-
-    The split rewrites every edge to absolute k. A materialized edge rewrites its gmem index in
-    place; a computed cone is rewritten BODY AND ALL, which replaces the nodes inside it — and a
-    schedule slice is keyed by NODE IDENTITY, so a cone carrying a scheduling site of its own (a
-    fold over its own axis) would lose the value the row decided for it and stamp a knob no kernel
-    realizes. The ordinary decode / map cone carries no such fold and rewrites cleanly. A computed
-    ``a``'s sites are the compute fill's own statistic prologue, which the fill realizes itself,
-    so they hold no slice to lose."""
-    for ch in node.channels:
-        if isinstance(ch.b, Load):
-            continue
-        if ch.b.axis is not None or ch.b.body.iter_of_type(Fold):
-            return (
-                "split-K rewrites a computed B cone's coordinates, which would drop the schedule slice of a "
-                "fold nested in it; pin the serial fold on this edge"
-            )
-    return None
-
-
-def splitk_width(k_axis: Axis, width: int) -> str | None:
-    """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
-    absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
-    big_k = k_axis.extent.as_static()
-    if big_k % width == 0:
-        return None
-    return f"split-K width {width} does not divide K={big_k}; pick a dividing split width."
 
 
 # ---- the register strip ------------------------------------------------------------------------ #
@@ -607,9 +558,6 @@ __all__ = [
     "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
-    "splitk_computed_b_site",
-    "splitk_slice_k_step",
-    "splitk_width",
     "stage_target",
     "strip_width",
     "warp_k_step",

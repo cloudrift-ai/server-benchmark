@@ -30,7 +30,8 @@ optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a pr
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
 ``WORK`` family (:class:`Workers`), so a ``TILE`` value carries no unit widths
 (``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
-(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Workers` and are
+(``[coop[-t]][/r<n>]`` — partitioning across KERNELS is the ``SPLIT`` routing family, not a
+schedule slice). Both therefore ``parse`` **against** a :class:`Workers` and are
 hand-written here; :func:`resolve_site_tile` is the one rule resolving the single ambiguity that
 spelling has (an empty ``TILE`` beside a thread inventory). There is no second, self-contained
 reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
@@ -80,9 +81,12 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
 
 
 class Level(enum.Enum):
-    """One hardware level the reduce axis can be partitioned across, coarse→fine."""
+    """One hardware level the reduce axis can be partitioned across, coarse→fine.
 
-    GRID = "grid"  # across CTAs (split-K) — emitted by 030_split_reduce, never the in-kernel walk
+    Partitioning ACROSS KERNELS is not a level here: it changes the kernel set, so it is a routing
+    decision (``SPLIT``, ``lowering/tile/_split``) resolved before any schedule exists — these are
+    the in-kernel walks alone."""
+
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -91,16 +95,13 @@ class Level(enum.Enum):
 class FoldMove(enum.Enum):
     """The per-level combine *mechanism* — the placement-keyed fold MOVE, derived from the
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
-    :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
-    ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence) and
-    ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    :meth:`ReduceStage.combine` is the ONE selector; ``_factor.emit_combine`` (SHFL butterfly /
+    SMEM tree at scalar residence) consumes its output."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
     SHFL = "shfl"  # lane-level ``__shfl_xor_sync`` butterfly (within-warp)
     SMEM = "smem"  # cross-warp / block-wide smem tree-halve (within-block)
-    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_split_reduce's one-kernel arm)
-    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_split_reduce)
 
 
 @dataclass(frozen=True)
@@ -109,16 +110,10 @@ class ReduceStage:
 
     The combine *mechanism* is **derived** (:meth:`combine`), not stored — the level
     implies the fold, and a BLOCK width derives warp-shuffle vs hierarchical-smem from the
-    warp size. ``width`` is power-of-two for BLOCK (the butterfly / tree reorder).
-
-    ``finalize`` is meaningful only at ``GRID``: how ``030_split_reduce`` realizes the cross-CTA
-    combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
-    additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
-    workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
+    warp size. ``width`` is power-of-two for BLOCK (the butterfly / tree reorder)."""
 
     level: Level
     width: int = 1
-    finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
     # BLOCK only (the ``b<n>t`` codec letter): swap the cooperative thread mapping for a
     # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
     # step) and the k partition rides the upper thread bits; the combine becomes the
@@ -131,9 +126,6 @@ class ReduceStage:
         placement-keyed move selector every fold emitter consumes (see :class:`FoldMove`).
 
         - ``SERIAL`` / ``REG`` → ``()`` (no cross-unit combine; REG-fold is TODO(reg)).
-        - ``GRID`` → ``(ATOMIC,)`` or ``(KERNEL,)`` per the ``finalize`` letter (the split-K
-          cross-CTA move — consumed by ``030_split_reduce``; the carrier / projection legality raises
-          stay with the graph rewrite, which alone holds the context).
         - ``BLOCK`` → the intra-CTA hierarchy: a lone ``SHFL`` when ``segmented`` (the
           per-row segmented butterfly for strided-cooperative rows) or ``width ≤ warp``
           (one warp); ``(SHFL, SMEM)`` when ``width`` is a clean warp multiple (lanes then
@@ -141,8 +133,6 @@ class ReduceStage:
           ``width`` required."""
         if self.level in (Level.SERIAL, Level.REG):
             return ()
-        if self.level is Level.GRID:
-            return (FoldMove.ATOMIC,) if self.finalize == "atomic" else (FoldMove.KERNEL,)
         # BLOCK.
         w = self.width
         if w & (w - 1):
@@ -166,13 +156,11 @@ class ReducePlan:
     stages: tuple[ReduceStage, ...] = ()
 
     @classmethod
-    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> ReducePlan:
+    def of(cls, *, coop: int = 1, reg: int = 1, coop_transposed: bool = False) -> ReducePlan:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
-        GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
-        ``coop_transposed`` rides the BLOCK stage (the ``b<n>t`` k-major lane swap)."""
+        BLOCK (coop) → REG (reg). ``coop_transposed`` rides the BLOCK stage (the ``b<n>t`` k-major
+        lane swap)."""
         stages: list[ReduceStage] = []
-        if cta > 1:
-            stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
         if coop > 1:
             stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed))
         if reg > 1:
@@ -182,14 +170,12 @@ class ReducePlan:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/coop[-t]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
-        serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
-        finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
-        fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
-        corpus."""
+        ``[coop[-t]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread serial remainder
+        is never spelled — it derives as ``ceil(extent / parallel)``).
+
+        Partitioning across KERNELS is not spelled here at all: it changes the kernel set, so it is
+        the ``SPLIT`` routing family's ``g<w>[a|k]``, recorded on the piece that owns the output."""
         parts: list[str] = []
-        if self.cta > 1:
-            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
         if self.reg > 1:
@@ -201,25 +187,25 @@ class ReducePlan:
         """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
         :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
         the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
-        ``b<n>`` embedded-worker grammar) is a loud error, not a silent second reading."""
+        ``b<n>`` embedded-worker grammar, or the retired ``g<n>`` cross-kernel split — now the
+        ``SPLIT`` routing family) is a loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, coop, reg, finalize, transposed = 1, 1, 1, "kernel", False
+        coop, reg, transposed = 1, 1, False
         for t in s.split("/") if s else ():
-            if t.startswith("g"):
-                body = t[1:]
-                if body.endswith(("a", "k")):
-                    finalize = "atomic" if body[-1] == "a" else "kernel"
-                    body = body[:-1]
-                cta = _codec_width(body, tok=t, codec="REDUCE")
-            elif t in ("coop", "coop-t"):
+            if t in ("coop", "coop-t"):
                 if work is None or work.kind != "thread":
                     raise ValueError(f"REDUCE {spec!r}: 'coop' requires a thread WORK inventory (t<N>)")
                 coop, transposed = work.count, t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
+            elif t.startswith("g"):
+                raise ValueError(
+                    f"REDUCE {spec!r}: the cross-kernel split {t!r} is not a schedule slice — "
+                    "it is the SPLIT routing family (SPLIT@<axis>=g<w>[a|k])"
+                )
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t] / r<n>)")
-        return cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed)
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect coop[-t] / r<n>)")
+        return cls.of(coop=coop, reg=reg, coop_transposed=transposed)
 
     @property
     def parallel(self) -> int:
@@ -229,11 +215,6 @@ class ReducePlan:
         for s in self.stages:
             p *= s.width
         return p
-
-    @property
-    def needs_split(self) -> bool:
-        """True iff any stage is a cross-CTA GRID split (``030_split_reduce`` territory)."""
-        return any(s.level is Level.GRID for s in self.stages)
 
     def _width(self, level: Level) -> int:
         for s in self.stages:
@@ -245,20 +226,6 @@ class ReducePlan:
     def coop(self) -> int:
         """The BLOCK (cooperative-thread) width, or 1 if no BLOCK stage."""
         return self._width(Level.BLOCK)
-
-    @property
-    def cta(self) -> int:
-        """The GRID (cross-CTA split) width, or 1 if no GRID stage."""
-        return self._width(Level.GRID)
-
-    @property
-    def finalize(self) -> str:
-        """The GRID stage's cross-CTA finalize — ``"atomic"`` | ``"kernel"`` (``"kernel"``
-        if no GRID stage; the value is only meaningful when :attr:`needs_split`)."""
-        for s in self.stages:
-            if s.level is Level.GRID:
-                return s.finalize
-        return "kernel"
 
     @property
     def reg(self) -> int:

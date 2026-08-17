@@ -1519,7 +1519,7 @@ def test_mma_splitk_finalize(monkeypatch, finalize):
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_REDUCE", "g2k" if finalize == "deferred" else "g2a")
+    monkeypatch.setenv("EMMY_SPLIT", "g2k" if finalize == "deferred" else "g2a")
     m, k, n = 128, 512, 128
     be = CudaBackend()
     rng = np.random.default_rng(4)
@@ -1561,7 +1561,7 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
         monkeypatch.setenv("EMMY_WORK", "w2x2")
-        monkeypatch.setenv("EMMY_REDUCE", "g2k")
+        monkeypatch.setenv("EMMY_SPLIT", "g2k")
         # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the offline prior may
         # legitimately pick a staged row (D_stage_* terms), which is not the baseline this test wants.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
@@ -2104,7 +2104,7 @@ def test_mma_splitk_atomic_f16acc_staged_rolled(monkeypatch):
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f2x2/k4")
     monkeypatch.setenv("EMMY_WORK", "w1x8")
-    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_SPLIT", "g2a")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
     m, k, n = 32, 1024, 256
     be = CudaBackend()

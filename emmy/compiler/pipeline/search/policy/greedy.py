@@ -621,7 +621,8 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.ir.tile.path import ROUTING_FAMILIES  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of, schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
@@ -633,22 +634,35 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
             return None
         identity = deploy_identity(tile)
         for rec in routing_idx.get(identity, ()):
-            place = {k: str(v) for k, v in rec.knobs.items()}
-            if set(place) == {"PLACE"}:
-                # The bare spelling names the SHALLOWEST legal seam — the first cut option
-                # (recognition offers them in ``cuttable_seams`` order).
-                return structural[0], float(rec.emmy_us or 0.0), None
-            for opt in structural:
-                graph = _leaf_graph(opt)
-                ops = [n.op for n in graph.nodes.values()]
-                stamps = {k: str(v) for op in ops for k, v in (getattr(op, "knobs", {}) or {}).items() if k.startswith("PLACE")}
-                if stamps == place:
-                    return opt, float(rec.emmy_us or 0.0), None
+            route = {k: str(v) for k, v in rec.knobs.items()}
+            families = {family_of(k) for k in route}
+
+            def _stamps(opt) -> dict:
+                ops = [n.op for n in _leaf_graph(opt).nodes.values()]
+                return {k: str(v) for op in ops for k, v in (getattr(op, "knobs", {}) or {}).items() if family_of(k) in ROUTING_FAMILIES}
+
+            hit = next((o for o in structural if _stamps(o) == route), None)
+            if hit is None and all("@" not in k for k in route):
+                # A BARE spelling names the primary site, which the realizer stamps canonically
+                # (``PLACE@<seam>`` / ``SPLIT@<axis>``), so it cannot equal the stamp. Accept the
+                # first option routing the same families to the same values — recognition offers
+                # them shallowest-first, which is what the bare key means.
+                hit = next(
+                    (
+                        o
+                        for o in structural
+                        if {family_of(k) for k in _stamps(o)} == families and set(_stamps(o).values()) == set(route.values())
+                    ),
+                    None,
+                )
+            if hit is not None:
+                return hit, float(rec.emmy_us or 0.0), None
             logger.warning(
-                "deploy: node %r matches routing golden %s by identity, but no cut option stamps %s — placement drift; falling through.",
+                "deploy: node %r matches routing golden %s by identity, but no structural option routes %s — "
+                "routing drift; falling through.",
                 fp.node_id,
                 rec.name,
-                place,
+                route,
             )
         if identity in sched_idx:
             return tile, float(sched_idx[identity][0].emmy_us or 0.0), None

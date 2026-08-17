@@ -295,8 +295,6 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
         ):
             if src in feats:
                 feats[dst] = feats[src]
-        if "D_splitk" in feats:
-            feats["D_tma_l2_splitk"] = math.log2(max(feats["D_splitk"], 1.0))
     return feats
 
 
@@ -383,16 +381,18 @@ def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
 
 @dataclass(frozen=True)
 class _Decomp:
-    """The reduce-axis decomposition factors the featurizer reads (``fold``/``cta``/``coop``)
-    plus the cross-CTA ``finalize`` codec letter. The per-thread serial remainder is derived by
-    the materializer (``ceil(extent / parallel)``), never spelled by the ``REDUCE`` codec, so it
-    is NOT a field here — a ``serial`` field defaulting to 1 is what silently fed the warp
-    K-chunk features for a year (the K-chunk lives on the ``TILE`` codec, ``TilePlan.bk``)."""
+    """The reduce-axis decomposition factors the featurizer reads (``fold``/``coop``). The
+    per-thread serial remainder is derived by the materializer (``ceil(extent / parallel)``),
+    never spelled by the ``REDUCE`` codec, so it is NOT a field here — a ``serial`` field
+    defaulting to 1 is what silently fed the warp K-chunk features for a year (the K-chunk lives
+    on the ``TILE`` codec, ``TilePlan.bk``).
+
+    Partitioning across KERNELS is likewise not a field: it is a routing decision, and the kernel
+    it produces carries the partition as a FREE AXIS, so the split width is already in the shape
+    the geometry features read. A knob field for it would double-count it."""
 
     fold: int = 1
-    cta: int = 1
     coop: int = 1
-    finalize: str = "atomic"
     # The ``coop-t`` transposed cooperative band (k-major matvec lane mapping) — a different
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU YAMLs).
@@ -400,11 +400,11 @@ class _Decomp:
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
-    """The primary reduce axis's ``(cta, coop, reg)`` partition factors, decoded from the
-    single ``REDUCE`` codec knob (``g<cta>`` cta / ``coop[-t]`` coop / ``r<reg>`` reg — the reduce
-    tier's one decomposition knob, decided in the ``_schedule`` helper). The ``serial``
-    remainder is derived from the schedule (``ceil(extent / parallel)``), not a knob, so it
-    stays the ``_Decomp`` default."""
+    """The primary reduce axis's ``(coop, reg)`` partition factors, decoded from the single
+    ``REDUCE`` codec knob (``coop[-t]`` coop / ``r<reg>`` reg — the reduce tier's one
+    decomposition knob, decided in the ``_schedule`` helper). The ``serial`` remainder is derived
+    from the schedule (``ceil(extent / parallel)``), not a knob, so it stays the ``_Decomp``
+    default."""
     from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
 
     spec = family_value(knobs, "REDUCE")
@@ -418,11 +418,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
             return _Decomp()
         ReducePlan.parse(reduce, Workers.parse(work))  # re-raise the original error, uncached
         raise AssertionError("unreachable — the uncached parse must raise what the memo mapped to None")
-    # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
-    # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
-    # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
-    # 2026-07-07 reduce-featurization tests; the warp tier repeated the same drop until 2026-07-28).
-    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed)
+    return _Decomp(fold=plan.reg, coop=plan.coop, coop_transposed=plan.coop_transposed)
 
 
 def tile_signature(knobs: dict) -> tuple:
@@ -467,7 +463,6 @@ def _geom_feats(
     cells: int,
     tile_m: int,
     tile_n: int,
-    splitk: int,
     bn: int,
     bm: int,
     bk: int,
@@ -475,7 +470,6 @@ def _geom_feats(
     free_prod,
     sm: float,
     warp: bool,
-    finalize: str = "atomic",
 ) -> dict[str, float]:
     """The engineered ``D_*`` tile-geometry / occupancy feature family — the
     single featurization the priors rank on. It folds in everything the old
@@ -551,12 +545,6 @@ def _geom_feats(
         "D_bk_ge32": 0.0 if warp else (1.0 if bk >= 32 else 0.0),
         "D_w_l2_bk": l2(bk) if warp else 0.0,
         "D_w_near_bk": (-abs(l2(bk) - 1.0)) if warp else 0.0,
-        "D_splitk": float(splitk),
-        "D_splitk_le2": 1.0 if splitk <= 2 else 0.0,
-        # Cross-CTA finalize fold (the REDUCE codec ``c`` field's letter): 1.0 = deferred
-        # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
-        # offline prior's split-K gate reads it.
-        "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
         "D_tilen_clean": 1.0 if tile_n in (32, 64, 128) else 0.0,
         "D_near_tilen": -abs(l2(tile_n) - 6.0),
         # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered — the
@@ -566,67 +554,30 @@ def _geom_feats(
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,
     }
     if free_prod:
-        ctas = float(free_prod) / area * splitk
+        # A kernel produced by a cross-kernel split carries its partition as a FREE AXIS, so the
+        # width is already inside ``free_prod`` — the CTA count needs no split multiplier, and the
+        # whole ``D_splitk_*`` family (excess / deficit / round-trip / finalize-letter) went with
+        # the knob it read. Whether to split at all is not a schedule choice any more: it is a
+        # routing decision, priced as the Σ over the kernels it produces.
+        ctas = float(free_prod) / area
         waves = math.log2(max(ctas / sm, 1e-3))
         out["D_log2_ctas"] = l2(ctas)
         out["D_log2_waves"] = waves  # CTAs relative to SM count
         out["D_near_waves"] = -abs(waves - 1.0)  # target ~2 waves
         out["D_ctas_ge_sm"] = 1.0 if ctas >= sm else 0.0
-        # Split-K beyond what occupancy needs is pure atomic/combine waste. The free
-        # axes alone give ``free_ctas = free_prod/area`` CTAs; split-K is justified
-        # only to lift that toward the ~2·SM ``D_near_waves`` target. The terms above
-        # fold ``splitk`` straight into ``ctas``, so they CANNOT tell "≈2 waves via a
-        # small tile" (golden, free) from "≈2 waves via heavy split-K on a big tile"
-        # (atomic-bound) — both score the same waves / ctas≥sm. This credits split-K
-        # up to the need and penalizes the excess, the engineered signal the online
-        # prior needs to separate the SPLITK=1/2 goldens from the SPLITK=8/16 tiles
-        # the -O1 sweep over-ranks (the offline prior already gets it via D_splitk_le2).
-        free_ctas = float(free_prod) / area
-        # Split-K is justified to (a) lift occupancy toward ~2 waves AND (b) hide the K-streaming
-        # latency of a K-HEAVY GEMM — a long reduction per output tile parallelizes across the split
-        # CTAs even when the free dims already fill the machine. The occupancy-only ``needed`` mispriced
-        # exactly (b): mlp_down (M=512, N=4096, K=14336) has ``free_ctas`` alone saturating the SMs, so
-        # it credited ZERO split and ranked the winning ``g8k`` golden ~9000-deep. ``k_ext /
-        # sqrt(free_prod)`` is the K-per-output-linear-dim heaviness (config-independent; ≈1 for a
-        # square / balanced GEMM, large only when K ≫ √(M·N)) — a second floor on the split the shape
-        # justifies.
-        occ_need = 2.0 * sm / max(free_ctas, 1.0)
-        kheavy_need = k_ext / math.sqrt(max(float(free_prod), 1.0)) if k_ext > 0 else 1.0
-        needed = max(occ_need, kheavy_need, 1.0)
-        out["D_splitk_excess"] = math.log2(max(splitk / needed, 1.0))
-        # The deficit side: UNDER-splitting a shape that justifies a wide split (``splitk < needed``)
-        # is the K-heavy miss — the penalty that lifts the ``g<w>k`` golden over the ``g1`` tile the
-        # occupancy terms alone rank as safe. Zero once ``splitk ≥ needed`` (and for every shape with
-        # ``needed == 1``, so the well-tuned non-split geometries are untouched). Was absent: split-K
-        # had only penalties (``D_splitk_le2`` / ``D_splitk_excess``), never a reward when justified.
-        out["D_splitk_deficit"] = math.log2(max(needed / max(float(splitk), 1.0), 1.0))
-        # The deferred split-K finalize (``g<w>k``) writes + re-reads a full free-size partial
-        # workspace and launches the combine kernel — a round-trip volume the in-place atomic
-        # ``g<w>a`` finalize does not pay.
-        out["D_splitk_roundtrip"] = l2(free_prod) if out["D_finalize_kernel"] else 0.0
-        # Register-tile intensity × occupancy interaction: a wide per-thread
-        # register tile (big FM·FN) is a win only while the grid still covers
-        # the SMs — the flat D_cells* terms can't express that, so the big-FM
-        # goldens (square.2048's FM=26) rank deep under any sign the fit gives
-        # them (2026-06-12 golden-sweep finding 2).
         out["D_l2_cells_occ"] = l2(cells) if ctas >= sm else 0.0
     return out
 
 
 # The reduce-partition slice of the shared ``_geom_feats`` block — the keys a TILE-less row keeps.
 # The tile-geometry keys (area / bands / aspect / cells) would be fabricated constants on a row
-# with no tile; the thread / split-K / finalize / occupancy keys carry the real partition signal
-# (``area=1`` makes ``#CTAs = free_prod·splitk`` — exactly the per-output-cell reduce grid).
+# with no tile; the thread / occupancy keys carry the real partition signal (``area=1`` makes
+# ``#CTAs = free_prod`` — exactly the per-output-cell reduce grid).
 _REDUCE_FEATURE_KEYS = (
     "D_threads",
     "D_l2_threads",
     "D_pow2_threads",
     "D_near_threads",
-    "D_splitk",
-    "D_splitk_le2",
-    "D_splitk_excess",
-    "D_finalize_kernel",
-    "D_splitk_roundtrip",
     # The scalar-on-warp-eligible guard MUST travel with the bonus features: a per-cell contraction
     # leaf (TILE decided-OFF, REDUCE coop fold) is exactly a scalar row competing against tensor
     # cores, and granting it the thread/occupancy bonuses without this penalty made greedy deploy a
@@ -661,7 +612,6 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
         cells=1,
         tile_m=1,
         tile_n=1,
-        splitk=d.cta,
         bn=0,
         bm=0,
         bk=1,  # a TILE-less row has no K-chunk knob (the serial remainder is derived, not spelled)
@@ -669,7 +619,6 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
         free_prod=knobs.get("S_ext_free_prod"),
         sm=float(knobs.get("H_sm_count") or 170.0),
         warp=False,
-        finalize=d.finalize,
     )
     out = {k: g[k] for k in _REDUCE_FEATURE_KEYS if k in g}
     out["D_reduce_ilp"] = math.log2(max(float(d.fold), 1.0))
@@ -700,14 +649,13 @@ def _tile_features(knobs: dict) -> dict[str, float]:
     # The scalar ``TILE`` codec spells no K-chunk (the smem slab's K granularity is derived
     # fit-to-smem at stage resolution, never a knob), so ``bk`` is structurally 1 here and the
     # scalar ``D_l2_bk`` / ``D_bk_ge32`` bands stay 0 until the codec grows a K token.
-    bn, bm, fm, fn, br, bk, splitk = par_n, par_m, reg_m, reg_n, d.coop, 1, d.cta
+    bn, bm, fm, fn, br, bk = par_n, par_m, reg_m, reg_n, d.coop, 1
     return _geom_feats(
         knobs,
         threads=bn * bm * br,
         cells=fm * fn,
         tile_m=bm * fm,
         tile_n=bn * fn,
-        splitk=splitk,
         bn=bn,
         bm=bm,
         bk=bk,
@@ -715,7 +663,6 @@ def _tile_features(knobs: dict) -> dict[str, float]:
         free_prod=knobs.get("S_ext_free_prod"),
         sm=float(knobs.get("H_sm_count") or 170.0),
         warp=False,
-        finalize=d.finalize,
     )
 
 
@@ -742,7 +689,6 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         cells=fm * fn,
         tile_m=wm * fm * am,
         tile_n=wn * fn * an,
-        splitk=d.cta,
         bn=0,  # OFF sentinels: the BN/BM bands don't fire on a warp row
         bm=0,
         # The slab K-chunk is the TILE codec's ``k<n>`` token (``TilePlan.bk``, atom_k multiples —
@@ -754,10 +700,6 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         free_prod=knobs.get("S_ext_free_prod"),
         sm=float(knobs.get("H_sm_count") or 170.0),
         warp=True,
-        # Forward the split-K finalize letter: without it the ``_geom_feats`` default ("atomic")
-        # made a warp ``g<n>k`` row featurize as its ``g<n>a`` twin — the deferred-combine choice
-        # was invisible exactly on the tensor-core tier where wide split-K matters most.
-        finalize=d.finalize,
     )
     # The warp-grid arrangement: how the CTA's warps split across the two canonical free slots
     # (``_free_slots``' wide/narrow ordering, same convention as the scalar ``D_l2_bn``/``D_l2_bm``

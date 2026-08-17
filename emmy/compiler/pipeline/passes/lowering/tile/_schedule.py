@@ -89,9 +89,8 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
-from emmy.compiler.ir.stmt.algebra import M
-from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
+from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
+from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
 from emmy.compiler.ir.tile.ir import is_contraction, operand_body
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
@@ -110,7 +109,6 @@ from emmy.compiler.pipeline.search.space import (
     map_tile_moves,
     raster_moves,
     scalar_tile_moves,
-    splitk_moves,
     stage_moves,
     warp_tile_moves,
 )
@@ -698,11 +696,6 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
     for p in coop_reduce_moves():
-        if p.needs_split and not p.coop_transposed:
-            # A cross-CTA split is offered on this tier only in COMPOSITE with the transposed band
-            # — every split candidate in the catalog is one, so this states the catalog's shape
-            # rather than adding a rule.
-            continue
         if p.coop_transposed:
             # The band's own requirements: the geometry (shared with the contraction tier) plus
             # this tier's epilogue condition.
@@ -847,16 +840,13 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
 
 
 def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
-    """The contraction's ``REDUCE`` candidates — the serial fold, the legal coop / ILP moves
-    (per-cell tier only — the non-output-tiled contract) and the divisor-legal split-K
-    moves. An ATOMIC split is offered only on a single-channel node whose FULL
-    projection tail distributes over the add; the deferred kernel finalize stays legal for any
-    epilogue."""
+    """The contraction's ``REDUCE`` candidates — the serial fold plus the legal coop / ILP moves
+    (per-cell tier only — the non-output-tiled contract). Partitioning across KERNELS is not here:
+    it changes the kernel set, so it is the ``SPLIT`` routing decision resolved at recognition,
+    and this kernel schedules whatever work its own extent carries."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
         pinned = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
-        if pinned.needs_split:
-            return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
             # the NON-output-tiled tier's, so a tiled tile has nothing to honor the pin with.
@@ -865,32 +855,16 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     out = [ReducePlan()]
     ext = node.axis.extent
     k = ext.as_static() if ext.is_static else None
-    # A cross-CTA split factors a STATIC K; either edge's σ-reindex then rides ``_sliced_edge``
-    # (a gmem index, or a computed cone's own k coordinate). Asked HERE and not only at
-    # materialization: ``_splitk_option`` enforces the same rule with ``pinned=True``, so a
-    # candidate the enumeration offered would otherwise become a raise instead of a dropped row.
-    splittable = k is not None and legal.enforce(legal.splitk_computed_b_site(node), pinned=False)
     if k is not None and not plan.is_tiled:
         inner = _inner_free(term.place)
         for p in coop_reduce_moves():
             if not (p.coop <= k and p.reg <= k):
-                continue
-            if p.needs_split and not splittable:
                 continue
             # The transposed lane swap also needs the structure its emitter assumes — the SAME
             # geometry the reduce tier requires, stated once in ``_legality``.
             if not legal.enforce(legal.coop_band_geometry(p, k, inner), pinned=False):
                 continue
             out.append(p)
-    if splittable:
-        step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
-        tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
-        for sp in splitk_moves():
-            if sp.finalize == "atomic" and not atomic_ok:
-                continue  # a non-distributive projection would raise at 030_split_reduce
-            if k % sp.cta == 0 and (k // sp.cta) % step == 0:
-                out.append(sp)
     return out
 
 
@@ -1402,79 +1376,6 @@ def _warp_stream_place(term: _Term, qk: TilePlan, pv: TilePlan) -> Placement:
     return Placement(free=term.place.free, grid=grid)
 
 
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
-    """Factor a STATIC contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
-    ``<k>_ks``) becomes the outer :class:`Fold`'s reduce axis, parallelized across CTAs and summed
-    in the finalize; ``kslice`` (extent ``K/w``, the ORIGINAL name) stays the inner contraction's.
-    The ``sigma`` maps the original ``k`` to ``ksplit·(K/w) + kslice`` so the operand loads
-    reconstruct the absolute index; distinct names are what avoid a double-reduce."""
-    legal.enforce(legal.splitk_width(k_axis, w), pinned=True)
-    b = k_axis.extent.as_static() // w
-    ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
-    kslice = replace(k_axis, extent=Dim(b))
-    sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
-    return ksplit, kslice, sigma
-
-
-def _sliced_edge(edge, sigma: Sigma):
-    """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
-    edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
-    only — the REDUNDANT-STATISTIC split: the cone's row-invariant prologue (the per-row statistic,
-    the K seam ``ops.cone_seam`` reads off the node boundary) spans the whole row and stays
-    FULL-ROW in every partition, each recomputing it. That redundancy is what the split trades for
-    parallelism; whether it pays on a given shape is evidence's decision."""
-    if isinstance(edge, Load):
-        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-    return edge.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
-
-
-def _splitk_option(
-    term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: str, knobs: dict, stage_spec: str, nested: Sequence[tuple] = ()
-) -> TileOp:
-    """One SPLIT-K contraction row — the structural ``Fold(axis=ksplit) ⊃ Fold(axis=kslice)``
-    composition ``030_split_reduce`` consumes into the cross-CTA partial + finalize. The inner node
-    is the SAME contraction a non-split matmul builds, over ``kslice`` with operands σ-reindexed to
-    absolute k; the outer reduce is the IDENTITY-lift composition over it (``Fold.composed``).
-
-    Knob keying stamps against the PRE-SPLIT tree, keeping the kernel single-eligible-axis so the
-    golden bare-collapse and the prior featurizer stay invariant."""
-    if not plan.is_warp:
-        legal.enforce(legal.scalar_block_threads(plan), pinned=True)
-    w = rplan.cta
-    legal.enforce(legal.splitk_slice_k_step(node, plan, w), pinned=True)
-    legal.enforce(legal.splitk_computed_b_site(node), pinned=True)
-    ksplit, kslice, sigma = _factor_k(node.axis, w)
-    inner = Fold.contraction(
-        k_axis=kslice,
-        a=_sliced_edge(node.a, sigma),
-        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma)) for ch in node.channels),
-    )
-    placed = plan.placed_on(term.place)
-    # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is
-    # MANDATORY, so it resolves whether or not the row spelled a depth — :func:`_resolve_stage`
-    # states that, and the enforce is what turns a declining fill into a loud row rather than a
-    # silently gmem-direct one.
-    stage = _resolve_stage(term, inner, placed, Stage.parse(stage_spec) if stage_spec else None)
-    if _needs_fill(term, inner, plan):
-        budget = term.ctx.max_dynamic_smem
-        legal.enforce(None if stage is not None else f"split-K: the fill slabs exceed the {budget} B smem budget", pinned=True)
-    # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
-    # operand, its combine the componentwise additive ⊕ over the same accumulator names — the
-    # reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``.
-    accs = tuple(inner.defines())
-    outer = Fold(
-        axis=ksplit,
-        operands=(inner,),
-        lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
-        **dict(zip(("init", "combine"), M(*(["add"] * len(accs)), names=accs), strict=True)),
-    )
-    op = Fold.projection(body=term.proj, operands=(outer,)) if len(term.proj) else outer
-    # The nested triples key against the PRE-SPLIT nodes the enumeration walked, which the split
-    # rewrite leaves untouched below the sliced contraction.
-    own = [("REDUCE", outer, rplan), ("TILE", inner, placed), ("STAGE", inner, stage)]
-    return _stamp(term, op, name, knobs, [*own, *nested])
-
-
 def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     """One row → its ``TileOp``, every slice RE-RESOLVED from the row's spellings through the same
     dispatches the enumeration used (:func:`_resolve_stage`, ``resolve_site_tile``,
@@ -1523,9 +1424,6 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     # nested-only term has no root TILE key at all; borrowing its shared thread inventory there
     # invents a slice the codec cannot address.
     plan = resolve_site_tile(value("TILE"), work, rplan.coop) if "TILE" in keys else TilePlan()
-    if is_contraction(node) and rplan.needs_split:
-        # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
-        return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)
     stage = _stage_of(term, node, plan, value("STAGE")) if value("STAGE") else None
     return _node_option(term, node, plan, rplan, stage, work, name, op_knobs, nested)
 

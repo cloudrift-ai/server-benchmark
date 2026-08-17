@@ -70,6 +70,7 @@ from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+from emmy.compiler.pipeline.passes.lowering.tile._split import legal_moves, realize_split, route_split, splittable_sites
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
 PATTERN = [Pattern("root", LoopOp)]
@@ -99,26 +100,32 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # the scheduler can read operand shapes (the shared-row stage detection); the matcher refreshes
     # it from the graph again when a later pass matches the scheduled op.
     pro = bind_prologue_contraction(node, free)
-    # (3.5) PLACEMENT — resolved FIRST, before any schedule fork exists: an authoritative
-    # PLACE pin cuts the recognized tree into a fragment of un-mapped LoopOps (or keeps it
-    # fused); each piece re-recognizes as a fresh root on the pass-scan restart (recursive — a
-    # deeper pin key may cut a piece again). The fused (computed-A) view is the reference tree
-    # when it binds — its seams (the `a` cone edge) are the ones a ``PLACE`` key spells.
+    # (3.5) ROUTING — resolved FIRST, before any schedule fork exists. Two families decide the
+    # KERNEL SET here, and both work the same way: an authoritative pin rewrites the recognized
+    # tree into a fragment of un-mapped LoopOps, and each piece re-recognizes as a fresh root on
+    # the pass-scan restart (recursive — a deeper pin key may route a piece again).
     #
-    # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form beside one cut fragment
-    # per legal seam, so tune DISCOVERS cuts and a deploy prices them like any kernel-set choice
-    # (``greedy._priced_pick``). Nothing holds the fused side ahead of the cuts — this list is a
-    # set of legal placements, not a ranking. The chosen fragment's parent piece carries
-    # ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays as the exact
-    # pin.
+    # - ``PLACE@<seam>: cut`` cuts the tree at a parent↔child seam. The fused (computed-A) view is
+    #   the reference tree when it binds — its seams (the `a` cone edge) are the ones a key spells.
+    # - ``SPLIT@<axis>: g<w>[a|k]`` partitions a reducing fold's axis across kernels.
+    #
+    # UNPINNED, routing is an enumerated STRUCTURAL fork: the fused form beside one fragment per
+    # legal cut seam and per legal split move, so tune DISCOVERS both and a deploy prices them like
+    # any kernel-set choice (``greedy._priced_pick`` — Σ over the fragment's kernels). Nothing
+    # holds the fused side ahead of the fragments; this list is a set of legal routings, not a
+    # ranking. The fragment piece that owns the output carries the decision in its op knobs, so a
+    # measured routing records and replays as the exact pin.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if verdict == "cut":
         return realize_cut(match, root, route_tree, route_free, route_stores, seam)
+    pinned_split = route_split(route_tree, route_free, route_stores)
+    if pinned_split is not None:
+        site, width, arm = pinned_split
+        return realize_split(match, root, route_tree, route_free, route_stores, site, width, arm)
     if verdict is None:
-        seams = cuttable_seams(route_tree, route_stores, route_free)
         cut_options = []
-        for s_ in seams:
+        for s_ in cuttable_seams(route_tree, route_stores, route_free):
             try:
                 cut_options.append(realize_cut(match, root, route_tree, route_free, route_stores, s_))
             except RuleSkipped:
@@ -129,6 +136,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
                 # ``legal.enforce`` convention; a PLACE pin naming the same seam still raises
                 # loudly through the ``route_cut`` arm above.
                 continue
+        for s_ in splittable_sites(route_tree, route_free):
+            for width, arm in legal_moves(s_, route_tree, route_stores):
+                try:
+                    cut_options.append(realize_split(match, root, route_tree, route_free, route_stores, s_, width, arm))
+                except RuleSkipped:
+                    continue  # already split — this IS a piece of an applied split
+                except (ValueError, NotImplementedError):
+                    continue  # same drop-vs-raise convention as the cut arm above
         if cut_options:
             return [map_tile, *cut_options]
     # Recognition ends here: the UNMAPPED tile is the rewrite's result. The MONOID-producer

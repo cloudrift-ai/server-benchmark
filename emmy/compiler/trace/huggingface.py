@@ -1594,7 +1594,7 @@ def load_quantized_split(
     - The twin is built from config alone on the META device (weights never read at trace;
       the experts' would-be random init never materializes).
     - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
-      streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
+      streams per shard: fp8 and NVFP4 weights dequantize by their scale siblings, everything
       casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
       3-D expert params are skipped — they stay meta on the twin.
     - The EXPERT tensors are collected into a per-layer store keyed by the expert program's

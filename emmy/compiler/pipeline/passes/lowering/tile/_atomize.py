@@ -117,8 +117,9 @@ class PackedKBlockB:
     ``bits`` is the packed-pair storage Load (its input tensor's dtype has
     ``logical_elems == 2``), ``table`` the data-dependent pair-value gather it feeds,
     ``factor`` the SSA name of the scale factor, and ``block`` the k extent the factor
-    is constant on. The packed byte-slab offer consumes this: the bits stage raw, the
-    drain decodes pairs, and the factor applies on the accumulator once per k block.
+    is constant on. The packed byte-slab offer consumes this: the bits stage raw, and
+    the drain decodes pairs and multiplies the factor into the decoded values at the
+    fragment load (one factor read per k block).
     """
 
     bits: Load

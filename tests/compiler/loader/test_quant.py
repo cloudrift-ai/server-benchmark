@@ -933,8 +933,10 @@ def test_fp4_and_fp8_recognizers_do_not_cross_match(tmp_path):
 # MIXED_PRECISION: one checkpoint, two schemes, sorted per leaf
 # ===================================================================
 
-# modelopt's form for a checkpoint whose schemes differ by leaf (nvidia/Qwen3.6-27B-NVFP4): the
-# algo names no single scheme, and one config group per scheme carries the widths instead.
+# modelopt's form for a checkpoint whose schemes differ by leaf (the nvidia/Qwen3.6-27B-NVFP4
+# shape): the algo names no single scheme, and one config group per scheme carries the widths
+# instead. The ignore entry here exercises the mechanism; the real 27B ignores mtp*, not lm_head
+# (its lm_head is NVFP4).
 _MIXED_QC = {
     "quant_method": "modelopt",
     "quant_algo": "MIXED_PRECISION",

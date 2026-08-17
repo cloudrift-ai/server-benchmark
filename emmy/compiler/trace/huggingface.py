@@ -631,8 +631,11 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     queries and a per-element OUTPUT GATE that multiplies the attention result before ``o_proj``.
     ``pre`` then returns a FOURTH tensor, that gate at ``[T, Hq·D]``, and ``post`` takes it as a
     third argument and applies ``attn_out * sigmoid(gate)``. Carrying it across the seam rather than
-    recomputing it is the same choice the linear-attention carve makes for its own gate: it comes
-    out of the same projection as q, so recomputing would run that projection twice. ``Pre`` and the
+    recomputing it in ``post`` mirrors what the linear-attention carve does with its own gate: both
+    are values some projection has already produced, and recomputing either means a second full pass
+    over a large weight. Here the weight is ``q_proj`` itself — the gate is literally its other half
+    — so recomputing would run the query projection twice per layer. (The linear-attention gate is
+    the same decision over a projection of its OWN, ``in_proj_z``, not a shared one.) ``Pre`` and the
     builder both expose the flag (``pre.emits_gate``) so a caller can tell which arity it got.
 
     Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``

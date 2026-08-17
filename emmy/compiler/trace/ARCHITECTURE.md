@@ -139,9 +139,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   gate. The shared `_build_pre_wrapper` instead compares those widths against the module's own declared
   query-heads-per-key/value-head ratio (`num_key_value_groups`), which identifies the layout without keying on a
   model name. `pre` then returns a FOURTH tensor, the gate at `[tokens, Hq·D]`, and `post` takes it as a third
-  argument and applies `attn_out * sigmoid(gate)` — the same choice the linear-attention carve makes for its own
-  gate, and for the same reason: it comes out of the same projection as q, so recomputing it would run that
-  projection twice. `Pre.emits_gate` says which arity a caller got. The dense and MoE posts both take the argument.
+  argument and applies `attn_out * sigmoid(gate)` — mirroring what the linear-attention carve does with its own
+  gate. Both carry a value some projection already produced rather than recompute it, because either recomputation
+  is a second full pass over a large weight; here that weight is `q_proj` itself, since the gate is its other half.
+  (The linear-attention gate is the same decision over a projection of its OWN, `in_proj_z`.) `Pre.emits_gate` says
+  which arity a caller got. The dense and MoE posts both take the argument.
   A query projection whose excess width is anything OTHER than that exact doubling still raises, as does a block
   carrying both a fused gate and a separate `g_proj` (two gates, undefined order); a module declaring no ratio
   passes through unchecked.

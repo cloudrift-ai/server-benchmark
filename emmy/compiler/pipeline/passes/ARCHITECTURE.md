@@ -272,6 +272,26 @@ escape with no schedule tier and no `PLACE` seam, so evidence could never price 
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.
 
+**Merge ORDER is a decision, and `loop/prefusion` makes it.** A merge is directional — it makes the SINK the
+region's output, so the sink's width must then be written. Splice a compute producer into a still-open
+contraction product and that outer product lands in gmem, and the fold that would have collapsed it can only
+arrive afterwards as a reduce nested in a reduce, which fusion refuses as an unreadable seam. Nothing
+downstream undoes it: the buffer is there at every tile. Which order the fixpoint reached was previously
+decided by whichever match the enumeration hit first, and one order costs a 1-layer Qwen3-0.6B trunk at seq
+512 a 6.006 GiB scratch slab against 0.026 GiB for the other.
+
+`loop/prefusion` runs the same splice through the same `_merge.merge_region` with the same refusals, and
+differs from `loop/fusion` in one predicate: it takes only merges whose sink is no wider than the producer.
+Those can only shrink what gets written, so draining them first means every contraction has CLOSED before
+anything is offered a chance to splice into its open product. It **refuses nothing** — a widening merge is
+DEFERRED, and `loop/fusion` offers every one of them afterwards, where the existing refusals decide. That is
+why this is an ordering and not a gate: no legal form leaves the enumeration, so the doctrine above is intact.
+
+It must be a PASS, not another rule inside `loop/fusion`. The cursor advances rule-by-rule within a pass and
+re-enumerates, so two rules' batches interleave — measured, the same predicate as a `009_` rule left the trunk
+at 6.006 GiB because the compute producer still reached the open product first. A pass is left only once it is
+quiescent.
+
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading
@@ -529,7 +549,9 @@ realizer (`lowering/tile/_cut.py`) splits the tree there: the child
 subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
 index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
 AXIS — bridges carrier state as **f32** per the split-reduce workspace rule, while a zero-axis projection child is
-the value seam and keeps its leaf operand dtype: in the one-kind IR every node is a `Fold`, so the axis is the
+the value seam and takes the seam VALUE's dtype — the converting statement's own where the cone converts, else the
+leaf operand it passes through; a coded-weight decode cone reads integer tables and yields f16, and the leaf dtype
+there would round every element to an integer: in the one-kind IR every node is a `Fold`, so the axis is the
 discriminator, not the class), and the parent
 consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
 roots on the pass-scan restart —

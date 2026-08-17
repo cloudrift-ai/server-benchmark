@@ -278,9 +278,9 @@ def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> No
 
 
 def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:
-    from importlib import import_module
-
-    _entangled_multi_stat = import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")._entangled_multi_stat
+    # The readable-seam refusals live in ``_merge``, the splice both merge passes share; the rule
+    # modules are thin predicates over it, so a plain import reaches them (no digit-led module name).
+    from emmy.compiler.pipeline.passes.loop.fusion._merge import _entangled_multi_stat
 
     # Pair + a free sweep whose nested fold is NOT flat-additive (a maximum) — still entangled.
     bad = Loop(

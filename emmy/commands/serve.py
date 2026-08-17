@@ -396,11 +396,22 @@ def _child_env() -> dict:
 
 
 def handle_serve(args):
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
-    serve_cmd = build_serve_cmd(args.model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
+    # ``<repo>@<revision>`` is emmy's pin spelling — ``compile``, ``pull``, the gen runner and the
+    # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
+    # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
+    # leaving them joined does not merely lose the pin: every local config probe downstream
+    # (``_local_config``) fails on the unresolvable id and silently returns ``None``, so the
+    # coded-checkpoint unquantized override and the MoE capture-size cap both no-op.
+    model, revision = split_revision(args.model)
+    if revision and not _has_flag(vllm_args, "--revision"):
+        vllm_args = [*vllm_args, "--revision", revision]
+    serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
     port = _flag_value(vllm_args, "--port", "8000")
     bench_cmd = build_bench_cmd(
-        args.model,
+        model,
         port=port,
         max_concurrency=args.max_concurrency,
         num_prompts=args.num_prompts,

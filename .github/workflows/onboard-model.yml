@@ -51,6 +51,8 @@ jobs:
       mode: ${{ steps.selection.outputs.mode }}
       deployment_summary: ${{ steps.artifacts.outputs.deployment_summary }}
       performance_summary: ${{ steps.artifacts.outputs.performance_summary }}
+      failure_kind: ${{ steps.notice.outputs.failure_kind }}
+      failure_summary: ${{ steps.notice.outputs.failure_summary }}
       pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
     env:
       GH_REPO: ${{ github.repository }}
@@ -475,17 +477,27 @@ jobs:
 
           {task}
           Do not select a model or GPU, provision or delete the VM, commit, push, or open/update a pull request.
+          For missing images or unfamiliar launch failures, investigate current official registries, release notes,
+          engine documentation, and upstream issues. Test an evidence-backed current repository/tag when the configured
+          image moved or disappeared, then pin the exact working tag or digest. You may implement a bounded,
+          model-agnostic compatibility fix with focused tests when it is necessary for this exact qualification.
+          You may delegate independent read-only research or failure diagnosis to the onboard-investigator subagent;
+          retain responsibility for all edits, measurements, and conclusions.
           Always write the required atomic summary with mode set to {mode}, including experiment_artifacts with
-          the shared experiment recipe and RESULTS.md, the exact results_<gpu-short>x<gpu-count>.tar.gz archive, and
-          the retained top-level experiment records for this platform. Replace only this platform's archive and
-          records; preserve every other platform archive, record, and RESULTS.md section. Do not retain the ignored
-          dated run directory or onboarding summaries. Update the final recipe's RESULTS.md for this platform while
-          preserving still-valid measurements for its other platforms.
+          the shared experiment recipe and RESULTS.md plus the exact results_<gpu-short>x<gpu-count>.tar.gz archive.
+          The archive must contain the platform's system-only experiment records; do not retain those records as
+          top-level files. Replace only this platform's archive and preserve every other platform archive and
+          RESULTS.md section. Do not retain the ignored dated run directory or onboarding summaries. Update the final
+          recipe's RESULTS.md for this platform while preserving still-valid measurements for its other platforms.
           Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
           filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
-          output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, and canonical golden YAML.
+          output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML,
+          and a bounded small fix under emmy/ with its focused tests and nearest ARCHITECTURE.md updates.
           Include one-line deployment_summary and performance_summary values drawn from the exact selected recipe lane.
+          On failure, set failure.regression=true only when a previously qualified behavior or performance lane
+          regressed and the bounded fix attempt could not restore it; include a concise, credential-free message for
+          the Discord notification.
           """
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY
@@ -511,6 +523,35 @@ jobs:
           fi
           exit "$agent_status"
 
+      - name: Collect onboarding failure notice
+        id: notice
+        if: always() && steps.vm.outcome == 'success'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          kind = ""
+          message = ""
+          summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          try:
+              summary = json.loads(summary_path.read_text())
+              failure = summary.get("failure") or {}
+              if summary.get("status") == "failed" and isinstance(failure, dict):
+                  kind = "regression" if failure.get("regression") is True else "failure"
+                  gate = failure.get("gate")
+                  detail = failure.get("message")
+                  parts = [value.strip() for value in (gate, detail) if isinstance(value, str) and value.strip()]
+                  message = ": ".join(parts)
+          except (OSError, ValueError, json.JSONDecodeError):
+              pass
+          message = " ".join(message.split())[:1000]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"failure_kind={kind}\n")
+              output.write(f"failure_summary={message}\n")
+          PY
+
       - name: Remove archived task-local raw results
         if: steps.vm.outcome == 'success'
         run: |
@@ -519,6 +560,7 @@ jobs:
           import os
           import re
           import shutil
+          import subprocess
           import tarfile
           from pathlib import Path, PurePosixPath
 
@@ -550,14 +592,29 @@ jobs:
               member_paths = []
               with tarfile.open(path, "r:gz") as source:
                   for member in source.getmembers():
-                      member_paths.append(PurePosixPath(member.name.removeprefix("./")))
+                      member_path = PurePosixPath(member.name.removeprefix("./"))
+                      if member_path.is_absolute() or ".." in member_path.parts:
+                          raise SystemExit(f"Unsafe archive member: {member.name}")
+                      member_paths.append(member_path)
                       if member.isfile():
                           contents = source.extractfile(member)
                           if contents is None:
                               raise SystemExit(f"Could not read archived file: {member.name}")
                           while contents.read(1024 * 1024):
                               pass
-              return {path.parts[0] for path in member_paths if path.parts}
+              roots = {member_path.parts[0] for member_path in member_paths if member_path.parts}
+              records = {
+                  member_path
+                  for member_path in member_paths
+                  if member_path.name == f"{platform}.experiment.yaml"
+                  or (
+                      member_path.name.startswith(f"{platform}_")
+                      and member_path.name.endswith(".experiment.yaml")
+                  )
+              }
+              if not records:
+                  raise SystemExit(f"Results archive contains no {platform} experiment records: {path}")
+              return roots
 
           if raw_directories:
               temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
@@ -600,19 +657,36 @@ jobs:
               experiment_recipe,
               experiment_report,
               archive_path,
-              *platform_records,
           ]
           missing = [path for path in durable_snapshot if not (workspace / path).is_file()]
           if missing:
               raise SystemExit(f"Current-platform durable snapshot is incomplete: {missing}")
+
+          tracked_record_deletions = []
+          for record in platform_records:
+              tracked = subprocess.run(
+                  ["git", "ls-files", "--error-unmatch", "--", str(record)],
+                  cwd=workspace,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              ).returncode == 0
+              (workspace / record).unlink()
+              if tracked:
+                  tracked_record_deletions.append(record)
 
           legacy_path = experiment_recipe.parent / "results.tar.gz"
           for key in ("experiment_artifacts", "artifacts"):
               existing = summary.get(key) or []
               if not isinstance(existing, list):
                   raise SystemExit(f"Summary {key} must be a list")
-              retained = [path for path in existing if Path(path) != legacy_path]
-              summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in durable_snapshot)]))
+              retained = [
+                  path
+                  for path in existing
+                  if Path(path) != legacy_path and Path(path) not in platform_records
+              ]
+              additions = durable_snapshot if key == "experiment_artifacts" else [*durable_snapshot, *tracked_record_deletions]
+              summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in additions)]))
 
           temporary_summary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
           try:
@@ -829,6 +903,8 @@ jobs:
       ONBOARD_MODE: ${{ needs.onboard.outputs.mode }}
       DEPLOYMENT_SUMMARY: ${{ needs.onboard.outputs.deployment_summary }}
       PERFORMANCE_SUMMARY: ${{ needs.onboard.outputs.performance_summary }}
+      FAILURE_KIND: ${{ needs.onboard.outputs.failure_kind }}
+      FAILURE_SUMMARY: ${{ needs.onboard.outputs.failure_summary }}
       PR_NUMBER: ${{ needs.onboard.outputs.pr_number }}
     steps:
       - name: Checkout exact workflow source

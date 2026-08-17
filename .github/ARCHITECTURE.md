@@ -108,9 +108,10 @@ small remote Python/rsync prerequisite set and
 requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
 the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment
-retains one LFS archive and top-level row-record set per exact GPU platform plus one cumulative `RESULTS.md`; a run
-replaces only its platform snapshot. Ignored dated run directories, loose benchmark output, and qualification
-summaries are not repository artifacts. An Emmy-tuned prebuilt image is produced only when every release gate passes.
+retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its system-only
+row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark output,
+top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image
+is produced only when every release gate passes.
 Nightly image publication is disabled unless
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
@@ -121,17 +122,25 @@ The selector runs the exact-SHA catalog logic against the rolling worktree's `re
 and priority always reflect the branch that the agent will update.
 The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills as authoritative
 agent inputs; older copies on the rolling branch cannot silently override a proposed artifact contract.
+The named onboarding agent may delegate bounded read-only compatibility research or failure diagnosis to the hidden
+`onboard-investigator` subagent. The parent retains every edit and measurement. When an official engine image tag is
+missing, qualification checks official registries, release notes, and upstream documentation for a renamed repository
+or current compatible tag before failing, then pins the exact working tag or digest. A necessary small,
+model-independent compatibility fix may touch at most eight implementation/test/architecture files and 500 changed
+lines, and any Python source change requires a focused test change. Broader changes fail artifact validation and
+remain follow-up work.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, and canonical-golden paths. The validator requires the shared experiment
-recipe and report, the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and matching current-platform row
-records.
+allowed recipe, experiment, serving-image, canonical-golden, and bounded implementation/test paths. The validator
+requires the shared experiment recipe and report plus the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and
+it opens that archive to require matching current-platform row records.
 It rejects changes to another platform snapshot and requires the current archive to be created or updated. Optional
 outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. The job installs a pinned,
 checksum-verified Git LFS binary in the runner's temporary directory when needed, then configures LFS locally before
 staging so the normal push uploads the archive object with the rolling branch. After the agent returns, the workflow
 requires each task-local timestamp directory to be a root member of the declared platform archive before removing
-that ignored local directory; only the durable archive proceeds to staging.
+that ignored local directory. It deletes current-platform top-level record copies only after the archive passes its
+record and byte-read checks; only the durable archive proceeds to staging.
 The workflow writes the agent's final completed text event to the job log before checking its exit status, preserving
 the failure explanation after temporary output cleanup. The validator also checks the requested mode, exact recipe
 model, expected lifecycle tag, and compact deployment and measured-performance summaries from the selected recipe
@@ -141,9 +150,11 @@ rolling model lifecycle PR using renewable GitHub App credentials for the long-r
 Both lifecycle workflows finish with a separate GitHub-hosted notification job. Discovery groups only recipe entries
 actually modified by the run under their resulting lifecycle, includes each current heat score, and links the run and
 rolling PR. Onboarding includes the selected model, target, operation mode, serving deployment, and measured
-performance from its validated atomic summary. Because the notification job is independent of the self-hosted agent
-job, it still runs after a failure, cancellation, or timeout. Discord delivery retries three times, remains
-non-blocking, and disables all mentions; the workflow run, durable reports, and rolling PR retain the complete
+performance from its validated atomic summary. A failed summary marks a regression only when a previously qualified
+behavior or measured lane cannot be restored by a bounded fix; the isolated notification job then sends a prominent
+red Discord notice with the credential-free gate and message. Because the notification job is independent of the
+self-hosted agent job, it still runs after a failure, cancellation, or timeout. Discord delivery retries three times,
+remains non-blocking, and disables all mentions; the workflow run, durable reports, and rolling PR retain the complete
 evidence.
 
 ### Discovery lifecycle PR

@@ -109,6 +109,10 @@ def _onboard_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         title = "Model onboarding workflow cancelled"
         description = "The model lifecycle workflow was cancelled before it completed."
         color = CANCELLED_COLOR
+    elif environment.get("FAILURE_KIND") == "regression":
+        title = "Model regression needs attention"
+        description = "A previously qualified behavior regressed and the onboarding agent could not restore it."
+        color = FAILURE_COLOR
     else:
         operation = f" {mode}" if mode else ""
         title = f"Model{operation} failed"
@@ -126,6 +130,10 @@ def _onboard_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
             fields.append({"name": "Deployment", "value": deployment_summary[:FIELD_VALUE_LIMIT], "inline": False})
         if performance_summary:
             fields.append({"name": "Performance", "value": performance_summary[:FIELD_VALUE_LIMIT], "inline": False})
+    failure_summary = environment.get("FAILURE_SUMMARY", "").strip()
+    if result not in {"success", "cancelled"} and failure_summary:
+        label = "Regression" if environment.get("FAILURE_KIND") == "regression" else "Failure"
+        fields.append({"name": label, "value": failure_summary[:FIELD_VALUE_LIMIT], "inline": False})
     if mode:
         fields.append({"name": "Mode", "value": f"`{mode[:1000]}`", "inline": True})
     return title, description, color, fields
@@ -169,7 +177,7 @@ def build_payload(environment: Mapping[str, str], *, now: datetime | None = None
     if pull_request is not None:
         fields.append(pull_request)
     timestamp = now or datetime.now(UTC)
-    return {
+    payload = {
         "username": "Emmy Robots",
         "allowed_mentions": {"parse": []},
         "embeds": [
@@ -184,6 +192,9 @@ def build_payload(environment: Mapping[str, str], *, now: datetime | None = None
             }
         ],
     }
+    if workflow_kind == "onboard" and environment.get("WORKFLOW_RESULT") == "failure" and environment.get("FAILURE_KIND") == "regression":
+        payload["content"] = "🚨 **Model regression needs attention**"
+    return payload
 
 
 def send_notification(

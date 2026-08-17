@@ -7,7 +7,8 @@ import argparse
 import json
 import subprocess
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -18,10 +19,14 @@ from emmy.recipe.lifecycle import validate_recipe_tags
 ALLOWED_ARTIFACT_PREFIXES = (
     "docker/vllm-emmy-serve/models/",
     "emmy/compiler/pipeline/search/goldens/",
+    "emmy/",
     "experiments/",
     "recipes/",
+    "tests/",
 )
 SUMMARY_TEXT_LIMIT = 1000
+MAX_IMPLEMENTATION_FILES = 8
+MAX_IMPLEMENTATION_CHANGED_LINES = 500
 
 
 def _summary_text(summary: dict, field: str) -> str:
@@ -55,14 +60,13 @@ def _is_platform_record(path: Path, platform: str) -> bool:
 
 def _is_durable_experiment_artifact(path: Path) -> bool:
     named_archive = path.name.startswith("results_") and path.name.endswith(".tar.gz")
-    return path.name in {"recipe.yaml", "RESULTS.md"} or path.name.endswith(".experiment.yaml") or named_archive
+    return path.name in {"recipe.yaml", "RESULTS.md"} or named_archive
 
 
 def _relative_experiment_artifact(workspace: Path, raw_path: str, experiment_dir: Path, platform: str) -> Path:
     path = _relative_file(workspace, raw_path, ("experiments/",))
     allowed_names = {"recipe.yaml", "RESULTS.md", f"results_{platform}.tar.gz"}
-    allowed_for_platform = path.name in allowed_names or _is_platform_record(path, platform)
-    if path.parent != experiment_dir or not allowed_for_platform:
+    if path.parent != experiment_dir or path.name not in allowed_names:
         raise ValueError(f"Artifact is outside the {platform} durable experiment snapshot: {raw_path}")
     return path
 
@@ -83,18 +87,91 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
     normalized = path.as_posix()
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Artifact path is not repository-relative: {raw_path}")
-    if normalized.startswith(ALLOWED_ARTIFACT_PREFIXES) and ((workspace / path).is_file() or _is_tracked_deletion(workspace, path)):
+    is_golden = normalized.startswith("emmy/compiler/pipeline/search/goldens/")
+    allowed_implementation_file = (
+        is_golden or path.parts[0] not in {"emmy", "tests"} or path.suffix == ".py" or path.name == "ARCHITECTURE.md"
+    )
+    if (
+        normalized.startswith(ALLOWED_ARTIFACT_PREFIXES)
+        and allowed_implementation_file
+        and ((workspace / path).is_file() or _is_tracked_deletion(workspace, path))
+    ):
         return path
     raise ValueError(f"Artifact path is outside the allowed onboarding areas or does not exist: {raw_path}")
 
 
-def _invalid_result_artifacts(artifacts: list[Path]) -> list[Path]:
+def _invalid_result_artifacts(workspace: Path, artifacts: list[Path]) -> list[Path]:
     return [
         path
         for path in artifacts
-        if (path.parts[0] == "experiments" and not _is_durable_experiment_artifact(path))
+        if (
+            path.parts[0] == "experiments"
+            and not _is_durable_experiment_artifact(path)
+            and not (path.name.endswith(".experiment.yaml") and _is_tracked_deletion(workspace, path))
+        )
         or (path.parts[0] == "recipes" and path.name not in {"recipe.yaml", "RESULTS.md"})
     ]
+
+
+def _archive_platform_records(workspace: Path, archive: Path, platform: str) -> list[PurePosixPath]:
+    records = []
+    with tarfile.open(workspace / archive, "r:gz") as source:
+        for member in source.getmembers():
+            member_path = PurePosixPath(member.name.removeprefix("./"))
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Unsafe member in exact platform archive: {member.name}")
+            if not member.isfile() or not _is_platform_record(Path(member_path.name), platform):
+                continue
+            contents = source.extractfile(member)
+            if contents is None or not isinstance(yaml.safe_load(contents), dict):
+                raise ValueError(f"Invalid experiment record in exact platform archive: {member.name}")
+            records.append(member_path)
+    if not records:
+        raise ValueError(f"Exact platform archive contains no {platform} experiment records: {archive}")
+    return records
+
+
+def _is_implementation_artifact(path: Path) -> bool:
+    return (
+        bool(path.parts) and path.parts[0] in {"emmy", "tests"} and not path.as_posix().startswith("emmy/compiler/pipeline/search/goldens/")
+    )
+
+
+def _validate_implementation_patch(workspace: Path, changed: set[str]) -> None:
+    implementation = sorted(Path(path) for path in changed if _is_implementation_artifact(Path(path)))
+    if len(implementation) > MAX_IMPLEMENTATION_FILES:
+        raise ValueError(f"Onboarding small fix changes too many implementation files: {len(implementation)}")
+    if not implementation:
+        return
+    source_changes = [path for path in implementation if path.parts[0] == "emmy" and path.suffix == ".py"]
+    test_changes = [path for path in implementation if path.parts[0] == "tests" and path.suffix == ".py"]
+    if source_changes and not test_changes:
+        raise ValueError("Onboarding small fix must include a focused test change")
+
+    result = subprocess.run(
+        ["git", "diff", "--numstat", "--no-renames", "HEAD", "--", *(str(path) for path in implementation)],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    changed_lines = 0
+    counted = set()
+    for line in result.stdout.splitlines():
+        added, deleted, raw_path = line.split("\t", 2)
+        if added == "-" or deleted == "-":
+            raise ValueError(f"Onboarding small fix must not add binary implementation artifacts: {raw_path}")
+        changed_lines += int(added) + int(deleted)
+        counted.add(raw_path)
+    for path in implementation:
+        if path.as_posix() in counted or not (workspace / path).is_file():
+            continue
+        contents = (workspace / path).read_bytes()
+        if b"\0" in contents:
+            raise ValueError(f"Onboarding small fix must not add binary implementation artifacts: {path}")
+        changed_lines += len(contents.splitlines())
+    if changed_lines > MAX_IMPLEMENTATION_CHANGED_LINES:
+        raise ValueError(f"Onboarding small fix changes too many implementation lines: {changed_lines}")
 
 
 def validate_summary(
@@ -162,8 +239,7 @@ def validate_summary(
     experiment_archive = experiment_dir / f"results_{platform}.tar.gz"
     if experiment_archive not in experiment_artifacts:
         raise ValueError(f"The exact platform archive must be included in experiment_artifacts: {experiment_archive}")
-    if not any(_is_platform_record(path, platform) for path in experiment_artifacts):
-        raise ValueError(f"At least one {platform} experiment record must be included in experiment_artifacts")
+    _archive_platform_records(workspace, experiment_archive, platform)
     raw_artifacts = summary.get("artifacts")
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
         raise ValueError("Summary must include a non-empty artifacts list")
@@ -177,7 +253,7 @@ def validate_summary(
             ]
         )
     )
-    invalid_result_artifacts = _invalid_result_artifacts(artifacts)
+    invalid_result_artifacts = _invalid_result_artifacts(workspace, artifacts)
     if invalid_result_artifacts:
         raise ValueError(f"Only durable recipe and experiment artifacts may be retained: {invalid_result_artifacts}")
     invalid_experiment_artifacts = [
@@ -186,7 +262,10 @@ def validate_summary(
         if path.parts[0] == "experiments"
         and not (
             path.parent == experiment_dir
-            and (path.name in {"recipe.yaml", "RESULTS.md", experiment_archive.name} or _is_platform_record(path, platform))
+            and (
+                path.name in {"recipe.yaml", "RESULTS.md", experiment_archive.name}
+                or (_is_platform_record(path, platform) and _is_tracked_deletion(workspace, path))
+            )
         )
     ]
     if invalid_experiment_artifacts:
@@ -197,7 +276,7 @@ def validate_summary(
 
 
 def stage_artifacts(workspace: Path, artifacts: list[Path], required_archive: Path | None = None) -> None:
-    invalid_result_artifacts = _invalid_result_artifacts(artifacts)
+    invalid_result_artifacts = _invalid_result_artifacts(workspace, artifacts)
     if invalid_result_artifacts:
         raise ValueError(f"Only durable recipe and experiment artifacts may be retained: {invalid_result_artifacts}")
     tracked_changes = subprocess.run(
@@ -226,6 +305,7 @@ def stage_artifacts(workspace: Path, artifacts: list[Path], required_archive: Pa
     if unexpected:
         raise ValueError(f"Agent changed paths outside its artifact manifest: {sorted(unexpected)}")
     changed = set(tracked_changes) | set(untracked) | set(ignored_experiments)
+    _validate_implementation_patch(workspace, changed)
     if required_archive is not None and required_archive.as_posix() not in changed:
         raise ValueError(f"Exact platform results archive was not created or updated: {required_archive}")
     if required_archive is not None:

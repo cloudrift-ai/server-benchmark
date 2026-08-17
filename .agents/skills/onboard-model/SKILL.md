@@ -13,25 +13,28 @@ Turn a Hugging Face model ID, an operation mode, and an exact `(GPU name, GPU co
 artifacts:
 
 - one recommended serving recipe under `recipes/<model>/recipe.yaml`;
-- one reusable serving experiment under `experiments/<model>/` with a cumulative report, system-only row records,
-  and one Git LFS raw-results archive per exact GPU platform;
+- one reusable serving experiment under `experiments/<model>/` with a cumulative report and one Git LFS evidence
+  archive, including the system-only row records, per exact GPU platform;
 - one compact, self-contained `recipes/<model>/RESULTS.md` only when a valid final deployment recipe exists;
 - a complete compiler golden under `emmy/compiler/pipeline/search/goldens/` when full coverage qualifies;
 - when Emmy is eligible, tuned kernels and a verified, prebuilt
   `cloudriftai/vllm-emmy-<model-slug>:<tag>` image.
 
 Repository storage retains reproducibility input and durable evidence for each qualified serving platform. In the
-serving experiment root, commit `recipe.yaml`, one cumulative `RESULTS.md`, top-level system-only experiment records,
-and `results_<gpu-short>x<gpu-count>.tar.gz` for each measured exact GPU name/count. Derive `<gpu-short>` with
-`emmy.hardware.gpu_short_name`; for example, a single RTX 4090 uses `results_rtx4090x1.tar.gz`. Track these archives
+serving experiment root, commit `recipe.yaml`, one cumulative `RESULTS.md`, and
+`results_<gpu-short>x<gpu-count>.tar.gz` for each measured exact GPU name/count. Store the system-only experiment
+records inside that platform archive as part of the timestamped raw run; do not commit them as top-level files. Derive
+`<gpu-short>` with `emmy.hardware.gpu_short_name`; for example, a single RTX 4090 uses
+`results_rtx4090x1.tar.gz`. Track these archives
 with Git LFS. When the caller says LFS is configured locally, verify the archive attribute but do not modify or list
 `.gitattributes`; the caller owns that infrastructure file. Do not commit the ignored dated run directory, loose
 benchmark JSON/TXT/logs, plots, compiler run summaries, partial working goldens, or onboarding-summary files.
 
 Use one serving experiment root for all GPU platforms that share the protocol. On a platform-specific run, replace
-only that platform's archive and top-level records, update only its section of the shared experiment `RESULTS.md`, and
-preserve every other platform archive, record, and report section. Reuse the existing serving experiment root when it
-already represents the protocol; otherwise create `experiments/<model>/serving/`.
+only that platform's archive, update only its section of the shared experiment `RESULTS.md`, and preserve every other
+platform archive and report section. Remove legacy top-level records only for the current platform after verifying
+they are retained inside its archive. Reuse the existing serving experiment root when it already represents the
+protocol; otherwise create `experiments/<model>/serving/`.
 
 Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns deployed workloads and
 must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
@@ -83,9 +86,12 @@ Use the model card, `config.json`, and current primary engine documentation to r
 - required tool-call, reasoning, tokenizer, and multimodal flags;
 - known model-specific launch or correctness issues.
 
-Prefer vLLM when both engines support the checkpoint. Use a moving image tag only for diagnosis, then pin the exact
-working tag or digest. Read `emmy/recipe/ARCHITECTURE.md` before authoring YAML; named recipe fields must not be
-duplicated in `extra_args`.
+Prefer vLLM when both engines support the checkpoint. If a configured image cannot be pulled, do not stop at the first
+missing tag. Check the official registry, release notes, engine documentation, and upstream repository for a renamed
+image repository or a current compatible tag. A registry manifest check or short clean deployment may establish the
+replacement. Use a moving image tag only for diagnosis, then pin the exact working tag or digest. Never substitute an
+unofficial image without explicit caller authorization. Read `emmy/recipe/ARCHITECTURE.md` before authoring YAML;
+named recipe fields must not be duplicated in `extra_args`.
 
 ## 2. Create and validate a conservative baseline
 
@@ -111,6 +117,18 @@ Require all of these before measuring performance:
 Start context testing at the model's native maximum. On an out-of-memory or invalid-capacity failure, halve it and
 retry from a clean deployment. Do not claim a context length from startup alone. Search current upstream issues for
 an unfamiliar error before changing engine or flags, and make one evidence-backed change per retry.
+
+When useful, delegate up to three independent read-only investigations to the caller-provided onboarding subagent.
+Good tasks are model protocol research, official engine/image compatibility research, and diagnosis of one unfamiliar
+failure from already captured logs. The parent agent owns all commands, edits, measurements, and final conclusions;
+never let subagent work consume the time reserved for artifacts and cleanup.
+
+You may implement a small, model-agnostic compatibility fix when it is necessary to qualify the exact requested
+checkpoint and platform. Keep it within `emmy/` plus focused tests and the nearest `ARCHITECTURE.md` updates, prefer an
+existing mechanism, and validate the reproducer before resuming qualification. Do not perform a broad refactor,
+dependency upgrade, validation bypass, workflow change, or model-specific hard-code. If the fix is not bounded, does
+not validate, or cannot finish before the deadline, preserve diagnostics outside the repository and report the gate
+as failed.
 
 Use `emmy ... --teardown` after every failed deployment and before changing a serving configuration. Do not mutate
 the remote checkout or containers manually over SSH; read-only inspection of `nvidia-smi`, container state, and logs
@@ -226,9 +244,10 @@ configuration selected by `recipes/<model>/recipe.yaml`; do not force unrelated 
 
 Commit the canonical experiment `recipe.yaml` when the comparison configuration remains useful. Follow the
 repository's `run-experiment` skill for the final measurement. Store the run as
-`results_<gpu-short>x<gpu-count>.tar.gz`, replace only the current platform's top-level system-only experiment records,
-and update its section in the shared factual experiment `RESULTS.md`, including failed-row evidence. Preserve every
-other platform snapshot. Fold the measured winner into a single-variant serving recipe under
+`results_<gpu-short>x<gpu-count>.tar.gz`, including the system-only experiment records inside the timestamped raw run,
+and update its section in the shared factual experiment `RESULTS.md`, including failed-row evidence. Remove
+current-platform legacy top-level records only after verifying the archive, and preserve every other platform
+snapshot. Fold the measured winner into a single-variant serving recipe under
 `recipes/<model>/recipe.yaml`; recipes have no `benchmark:` block.
 
 ## 7. Write the durable report
@@ -273,7 +292,8 @@ Use measurements only, compare complete runs without cherry-picking, and include
 
 Keep the recipe report useful without the working directory. The recipe is the decision and its report embeds the
 selected lane's compact, best qualified measurements. The experiment directory separately retains reproducibility
-input, raw results, per-row system-only experiment records, and its factual last-run artifact index.
+input, per-platform archives containing raw results and per-row system-only experiment records, and its factual
+last-run artifact index.
 
 ## 8. Verify and hand off
 
@@ -298,8 +318,9 @@ Also verify:
   verified FAST_MATH pack for the exact serving shape;
 - `EMMY_FAST_MATH=1` appears in an Emmy recipe unless its accuracy gate regressed, and never appears in a
   mainstream-only recipe;
-- the experiment snapshot contains the shared `recipe.yaml` and `RESULTS.md`, the exact platform's LFS archive and
-  top-level records, while other platform archives, records, and report sections remain unchanged;
+- the experiment snapshot contains the shared `recipe.yaml` and `RESULTS.md` plus the exact platform's LFS archive;
+  the archive contains the platform's records, no current-platform record remains at the experiment root, and other
+  platform archives and report sections remain unchanged;
 - no ignored dated run directory, loose benchmark output, or onboarding summary is staged;
 - tracked artifacts contain no credentials, absolute scratch paths, or VM identifiers;
 - deployed workloads are torn down and `docker logout` has run.
@@ -317,9 +338,10 @@ durable `RESULTS.md` report.
 Write this JSON object atomically to the caller-supplied summary path outside the repository and print that path as the
 final line. Include the requested mode on success and failure. List every repository file created, modified, or deleted
 by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`. In
-`experiment_artifacts`, list the shared experiment recipe and report, the current platform's compressed archive, and
-its retained top-level experiment records. List deleted prior records for the current platform in `artifacts`, but not
-in `experiment_artifacts`. Do not list unchanged artifacts from other platforms or the ignored dated run directory.
+`experiment_artifacts`, list only the shared experiment recipe and report plus the current platform's compressed
+archive. List deleted legacy records for the current platform in `artifacts`, but not in `experiment_artifacts`. List
+any bounded implementation fix and its focused tests in `artifacts`. Do not list unchanged artifacts from other
+platforms or the ignored dated run directory.
 
 ```json
 {
@@ -337,8 +359,7 @@ in `experiment_artifacts`. Do not list unchanged artifacts from other platforms 
     "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
     "experiments/<model>/serving/recipe.yaml",
     "experiments/<model>/serving/RESULTS.md",
-    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz",
-    "experiments/<model>/serving/<gpu-short>x<gpu-count>_<row-id>.experiment.yaml"
+    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz"
   ],
   "compiler_artifacts": [
     "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml"
@@ -346,8 +367,7 @@ in `experiment_artifacts`. Do not list unchanged artifacts from other platforms 
   "experiment_artifacts": [
     "experiments/<model>/serving/recipe.yaml",
     "experiments/<model>/serving/RESULTS.md",
-    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz",
-    "experiments/<model>/serving/<gpu-short>x<gpu-count>_<row-id>.experiment.yaml"
+    "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz"
   ],
   "report": "recipes/<model>/RESULTS.md",
   "compiler": {
@@ -364,11 +384,14 @@ in `experiment_artifacts`. Do not list unchanged artifacts from other platforms 
 ```
 
 Use `status: "failed"`, nullable serving artifact fields, `deployment_summary: null`, `performance_summary: null`,
-`report: null`, and a `failure` object with `gate` and `message` when no valid serving recipe is produced. Keep a
-complete golden populated if compiler qualification succeeded. Put partial inventories and useful diagnostics in the
-external output location, not the repository. Always write the summary, then return nonzero for a failed run. Do not
-delete the VM. The caller uses the SSH target and its separately captured provider/instance handle to perform and
-verify VM cleanup.
+`report: null`, and a `failure` object with `gate`, `message`, and boolean `regression` when no valid serving recipe is
+produced. Set `regression: true` only when a previously qualified behavior or measured lane no longer meets its prior
+contract and the bounded fix attempt could not restore it. Keep the message concise and credential-free because the
+workflow sends it to the configured Discord channel as a prominent regression notice. A new model that has never
+qualified is a failure, not a regression. Keep a complete golden populated if compiler qualification succeeded. Put
+partial inventories and useful diagnostics in the external output location, not the repository. Always write the
+summary, then return nonzero for a failed run. Do not delete the VM. The caller uses the SSH target and its separately
+captured provider/instance handle to perform and verify VM cleanup.
 
 On any failure, tear down workloads, report the first failed gate and external diagnostic paths, remove task-owned
 measurement output from the checkout, and return nonzero. Never claim partial onboarding as success.

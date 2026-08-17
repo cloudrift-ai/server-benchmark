@@ -23,8 +23,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
   trace and eval
-- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
-  INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
+- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), which suppresses routine HTTP request INFO
+  records so versioned JSON remains parseable, plus `ensure_plugin_logging()` — makes emmy INFO logs visible when
+  nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
   (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
   …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence
@@ -654,8 +655,7 @@ one durable snapshot per exact GPU platform:
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
   <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
-  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run
-  rtx5090x1_<row>.experiment.yaml
+  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run and row records
   RESULTS.md                # one interpretation across retained platforms
 ```
 
@@ -664,9 +664,10 @@ emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
 Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
-the platform's named raw-results archive and system-only records, update its section in the shared `RESULTS.md`, and
-commit the complete platform snapshot without changing other platform results. The CLI and experiment code do not
-interpret measurements; the skill performs the intelligent review and the CLI itself performs no Git operation.
+the platform's named raw-results archive containing its system-only records, update its section in the shared
+`RESULTS.md`, and commit the complete platform snapshot without changing other platform results. The CLI and
+experiment code do not interpret measurements; the skill performs the intelligent review and the CLI itself performs
+no Git operation.
 
 ## Adding a New VM Provider
 

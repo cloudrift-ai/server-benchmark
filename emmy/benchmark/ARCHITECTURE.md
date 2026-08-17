@@ -53,11 +53,11 @@ Command records preserve timing, status, errors, and system information. `comman
 worktree, every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve
 declared results.
 
-The repository `run-experiment` skill validates row coverage, copies the latest records beside the recipe, writes a
-thoughtful interpretation grounded in the raw evidence, replaces the exact GPU platform's named Git LFS raw-results
-archive, and commits its archive and records with the shared `RESULTS.md`. Other platform snapshots remain unchanged.
-The timestamped raw directory stays local and ignored. Interpretation belongs to the skill's intelligent review,
-never the runner or a repository script.
+The repository `run-experiment` skill validates row coverage, keeps the latest records inside the archived raw-run
+tree, writes a thoughtful interpretation grounded in the raw evidence, replaces the exact GPU platform's named Git
+LFS raw-results archive, and commits it with the shared `RESULTS.md`. Other platform snapshots remain unchanged. The
+timestamped raw directory stays local and ignored. Interpretation belongs to the skill's intelligent review, never
+the runner or a repository script.
 
 `commands.bench` owns orchestration, `execution` runs execution groups, `experiment_record` owns the typed record
 schema and YAML serialization, top-level `system_info` owns the typed host schema plus the one shared generic/PCI

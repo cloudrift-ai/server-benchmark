@@ -8,9 +8,9 @@ All tests use **pytest** with **pytest-asyncio** (`asyncio_mode = "auto"` in `py
 
 `tests/` mirrors the `emmy/` source tree: a test directory exists because a source package does, and a test
 module is named for the source module it covers. To find the tests for `emmy/<a>/<b>.py`, look in
-`tests/<a>/test_<b>.py`. Two files sit at the root: `conftest.py` — shared fixtures plus the CUDA / LPT xdist
-routing hook (see **Running**) — and `test_emmy.py`, which mirrors `emmy/emmy.py`, the CLI entrypoint that belongs
-to no subpackage.
+`tests/<a>/test_<b>.py`. Three files sit at the root: `conftest.py` — shared fixtures plus the CUDA / LPT xdist routing
+hook (see **Running**) — `test_emmy.py`, which mirrors `emmy/emmy.py`, the CLI entrypoint that belongs to no package,
+and `test_logging_setup.py`, which covers the process-wide CLI and serving-plugin logging boundary.
 
 Mirroring is the rule, not a coincidence — when a source package grows subpackages, the test directory follows.
 `tests/compiler/pipeline/search/` is the worked example: its `data/`, `policy/`, and `prior/` subdirectories exist
@@ -114,8 +114,8 @@ directly; they never import from another test module or from `conftest.py`.
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved lifecycle tag
-  and heat, compact notification evidence, current-platform archive and row records, and isolation from other platform
-  results before artifacts may be staged.
+  and heat, compact notification evidence, current-platform records inside the named archive, bounded compatibility
+  fixes, regression notices, and isolation from other platform results before artifacts may be staged.
 - **Temp recipes** — unit tests and multi-instance edge cases create throwaway recipes via `tmp_path`.
 - **Plain functions** — no test classes; tests are grouped by file and separated with comment headers.
 - **Assertions on stdout** — dry-run tests verify that the correct commands and messages appear in the expected order.

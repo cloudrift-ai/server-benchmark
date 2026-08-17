@@ -166,10 +166,11 @@ emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-al
 
 Each real run creates a timestamped raw-results directory and writes one system-only YAML experiment record per
 matrix row. Use `$run-experiment` to run or customize an experiment, replace the platform's LFS-backed
-`results_<gpu-short>x<gpu-count>.tar.gz`, assemble its records, update the shared `RESULTS.md` interpretation, and
-commit the durable platform snapshot. Other platform snapshots remain unchanged. The runner and experiment code never
-interpret measurements; the skill reviews the raw evidence. The timestamped directory is ignored and may be deleted
-after its archive has been extracted or byte-checked against the raw files.
+`results_<gpu-short>x<gpu-count>.tar.gz`, verify its included records, update the shared `RESULTS.md` interpretation,
+and commit the durable platform snapshot. Records remain inside the archive rather than as top-level experiment files.
+Other platform snapshots remain unchanged. The runner and experiment code never interpret measurements; the skill
+reviews the raw evidence. The timestamped directory is ignored and may be deleted after its archive has been extracted
+or byte-checked against the raw files.
 
 ## Deploy
 

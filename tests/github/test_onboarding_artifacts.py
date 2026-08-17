@@ -1,6 +1,8 @@
 import importlib.util
+import io
 import json
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,15 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(onboarding_artifacts)
 
 
+def _write_archive(path, platform="h200x1", marker="current"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    contents = f"status: succeeded\nmarker: {marker}\n".encode()
+    record = tarfile.TarInfo(f"2026-08-16_00-00-00/{platform}_np8_deadbeef.experiment.yaml")
+    record.size = len(contents)
+    with tarfile.open(path, "w:gz") as output:
+        output.addfile(record, io.BytesIO(contents))
+
+
 def _write_artifacts(workspace):
     paths = [
         "recipes/Model/recipe.yaml",
@@ -19,7 +30,6 @@ def _write_artifacts(workspace):
         "experiments/Model/serving/recipe.yaml",
         "experiments/Model/serving/RESULTS.md",
         "experiments/Model/serving/results_h200x1.tar.gz",
-        "experiments/Model/serving/h200x1_np8_deadbeef.experiment.yaml",
     ]
     for raw_path in paths:
         path = workspace / raw_path
@@ -27,7 +37,7 @@ def _write_artifacts(workspace):
         if raw_path == paths[0]:
             path.write_text("tags: [best-effort]\nmodel:\n  huggingface: org/Model\n  heat: 77\n")
         elif path.suffixes == [".tar", ".gz"]:
-            path.write_bytes(b"compressed results")
+            _write_archive(path)
         else:
             path.write_text("result\n")
     return paths
@@ -141,7 +151,7 @@ def test_validate_summary_requires_exact_platform_archive(tmp_path):
                 "recipe": paths[0],
                 "report": paths[1],
                 "experiment": paths[2],
-                "experiment_artifacts": [paths[2], paths[3], paths[5]],
+                "experiment_artifacts": [paths[2], paths[3]],
                 "artifacts": paths,
                 "cleanup": {"workloads": "complete", "docker_logout": True},
             }
@@ -149,6 +159,85 @@ def test_validate_summary_requires_exact_platform_archive(tmp_path):
     )
 
     with pytest.raises(ValueError, match="exact platform archive"):
+        onboarding_artifacts.validate_summary(
+            summary_path,
+            tmp_path,
+            "org/Model",
+            "NVIDIA H200 141GB",
+            1,
+            "user@host",
+            "onboarding",
+            "best-effort",
+        )
+
+
+def test_validate_summary_requires_platform_record_inside_archive(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    archive = tmp_path / paths[4]
+    with tarfile.open(archive, "w:gz") as output:
+        contents = b"measured\n"
+        result = tarfile.TarInfo("2026-08-16_00-00-00/benchmark.log")
+        result.size = len(contents)
+        output.addfile(result, io.BytesIO(contents))
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": paths[2:],
+                "artifacts": paths,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="archive contains no h200x1 experiment records"):
+        onboarding_artifacts.validate_summary(
+            summary_path,
+            tmp_path,
+            "org/Model",
+            "NVIDIA H200 141GB",
+            1,
+            "user@host",
+            "onboarding",
+            "best-effort",
+        )
+
+
+def test_validate_summary_rejects_top_level_experiment_record(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    record = tmp_path / "experiments" / "Model" / "serving" / "h200x1_np8_deadbeef.experiment.yaml"
+    record.write_text("status: succeeded\n")
+    record_path = str(record.relative_to(tmp_path))
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": [*paths[2:], record_path],
+                "artifacts": [*paths, record_path],
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="durable experiment snapshot"):
         onboarding_artifacts.validate_summary(
             summary_path,
             tmp_path,
@@ -413,6 +502,78 @@ def test_stage_artifacts_rejects_unmanifested_ignored_experiment(tmp_path):
         onboarding_artifacts.stage_artifacts(tmp_path, [Path("experiments/Model/recipe.yaml")])
 
 
+def test_stage_artifacts_accepts_bounded_implementation_fix(tmp_path):
+    _init_repo(tmp_path)
+    implementation = tmp_path / "emmy" / "compatibility.py"
+    test = tmp_path / "tests" / "test_compatibility.py"
+    implementation.parent.mkdir()
+    test.parent.mkdir()
+    implementation.write_text("VALUE = 'before'\n")
+    test.write_text("def test_value():\n    assert True\n")
+    subprocess.run(["git", "add", "emmy/compatibility.py", "tests/test_compatibility.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    implementation.write_text("VALUE = 'after'\n")
+    test.write_text("def test_value():\n    assert 'after' != 'before'\n")
+
+    onboarding_artifacts.stage_artifacts(
+        tmp_path,
+        [Path("emmy/compatibility.py"), Path("tests/test_compatibility.py")],
+    )
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert staged == ["emmy/compatibility.py", "tests/test_compatibility.py"]
+
+
+def test_stage_artifacts_requires_focused_test_for_implementation_fix(tmp_path):
+    _init_repo(tmp_path)
+    implementation = tmp_path / "emmy" / "compatibility.py"
+    implementation.parent.mkdir()
+    implementation.write_text("VALUE = 'before'\n")
+    subprocess.run(["git", "add", "emmy/compatibility.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    implementation.write_text("VALUE = 'after'\n")
+
+    with pytest.raises(ValueError, match="focused test change"):
+        onboarding_artifacts.stage_artifacts(tmp_path, [Path("emmy/compatibility.py")])
+
+
+def test_stage_artifacts_rejects_large_implementation_fix(tmp_path):
+    _init_repo(tmp_path)
+    baseline = tmp_path / "README.md"
+    baseline.write_text("baseline\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    artifacts = []
+    for index in range(onboarding_artifacts.MAX_IMPLEMENTATION_FILES + 1):
+        path = tmp_path / "tests" / f"test_fix_{index}.py"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("def test_fix():\n    assert True\n")
+        artifacts.append(path.relative_to(tmp_path))
+
+    with pytest.raises(ValueError, match="too many implementation files"):
+        onboarding_artifacts.stage_artifacts(tmp_path, artifacts)
+
+
+def test_stage_artifacts_rejects_large_implementation_line_count(tmp_path):
+    _init_repo(tmp_path)
+    baseline = tmp_path / "README.md"
+    baseline.write_text("baseline\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    test = tmp_path / "tests" / "test_large_fix.py"
+    test.parent.mkdir()
+    test.write_text("\n".join(f"VALUE_{index} = {index}" for index in range(501)) + "\n")
+
+    with pytest.raises(ValueError, match="too many implementation lines"):
+        onboarding_artifacts.stage_artifacts(tmp_path, [Path("tests/test_large_fix.py")])
+
+
 def test_stage_artifacts_requires_updated_platform_archive(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / ".gitattributes").write_text("experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text\n")
@@ -466,8 +627,7 @@ def test_platform_update_preserves_other_platform_snapshot(tmp_path):
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
 
     (tmp_path / paths[3]).write_text("H200 updated; RTX 4090 preserved\n")
-    (tmp_path / paths[4]).write_bytes(b"new H200 archive")
-    (tmp_path / paths[5]).write_text("new H200 record\n")
+    _write_archive(tmp_path / paths[4], marker="updated")
     old_record.unlink()
     old_record_path = str(old_record.relative_to(tmp_path))
     summary_path = tmp_path.parent / f"{tmp_path.name}-summary.json"

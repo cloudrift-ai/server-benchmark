@@ -91,6 +91,41 @@ def test_pointwise_chain():
     assert len(writes) == 1
 
 
+def test_dependency_emission_budget_preserves_completed_spelling() -> None:
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="x", input="src_0", index=(Var("a0"),)),
+                    Assign(name="y", op="exp", args=("x",)),
+                    Write(output="producer", index=(Var("a0"),), value="y"),
+                ),
+            ),
+        ),
+    )
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="yv", input="producer", index=(Var("a0"),)),
+                    Assign(name="z", op="add", args=("yv", "yv")),
+                    Write(output="consumer", index=(Var("a0"),), value="z"),
+                ),
+            ),
+        ),
+    )
+    loops = {"producer": producer, "consumer": consumer}
+    edges = {("consumer", "producer"): ("producer", "producer")}
+
+    unbounded = splice_loops(loops, edges)
+
+    assert unbounded is not None
+    assert splice_loops(loops, edges, max_bindings=4) == unbounded
+    assert splice_loops(loops, edges, max_bindings=3) is None
+
+
 # ---------------------------------------------------------------------------
 # Shared intermediate: consumer uses producer output twice at same index → one emission
 # ---------------------------------------------------------------------------

@@ -16,46 +16,59 @@ producers after) — that's what the fusion splicer does.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from emmy.compiler.ir.loop.ir import Axis, Loop, Scope, Stmt
 from emmy.compiler.ir.stmt import Body
+
+
+@dataclass
+class _MutableLoop:
+    """Construction-only loop node; frozen into a ``Loop`` by ``finish``."""
+
+    axis: Axis
+    body: list[Stmt | _MutableLoop] = field(default_factory=list)
 
 
 class LoopBuilder:
     """Mutable accumulator for a ``LoopOp`` body."""
 
     def __init__(self, used_names: set[str]) -> None:
-        self._body: Body = ()
+        self._body: list[Stmt | _MutableLoop] = []
         self._used: set[str] = set(used_names)
+        self._next_suffix: dict[str, int] = {}
 
     def fresh(self, hint: str) -> str:
         """Return an unused name derived from ``hint`` and reserve it."""
         if hint not in self._used:
             self._used.add(hint)
             return hint
-        i = 1
+        i = self._next_suffix.get(hint, 1)
         while f"{hint}_s{i}" in self._used:
             i += 1
         name = f"{hint}_s{i}"
         self._used.add(name)
+        self._next_suffix[hint] = i + 1
         return name
 
     def insert(self, stmt: Stmt, enclosure: Scope) -> None:
         """Prepend ``stmt`` at the leaf of the path denoted by ``enclosure``."""
-        self._body = _prepend_at(self._body, enclosure.enclosing, stmt)
+        body = self._body
+        for axis in enclosure.enclosing:
+            loop = next((item for item in body if isinstance(item, _MutableLoop) and item.axis == axis), None)
+            if loop is None:
+                loop = _MutableLoop(axis)
+                body.append(loop)
+            body = loop.body
+        # Construction resolves consumers before producers. Appending is O(1);
+        # ``finish`` reverses each scope to retain prepend-at-leaf order.
+        body.append(stmt)
 
     def finish(self) -> Body:
         """Return the accumulated body."""
-        return self._body
+        return _freeze(self._body)
 
 
-def _prepend_at(body: Body, path: tuple[Axis, ...], stmt: Stmt) -> Body:
-    """Descend ``body`` following ``path``; create missing ``Loop`` nodes;
-    prepend ``stmt`` at the leaf."""
-    if not path:
-        return (stmt,) + tuple(body)
-    head, rest = path[0], path[1:]
-    for i, s in enumerate(body):
-        if isinstance(s, Loop) and s.axis == head:
-            new_inner = _prepend_at(s.body, rest, stmt)
-            return tuple(body[:i]) + (Loop(axis=head, body=new_inner),) + tuple(body[i + 1 :])
-    return (Loop(axis=head, body=_prepend_at((), rest, stmt)),) + tuple(body)
+def _freeze(body: list[Stmt | _MutableLoop]) -> Body:
+    """Freeze the append-built tree in its logical prepend order."""
+    return Body(Loop(axis=item.axis, body=_freeze(item.body)) if isinstance(item, _MutableLoop) else item for item in reversed(body))

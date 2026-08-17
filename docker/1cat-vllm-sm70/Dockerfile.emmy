@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+
+# Add the Emmy compiler plugin to an exact prebuilt 1Cat image without changing
+# 1Cat's model loader, scheduler, TP/PP, attention/cache, routing, or MXFP4 paths.
+# Build from the repository root after `make wheel`:
+#
+#   docker build -f docker/1cat-vllm-sm70/Dockerfile.emmy \
+#     --build-arg BASE_IMAGE=cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 \
+#     -t emmy/1cat-vllm-deepseek-v4-flash-0731:local .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY dist/emmy_ml-*.whl /tmp/emmy-wheel/
+RUN pip install --no-cache-dir --no-deps /tmp/emmy-wheel/emmy_ml-*.whl \
+    && pip install --no-cache-dir cupy-cuda12x==14.1.1 \
+    && rm -rf /tmp/emmy-wheel
+
+ENV EMMY_CUBIN_CACHE=/root/.cache/huggingface/emmy-cubins
+
+LABEL ai.emmy.compiler.integration="onecat-leaf" \
+      ai.emmy.compiler.kernel="sm70-rms-norm-fp16"

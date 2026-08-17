@@ -17,6 +17,13 @@ def register() -> None:
     # from docker logs, and the gemma4 verify gate greps them there.
     ensure_plugin_logging()
 
+    from emmy import config
+
+    if config.onecat_rms_norm():
+        from emmy.serving.onecat import register_onecat_kernels
+
+        register_onecat_kernels()
+
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")
     if "EmmyGenModel" not in ModelRegistry.get_supported_archs():

@@ -25,6 +25,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   nothing handles emmy's INFO records, which would silence the runners' boot/pack lines in `docker logs` — the
   gemma4 image's verify gate greps the "pack hit" line there (no-op when logging is already configured, e.g. the
   `emmy` CLI).
+- `onecat.py` — guarded 1Cat leaf-kernel adapter. With `EMMY_ONECAT_RMS_NORM=1`, the compatible SM70 DeepSeek decode
+  RMSNorm leaf is traced and compiled by Emmy on first use, then launched directly over 1Cat-owned device
+  buffers through `CompiledProgram.run_once_external`. The exact live shape/dtype/platform contract is checked before
+  dispatch; a build failure, unsupported call, capture-time cold call, or failed first-use numerical comparison uses
+  the original vLLM kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache
+  state, routing, and MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

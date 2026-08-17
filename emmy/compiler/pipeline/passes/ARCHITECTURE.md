@@ -270,7 +270,9 @@ sweep of flat same-extent additive folds — the value folds of a fused softmax�
 contraction over the pair; other shapes fall to the raw-loop
 escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
-nest that no schedule can run and recognition cannot certify.
+nest that no schedule can run and recognition cannot certify. The same factor caps distinct dependency emissions
+during region splicing, so a candidate already beyond the structural growth bound is refused before its Loop body is
+constructed; the normalized aggregate-work check remains the final authority for completed candidates.
 
 **Merge ORDER is a decision, and `loop/prefusion` makes it.** A merge is directional — it makes the SINK the
 region's output, so the sink's width must then be written. Splice a compute producer into a still-open

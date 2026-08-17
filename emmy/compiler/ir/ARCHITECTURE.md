@@ -418,6 +418,9 @@ that node: the edge points at a Write that doesn't exist, so the splicer raises
 node must rename its body `Write.output` to match (`fusion/_helpers.py::rename_write_output`).
 Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops`
 — `compile -vv` shows which pattern a rejected edge hit.
+Fusion also passes a region-relative dependency-emission bound into the splicer. Resolution stops before constructing
+a candidate whose distinct bindings already exceed the fusion growth factor; direct splicer callers remain unbounded
+unless they supply the same structural guard.
 
 ### `loop/runner.py` — C++ JIT executor
 
@@ -429,8 +432,12 @@ default `Backend.run` topo-walk like any pre-fusion graph.
 
 ### `loop/builder.py` — fluent construction
 
-`LoopBuilder` helper used by decomposition/fusion tests to construct
-LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
+`LoopBuilder` constructs LoopOp bodies without spelling out every `Loop(Axis(…))` nest. Fresh names retain the
+first-free `<hint>_sN` spelling, while a monotone per-hint suffix cursor ensures each occupied suffix is probed at
+most once. Body insertion appends into a construction-only mutable loop tree and freezes each scope in reverse at
+`finish`, retaining prepend-at-leaf order without copying an immutable tuple per dependency. Large merge regions
+therefore resolve names and assemble bodies in linear rather than quadratic work; the emitted SSA names, structural
+keys, and source remain unchanged.
 
 ## `tile/`
 

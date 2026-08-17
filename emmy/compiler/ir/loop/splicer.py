@@ -137,6 +137,8 @@ def splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp |
 def splice_loops(
     loops: dict[str, LoopOp],
     splice_edges: dict[tuple[str, str], tuple[str, str]],
+    *,
+    max_bindings: int | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -152,7 +154,9 @@ def splice_loops(
     seed the traversal — is derived from ``splice_edges``: it's the
     unique tag in ``loops`` that never appears as a splice target.
     Returns ``None`` if the sink is ambiguous (cycle or multiple sinks)
-    or if any splice edge hits an unsupported pattern.
+    or if any splice edge hits an unsupported pattern. ``max_bindings`` bounds
+    the number of distinct dependency emissions before body construction; fusion
+    derives it from the input region, while direct callers default to unbounded.
     """
     target_tags = {tag for tag, _out in splice_edges.values()}
     candidates = [tag for tag in loops if tag not in target_tags]
@@ -164,6 +168,7 @@ def splice_loops(
             loops={tag: op.analyze() for tag, op in loops.items()},
             splice_edges=splice_edges,
             root=root,
+            max_bindings=max_bindings,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -174,7 +179,7 @@ def splice_loops(
         return None
 
 
-def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph, *, max_bindings: int | None = None) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -216,6 +221,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     merged = splice_loops(
         loops={nid: n.op for nid, n in loop_nodes.items()},
         splice_edges=splice_edges,
+        max_bindings=max_bindings,
     )
     if merged is None:
         return None
@@ -250,6 +256,7 @@ class _Splicer(LoopBuilder):
         loops: dict[str, LoopMeta],
         splice_edges: dict[tuple[str, str], tuple[str, str]],
         root: str,
+        max_bindings: int | None,
     ) -> None:
         used: set[str] = set()
         for meta in loops.values():
@@ -258,6 +265,7 @@ class _Splicer(LoopBuilder):
         self.loops = loops
         self.splice_edges = splice_edges
         self.root = root
+        self.max_bindings = max_bindings
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
         # emit scope it lands at in the merged body, and the σ restricted
@@ -305,6 +313,8 @@ class _Splicer(LoopBuilder):
         existing = self._binding.get(key)
         if existing is not None:
             return existing
+        if self.max_bindings is not None and len(self._binding) >= self.max_bindings:
+            raise _NotSupported(f"dependency growth exceeds {self.max_bindings} distinct emissions")
         bound = self.fresh(name)
         self._binding[key] = bound
         self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))

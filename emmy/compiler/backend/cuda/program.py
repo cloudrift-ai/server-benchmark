@@ -893,6 +893,46 @@ class CompiledProgram:
         for i, launch in enumerate(self.compiled.launches):
             _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
 
+    def run_once_external(self, bindings: dict[str, cp.ndarray]) -> None:
+        """Launch once with selected input/output buffers bound to caller-owned device arrays.
+
+        This is the narrow zero-copy ABI for a host runtime that already owns the live tensors.
+        Only exact-shape, exact-dtype, contiguous input/output buffers are accepted. Programs
+        with TMA descriptors are rejected because a descriptor embeds the allocation pointer;
+        callers on those targets use the ordinary upload/output path instead. The original
+        allocations are restored immediately after enqueueing because CUDA kernel arguments
+        carry their pointers by value.
+
+        Caller owns stream ordering and must hold :func:`gpu_lock` when configured, exactly as
+        for :meth:`run_once`.
+        """
+        if not bindings:
+            raise ValueError("run_once_external requires at least one device binding")
+        if any(launch.tma_descriptors for launch in self.compiled.launches):
+            raise ValueError("run_once_external does not support programs with TMA descriptors")
+
+        original: dict[str, cp.ndarray] = {}
+        for name, external in bindings.items():
+            buf = self.compiled.buf_by_name.get(name)
+            if buf is None:
+                raise KeyError(f"run_once_external: unknown buffer {name!r}")
+            if buf.role not in ("input", "output"):
+                raise ValueError(f"run_once_external: buffer {name!r} has role {buf.role!r}, expected input/output")
+            shape = buf.resolve_shape(self.sym_values) or (1,)
+            if tuple(external.shape) != shape:
+                raise ValueError(f"run_once_external: buffer {name!r} has shape {tuple(external.shape)}, expected {shape}")
+            if external.dtype != buf.dtype.np:
+                raise ValueError(f"run_once_external: buffer {name!r} has dtype {external.dtype}, expected {buf.dtype.np}")
+            if not external.flags.c_contiguous:
+                raise ValueError(f"run_once_external: buffer {name!r} must be C-contiguous")
+            original[name] = self.arrays[name]
+
+        self.arrays.update(bindings)
+        try:
+            self.run_once()
+        finally:
+            self.arrays.update(original)
+
     def _descs_now(self) -> dict[int, dict[str, cp.ndarray]]:
         """The per-launch TMA descriptors matching the CURRENT ``self.sym_values``:
         the prebuilt (allocation-shaped) entries overlaid with per-sym re-encodes of

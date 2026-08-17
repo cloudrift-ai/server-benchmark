@@ -123,7 +123,8 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
-    merged = _build_merged_region(graph, region, sink)
+    pre_bindings = sum(len(graph.nodes[node_id].op.body.definitions) for node_id in region)
+    merged = _build_merged_region(graph, region, sink, max_bindings=max(1, _BLOWUP_FACTOR * pre_bindings))
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
     if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region):

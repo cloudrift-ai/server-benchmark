@@ -62,6 +62,7 @@ GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+ONECAT_RMS_NORM = "EMMY_ONECAT_RMS_NORM"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
@@ -338,6 +339,14 @@ def serving_static(default: bool = False) -> bool:
     ``EMMY_SERVING_BATCHED`` (pads only to the step's longest sequence). A deliberate
     opt-in, not a default. See `serving/ARCHITECTURE.md`."""
     return _bool(SERVING_STATIC, default)
+
+
+def onecat_rms_norm(default: bool = False) -> bool:
+    """``EMMY_ONECAT_RMS_NORM`` — replace 1Cat's SM70 decode RMSNorm leaf with
+    the equivalent Emmy-compiled program. Off by default; unsupported shapes,
+    dtypes, platforms, and failed first-use parity checks retain 1Cat's original
+    kernel."""
+    return _bool(ONECAT_RMS_NORM, default)
 
 
 def serving_batched(default: bool = False) -> bool:

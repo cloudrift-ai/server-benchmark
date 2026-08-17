@@ -123,6 +123,12 @@ every kernel in program order with none of `iter_once`'s per-launch event record
 in `iter_once`; the caller's `outputs()` `.get()` synchronizes. Both expect the caller to hold `gpu_lock()`. See
 `tests/compiler/test_program_rebind.py`.
 
+`run_once_external(bindings)` is the zero-copy host-runtime ABI for a bounded leaf program. It temporarily binds
+exact-shape, exact-dtype contiguous caller-owned device arrays to selected input/output slots, enqueues the ordinary
+launch plan, and restores the program's allocations after the pointer arguments have been passed by value. It rejects
+scratch/constant slots and every program with TMA descriptors, whose encoded descriptors would retain the old base
+pointer. The 1Cat integration uses this seam for an SM70 RMSNorm leaf while 1Cat continues to own the model runtime.
+
 **Captured-graph replay over a capacity buffer set (`set_sym_values` / `upload_prefix` / `capture_program_graph` /
 `replay_program_graph` / `outputs(sym_values)`).** The serving fast path: instead of `rebind` re-sizing buffers and
 `run_once` issuing ~hundreds of host launches per request, build the program once at a **capacity** seq_len, then per

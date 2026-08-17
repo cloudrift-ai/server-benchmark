@@ -1,7 +1,8 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Emmy serving is ineligible because the
-DeepSeek V4 compressor and hyper-connection path has no executable external-attention serving ABI.
+Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. A bounded live Emmy integration is also
+qualified for the final decode RMSNorm; full `EmmyGenModel` serving remains ineligible because the DeepSeek V4
+compressor, hyper-connection state, quantized checkpoint path, and TP trunk lack executable serving-twin coverage.
 
 ## Qualified deployment
 
@@ -53,10 +54,28 @@ chat, separated reasoning, and structured tool-call probes. The tool parser retu
 The [canonical V100 golden](golden/v100_sm70.yaml)
 contains 279 exact Loop realizations across 13 programs. Every retained realization has positive deployable O3 and
 reference timings. The current schema passed all 279 stored-record and offer checks. The in-model audit traced four
-exact representative DeepSeek graphs with 945, 1,156, 1,087, and 1,156 Graph IR nodes, but `audit_card` returned no
-verdict within the bounded 106-minute replay. External sampling localized the compile-time hotspot to merge-region
-dependency resolution in the Loop splicer. In-model compiler qualification therefore remains incomplete, and this
-compiler evidence does not establish an Emmy serving path for the checkpoint.
+exact representative DeepSeek graphs with 945, 1,156, 1,087, and 1,156 Graph IR nodes. Its layer-0 Loop pass exposed
+dependency growth that ran for more than 22 minutes 59 seconds before the existing normalized-work guard. The
+model-agnostic builder and structural-bound fix now completes that exact graph in 3.825650 seconds (3.848140-second
+repeat), a censored improvement greater than 360×. Full in-model serving-twin qualification remains incomplete.
+
+## Bounded live Emmy qualification
+
+The 2026-08-17 experiment derives a local image from the pinned 1Cat base and replaces only the final decode RMSNorm
+with a guarded Emmy-compiled SM70 program. 1Cat still owns model loading, TP8×PP2, attention/cache state, routing, and
+FP4/FP8 kernels. The adapter activated on all eight TP ranks of the last PP stage and survived CUDA graph capture.
+Unsupported calls and build or first-use parity failures fall back to the original runtime implementation.
+
+The deployed `WORK=t256, REDUCE=coop` realization measured 4.5692 ± 0.0021 µs over three fresh deployable-O3 runs,
+1.578× faster than Emmy's 7.2084 µs greedy realization for the leaf. A matched same-host endpoint comparison was a
+tie: stock produced 34.1841 ± 0.2505 tokens/s and 197.414 ± 1.514 ms TPOT; the bounded Emmy lane produced
+34.1984 ± 0.1387 tokens/s and 197.376 ± 0.666 ms TPOT. Each lane completed 24/24 steady requests, and deterministic
+chat content and token usage matched. A separate recipe-driven run completed 32/32 requests and reached 34.44
+tokens/s in its final repeat.
+
+The maintained recipe remains on the published stock image because the derived image is local. Registry publication
+requires separate human approval. Raw evidence and the exact scope are in
+[`emmy_rmsnorm_v100_sxm3`](../../experiments/DeepSeek-V4-Flash-0731/emmy_rmsnorm_v100_sxm3/RESULTS.md).
 
 ## Reproduce
 

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
@@ -552,8 +553,8 @@ def _prebuild_descriptors(
 # threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
 # unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
 # in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
-# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides.
-_KERNEL_TIMEOUT_MS = float(_os.environ.get("EMMY_KERNEL_TIMEOUT_MS", "2000"))
+# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides —
+# read live through ``config.kernel_timeout_ms()`` (the env owner), never cached at import.
 
 # First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
 # steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
@@ -1063,7 +1064,7 @@ class CompiledProgram:
             self._e2e_graph.launch()
         self._e2e_stop.record()
         n = max(1, len(self.compiled.launches))
-        _wait_for_event(self._e2e_stop, _KERNEL_TIMEOUT_MS * n * replays, "<whole-program e2e window>")
+        _wait_for_event(self._e2e_stop, config.kernel_timeout_ms() * n * replays, "<whole-program e2e window>")
         return cp.cuda.get_elapsed_time(self._e2e_start, self._e2e_stop) / replays
 
     def iter_once(
@@ -1125,7 +1126,7 @@ class CompiledProgram:
                     _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
             grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
-            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
+            _wait_for_event(stops[i], config.kernel_timeout_ms() * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the
@@ -1275,7 +1276,7 @@ def benchmark_program(
 
     Single loop covers warmup + measurement: the first ``warmup`` iters
     are discarded, the rest are counted toward the result. The
-    per-launch ``_KERNEL_TIMEOUT_MS`` watchdog (inside
+    per-launch ``config.kernel_timeout_ms()`` watchdog (inside
     :meth:`CompiledProgram.iter_once`) runs every iter — warmup or
     measured — so a single hung kernel raises cleanly instead of
     stalling the whole sweep.
@@ -1304,7 +1305,7 @@ def benchmark_program(
     ``run_timeout_s`` bounds the iter loop on **accumulated GPU time**
     (sum of per-launch CUDA-event measurements), not wall-clock — so
     Python/cupy framing overhead doesn't shrink the budget for tiny
-    ops. Catches the gap left by the per-launch ``_KERNEL_TIMEOUT_MS``
+    ops. Catches the gap left by the per-launch ``config.kernel_timeout_ms()``
     watchdog: a variant where every launch fits under the watchdog but
     summed across iters exceeds the budget (e.g. 999 ms × N iters).
     Checked between iters so no in-flight launch is mid-kernel when

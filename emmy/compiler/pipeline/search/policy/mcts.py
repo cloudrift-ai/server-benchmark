@@ -143,12 +143,12 @@ class TuningSearch(Search):
         # ε-greedy exploration: with probability ``explore_eps`` a selection step
         # descends a UNIFORMLY RANDOM live child instead of the PUCT argmax. PUCT
         # alone is deterministic — a tie (cold prior → uniform ``P``) always goes
-        # to the first-in-list (= heuristic enumeration order), so each fork is
-        # visited once and takes its heuristic-preferred child; a binary fork like
-        # ``WARPSPEC`` then never benches its option-1 branch even when that's the
-        # real win. ε-randomness makes ~half the visits to such a fork take the
-        # other branch, so tuning finds good configs WITHOUT relying on the
-        # heuristic/prior ordering. ``0.0`` (the default) restores deterministic
+        # to the first-in-list (= the enumeration's emission order, which means
+        # nothing), so each fork is visited once and takes whichever child the walk
+        # emitted first; a binary fork like ``WARPSPEC`` then never benches its
+        # second branch even when that's the real win. ε-randomness makes ~half the
+        # visits to such a fork take the other branch, so tuning finds good configs
+        # WITHOUT relying on emission order at all. ``0.0`` (the default) restores deterministic
         # PUCT — kept for the unit tests and single-shot compile. Seeded for
         # reproducibility (vary ``seed`` per op/run upstream, not via wall clock).
         self._explore_eps = explore_eps

@@ -14,8 +14,7 @@ def test_pipeline_ranges_cover_every_layer_once_with_uneven_partition(monkeypatc
 
     assert ranges[0][0] == 0
     assert ranges[-1][1] == 50
-    # strict=False: the offset pairing is one shorter than ``ranges`` by construction.
-    assert all(left[1] == right[0] for left, right in zip(ranges, ranges[1:], strict=False))
+    assert all(left[1] == right[0] for left, right in zip(ranges[:-1], ranges[1:], strict=True))
     assert sorted(layer for start, end in ranges for layer in range(start, end)) == list(range(50))
 
 

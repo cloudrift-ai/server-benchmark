@@ -50,7 +50,7 @@ own:
 ```
 WORK   = w2x2                              a 2x2 grid of warps
 TILE   = f2x8                              each worker computes a 2 by 8 fragment of the output
-STAGE  = d2/cp                             two blocks in flight, copied asynchronously into shared memory
+STAGE  = d2/smem-async                     two blocks in flight, cp.async-copied into shared memory
 REDUCE = g2k                               the summed axis split across 2 blocks, combined by a second kernel
 RASTER = ''                                the default launch order
 ```
@@ -113,9 +113,9 @@ the compiler reports loudly rather than a value it quietly ignores.
 Any knob can be **pinned** from the environment, which makes the rule emit that one value instead of forking:
 
 ```bash
-EMMY_STAGE=d2/cp emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89
+EMMY_STAGE=d2/smem-async emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89
 
-EMMY_KNOBS="WORK=w2x2,TILE=f2x8,STAGE=d2/cp" emmy run --golden matmul.square.512 --bench
+EMMY_KNOBS="WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async" emmy run --golden matmul.square.512 --bench
 ```
 
 Two properties of pinning are easy to get wrong:

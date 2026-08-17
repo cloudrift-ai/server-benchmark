@@ -18,7 +18,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 def _compile_chain(n: int):
     """``(x @ w1) @ w2`` fp16 with the matmul seam cut and ``REDUCE=g4a`` pinned on each
     piece — two atomic kernels whose outputs are ``32×n`` (the delegation-cap lever:
-    512 → 32 KB per accumulator, well under ``_MAX_DELEGATED_WORDS``; 3840 → 240 KB,
+    512 → 32 KB per accumulator; 3840 → 240 KB,
     past it)."""
     mp = pytest.MonkeyPatch()
     # Per-knob vars, NOT EMMY_KNOBS: the aggregate splat runs at knob-module IMPORT time, long
@@ -83,12 +83,9 @@ def test_first_atomic_keeps_its_memset(chained_atomic):
     assert any(op.zero_outputs for op in ops.values()), "the capture's first atomic kernel keeps its runtime memset"
 
 
-def test_oversized_accumulator_keeps_its_memset():
-    """A 240 KB accumulator (32×3840 fp16) sits past ``_MAX_DELEGATED_WORDS`` — one CTA zeroing
-    it serially costs ~10× the MEMSET node it would replace (the m64 gate_up workspace burned
-    14 µs/launch at 983 KB), so delegation is refused and every atomic output keeps its runtime
-    memset."""
+def test_oversized_accumulator_is_delegated_too():
+    """A 240 KB accumulator (32×3840 fp16) delegates like any other static accumulator: whether
+    delegation's saved MEMSET node beats CTA-0's serial zeroing is a size- and card-dependent
+    measurement, so it is tuned evidence's decision, never a compile-time size threshold."""
     ops = _cuda_ops(_compile_chain(3840))
-    assert not any(op.zero_prologues for op in ops.values()), "no kernel may carry a delegated zero past the cap"
-    atomics = [op for op in ops.values() if op.zero_outputs]
-    assert len(atomics) >= 2, "both atomic matmuls keep their runtime memsets"
+    assert any(op.zero_prologues for op in ops.values()), "a large static accumulator still delegates"

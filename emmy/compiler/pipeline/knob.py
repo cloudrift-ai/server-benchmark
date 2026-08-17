@@ -346,7 +346,7 @@ def canon_family_value(name: str, value) -> str:
     form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
     spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
     alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
-    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
+    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/smem-async`` instead of
     failing verification against its own value on the deploy path. Any other family — and any
     unparseable value — passes through untouched (the caller's own equality applies).
 
@@ -384,7 +384,7 @@ def values_equal(name: str, want, got) -> bool:
     their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
     (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
     pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
-    ``cp/d2`` matches the realized ``d2/cp``. ``WORK``
+    ``cp/d2`` matches the realized ``d2/smem-async``. ``WORK``
     compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
@@ -588,11 +588,39 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tuning_knob_items(knobs))
 
 
+def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """The verified tier's EXACT row identity: the recording-canonical view
+    (:func:`stamp_schedule_families`) restricted to the :data:`SCHEDULE_FAMILIES` keys — what the
+    schedule fork decides. A recorded row legitimately carries later forks' knobs too (the
+    kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
+    never part of THIS fork's identity."""
+    stamped = stamp_schedule_families(knobs)
+    return canonical_row_key({k: v for k, v in stamped.items() if family_of(k) in SCHEDULE_FAMILIES})
+
+
 def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
     from the ROW reading as free (a later pass decides it)."""
     return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
+
+
+def drop_uninformative_scopes(knobs: dict) -> dict[str, str]:
+    """The two spelling rules that make a row equal its own realization, WITHOUT the
+    family-level OFF fill: a bare OFF beside scoped keys of the same family is dropped (a bare pin
+    fans out over every eligible site, so it would contradict them), and a scoped OFF is dropped
+    (it names a site that declined, which is exactly what stamping nothing there says). Both are
+    no-information spellings, so removing them changes no decision — unlike the fill, which turns
+    "this family was never mentioned" into "this family is pinned OFF" and would over-constrain a
+    partial row. :func:`stamp_schedule_families` applies these rules and then fills; a replay pin
+    wants only these."""
+    out = dict(tuning_knob_items(knobs))
+    for family in {family_of(name) for name in out if "@" in name}:
+        if out.get(family) == "":
+            out.pop(family)
+    for name in [n for n in out if "@" in n and out[n] == ""]:
+        out.pop(name)
+    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
@@ -608,16 +636,8 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     # test temporarily replaces the registry after ``space`` has already loaded.
     from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
 
-    out = dict(tuning_knob_items(knobs))
-    # A previously stamped row can carry the family's bare OFF together with a later
-    # axis-scoped decision (for example ``REDUCE=''`` plus ``REDUCE@a0='coop'``).
-    # The scoped spelling is the exact tree-site decision; retaining the bare spelling
-    # would fan OFF across every eligible site during replay and make the row ambiguous.
-    scoped_families = {family_of(name) for name in out if "@" in name}
-    for family in scoped_families:
-        bare = out.get(family)
-        if bare == "":
-            out.pop(family)
+    # The no-information spellings go first (:func:`drop_uninformative_scopes`), THEN the fill.
+    out = drop_uninformative_scopes(knobs)
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:

@@ -285,7 +285,7 @@ def test_parse_knob_spec_grammar():
     whitespace tolerated, empties skipped, values kept as raw strings."""
     from emmy.compiler.pipeline.knob import parse_knob_spec
 
-    assert parse_knob_spec(" bk = 2 ,, BM=16, STAGE=d2/cp ") == {"BK": "2", "BM": "16", "STAGE": "d2/cp"}
+    assert parse_knob_spec(" bk = 2 ,, BM=16, STAGE=d2/smem-async ") == {"BK": "2", "BM": "16", "STAGE": "d2/smem-async"}
     assert parse_knob_spec("") == {}
     with pytest.raises(ValueError, match="missing '='"):
         parse_knob_spec("BK2")
@@ -328,18 +328,17 @@ def test_knob_features_typed_knobs(monkeypatch):
 
 
 def test_knob_features_stage_codec():
-    """The ``STAGE`` codec (``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``) featurizes to the
+    """The ``STAGE`` codec (``d<depth>/copy|reg|cp|tma[/p<reg_depth>]``) featurizes to the
     ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""
-    feats = knob_features({"STAGE": "d3/tma"})
+    feats = knob_features({"STAGE": "d3/smem-tma"})
     assert feats["D_stage_depth"] == 3.0
     assert feats["D_stage_async"] == 1.0
     assert feats["D_stage_tma"] == 1.0
-    assert feats["D_stage_split"] == 0.0
     assert feats["D_stage_reg_depth"] == 1.0  # no /p<n> ⇒ register pipeline OFF
-    sync = knob_features({"STAGE": "d2/cp"})
+    sync = knob_features({"STAGE": "d2/smem-async"})
     assert sync["D_stage_depth"] == 2.0 and sync["D_stage_async"] == 1.0 and sync["D_stage_tma"] == 0.0
     # The smem→register double-buffer (``p<n>``) featurizes orthogonally to the gmem→smem ring.
-    pp = knob_features({"STAGE": "d3/cp/p2"})
+    pp = knob_features({"STAGE": "d3/smem-async/p2"})
     assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0
     assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE": ""}))
 
@@ -349,15 +348,15 @@ def test_stage_codec_reg_depth_roundtrip():
     omitted so an unstaged-register config spells byte-identical to before the field existed."""
     from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
 
-    assert Stage.parse("d3/cp/p2") == Stage(depth=3, transport="cp.async", reg_depth=2)
-    assert Stage.parse("d2/cp/p4").reg_depth == 4
-    assert Stage.parse("d2/cp").reg_depth == 1  # absent ⇒ OFF
-    assert Stage(depth=2, transport="cp.async", reg_depth=2).spell() == "d2/cp/p2"
-    assert Stage(depth=2, transport="cp.async", reg_depth=1).spell() == "d2/cp"  # p1 omitted
+    assert Stage.parse("d3/smem-async/p2") == Stage(depth=3, transport="smem-async", reg_depth=2)
+    assert Stage.parse("d2/smem-async/p4").reg_depth == 4
+    assert Stage.parse("d2/smem-async").reg_depth == 1  # absent ⇒ OFF
+    assert Stage(depth=2, transport="smem-async", reg_depth=2).spell() == "d2/smem-async/p2"
+    assert Stage(depth=2, transport="smem-async", reg_depth=1).spell() == "d2/smem-async"  # p1 omitted
     # reg_depth is perf-only — NOT part of the structural signature (golden-match stability).
     from emmy.compiler.pipeline.search.features import _stage_sig  # noqa: PLC0415
 
-    assert _stage_sig({"STAGE": "d2/cp/p2"}) == _stage_sig({"STAGE": "d2/cp"})
+    assert _stage_sig({"STAGE": "d2/smem-async/p2"}) == _stage_sig({"STAGE": "d2/smem-async"})
 
 
 def test_knob_features_mma_expansion():
@@ -397,8 +396,8 @@ def test_format_tuning_knobs_skips_struct():
 def test_format_tuning_knobs_canonical_order():
     """The codec knobs render in canonical order (``KNOB_ORDER`` = ``TILE``, ``REDUCE``,
     ``STAGE``), not alphabetical — shared with the ``emmy eval`` golden tables."""
-    out = format_tuning_knobs({"STAGE": "d2/cp", "REDUCE": "coop", "TILE": "mma_m16n8k16_f16_f32/f1x1"})
-    assert out == "TILE=mma_m16n8k16_f16_f32/f1x1, REDUCE=coop, STAGE=d2/cp"
+    out = format_tuning_knobs({"STAGE": "d2/smem-async", "REDUCE": "coop", "TILE": "mma_m16n8k16_f16_f32/f1x1"})
+    assert out == "TILE=mma_m16n8k16_f16_f32/f1x1, REDUCE=coop, STAGE=d2/smem-async"
 
 
 def test_apply_knobs_env_no_raw_falls_back_to_env(monkeypatch):
@@ -484,8 +483,8 @@ def test_is_off_value(monkeypatch):
 def test_bare_and_axis_named_featurize_identically():
     """A single-node kernel's bare ``TILE`` / ``STAGE`` and their ``@<axis>`` forms parse, featurize,
     and match identically — the migration is invisible on one-node kernels (the parity bar)."""
-    bare = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE": "d2/cp", "S_ext_free_prod": 4096.0}
-    axed = {"TILE@d": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE@d": "d2/cp", "S_ext_free_prod": 4096.0}
+    bare = {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE": "d2/smem-async", "S_ext_free_prod": 4096.0}
+    axed = {"TILE@d": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "STAGE@d": "d2/smem-async", "S_ext_free_prod": 4096.0}
     assert knob_features(bare) == knob_features(axed)
     assert tile_signature(bare) == tile_signature(axed)
     assert is_warp(bare) == is_warp(axed) is True
@@ -496,7 +495,7 @@ def test_display_renders_keys_as_stored():
     """Since phase 3 the stampers spell the canonical codec key, so the view renders keys AS
     STORED — bare stays bare, an explicit ``@`` spelling (flash's pair, the fused kernel's cone
     stat) stays explicit; there is no display collapse between memory and storage."""
-    one = dict(tuning_knob_items({"TILE": "f2", "REDUCE": "coop", "STAGE": "d2/cp"}))
+    one = dict(tuning_knob_items({"TILE": "f2", "REDUCE": "coop", "STAGE": "d2/smem-async"}))
     assert set(one) == {"TILE", "REDUCE", "STAGE"}
     flash = dict(tuning_knob_items({"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop"}))
     assert set(flash) == {"TILE@dd", "TILE@pj", "REDUCE"}
@@ -518,10 +517,10 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
     pv_tile = "mma_m16n8k16_f16_f32/f4x1/k2"  # the same inventory, its own register tile
     knobs = {
         "TILE@d": qk_tile,
-        "STAGE@d": "d2/cp",
+        "STAGE@d": "d2/smem-async",
         "REDUCE@sk": "",
         "TILE@sk": pv_tile,
-        "STAGE@sk": "d2/cp",
+        "STAGE@sk": "d2/smem-async",
         "WORK": "w4x1",  # one kernel, one inventory — both nodes share the warp map
         "S_ext_free_prod": 4096.0,
     }
@@ -582,14 +581,14 @@ def test_values_equal_canonicalizes_tile_atom_alias():
 
 def test_values_equal_canonicalizes_stage_token_order():
     """A ``STAGE`` pin binds order-free but spells in schema order, so a hand pin ``cp/d2`` must
-    verify against the realized ``d2/cp`` — this runs on the DEPLOY path (the golden-row match),
+    verify against the realized ``d2/smem-async`` — this runs on the DEPLOY path (the golden-row match),
     where a false mismatch drops the recorded row. A genuinely different pipeline still misses."""
     from emmy.compiler.pipeline.knob import values_equal
 
-    assert values_equal("STAGE", "cp/d2", "d2/cp")
-    assert values_equal("STAGE@a1", "split/tma/d1", "d1/tma/split")
-    assert not values_equal("STAGE", "d2/cp", "d3/cp")
-    assert not values_equal("STAGE", "d1/tma", "d1/tma/split")
+    assert values_equal("STAGE", "smem-async/d2", "d2/smem-async")
+    assert values_equal("STAGE@a1", "smem-tma/d1", "d1/smem-tma")
+    assert not values_equal("STAGE", "d2/smem-async", "d3/smem-async")
+    assert not values_equal("STAGE", "d1/smem-tma", "d2/smem-tma")
 
 
 def test_knob_pinned_scopes_and_restores(monkeypatch):
@@ -661,8 +660,16 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     assert restamped["REDUCE@a0"] == "coop"
     assert "REDUCE" not in restamped
 
-    # A non-OFF bare value names a real primary-site decision. Keep it visible so a
-    # repository promotion can reject or explicitly re-key it rather than lose work.
+    # The MIRROR of the bare-OFF rule: a scoped OFF names a site that declined, which is what
+    # stamping nothing there already says — realization drops the key, so keeping it would spell
+    # one configuration two ways, and beside a bare non-OFF value it contradicts it (a bare pin
+    # fans out over every eligible site). The bare decision survives alone.
     primary_and_scoped = stamp_schedule_families({"REDUCE": "g2k", "REDUCE@a0": ""})
     assert primary_and_scoped["REDUCE"] == "g2k"
-    assert primary_and_scoped["REDUCE@a0"] == ""
+    assert "REDUCE@a0" not in primary_and_scoped
+
+    # …and a row whose family is ONLY declined scoped keys collapses to the family-level OFF —
+    # exactly the realized stamp of that configuration (the sm_89 restored-row replay class).
+    declined_only = stamp_schedule_families({"STAGE@a1": "", "REDUCE@a1": "", "WORK": "w1x16"})
+    assert declined_only["STAGE"] == "" and declined_only["REDUCE"] == ""
+    assert not any("@" in key for key in declined_only)

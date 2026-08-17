@@ -824,8 +824,16 @@ def _ab_samples(specs, dynamic=None):
 
 
 def _sample_replay_knobs(sample) -> dict:
-    """All knob pins needed to reproduce a golden winner or explicit A/B row."""
-    return {**getattr(sample, "pins", {}), **sample.knobs}
+    """All knob pins needed to reproduce a golden winner or explicit A/B row, with the
+    no-information spellings dropped (:func:`drop_uninformative_scopes`) so replay pins exactly the
+    row the realization stamps. A stored spelling may still carry a declined scoped key
+    (``STAGE@a1: ''``); pinning it verbatim contradicts the row's own bare value (a bare pin fans
+    out across every eligible site) and the realized kernel — which stamps nothing at a declined
+    site — can never satisfy it. The family-level OFF fill is deliberately NOT applied here: a
+    partial working row leaves a family unmentioned meaning "unpinned", not "pinned OFF"."""
+    from emmy.compiler.pipeline.knob import drop_uninformative_scopes  # noqa: PLC0415
+
+    return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
 
 
 async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None, strict_correctness=False):

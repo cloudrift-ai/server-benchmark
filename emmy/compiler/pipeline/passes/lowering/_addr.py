@@ -23,7 +23,7 @@ from emmy.compiler.ir.stmt import Load
 # both the k16 convert drain and the k32 repack drain, either B orientation). 16 extra bytes per
 # row breaks the stride while keeping every 16 B cp.async chunk aligned (the byte-staging
 # legality requires the data cols to be 16-divisible, so ``cols + 16`` stays 16 B-periodic).
-# Derived, not tuned — the same fixed-pad reasoning as the flash ``_twist._PAD``. cp.async only:
+# Derived, not tuned — the bank-quartet aliasing argument below. cp.async only:
 # a TMA box deposit is dense (its byte slab stays unpadded and eats the measured conflicts).
 # Shared by the kernel staging pass and the tile-layer byte-staging legality check, so it lives
 # here rather than in `kernel/_stage` — a tile pass may not import the kernel pass layer.

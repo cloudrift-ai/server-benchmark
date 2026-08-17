@@ -239,7 +239,7 @@ def test_f8_atoms_offer_staged_byte_slabs():
     _term, node = _f8_term()
     tile = TilePlan.parse(f"{K32}/f4x1/k4", Workers.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
-    for spec in ("d2/cp", "d2/tma"):
+    for spec in ("d2/smem-async", "d2/smem-tma"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
 
 

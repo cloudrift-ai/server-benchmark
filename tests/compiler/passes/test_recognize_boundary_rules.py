@@ -25,6 +25,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import Fold, TileOp
+from emmy.compiler.ir.tile.ir import deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -64,9 +65,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     inside K, while the linear bias feeds only the accumulator epilogue. Grouping the
     whole preamble together demotes the contraction to a scalar ``Map``.
     """
-    from importlib import import_module
-
-    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
 
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 64), ("k", 128)))
     body = Body(
@@ -104,7 +103,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
         )
     )
 
-    node, free, stores = recognize._lift(list(body), "out")
+    node, free, stores = lift_mod._lift(list(body), "out")
 
     assert [axis.name for axis in free] == ["m", "n"]
     # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
@@ -123,9 +122,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
 
 def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
     """Q and K can occupy different affine regions of one load-time-packed QKV buffer."""
-    from importlib import import_module
-
-    recognize = import_module("emmy.compiler.pipeline.passes.lowering.tile.010_recognize")
+    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
 
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 32), ("k", 64)))
     body = Body(
@@ -163,7 +160,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
         )
     )
 
-    node, free, stores = recognize._lift(list(body), "score")
+    node, free, stores = lift_mod._lift(list(body), "score")
 
     assert [axis.name for axis in free] == ["m", "n"]
     # Both views of the packed buffer hoist as materialized operand edges of the stored node.
@@ -211,7 +208,13 @@ def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
         leaves = flatten_leaves(fp.options)
+        # The placement fork (fused option-0 + cut fragments) precedes the schedule fork;
+        # these tests assert on the SCHEDULE rows, so take the fused side and harvest nothing.
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         if pick is not None:
             for leaf in leaves:
@@ -230,45 +233,61 @@ def _is_warp_row(row: dict) -> bool:
     return str(row.get("WORK", "")).startswith("w")
 
 
-def test_wide_m1_flinear_uses_single_warp_k_fold():
-    """A coalesced wide-K M=1 F.linear must not expose the dominated serial
-    reduction to deploy selection, while tune retains the complete fork."""
-    from dataclasses import replace
+def test_wide_m1_flinear_offers_the_warp_k_fold_and_a_pin_realizes_it(monkeypatch):
+    """A coalesced wide-K M=1 F.linear OFFERS the 32-wide cooperative K fold beside the serial
+    one, and a pin naming it realizes exactly that kernel.
 
-    from emmy.compiler.pipeline.knob import family_of
+    This used to assert that an unpinned deploy PICKED the coop fold — B's stored layout
+    classified the shape and promoted the band ahead of the serial row. That ordering is gone:
+    which of the two wins is measured evidence's answer, so an unpinned compile with none may take
+    either, and the enumeration's obligation is only that both are reachable."""
+    from emmy.compiler.pipeline.knob import family_of, family_value
 
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    monkeypatch.delenv("EMMY_REDUCE", raising=False)
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4080")
+    rows, _ = _resolve(_m1_linear_graph(), ctx=ctx)
+    offered = {v for row in rows for k, v in row.items() if family_of(k) == "REDUCE"}
+    assert "" in offered and "coop" in offered, offered
+    assert any(row.get("WORK") == "t32" and family_value(row, "REDUCE") == "coop" for row in rows), rows
+
+    monkeypatch.setenv("EMMY_WORK", "t32")
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
-    # F1 site grammar: the coop WIDTH rides the ONE WORK entry; the REDUCE value is site-local.
-    reduce_specs = [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"]
-    assert reduce_specs == ["coop"]
+    assert [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"] == ["coop"]
     assert tile.knobs.get("WORK") == "t32"
-    tune_rows, _ = _resolve(_m1_linear_graph(), ctx=replace(ctx, validate_pins=False))
-    offered = {v for row in tune_rows for k, v in row.items() if family_of(k) == "REDUCE"}
-    assert "" in offered and "coop" in offered
-    assert any(row.get("WORK") == "t32" for row in tune_rows)
 
 
-def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
-    """The merged fork: the ``Map``-form reduce rows lead (option-0 = the conservative coop pick,
-    lowerable everywhere), then the computed-A bilinear fold form's warp rows — every one riding a
+def test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows():
+    """The merged fork carries BOTH readings: the ``Map``-form reduce rows (lowerable everywhere)
+    and the computed-A bilinear fold form's warp rows — every one riding a
     resolved ``sync`` compute-fill stage, at BOTH depths (``d1`` + the asymmetric B-ring ``d2``
     as fork siblings), with the K partition either decided-empty or a redundant-statistic
     split — deferred ``g<w>k`` or, this fixture's plain-store tail being distributive, the
     single-kernel atomic ``g<w>a`` (the single-channel computed-A split-K family).
+
+    Membership, not position: this used to require the Map form's cooperative row to LEAD, because
+    that was the row a prior-free compile deployed. Nothing leads any more, so the assertion is
+    that each reading contributed rows and that each spells its own families correctly.
 
     Both readings spell the SAME key set — the contraction tree's, since that is the union's one
     namespace: bare ``TILE`` / ``STAGE`` / ``REDUCE`` for the product fold and ``@<stat axis>`` for
     the cone's statistic, each stamped as a DECIDED EMPTY where its reading has no such site."""
     rows, _ = _resolve(_norm_linear_graph())
     assert rows, "no fork was offered for the fused norm→linear"
-    assert not _is_warp_row(rows[0]), "option-0 must be the Map-form coop row, not a warp row"
-    # F1: a coop partition spells the site value ``coop`` with its width in the WORK entry.
-    assert any(isinstance(v, str) and v.startswith("coop") for v in rows[0].values()), "option-0 must cooperate on the stat reduce"
-    assert str(rows[0].get("WORK", "")).startswith("t"), "the coop width rides the WORK inventory"
-    assert rows[0]["TILE"] == "" and rows[0]["STAGE"] == "" and rows[0]["REDUCE"] == "", (
-        f"the Map reading must stamp the contraction's families as decided empties: {rows[0]}"
-    )
+    # The Map reading: the statistic fold cooperates (its width in WORK, F1 site grammar) and the
+    # contraction's own families are stamped as decided empties.
+    coop_map = [
+        r
+        for r in rows
+        if not _is_warp_row(r)
+        and any(isinstance(v, str) and v.startswith("coop") for v in r.values())
+        and str(r.get("WORK", "")).startswith("t")
+        and r["TILE"] == ""
+        and r["STAGE"] == ""
+        and r["REDUCE"] == ""
+    ]
+    assert coop_map, f"the Map reading contributed no cooperative stat-reduce row: {rows[:4]}"
     warp = [r for r in rows if _is_warp_row(r)]
     assert warp, "the bilinear fold form contributed no warp rows"
     stages_seen = set()
@@ -276,7 +295,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     for r in warp:
         stat = [(k, v) for k, v in r.items() if "@" in k]
         assert stat and all(v == "" for _, v in stat), f"the compute fill realizes the statistic itself — its site stays empty: {r}"
-        assert r["STAGE"] in ("d1/sync", "d2/sync"), f"warp rows must ride the resolved sync compute-fill: {r}"
+        assert r["STAGE"] in ("d1/smem", "d2/smem"), f"warp rows must ride the resolved reg compute-fill: {r}"
         assert r["REDUCE"] == "" or (r["REDUCE"].startswith("g") and r["REDUCE"].endswith(("k", "a"))), (
             f"the computed-A form allows only the empty or split (g<w>k / g<w>a) K partition: {r}"
         )
@@ -286,7 +305,7 @@ def test_norm_linear_offers_map_rows_then_warp_contraction_rows():
     # B-only ring clamps back to d1 (nothing async to overlap) — d1 alone is correct here.
     # The canonical-B (constant-weight) shape class exercises d2 in
     # test_fused_cone_splitk_matches_reference.
-    assert "d1/sync" in stages_seen, f"the resolved sync compute-fill must be offered: {stages_seen}"
+    assert "d1/smem" in stages_seen, f"the resolved reg compute-fill must be offered: {stages_seen}"
     assert "" in reds_seen and any(v for v in reds_seen), f"both the serial and split K partitions must be offered: {reds_seen}"
 
 
@@ -314,13 +333,103 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     assert (isinstance(cone, Fold) and cone.axis is None) and cone.out == operand_name(c.a)
     assert cone.operands[0].operands[0].role is AxisRole.PLANAR, "the statistic reduce is the prologue's source"
     # The seam IS the boundary: prologue row-invariant, body k-varying, stats the bridged values.
-    pro, cell, stats = cone_seam(cone)
+    pro, cell, stats = cone_seam(cone, c.axis.name)
     assert pro == tuple(cone.operands[0].lower()) and cell == tuple(cone.body)
     assert not any(refs_axis(s, c.axis.name) for s in pro), "the prologue never indexes K — it runs once per row"
     assert any(refs_axis(s, c.axis.name) for s in cell), "the per-cell body is the k-varying remainder"
     assert stats, "the statistic bridges through the stat smem rows"
     # The operand body is the flattened cone verbatim: the stat loop, its sweep, then the cone.
     assert operand_body(c.a) == tuple(cone.lower()) == (*pro, *cell)
+
+
+def _attention_cone_term() -> tuple[Fold, Fold]:
+    """The attention shape of the computed-A cone, built directly: the ``softmax(Q·Kᵀ)·V``
+    contraction over the KV axis whose A cone is ``exp(s − m)·(1/d)`` over a COMPUTED score — one
+    edge for the row statistic (the twisted ``(m, d)`` pair) and one for the per-cell score
+    contraction ``s = Σ_d Q·K``. Returns ``(root, cone)``."""
+    from emmy.compiler.ir.stmt import Lambda
+    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.tile import Channel
+
+    def score(kv_name: str, dd: Axis, acc: str) -> Fold:
+        q = Load(names=(f"{acc}__q",), input="q", index=(Var("m"), Var(dd.name)))
+        k = Load(names=(f"{acc}__k",), input="k", index=(Var(kv_name), Var(dd.name)))
+        return Fold.contraction(k_axis=dd, a=q, channels=(Channel(b=k, acc=acc),))
+
+    names, other = ("mx", "dn"), ("mx__o", "dn__o")
+    stat = Fold(
+        axis=Axis("kv", Dim(32)),
+        operands=(score("kv", Axis("dd", Dim(16)), "s1"),),
+        lift=Lambda(params=("kv", "s1"), body=Body(()), results=("s1", 1.0)),
+        init=(float("-inf"), 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
+    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,))
+    cone = Fold.projection(
+        body=Body(
+            (
+                Assign(name="ex0", op="subtract", args=("s2", "mx")),
+                Assign(name="ex1", op="exp", args=("ex0",)),
+                Assign(name="pw", op="multiply", args=("rd", "ex1")),
+            )
+        ),
+        operands=(prologue, score("kvb", Axis("ddb", Dim(16)), "s2")),
+    )
+    v = Load(names=("vl",), input="v", index=(Var("kvb"), Var("n")))
+    pv = Fold.contraction(k_axis=Axis("kvb", Dim(32)), a=cone, channels=(Channel(b=v, acc="o"),))
+    return Fold.projection(body=Body(()), operands=(pv,)), cone
+
+
+def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
+    """A cone may carry more than the one row-invariant statistic edge: attention's score
+    contraction is a PER-CELL producer its ``exp(s − m)`` reads. The K seam splits the EDGES the
+    same way it splits the stmts — a k-invariant edge is the prologue (run once per tile row), a
+    k-varying one is per-cell and splices into the cell ahead of its first use — so the fill
+    computes the score instead of reading a name nothing defines.
+
+    Such an edge is evaluated INLINE from lowered loop IR, so no ``TILE`` / ``REDUCE`` / ``STAGE``
+    slice can address it and none is offered (a value there would be unrealizable, and the rows
+    carrying it would emit the identical kernel). It stays a ``PLACE`` seam: cutting it is exactly
+    how the score becomes a kernel of its own — the two-kernel form evidence prices against this
+    one."""
+    from emmy.compiler.ir.tile.ir import refs_axis
+    from emmy.compiler.ir.tile.ops import cone_seam
+    from emmy.compiler.ir.tile.path import family_sites, sites
+
+    root, cone = _attention_cone_term()
+    pv = root.operands[0]
+    pro, cell, stats = cone_seam(cone, pv.axis.name)
+    assert pro == tuple(cone.operands[0].lower()), "the k-invariant statistic edge is the prologue"
+    assert not any(refs_axis(s, pv.axis.name) for s in pro)
+    assert cell[0] == cone.operands[1].lower()[0], "the score edge leads the per-cell cell"
+    assert stats == ("mx", "rd"), f"the statistic bridges through the stat smem rows: {stats}"
+    # Every name the cell reads is defined by the cell, the bridged stats, or an axis.
+    defined = {nm for s in cell for nm in deep_defines(s)} | set(stats) | stmt_axis_names(cell) | {"m", "n", pv.axis.name}
+    assert deep_reads(list(cell)) <= defined, f"the fill reads an undefined name: {deep_reads(list(cell)) - defined}"
+
+    all_sites = sites(root)
+    (inline,) = [s for s in all_sites if s.inline]
+    assert inline.node is cone.operands[1] and inline.axis == "ddb"
+    for family in ("TILE", "REDUCE", "STAGE"):
+        assert not [s for s in family_sites(family, all_sites) if s.node is inline.node], f"{family} must not address an inline node"
+    assert [s for s in family_sites("PLACE", all_sites) if s.node is inline.node], "the score edge stays a cuttable seam"
+    # …and the statistic edge keeps its own reduce site — it is realized per tile ROW, not per cell.
+    stat = cone.operands[0].operands[0]
+    assert any(s.node is stat for s in family_sites("REDUCE", all_sites))
+
+
+def test_cone_per_cell_edge_reaches_the_per_cell_emitter():
+    """The same edge on the untiled tier: the emitter's node-walk lowers EVERY operand edge of a
+    zero-axis node, so the score's own reduce loop is emitted ahead of the cell that reads it.
+    Walking only the first edge left the cell reading a name nothing defined — nvcc's
+    ``identifier "s2" is undefined``."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _emit
+
+    _root, cone = _attention_cone_term()
+    body = Body(tuple(_emit(cone, Ctx(grid=())).body))
+    defined = {nm for s in body for nm in deep_defines(s)} | stmt_axis_names(body) | {"m", "n", "kvb"}
+    assert "s2" in defined, "the cone's score edge never reached the emitted body"
+    assert deep_reads(list(body)) <= defined, f"the emitted body reads an undefined name: {deep_reads(list(body)) - defined}"
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():
@@ -370,7 +479,7 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     assert all(s.pure for s in tile.op.body) and not isinstance(tile.op.body[-1], Write)
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "o"
     assert any(_is_warp_row(r) for r in rows)
-    assert not _is_warp_row(rows[0]), "option-0 stays the coop reduce row"
+    assert any(not _is_warp_row(r) for r in rows), "the per-cell reading must stay reachable beside the warp rows"
 
 
 def _normed_sdpa_graph():
@@ -388,32 +497,6 @@ def _normed_sdpa_graph():
     )
     graph, _, _ = graph_from_code(code)
     return graph
-
-
-def test_normed_gqa_sdpa_certifies_flash():
-    """The fused flash form must certify when gate-free loop fusion moves RMSNorm'd Q/K
-    cones into the repeated score contractions. The existing flash recognizer recovers those
-    cones as computed operand ``Fold`` edges while V remains materialized, so it neither loses
-    normalization semantics nor fragments SDPA into a full [b,h,m,n,d] outer product."""
-    pytest.importorskip("torch")
-
-    def decide(fp):
-        return flatten_leaves(fp.options)[0]
-
-    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_normed_sdpa_graph(), decide)
-    flash = [
-        n.op
-        for n in terminal.nodes.values()
-        if type(n.op).__name__ == "TileOp"
-        and (isinstance(n.op.op, Fold) and n.op.op.axis is None)
-        and n.op.op.operands
-        and getattr(n.op.op.operands[0], "role", None) is AxisRole.TWISTED
-    ]
-    assert flash, "no TWISTED flash kernel certified for the normed GQA sdpa"
-    src = flash[0].op.operands[0]
-    first = src.step_stmts()[0]
-    assert getattr(first, "role", None) is AxisRole.CONTRACTION, "flash did not absorb the score contraction (fold stayed cut)"
-    assert not isinstance(first.a, Load) and not isinstance(first.b, Load), "normalized Q/K cones were reduced to raw loads"
 
 
 def test_bind_contraction_declined_cone_raises_not_positional():
@@ -543,3 +626,69 @@ def test_duplicated_cone_with_commuted_args_still_shares_one_a():
     c_map, _, _stores = bound
     (product,) = c_map.operands
     assert len(product.channels) == 2, "both ⊗-folds grouped over the one shared cone"
+
+
+# --------------------------------------------------------------------------- #
+# The MASKED score cone — SDPA's ``softmax(Q·Kᵀ + mask)·V``. A coordinate-predicated
+# ``Select`` in the score is an ordinary pure stmt of the cone, so the masked region must
+# reach the SAME computed-A contraction the unmasked one reaches.
+# --------------------------------------------------------------------------- #
+
+
+def _sdpa_graph(*, is_causal: bool, B: int = 1, H: int = 2, S: int = 64, D: int = 32) -> Graph:
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (Dim(B), Dim(H), Dim(S), Dim(D)), dtype=F16), node_id=name)
+    g.add_node(SdpaOp(is_causal=is_causal), ["q", "k", "v"], Tensor("o", (Dim(B), Dim(H), Dim(S), Dim(D)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v"], ["o"]
+    return g
+
+
+def _resolve_sdpa(is_causal: bool) -> tuple[list[dict], TileOp]:
+    """Run the tile passes over an SDPA graph, picking the warp row wherever one is offered.
+    Returns ``(the softmax·V node's fork rows — empty when the cell took the flat zero-axis
+    escape and no schedule fork was offered at all, its TileOp)``."""
+    rows: dict[str, list[dict]] = {}
+
+    def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
+        leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
+        harvest = [dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves]
+        rows.setdefault(fp.node_id, []).extend(harvest)
+        return next((leaf for leaf, row in zip(leaves, harvest, strict=True) if _is_warp_row(row)), leaves[0])
+
+    rg, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_sdpa_graph(is_causal=is_causal), decide)
+    return rows.get("o", []), rg.nodes["o"].op
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_masked_sdpa_reaches_the_computed_a_contraction(is_causal):
+    """SDPA's ``softmax·V`` half binds as ONE computed-A contraction over the ``(m, d)`` statistic
+    — masked as well as unmasked. The mask is a ``Select`` on the score, which the twisted λ read
+    and the MAP cone both carry, so the fork offers the mma tier either way. When they did not, the
+    causal region kept the flat zero-axis ``Fold`` escape: a knob-less serial kernel, two orders of
+    magnitude off the split it replaced, on the shape every decoder-only model uses."""
+    rows, tile = _resolve_sdpa(is_causal)
+    assert any(_is_warp_row(r) for r in rows), "the masked softmax·V must offer the warp/mma tier, not just the scalar escape"
+    assert any("mma" in str(r.get("TILE", "")) for r in rows), "no mma TILE was offered for the softmax·V contraction"
+    assert tile.knobs.get("TILE", "").startswith("mma"), f"the picked row must realize the contraction: {tile.knobs.get('TILE')!r}"
+
+
+def test_masked_score_cone_keeps_its_predicate_per_cell():
+    """The mask ``Select`` reads the contraction axis through its PREDICATE, not an index, so the
+    K seam must place it in the per-cell body. Hoisted into the row-invariant prologue it would be
+    evaluated once per row, at a coordinate that is not even bound there."""
+    from emmy.compiler.ir.stmt import Select
+    from emmy.compiler.ir.tile.ops import cone_seam
+
+    _, tile = _resolve_sdpa(is_causal=True)
+    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    assert fold.role is AxisRole.CONTRACTION and not isinstance(fold.a, Load)
+    pro, cell, _stats = cone_seam(fold.a, fold.axis.name)
+    assert any(isinstance(s, Select) for s in cell), "the mask predicates the per-cell weight"
+    assert not any(isinstance(s, Select) for s in pro), "the mask is k-varying — it never joins the row prologue"

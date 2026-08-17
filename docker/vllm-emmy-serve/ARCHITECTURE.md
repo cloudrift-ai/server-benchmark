@@ -261,9 +261,9 @@ The full release session on a rented card (each step from the repo checkout; hos
    each row; and audits the freshly traced serving twins. Any missing realization, DRIFT, GAP, or compile failure is
    a hard failure.
 
-   With a `SERVE_CONSULT_BASELINE` JSON in the config, the audit additionally ratchets each twin's golden-tier
+   With a `SERVE_CONSULT_BASELINE` JSON in the config, the audit additionally ratchets each twin's verified-tier
    consultation count per lane against that checked-in baseline. MATCH/DRIFT/GAP only report on forks that consult
-   the golden tier; a pass change that removes a kernel's schedule fork deploys it single-option with **no**
+   the verified tier; a pass change that removes a kernel's schedule fork deploys it single-option with **no**
    consultation, so its recorded goldens silently stop applying with zero DRIFT — the count drop is the only
    deploy-side signal, and it fails the gate naming the twin. Seed or refresh the baseline with
    `emmy eval golden … --update-consult-baseline` on the target GPU (only a passing audit records), and commit the

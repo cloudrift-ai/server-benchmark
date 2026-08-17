@@ -26,13 +26,12 @@ the finalize is a fresh ``ReducePlan``); ``lowering/kernel`` only ever sees sing
 kernels (``assert not needs_split``).
 
 This cut handles **additive** carriers — a degenerate ``PLANAR`` reduce (``sum``) and a
-``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and the twisted
-multi-component carrier: **flash split-KV** (:func:`_split_twisted_warp`), where a WARP-tiled
-``TWISTED`` streaming tree keeps its fragment residence in the partial (the ``Fold`` axis
-shrinks to the slice and its absolute base rides that axis's ``Window``), stores the raw
-``(m, l, O)`` state to an f32 workspace, and the finalize folds the partitions through the
-exp-family LSE combine before projecting. Pays where the un-split grid starves the SMs (few
-heads / short query axis); pin ``REDUCE=g<n>k``.
+``CONTRACTION`` contraction (split-K matmul), one carrier-state component each — and, through the
+residual path's carrier-generic deferred-kernel finalize, a multi-component ``TWISTED`` carrier
+(the streaming softmax's ``(m, d)`` state packs into the workspace's leading ``comp`` axis and the
+finalize folds partitions through the exp-family combine). The WARP-tiled fragment-residence
+split-KV arm was deleted with the flash pattern compiler; it returns with the TWISTED computed-A
+recognizer arm. Pays where the un-split grid starves the SMs; pin ``REDUCE=g<n>k``.
 
 **Two shapes of contraction split-K.** A structural ``Fold(axis=ksplit,
 source=Fold.contraction(k_axis=kslice))`` (built schedule-side) has its K axis already
@@ -49,9 +48,9 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
@@ -65,10 +64,9 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled, stream_pair
+from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, reduce_loop, reduce_plan, sched_of, scheduled
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
-from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
 PATTERN = [Pattern("root", TileOp)]
@@ -246,7 +244,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     p_op = _partial(())
     partial_tile = _mapped(
-        p_op, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, schedule=_partial_sched(p_op), stores=ws_stores
+        p_op, (split, *grid), name=f"{tile.name or out.name}__partial", knobs=tile.knobs, schedule=_partial_sched(p_op), stores=ws_stores
     )
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
@@ -267,116 +265,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
     fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, stores=fin_stores)
-
-    frag = Graph()
-    for inp in root.inputs:
-        frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
-    frag.outputs = [out.name]
-    return frag
-
-
-def _split_twisted_warp(match: Match, root: Node, tile: TileOp, op: Fold, plan: ReducePlan, split: Axis):
-    """Realize flash split-KV: a **warp-tiled** ``TWISTED`` streaming tree whose GRID stage slices
-    the kv stream across ``cta`` CTAs. The partial keeps the WHOLE fragment-resident tree — the
-    ``Fold`` gets its axis shrunk to the slice length ``B`` and its absolute base on
-    ``offset`` (``_ksplit · B``; the realizer walks the local ``[0, B)`` window and re-bases the
-    gmem/TMA coords + causal mask, composing with the causal tile-skip) — and stores the RAW
-    ``(m, l, O)`` state: O per output cell, the d-invariant row stats once per row at the last
-    slot's origin, into an **f32** workspace (the pre-projection state must not round-trip
-    through the output dtype). The finalize folds the workspace over the split axis via the
-    carrier's ``as_state_merge`` (the LSE cross-partition combine) and runs the ORIGINAL
-    projection (``O/l`` + the layout-aware store) per output element. Deferred-kernel finalize
-    only — the twisted ``e^{Δm}`` rescale can't be an atomic."""
-    (red,) = op.operands
-    score, _ = stream_pair(red)  # the score fold (the hoisted operand edge) — its tile is the schedule read
-    cta = plan.cta
-    src_sched = sched_of(tile)
-    head_tile = src_sched.tile_of(score)
-    atom_n = head_tile.atom.shape[1]
-    bn = head_tile.regs[1] * atom_n
-    # What a split-KV partition demands is stated ONCE, in ``_legality.splitkv_slice`` — the
-    # deferred-kernel finalize (the twisted state has no atomic), a divisible kv extent, and
-    # block-whole slices. The enumeration DROPS a row it refuses; here the row is already chosen,
-    # so the same predicate raises. Restating it as three local checks is precisely the "one rule,
-    # once as a drop and once as a raise" defect that module exists to remove.
-    legal.enforce(legal.splitkv_slice(red, head_tile, plan), pinned=True)
-    ext = red.axis.extent
-    if ext.is_static:
-        b_dim = Dim(ext.as_static() // cta)
-        bound = None  # the shrunk static extent alone bounds the slice
-    else:
-        # Symbolic kv: the slice width is the bn-ALIGNED ceil split ``B = ceil(S / (cta·bn)) · bn``
-        # (a composite Dim — every slice base lands block-aligned, so only each slice's own tail
-        # chunk is partial), and ``bound = min((s+1)·B, S)`` is the slice's absolute end — the
-        # realizer stops the stream at ``bound − offset`` and masks/clamps against it (a mid-tensor
-        # slice end reads VALID next-slice keys the extent-only tail masks would keep). A slice
-        # wholly past ``S`` runs zero steps and contributes the carrier identities, which the
-        # finalize's LSE combine folds as exact no-ops.
-        b_dim = ext.ceil_div(cta * bn) * bn
-        nxt = BinaryExpr("*", BinaryExpr("+", Var(_SPLIT), Literal(1, "int")), b_dim.expr)
-        bound = TernaryExpr(cond=BinaryExpr("<", nxt, ext.expr), if_true=nxt, if_false=ext.expr)
-    out = root.output
-    grid = tile.place.grid  # (batch…, m_blocks) — the warp placement's shrunk query axis, d folded away
-    alg = Reduction(red)
-    names, terms = alg.names, alg.terms
-    expect = next(n for n, t in zip(names[1:], terms[1:], strict=True) if isinstance(t, str))
-    n_comp = len(names)
-    # The query / value axes are PLACEMENT facts — the pre-split tile's trailing free axes (the
-    # warp placement preserves ``free`` while its grid shrinks the query axis and folds ``d`` away).
-    m_axis, d_axis = tile.place.free[-2], tile.place.free[-1]
-    batch = tuple(a for a in grid[:-1])
-
-    # The workspace is OURS (bare ``(batch…, m, d)`` order — the fused output layout only matters
-    # at the finalize's store); f32 so the pre-projection state keeps the stream's precision.
-    ws_name = f"{out.name}__partial"
-    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in batch), m_axis.extent, d_axis.extent)
-
-    def ws_index(i: int, name: str) -> tuple:
-        cell = (Var(m_axis.name), Var(d_axis.name) if name == expect else Literal(0, "int"))
-        return (Literal(i, "int"), Var(split.name), *(Var(a.name) for a in batch), *cell)
-
-    off = BinaryExpr("*", Var(split.name), b_dim.expr)
-    # The slice rides the AXIS's window — its absolute base / end in the un-split stream.
-    sliced = replace(red, axis=replace(red.axis, extent=b_dim, window=Window(parent=red.axis, base=off, bound=bound)))
-    ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i, names[i]), value=names[i])) for i in range(n_comp))
-    partial_map = Fold.projection(body=Body(()), operands=(sliced,))
-    # The partial's slices RE-KEY against its own tree: the QK/PV warp plans + the stream's
-    # resolved K/V pipeline carry over; the GRID stage is consumed (any residual partition would
-    # re-key here too, but the stream's plan is GRID-only by construction).
-    p_sched = Sched(partial_map, {})
-    sliced_head, sliced_pv = stream_pair(sliced)
-    _, orig_pv = stream_pair(red)
-    p_sched.put("TILE", sliced_head, head_tile)
-    p_sched.put("TILE", sliced_pv, src_sched.tile_of(orig_pv))
-    p_sched.put("STAGE", sliced, src_sched.get("STAGE", red))
-    stripped = _strip_grid(plan)
-    if stripped.stages:
-        p_sched.put("REDUCE", sliced, stripped)
-    # The partial's grid gains ``_ksplit`` and keeps the shrunk query axis; its FREE axes keep the
-    # true ``(m, d)`` tail so the fragment realizer re-derives the views (``Ctx.free``).
-    partial_tile = _mapped(
-        partial_map,
-        (split, *grid),
-        name=f"{tile.name}__partial",
-        knobs=tile.knobs,
-        free=(split, *grid[:-1], m_axis, d_axis),
-        schedule=p_sched.table,
-        stores=ws_stores,
-    )
-
-    # Finalize: per output element, seed the state, fold the partitions (the exp-family LSE
-    # combine), then the original projection + layout-aware store (``op.body`` verbatim).
-    other = tuple(f"{nm}__p" for nm in names)
-    combine = alg.state_merge(other)
-    ids = alg.identities()
-    seeds = tuple(Init(name=nm, identity=ids[nm], dtype=F32) for nm in names)
-    loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i, names[i])) for i in range(n_comp))
-    fin_loop = Loop(axis=split, body=Body((*loads, combine)))
-    fin_op = Fold.projection(body=Body((*seeds, fin_loop, *op.body)))
-    fin_tile = _mapped(fin_op, (*batch, m_axis, d_axis), name=tile.name, stores=tile.stores)
+    fin_tile = _mapped(fin_op, grid, name=tile.name or out.name, stores=fin_stores)
 
     frag = Graph()
     for inp in root.inputs:
@@ -420,26 +309,8 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     inner = fold_node.composed
     if inner is not None and sched_of(tile).tile_of(inner) is not None:
         return _split_contraction(match, root, tile, inner, fold_node, plan, rax, projection)
-    # Flash split-KV: a warp-tiled TWISTED streaming tree keeps its fragment residence in the
-    # partial (the scalar residual path below would drop it to the per-cell tier).
-    if (
-        isinstance(op, Fold)
-        and op.axis is None
-        and len(op.operands) == 1
-        and isinstance(op.operands[0], Fold)
-        and op.operands[0].role is AxisRole.TWISTED
-    ):
-        red_stmts = op.operands[0].step_stmts()
-        score = red_stmts[0] if len(red_stmts) else None
-        head_tile = sched_of(tile).tile_of(score) if isinstance(score, Fold) else None
-        if head_tile is not None and head_tile.is_warp:
-            # A symbolic kv splits too: ``_split_twisted_warp`` builds the bn-aligned runtime slice
-            # width and the absolute ``bound`` the realizer stops/masks against.
-            return _split_twisted_warp(match, root, tile, op, plan, Axis(name=_SPLIT, extent=Dim(cta)))
     if not rax.extent.is_static:
-        raise NotImplementedError(
-            "cross-CTA split of a symbolic reduce axis is not built yet (warp flash split-KV above is the one built symbolic arm)"
-        )
+        raise NotImplementedError("cross-CTA split of a symbolic reduce axis is not built yet")
     extent = rax.extent.as_static()
     if extent % cta != 0:
         raise NotImplementedError(f"cross-CTA split needs a divisible reduce axis (extent {extent} % cta {cta})")
@@ -498,18 +369,28 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
     # additive workspace stays ``ws[cta, *free]``). A multi-component (twisted flash) carrier
     # writes its ``(m, l, O)`` state to the three ``comp`` slices, no multi-output kernel.
+    # The workspace shape MUST match the rank of ``ws_index`` — sized by the GRID extents, never
+    # ``out.shape`` (whose extent-1 batch dims the grid never carries): a rank mismatch makes
+    # ``render_index``'s fallback flatten WITHOUT strides, colliding the partitions' states (the
+    # statistic-with-projection split wrote ``ws[ksplit + cell]``). And it is **f32**: it holds
+    # raw pre-projection accumulator states — the same rule as the contraction arm above (the
+    # flash split-KV / 020 channel-workspace rule).
     ws_name = f"{out.name}__partial"
-    ws_shape = (Dim(n_comp), Dim(cta), *out.shape) if n_comp > 1 else (Dim(cta), *out.shape)
+    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in grid)) if n_comp > 1 else (Dim(cta), *(a.extent for a in grid))
+    ws_cell = tuple(Var(ax.name) for ax in grid)  # grid-rank by construction; ``cell`` (the output
+    # Write's index, possibly full-rank with batch literals) stays the OUTPUT store's index only.
 
     def ws_index(i: int) -> tuple:
         lead = (Literal(i, "int"), Var(_SPLIT)) if n_comp > 1 else (Var(_SPLIT),)
-        return (*lead, *cell)
+        return (*lead, *ws_cell)
 
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace -----
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     partial_op = Fold.projection(body=Body((*before, sliced_loop)))
     res_op, res_sched = _residual(partial_op, plan, fold_node)
-    partial_tile = _mapped(res_op, (split, *grid), name=f"{tile.name}__partial", knobs=tile.knobs, schedule=res_sched, stores=ws_stores)
+    partial_tile = _mapped(
+        res_op, (split, *grid), name=f"{tile.name or out.name}__partial", knobs=tile.knobs, schedule=res_sched, stores=ws_stores
+    )
 
     # --- finalize kernel: seed the carrier state, then fold each partition's state from the
     # workspace over the split axis via the fold's cross-partition combine (``Reduction.state_merge`` —
@@ -529,13 +410,13 @@ def rewrite(match: Match, root: Node) -> TileOp | Graph | None:
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
     fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
-    fin_tile = _mapped(fin_op, grid, name=tile.name, stores=fin_stores)
+    fin_tile = _mapped(fin_op, grid, name=tile.name or out.name, stores=fin_stores)
 
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     frag = Graph()
     for inp in root.inputs:
         frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, out.dtype), node_id=ws_name)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

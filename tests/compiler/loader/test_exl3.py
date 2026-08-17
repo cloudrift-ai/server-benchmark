@@ -611,7 +611,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
                 return leaf
         return leaves[0]
 
@@ -663,7 +663,7 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/sync":
+            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
                 selected.append(row)
                 return leaf
             if lane == "coop" and row.get("WORK") == "t128" and row.get("REDUCE") == "coop":
@@ -711,6 +711,140 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
         float(ref.max()),
         {name: (float(np.asarray(value).min()), float(np.asarray(value).max())) for name, value in run_outputs.items()},
     )
+
+
+def _trellis_linear_graph(m: int = 16, tensors=None, cb: int = 0):
+    """The streamed computed-B linear: ``x @ decode(trellis)ᵀ``, its two spelling boundaries kept
+    observable so index-map fusion cannot replace the computed-B contraction with a planar one."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (m, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, 128), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    shape = (8, 8, 32) if tensors is None else tuple(tensors["layer.trellis"].shape)
+    spell_trellis_inputs(graph, {"w": (cb, shape)})
+    graph.outputs.extend(["y_left_flat", "y_core_reduce"])
+    return graph
+
+
+def _computed_b_rows(rows):
+    """The rows of the compute-FILLED warp lane — the one whose B is the streamed cone (a warp
+    ``WORK`` inventory over the mandatory ``smem`` fill; no other lane has a computed operand)."""
+    return [r for r in rows if str(r.get("WORK", "")).startswith("w") and str(r.get("STAGE", "")).endswith("/smem")]
+
+
+def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
+    """The computed-B warp lane admits the cross-CTA split — no GPU, enumeration only.
+
+    The split factors a static K into ``ksplit × kslice`` and σ-reindexes each operand to absolute
+    k. A materialized edge rewrites its gmem index; a computed cone rewrites its own k coordinate,
+    which is the SAME rule (``_schedule._sliced_edge``) the computed-A split already rode. This
+    lane used to offer the serial fold alone, so no golden could record a split quantized linear."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
+        monkeypatch.delenv(var, raising=False)
+    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))))
+    assert rows, "the trellis linear must offer a compute-filled warp lane"
+    offered = {str(r.get("REDUCE", "")) for r in rows}
+    assert any(s.startswith("g") for s in offered), offered
+
+
+def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
+    """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
+    ``kslice`` = K/2 columns, so both the materialized A load and the computed B cone's own
+    ``w_decoded_*`` reads must carry the ``<k>_ks · 64`` partition base; together the two
+    partitions cover K exactly, which IS the reassociation the split performs."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+
+    def computed_b_leaf(fp):
+        leaves = flatten_leaves(fp.options)
+        picked = [leaf for leaf in leaves if _computed_b_rows([dict(getattr(leaf, "knobs", {}) or {})])]
+        return picked[0] if picked else leaves[0]
+
+    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(
+        _trellis_linear_graph(), computed_b_leaf
+    )
+    kernels = {nid: n.op.kernel_source for nid, n in lowered.nodes.items() if isinstance(n.op, CudaOp)}
+    mma_partials = [nid for nid, src in kernels.items() if nid.endswith("__partial") and "mma.sync" in src]
+    assert mma_partials, f"the computed-B contraction must split into an mma partial; got {sorted(kernels)}"
+    src = kernels[mma_partials[0]]
+    assert "_ks * 64" in src, "the partial must offset its reads by the partition base"
+    # ``w_decoded_tile_step`` is the cone's k-INDEXED read (the other decode tables are scalars or
+    # are indexed by an already-offset value).
+    decode = [ln for ln in src.splitlines() if "w_decoded_tile_step[" in ln]
+    assert decode, "the partial must still stream the trellis decode cone"
+    assert all("_ks * 64" in ln for ln in decode), "every computed-B cone read must be σ-reindexed to absolute k"
+    assert kernels[mma_partials[0].removesuffix("__partial")], "the split must splice a finalize kernel"
+
+
+@requires_cuda
+def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
+    """The split over the streamed computed-B cone agrees with the decoded linear on CUDA. The
+    compute-filled warp lane is sm_80+, and the deferred-kernel finalize is the correct one for
+    either projection (the trellis scale epilogue does not distribute over the partition add)."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import flatten_leaves
+    from emmy.compiler.pipeline.pipeline import Run
+    from tests.compiler.helpers import device_compute_capability
+
+    capability = device_compute_capability()
+    if capability < (8, 0):
+        pytest.skip("the computed-B tensor-core lane requires SM80 or newer")
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    picked: list[dict] = []
+
+    def computed_b_leaf(fp):
+        leaves = flatten_leaves(fp.options)
+        for leaf in leaves:
+            row = dict(getattr(leaf, "knobs", {}) or {})
+            if _computed_b_rows([row]):
+                picked.append(row)
+                return leaf
+        return leaves[0]
+
+    graph = _trellis_linear_graph(m=16, tensors=tensors, cb=0)
+    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, computed_b_leaf)
+    assert picked, "the compute-filled warp lane must be selectable"
+    kernels = {nid: n.op.kernel_source for nid, n in lowered.nodes.items() if isinstance(n.op, CudaOp)}
+    assert any(nid.endswith("__partial") and "mma.sync" in src for nid, src in kernels.items()), sorted(kernels)
+    lowered.outputs = list(kernels)
+    x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
+    feed = bind_constants(lowered, {})
+    feed.update(
+        {
+            "x": x,
+            "w": tensors["layer.trellis"].numpy(),
+            "w_suh": tensors["layer.suh"].numpy(),
+            "w_svh": tensors["layer.svh"].numpy(),
+        }
+    )
+    got = CudaBackend(debug=True).run(lowered, input_data=feed)[0].outputs["y"].astype(np.float32)
+    ref = x.astype(np.float32) @ decoded.astype(np.float32).T
+    err = got - ref
+    rel_rms = float(np.sqrt(np.mean(err**2)) / max(np.sqrt(np.mean(ref**2)), 1e-12))
+    assert rel_rms < 2e-2, rel_rms
 
 
 @pytest.mark.parametrize("cb", [1, 2])

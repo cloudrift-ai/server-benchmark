@@ -794,7 +794,7 @@ def test_cat_to_indexmap_correctness():
 
 
 # ---------------------------------------------------------------------------
-# 050_fold_into_constant — the sub-sm_90 matvec exception
+# 050_fold_into_constant — unconditional layout canonicalization
 # ---------------------------------------------------------------------------
 
 
@@ -821,30 +821,18 @@ def _folded_weights(graph: Graph) -> list[str]:
     ]
 
 
-def test_transpose_fold_sub_sm90_matvec_exception():
-    """Below sm_90 the transpose-into-constant fold fires ONLY for an M=1
-    matvec weight (the decode gemv tier needs the k-major layout for the
-    ``b<n>t`` REDUCE band — the recorded ``.m1.t`` golden winners on sm_89);
-    a matrix-matmul weight keeps the historic no-fold behavior."""
+def test_transpose_fold_is_capability_and_shape_unconditional():
+    """The fold is a structural canonicalization: a parameter transpose dissolves into the load
+    chain on EVERY capability and consumer shape — no sub-sm_90 gate, no matvec carve-out (the
+    deleted shape/hardware special-casing; which layout realization wins is evidence's call)."""
     from emmy.compiler import target as target_mod
 
-    target_mod.set_target((8, 9))
-    try:
-        folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1)))
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
-    assert folded_m1, "M=1 matvec weight must fold k-major below sm_90 (the .m1.t golden layout)"
-    assert not folded_m64, "M>1 weights must keep the historic sub-sm_90 no-fold behavior"
-
-
-def test_transpose_fold_sm90_unchanged():
-    """At sm_90+ the fold fires for every parameter transpose, matvec or not."""
-    from emmy.compiler import target as target_mod
-
-    target_mod.set_target((12, 0))
-    try:
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
-    assert folded_m64
+    for cap in ((7, 0), (8, 9), (12, 0)):
+        target_mod.set_target(cap)
+        try:
+            folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1)))
+            folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
+        finally:
+            target_mod.set_target(None)
+        assert folded_m1, f"M=1 matvec weight must fold at {cap}"
+        assert folded_m64, f"M>1 weight must fold at {cap} — the sub-sm_90 no-fold gate is deleted"

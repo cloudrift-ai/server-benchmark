@@ -111,6 +111,13 @@ _UNKNOWN_COST = 0.05
 #: several times slower than a dev box), and only a pole-sized test can actually distort
 #: the plan. Nothing near the recording threshold can drift into this range.
 _GATE_SECONDS = 5.0
+#: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
+#: so they are exempt from the staleness gate and from the written baseline — otherwise every
+#: `make bench-kernels` / `make test-goldens` run would fail demanding entries that `make test`,
+#: which skips them, can never record.
+_OFF_LANE_MARKERS = ("perf", "corpus")
+#: Node ids seen carrying an off-lane marker this session (filled during collection).
+_OFF_LANE_ITEMS: set[str] = set()
 
 
 def pytest_addoption(parser):
@@ -145,7 +152,7 @@ def pytest_sessionfinish(session):
         # will never run (the two whole-card gate entries, 340 s and 150 s, outlived the
         # split into shards). Regenerate with `make test-durations`, which runs the WHOLE
         # suite — pointing this at a subset writes a baseline covering only that subset.
-        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED}
+        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS}
         with open(_DURATIONS_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")
@@ -157,7 +164,10 @@ def pytest_sessionfinish(session):
     # holds every test's duration (an xdist worker sees just its own slice).
     if is_controller and _CALL_DURATIONS:
         baseline = _load_baseline()
-        missing = sorted(((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline), reverse=True)
+        missing = sorted(
+            ((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline and n not in _OFF_LANE_ITEMS),
+            reverse=True,
+        )
         if missing:
             session.exitstatus = 1
             print(f"\nERROR: {len(missing)} test(s) at or over {_GATE_SECONDS:g}s are missing from {_DURATIONS_FILE}:")
@@ -277,11 +287,25 @@ def pytest_collection_modifyitems(config, items):
     # collection (e.g. ``pytest tests/serving/``), not only runs that happen
     # to collect ``tests/perf/`` and load its conftest.
     selected = config.getoption("-m") or ""
+    _OFF_LANE_ITEMS.update(i.nodeid for i in items if any(m in i.keywords for m in _OFF_LANE_MARKERS))
     if "perf" not in selected:
         skip_perf = pytest.mark.skip(reason="perf marker not selected; run with `pytest -m perf`")
         for item in items:
             if "perf" in item.keywords:
                 item.add_marker(skip_perf)
+
+    # ``corpus`` deselects on the same terms, for the same reason in a different currency:
+    # the golden decode gate re-enumerates every schedule fork in the corpus, so its cost
+    # scales with the record count TIMES the fork size and it is minutes per file on a cold
+    # cache — which is every CI run, since the memo lives in ``~/.cache/emmy``. It is a
+    # corpus tripwire, not a code test: it catches a stored row that a structural change
+    # invalidated, so it belongs with `make test-goldens` before a golden edit or a codec
+    # change, not in the per-commit lane.
+    if "corpus" not in selected:
+        skip_corpus = pytest.mark.skip(reason="corpus marker not selected; run with `make test-goldens`")
+        for item in items:
+            if "corpus" in item.keywords:
+                item.add_marker(skip_corpus)
 
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for

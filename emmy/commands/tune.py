@@ -826,7 +826,7 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
     # selection that tuning recorded is keyed by Op.cache_key (opt-level independent),
     # so the -O1-tuned winners are still picked when re-benching here at -O3.
     bench_flags = args.nvcc_flags if args.nvcc_flags is not None else ""
-    os.environ[config.NVCC_FLAGS] = bench_flags
+    config.set_nvcc_flags(bench_flags, default=bench_flags)  # force the deployable lane over tune's -O1
     bench_ctx = _context_for_device(device_id, target=getattr(args, "target", None))
     sys.stderr.write(f"\n[tune] --bench: re-benching at -O3 ({bench_flags or 'nvcc default -O3'}) — deployable numbers\n")
 

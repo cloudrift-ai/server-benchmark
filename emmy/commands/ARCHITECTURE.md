@@ -216,10 +216,17 @@ and YAML, proves that every structural target has every config-derived realizati
 and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
 a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
-When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's golden-tier
+Both audits read the verified tier through `compiler/pipeline/search/audit.py`, one verdict per consultation. The
+**offer audit** compiles each record's OWN persisted program and reports the entries no enumerated leaf equals
+(`UNREALIZED`, tolerable only while an offered sibling still floors the target) and the targets where none does
+(`FALL-THROUGH` — the deploy would fall past the tier entirely). The **serving-matrix audit** then compiles each
+precision lane's serving twins with only that lane's records as evidence: `DRIFT` means the identity still matches but
+the recording no longer equals any offered row, and `GAP` means no record carries a fork's identity at all.
+
+When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's verified-tier
 consultation count (per precision lane) against that checked-in baseline. This catches the regression the verdicts
-cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no golden consultation, so
-its recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
+cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no consultation, so its
+recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
 the gate naming the twin; counts above baseline only log that the baseline is stale. `--update-consult-baseline`
 re-records the file from a passing audit (run it once to seed the baseline, and again whenever an intentional
 compiler change shifts the counts).

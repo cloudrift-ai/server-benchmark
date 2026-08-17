@@ -99,7 +99,8 @@ def test_trace_records_partition_fork() -> None:
     hierarchical tile → stage → reduce fork tree is one fork point, not a per-family chain), with
     the kernel's node id, ``chosen_kind == "op"`` (a ``TileOp`` rebind), the decide's score
     annotation (``None`` for the unranked option-0 decide), and the chosen leaf's COMPLETE knob
-    row (the axis-named ``TILE@<k>`` key; option-0 = the conservative per-cell leaf)."""
+    row (the axis-named ``TILE@<k>`` key; on this fixture the first-emitted leaf is the per-cell
+    one — an enumeration fact this assertion reads, not a policy it defends)."""
     from emmy.compiler.pipeline.knob import family_of, family_value
 
     g = _f32_matmul_graph()
@@ -112,7 +113,7 @@ def test_trace_records_partition_fork() -> None:
     assert d.chosen_kind == "op"
     assert d.score is None
     assert d.n_options >= 1, "the fork offers its lazy fork tree as the raw option"
-    assert family_value(d.knob_delta, "TILE") == "", "option-0 is the conservative per-cell leaf"
+    assert family_value(d.knob_delta, "TILE") == "", "this fixture emits the per-cell leaf first"
 
 
 def test_decide_score_lands_on_trace() -> None:

@@ -171,7 +171,7 @@ class ConstantOp(Op):
 
     ``source_parts`` is the MULTI-source alternative to ``source_path``: an ordered tuple of
     ``(path, pre-chain shape)`` pairs the loader reads individually and concatenates along
-    **axis 0** before running ``load_ops`` (``merge_sibling_linears``' N-concat of sibling
+    **axis 0** before running ``load_ops`` (the N-concat of sibling
     projection weights — axis 0 is the ``(N, K)`` out-features axis). Exactly one of
     ``source_path`` / ``source_parts`` / ``source_graph`` is set on a loadable constant;
     ``source_shape`` / ``source_dtype`` describe the post-concat (or post-evaluation) source.

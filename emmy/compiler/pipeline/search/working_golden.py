@@ -160,7 +160,6 @@ def _append_trace_inventory(
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
@@ -184,20 +183,10 @@ def _append_trace_inventory(
     input_graph = graph.copy()
     fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
 
-    # Match two-level tuning's fold-aware target set. A flash score producer is
-    # part of its consuming attention target, not a second inventory row.
-    absorbed: dict[str, str] = {}
-    for node_id in fused.topological_order():
-        node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp):
-            continue
-        for producer_id in fused_producer_ids(fused, node):
-            absorbed[producer_id] = node_id
-
     targets: list[tuple[str, object]] = []
     for node_id in fused.topological_order():
         node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp) or node_id in absorbed:
+        if not isinstance(node.op, LoopOp):
             continue
         targets.append((node_id, node))
 
@@ -208,11 +197,9 @@ def _append_trace_inventory(
     program_ref: int | None = None
     inventory = []
     for node_id, node in targets:
-        folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
-        target_prov = provenance.union(*(provenance.get(item) for item in (node, *folded)))
-        origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
-        inventory.append((node_id, node, folded, origins))
-    origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+        origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
+        inventory.append((node_id, node, origins))
+    origin_counts = Counter(origins for _node_id, _node, origins in inventory if origins)
     used_names = {
         realization["name"]
         for entry in entries
@@ -220,7 +207,7 @@ def _append_trace_inventory(
         if isinstance(realization, dict) and isinstance(realization.get("name"), str)
     }
 
-    for node_id, node, folded, origins in inventory:
+    for node_id, node, origins in inventory:
         key = node.op.cache_key()
         suffix = key[:12] if key is not None else node_id
         name = f"{node.op.name or node_id}.{suffix}"
@@ -243,7 +230,7 @@ def _append_trace_inventory(
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
-            loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
+            loop_graph = single_node_graph(fused, node_id)
             loop_ref = intern_loop_program(loops, loop_graph)
             if seen_loops is not None and loop_ref in seen_loops:
                 continue

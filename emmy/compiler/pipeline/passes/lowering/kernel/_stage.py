@@ -2,7 +2,7 @@
 
 The single home for every operand-staging *transport*: the warp tier's cooperative gmem→smem
 2-D slab fills (synchronous copy / ``cp.async`` / TMA, off a :class:`~emmy.compiler.ir.schedule.Stage`) and
-the reduce tier's ``sync`` 1-D shared-row fill (:func:`sync_row_fill`, the fused norm→linear
+the reduce tier's synchronous 1-D shared-row fill (:func:`sync_row_fill`, the fused norm→linear
 prologue) both live here, indexed off the same linear-tid / thread-count seam. Assembles the
 surviving kernel-IR transport leaf nodes (``Smem`` / ``CpAsyncCopy`` / ``CpAsyncCommit`` /
 ``CpAsyncWait`` / ``Sync`` — and the TMA quartet ``TmaDescriptor`` / ``TmaLoad`` /
@@ -17,7 +17,7 @@ skeleton, :func:`pipelined_kloop` — per operand-group a ``(transport, depth)``
 wait / barrier placement DERIVED from which tagged body segments read each group's slabs (the
 whole-body single-group entry is :func:`staged_kloop`; the warp-flash alternating form is the same
 walk over its three tagged segments) — driven by a :class:`Transport` strategy
-(:class:`SyncCopyTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
+(:class:`SyncTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
 producers put behind one ``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
 (synchronous copy / cp.async / TMA) filled it. A modern slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
@@ -152,6 +152,41 @@ def cp_async_fill(
     return [loop]
 
 
+def sync_copy_fill(
+    *,
+    slab: str,
+    shape: tuple[int, int],
+    src: str,
+    gmem_index,
+    cta: CtaTile,
+    elem_bytes: int,
+    name: str,
+    row_offset: Expr | None = None,
+    swizzle: str = "NONE",
+) -> list[Stmt]:
+    """The BLOCKING gmem→smem copy of the same ``rows × cols`` slab :func:`cp_async_fill` copies —
+    each lane vector-LOADS its ``V``-element chunk into registers and vector-STORES it into the
+    slab, instead of handing the address pair to the copy engine. Same striping, chunk width, ring
+    ``row_offset`` and software ``swizzle``, so the slab a drain reads is identical either way; the
+    caller closes it with the plain CTA barrier (there is no commit group to wait on). This is the
+    only transport a target without ``cp.async`` (sm_70) can copy a materialized operand with."""
+    rows, cols = shape
+    v = _cp_async_width(cols, elem_bytes)
+    fe = Axis(name=f"_f{name}", extent=(rows * cols) // v)
+    base = _mul(Var(fe.name), _lit(v))
+    row = BinaryExpr("/", base, _lit(cols))
+    col = BinaryExpr("%", base, _lit(cols))
+    smem_row = _add(row_offset, row) if row_offset is not None else row
+    names = tuple(f"_{name}_copy{i}" for i in range(v))
+    body = Body(
+        (
+            Load(names=names, input=src, index=tuple(gmem_index(row, col))),
+            Write(output=slab, index=(smem_row, col), values=names, swizzle=swizzle),
+        )
+    )
+    return [StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=body, unroll=False)]
+
+
 def cp_async_commit() -> list[Stmt]:
     """Close the current cp.async batch into a commit-group (the depth-``D`` ring commits one
     group per filled slot, so ``CpAsyncWait(group=D-1)`` can drain exactly the slot it needs)."""
@@ -173,13 +208,13 @@ def slab_smem(name: str, rows: int, cols: int, dtype: str, *, align: int = 0) ->
 
 
 def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expr, n_threads: int, dtype: str) -> list[Stmt]:
-    """The ``sync``-transport 1-D operand fill: cooperatively copy the CTA-shared row
+    """The synchronous ``smem`` 1-D operand fill: cooperatively copy the CTA-shared row
     ``src[grid…, 0:extent]`` into a length-``extent`` smem ``slab``, then a CTA barrier so
     every lane sees the filled row before the reader drains it. The ``n_threads`` cooperating
     lanes stripe it (``for k = linear_tid; k < extent; k += n_threads``), the same
     linear-tid / thread-count seam :func:`cp_async_fill` indexes off — so every transport's
     fill lives here. This is the scalar reduce tier's shared-row prologue (the fused
-    norm→linear input row), the single-buffer ``sync`` counterpart of the async 2-D slab
+    norm→linear input row), the single-buffer synchronous counterpart of the async 2-D slab
     fills above."""
     fe = Axis(name=f"_{slab}_f", extent=extent)
     val = f"_{slab}_v"
@@ -192,7 +227,7 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 def sync_stat_fill(
     *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
 ) -> list[Stmt]:
-    """The ``sync``-transport per-row STATISTIC prologue — the fused norm→linear warp edge's
+    """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
     stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
@@ -322,11 +357,11 @@ class Operand:
     # operand's own gmem orientation, K stride-1 in both) instead of the canonical K-major
     # ``bk × tile_n``. The mma drain reads it with the plain (no ``.trans``) ldmatrix — the
     # ``LdmatrixLoad(b_trans=True)`` staged path flash's K slab already drains through. Role
-    # "b" only, on every staged transport (cp.async / TMA / the sync transport's async B fills).
+    # "b" only, on every staged transport (cp.async / TMA / the ``smem`` fill's async B fills).
     trans: bool = False
     # Extra smem columns padding each slab row (cp.async transport only — a TMA box deposit is
     # dense). The pad breaks the same-bank stride of a power-of-two row — the flash K/V slabs'
-    # bank-conflict fix (`_twist._PAD`), whose drains are not plain ldmatrix rows; the mma matmul
+    # bank-conflict fix for padded slabs, whose drains are not plain ldmatrix rows; the mma matmul
     # tier uses the software ``swizzle`` above instead (zero smem growth). Mutually exclusive with
     # a non-NONE ``swizzle`` (the XOR's atom derivation assumes dense rows). The fill's logical
     # (row, col) writes stride the padded decl automatically (``render_index`` flattens against
@@ -362,12 +397,12 @@ class Operand:
 
 @dataclass(frozen=True)
 class SyncOperand:
-    """One ``sync``-transport slab operand — filled by plain per-thread COMPUTE, not an
+    """One ``smem`` compute-filled slab operand — filled by plain per-thread COMPUTE, not an
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
     coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
     CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
-    ``ldmatrix`` drain reads). B weights never ride this: every B fill — canonical or
-    transposed — is a vectorized ``cp.async`` :class:`Operand` on ``async_operands``."""
+    ``ldmatrix`` drain reads). A MATERIALIZED edge never rides this: every such fill — canonical or
+    transposed — is a vectorized copy :class:`Operand` on ``copy_operands``."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
@@ -385,80 +420,35 @@ class SyncOperand:
     def slot_row(self, slot: Expr) -> Expr | None:  # noqa: ARG002
         """Always ``None`` — a sync-filled slab is SINGLE-BUFFER by construction: the compute /
         copy fill runs on the drain's own threads, so a prefetch slot for it buys no overlap
-        (the work is serial either way) while doubling the slab. The sync transport's ``depth``
-        rings its ``async_operands`` only (:class:`SyncTransport`)."""
+        (the work is serial either way) while doubling the slab. The synchronous fill's ``depth``
+        rings its ``copy_operands`` only (:class:`SyncTransport`)."""
         return None
 
 
 @dataclass(frozen=True)
-class SyncCopyTransport:
-    """The blocking gmem→smem copy producer.
-
-    Every CTA thread vector-loads a contiguous operand run from global memory and vector-stores it
-    into the selected shared-memory ring slot. ``wait`` is the CTA barrier that publishes the
-    completed slot; there is no commit primitive. The ordinary :func:`pipelined_kloop` therefore
-    owns depth, slot rotation, refill barriers, and the independent smem→register pipeline exactly
-    as it does for asynchronous transports. A depth above one is correct but cannot overlap the
-    blocking copy with the current drain on the same threads; it remains a searchable schedule
-    rather than a promised latency-hiding mechanism.
-    """
-
-    operands: tuple[Operand, Operand]
-    slab_dtype: str
-    elem_bytes: int
-    cta: CtaTile
-
-    def slab_decls(self, ring: int) -> list[Stmt]:
-        return [slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype) for op in self.operands]
-
-    def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
-        return []
-
-    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002
-        out: list[Stmt] = []
-        for op in self.operands:
-            rows, cols = op.shape
-            elem_bytes = op.elem_bytes or self.elem_bytes
-            v = _cp_async_width(cols, elem_bytes)
-            fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
-            base = _mul(Var(fe.name), _lit(v))
-            row = BinaryExpr("/", base, _lit(cols))
-            col = BinaryExpr("%", base, _lit(cols))
-            smem_row = row
-            row_offset = op.slot_row(slot)
-            if row_offset is not None:
-                smem_row = _add(row_offset, row)
-            names = tuple(f"_{op.tag}_copy{i}" for i in range(v))
-            body = Body(
-                (
-                    Load(names=names, input=op.buf, index=tuple(op.index(k0)(row, col))),
-                    Write(output=op.slab, index=(smem_row, col), values=names, swizzle=op.swizzle),
-                )
-            )
-            out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=body, unroll=False))
-        return out
-
-    def commit(self) -> list[Stmt]:
-        return []
-
-    def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
-        return [Sync()]
-
-
-@dataclass(frozen=True)
 class SyncTransport:
-    """The ``sync`` producer — per-thread compute/copy fills closed by ONE CTA barrier. This is the
-    mma tier's ``sync`` transport: the fused-edge compute-fill (a producer cone materializing the A
-    tile) rides ``operands``; plain-copy operands (the fused edge's B weights) ride
-    ``async_operands`` as vectorized ``cp.async`` fills issued BEFORE the compute fill, so the
-    hardware copies fly underneath it — the same ``fill``/``commit``/``wait`` seam as the pure
-    cp.async / TMA producers, closed by one ``CpAsyncWait`` + CTA barrier. ``depth >= 2`` is the
-    **asymmetric (B-only) prefetch ring**: only the ``async_operands`` slabs ring (the cp.async
-    B copies for chunk ``i+ring-1`` fly under the A fill AND the drain of chunk ``i``), while the
-    sync-filled slabs stay single-buffer and fill the CURRENT chunk off the skeleton's ``k0_cur``
-    handle — ringing a compute fill buys no overlap (it runs on the drain's own threads). NOTE:
-    even the B-only ring measured slower on the reference gemma shape (the extra B slot crosses
-    the smem occupancy quantization) — the ring stays pin-only, ``d1`` the deployable form.
+    """The synchronous ``smem`` producer — per-thread compute/copy fills closed by ONE CTA barrier.
+    This is the mma tier's ``smem`` fill: a fused-edge producer cone materializing its operand tile
+    rides ``operands`` (the per-thread compute loop), and every MATERIALIZED peer rides
+    ``copy_operands`` as a vectorized copy issued BEFORE it, so the copies fly underneath the
+    compute work — the same ``fill``/``commit``/``wait`` seam as the pure cp.async / TMA producers.
+    A term with no computed edge at all (``operands`` empty) is the degenerate case: the plain
+    blocking gmem→smem copy of both operands.
+
+    ``copy_sync`` picks the peer copy instruction: ``cp.async`` (the default — closed by one
+    ``CpAsyncWait`` + CTA barrier), or the BLOCKING vector load/store (:func:`sync_copy_fill`,
+    closed by the CTA barrier alone) on a target without ``cp.async``. The slab layout, the
+    striping and the drain are identical either way; only the copy instruction and the handshake
+    differ. Under a blocking copy a depth above one is correct but cannot overlap the copy with the
+    current drain on the same threads; it stays a searchable schedule rather than a promised
+    latency-hiding mechanism.
+
+    ``depth >= 2`` is the **asymmetric (peer-only) prefetch ring**: only the ``copy_operands``
+    slabs ring (the copies for chunk ``i+ring-1`` fly under the compute fill AND the drain of chunk
+    ``i``), while the sync-filled slabs stay single-buffer and fill the CURRENT chunk off the
+    skeleton's ``k0_cur`` handle — ringing a compute fill buys no overlap (it runs on the drain's
+    own threads). The ring depths are fork siblings enumerated beside ``d1``; which deploys is
+    evidence's decision per shape and card.
 
     The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
     16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation
@@ -472,16 +462,18 @@ class SyncTransport:
     # The optional one-shot per-row statistic prologue (:func:`sync_stat_fill` — the fused
     # norm→linear cone's cooperative reduce), emitted once ahead of the K-loop.
     prologue_stmts: tuple[Stmt, ...] = ()
-    # Plain-copy operands filled by vectorized ``cp.async`` instead of the per-thread compute loop.
-    async_operands: tuple[Operand, ...] = ()
+    # Materialized peers filled by a vectorized copy instead of the per-thread compute loop.
+    copy_operands: tuple[Operand, ...] = ()
     elem_bytes: int = 2
+    # ``True`` → the peers copy with the BLOCKING vector load/store (no ``cp.async`` on the target).
+    copy_sync: bool = False
 
     def slab_decls(self, ring: int) -> list[Stmt]:
         # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); only the
-        # async (cp.async B) slabs allocate the ring.
+        # copied peer slabs allocate the ring.
         return [
             *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands),
-            *(slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in self.async_operands),
+            *(slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype) for op in self.copy_operands),
         ]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
@@ -559,17 +551,18 @@ class SyncTransport:
 
     def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:
         out: list[Stmt] = []
-        # Issue the async copies FIRST — at ``depth 1`` they are in flight while the compute fill
-        # below runs; at ``depth >= 2`` (the B-only ring) ``k0``/``slot`` are the skeleton's
-        # PREFETCH chunk/slot, so they additionally fly under the previous chunk's drain.
-        for op in self.async_operands:
-            out += cp_async_fill(
+        # Issue the peer copies FIRST — at ``depth 1`` they run (cp.async: fly) while the compute
+        # fill below runs; at ``depth >= 2`` (the peer-only ring) ``k0``/``slot`` are the
+        # skeleton's PREFETCH chunk/slot, so they additionally cover the previous chunk's drain.
+        copy = sync_copy_fill if self.copy_sync else cp_async_fill
+        for op in self.copy_operands:
+            out += copy(
                 slab=op.slab,
                 shape=op.shape,
                 src=op.buf,
                 gmem_index=op.index(k0),
                 cta=self.cta,
-                elem_bytes=self.elem_bytes,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,
@@ -631,10 +624,10 @@ class SyncTransport:
         return out
 
     def commit(self) -> list[Stmt]:
-        return cp_async_commit() if self.async_operands else []
+        return cp_async_commit() if self.copy_operands and not self.copy_sync else []
 
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
-        return cp_async_wait(in_flight) if self.async_operands else [Sync()]
+        return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
 
 
 @dataclass(frozen=True)
@@ -889,7 +882,7 @@ def _staged_slabs(transport) -> frozenset[str]:
     """The smem slab names ``transport`` fills — the liveness key a scheduled operand-group's live
     range is derived against (segments tag the slab names they READ; the group's range is the
     ``[first, last]`` interval of segments whose tags intersect these names)."""
-    ops = (*getattr(transport, "operands", ()), *getattr(transport, "async_operands", ()))
+    ops = (*getattr(transport, "operands", ()), *getattr(transport, "copy_operands", ()))
     return frozenset(op.slab for op in ops)
 
 

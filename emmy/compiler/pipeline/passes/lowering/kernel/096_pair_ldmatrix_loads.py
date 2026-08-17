@@ -3,8 +3,8 @@
 Every staged B drain costs one ``ldmatrix.x2``[``.trans``] per fragment, but ``ldmatrix.x4``
 loads four 8×8 matrices — two adjacent B fragments — in one instruction, halving the drain's
 LSU count. Two emitters produce the fusable pattern (which is why this is a PASS, not an
-emitter change — same family as ``050_vectorize_loads``): the warp-flash streaming drains
-(``_twist._frag_contraction`` — K's N-adjacent plain-``x2`` pairs and V's col-adjacent
+emitter change — same family as ``050_vectorize_loads``): the staged mma drains
+(``_atom._staged_inner_atom_loop`` — N-adjacent plain-``x2`` pairs and col-adjacent
 ``x2.trans`` pairs) and the matmul tier's staged drains (``_atom._staged_inner_atom_loop`` —
 ``n.reg`` col-adjacent B fragments per K step).
 
@@ -38,6 +38,7 @@ from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad, MbarrierWait, Sync
 from emmy.compiler.ir.stmt import Body, Cond, Loop, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -47,10 +48,17 @@ _ATOM8 = 8
 
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
-    new_body, changed = _walk(op.body)
-    if not changed:
-        raise RuleSkipped("no pairable staged ldmatrix loads")
-    return KernelOp(body=new_body, name=op.name, knobs=dict(op.knobs))
+    # Idempotence + override via the recorded PAIR_LDMATRIX policy knob (the
+    # 050_vectorize_loads pattern): only ``True`` is enumerated, so the autotuner
+    # never forks on it; ``EMMY_PAIR_LDMATRIX=0`` still pins ``False``.
+    if PAIR_LDMATRIX.name in op.knobs:
+        raise RuleSkipped("PAIR_LDMATRIX already decided (idempotence via knob)")
+    if not PAIR_LDMATRIX.narrow((True,))[0]:
+        return KernelOp(body=op.body, name=op.name, knobs={**op.knobs, PAIR_LDMATRIX.name: False})
+    # Stamp the policy (True) even when nothing pairs — the realized config records that pairing
+    # was enabled, keeping a uniform knob set (the 050 convention).
+    new_body, _ = _walk(op.body)
+    return KernelOp(body=new_body, name=op.name, knobs={**op.knobs, PAIR_LDMATRIX.name: True})
 
 
 def _walk(body: Body) -> tuple[Body, bool]:

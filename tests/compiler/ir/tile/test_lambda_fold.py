@@ -90,29 +90,6 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
     assert component_ops(fold.combine) is None  # twisted — derived structurally, never stored
 
 
-def test_twisted_composed_fold_is_lambda_spelled_with_derived_evaluation() -> None:
-    """Flash's kv fold stores the λ spelling (step 7 — the composed step dissolved): the QK
-    score is a hoisted operand edge, the PV contraction is SYNTHESIZED into the derived blocked
-    evaluation (memoized — one identity per stored fold), and the derived step reproduces the
-    retired step material exactly."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import _flash_op
-
-    op, _stores = _flash_op("Q", "K", "V", [1, 2], Dim(16), Dim(16), 8, 8)
-    (red,) = op.operands
-    assert red.lift is not None
-    assert red.role is AxisRole.TWISTED
-    assert red.lift.results[1:] == (1.0, "v_e")  # ι: (score, 1, v) — the singleton state
-    assert red.operands[0].role is AxisRole.CONTRACTION and red.operands[0].out == "sacc"  # the hoisted QK edge
-    stmts = red.step_stmts()
-    assert stmts[0] is red.operands[0]  # the derived head position — ahead of the lift body
-    pvs = [s for s in stmts[1:] if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION]
-    assert len(pvs) == 1 and pvs[0].out == "O_i__pv"  # the synthesized PV contraction
-    assert pvs[0].channels[0].b is red.operands[1]  # B is the fold's own value operand edge
-    assert red.step_stmts()[1:] == stmts[1:] and red.step_stmts()[0] is stmts[0]  # memoized — one identity
-    assert red.loop == red.loop  # the derived loop is deterministic from the stored params
-
-
 def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
     fold = fold_from_loop(_softmax_loop())
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}

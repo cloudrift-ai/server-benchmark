@@ -31,6 +31,10 @@ jobs:
   test:
     runs-on:
       group: ubuntu-runners
+    # A hung suite must fail, not occupy a runner indefinitely: a corpus-decode explosion sat in
+    # "Run tests" for over an hour before anyone noticed. The healthy run is single-digit minutes,
+    # so 20 leaves ample headroom while still failing fast on a regression.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

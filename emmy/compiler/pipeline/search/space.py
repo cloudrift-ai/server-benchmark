@@ -12,8 +12,16 @@ of the pipeline it loaded. When adding a knob, declare it here and import it int
 
 Scope note: this module holds the **static** space only — the declared dimensions and their bounded
 candidate grids. Per-kernel legality (the warp static-K divisibility check, the stage resolvers, coop
-eligibility, the ``_COOP_*`` constants) stays with the tile scheduler — the legal subset is a
-function of the node.
+band eligibility) stays with the tile scheduler — the legal subset is a function of the node.
+
+**A catalog is a DOMAIN, never a ranking.** Every value here is offered whenever it is legal, and
+the order the generators happen to emit values in is an implementation detail with no meaning
+attached: nothing may be placed first, last, or at all in order to steer an unmeasured compile
+toward a particular kernel. Ranking is the deploy evidence hierarchy's job — recorded goldens,
+then measurements, then the fitted prior — so a value that measured slow on some shape stays in
+its ladder (a domain is not a preference history), and a compile with no evidence at all simply
+takes whatever the enumeration emitted first. That pick being slow is an accepted outcome; adding
+a default, a lead value, or a filter to improve it is not.
 
 The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
 (:class:`~emmy.compiler.ir.schedule.TilePlan` / :class:`~emmy.compiler.ir.schedule.ReducePlan`,
@@ -28,8 +36,8 @@ Two groups:
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
   tile schedule and materialized in ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
   schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
-  so the online prior featurizes / tunes the decision. ``off=""`` (the conservative serial / per-cell /
-  gmem-direct / uniform default) is auto-stamped on kernels the pass doesn't schedule.
+  so the online prior featurizes / tunes the decision. ``off=""`` (the serial / per-cell /
+  gmem-direct / uniform spelling) is auto-stamped on kernels the pass doesn't schedule.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -74,13 +82,14 @@ TILE = Knob(
 )
 
 # Operand staging — the reused gmem operands (matmul A/B, a fused prologue's read) ride a
-# shared-memory slab + double-buffered producer (``sync`` plain copy / ``cp.async`` / ``tma``) over
-# the serial reduce loop, instead of the gmem-direct register baseline. Resolved into the schedule's
-# :class:`Stage` (``None`` = gmem-direct). Composes with both fragments of the unified ``TILE`` knob.
+# shared-memory slab + double-buffered producer (``smem`` synchronous thread fill / ``smem-async``
+# cp.async / ``smem-tma`` TMA) over the serial reduce loop, instead of the no-intermediate baseline.
+# Resolved into the schedule's :class:`Stage` (``None`` = no intermediate). Composes with both
+# fragments of the unified ``TILE`` knob.
 STAGE = Knob(
     "STAGE",
     KnobType.STR,
-    help="Operand-staging codec (d<depth>/sync|cp|tma[/split][/p<reg_depth>]; empty=gmem-direct). "
+    help="Operand-staging codec (d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; empty=no intermediate). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
@@ -150,13 +159,12 @@ RASTER = Knob(
 
 
 def raster_moves() -> list[str]:
-    """The ``RASTER`` codec candidates — the flat order ``""`` first (the conservative option-0,
-    byte-identical to the historical codegen), then the CUTLASS/Triton-conventional grouped-M
-    stripe of 8. Wall-time effect is shape-dependent and small (±2–4% measured on sm_89:
-    qkv −4%, gate_up fm +2.4%, most shapes neutral) while DRAM traffic on wide-N shapes halves
-    (503.6 → 261.6 MB on mlp_gate_up, the theoretical floor) — so the family is enumerated for
-    the search/goldens to arbitrate per shape, never a blanket policy. ``gn<G>`` spellings are
-    pin-only until a shape wants them."""
+    """The ``RASTER`` codec candidates — the flat N-fastest order ``""`` and the
+    CUTLASS/Triton-conventional grouped-M stripe of 8. Wall-time effect is shape-dependent and
+    small (±2–4% measured on sm_89: qkv −4%, gate_up fm +2.4%, most shapes neutral) while DRAM
+    traffic on wide-N shapes halves (503.6 → 261.6 MB on mlp_gate_up, the theoretical floor) — so
+    the family is enumerated for the evidence to arbitrate per shape, never a blanket policy.
+    ``gn<G>`` spellings are pin-only until a shape wants them."""
     return ["", "gm8"]
 
 
@@ -179,6 +187,22 @@ INTERLEAVE_LOADS = Knob(
     KnobType.BOOL,
     hints=(True,),  # on by default; not a search dimension — manual override only via the env var
     help="Sink each Load to just before its first SSA-consumer in flat compute blocks.",
+    off=False,
+)
+
+VECTORIZE_STORES = Knob(
+    "VECTORIZE_STORES",
+    KnobType.BOOL,
+    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
+    help="Fold runs of consecutive scalar Writes into one wide vector Write (float4 / __half2).",
+    off=False,
+)
+
+PAIR_LDMATRIX = Knob(
+    "PAIR_LDMATRIX",
+    KnobType.BOOL,
+    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
+    help="Pair slab-adjacent staged ldmatrix.x2 B-fragment loads into one ldmatrix.x4.",
     off=False,
 )
 
@@ -288,16 +312,13 @@ LOOPIFY = Knob(
 # enumerates into the scheduling fork. A move is the **typed schedule slice** itself — a
 # :class:`TilePlan` / :class:`ReducePlan` built structurally, never a parsed literal — so the
 # enumeration never speaks a codec spelling: ``_schedule`` spells each row ONCE, site-local, at the
-# boundary where it becomes stored state. Two invariants keep a cold greedy compile stable and correct:
+# boundary where it becomes stored state. One invariant bounds what may live here:
 #
-# - **Conservative option-0.** The per-cell / serial / gmem-direct pick leads every list (the reduce
-#   tier deliberately emits its conservative *cooperative* pick first — the option-0 rule is
-#   per-family, naming that family's safe default), so the emission-order fallback (no prior loaded)
-#   keeps today's behavior.
 # - **Static-value legality only.** Guards evaluable from the values alone (the scalar block-thread
-#   budget) apply here; per-node guards (warp static-K divisibility, stage resolver eligibility) live
-#   with their moves in ``_schedule``. An env pin still wins via ``Knob.narrow`` at the call site —
-#   the catalog is the *unpinned* candidate set.
+#   budget, the C-fragment register budget) apply here; per-node guards (warp static-K divisibility,
+#   stage resolver eligibility) live with their moves in ``_schedule``. An env pin still wins via
+#   ``Knob.narrow`` at the call site — the catalog is the *unpinned* candidate set. Nothing else
+#   filters: a catalog entry is dropped for illegality, never for measured speed.
 
 # The scalar block-thread budget (CUDA's 1024-thread/CTA hardware limit); a scalar tile launches
 # ``par_n·par_m`` threads (one per parallel output cell). The same limit ``_schedule`` enforces on a
@@ -336,8 +357,9 @@ _SCALAR_TILE_SPACE = Space(
 
 
 def scalar_tile_moves() -> list[TilePlan]:
-    """The scalar-contraction output-tile candidates: the per-cell tile first — the conservative
-    option-0 — then :data:`_SCALAR_TILE_SPACE`'s points, parallel widths varying slowest."""
+    """The scalar-contraction output-tile candidates: the untiled per-cell tile, plus every point
+    of :data:`_SCALAR_TILE_SPACE` (parallel widths varying slowest — a generation order, not a
+    ranking)."""
     moves = [TilePlan()]
     moves.extend(TilePlan(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_TILE_SPACE)
     return moves
@@ -376,8 +398,8 @@ _WARP_TILE_SPACE = Space(
 
 def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     """The warp-contraction output-tile candidates over the (already dtype-eligible)
-    ``atom_names``: :data:`_WARP_TILE_SPACE`'s points per atom. No conservative option-0 of its own
-    — these EXTEND :func:`scalar_tile_moves` (whose per-cell tile leads the combined list)."""
+    ``atom_names``: :data:`_WARP_TILE_SPACE`'s points per atom. There is no untiled member here —
+    these EXTEND :func:`scalar_tile_moves`, which carries the per-cell tile."""
     from emmy.compiler.ir.atom import ATOM_REGISTRY  # noqa: PLC0415
 
     moves = []
@@ -391,28 +413,6 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     return moves
 
 
-# The warp-flash (fragment-resident TWISTED) tile grid: warps per CTA over the query rows ×
-# score n-atoms per streaming key block. The conservative pair leads (one warp, the ``2·atom_n``
-# key block — today's deterministic stamp), so a cold tie keeps the historical geometry. Per-node
-# legality (kv / query-row divisibility, the dtype atom) is the scheduler's
-# (the twisted warp options), not the grid's.
-_FLASH_WARPS: tuple[int, ...] = (1, 2, 4)  # warps per CTA, each owning its own query-row block
-_FLASH_KEY_ATOMS: tuple[int, ...] = (2, 4, 8, 16)  # score n-atoms per streaming block (bn = n·atom_n keys)
-_FLASH_QTILES: tuple[int, ...] = (1, 2)  # register query tiles per warp (reg_m — FA-2's in-flight ILP)
-
-
-def twisted_warp_moves() -> list[tuple[int, int, int]]:
-    """The warp-flash geometry candidates ``(warps_m, key_atoms, q_tiles)`` — the
-    :data:`_FLASH_WARPS` × :data:`_FLASH_KEY_ATOMS` × :data:`_FLASH_QTILES` grid, conservative
-    option-0 ``(1, 2, 1)`` first. ``q_tiles`` is the register query-tile count per warp (the
-    ``TILE`` codec's ``f<FM>x<FN>`` reg_m): each warp streams ``q_tiles`` independent ``(m, l, O)``
-    chains against shared K/V fragments — FA-2's in-flight ILP, hiding the per-step
-    mma → rowmax → exp → rescale dependency chain without more warps. Each triple resolves into
-    the Q@K / P@V mma :class:`TilePlan`\\ s in the twisted warp options (the ``TILE``
-    codec spells the full plan; this grid only generates the free geometry — ``bk`` is shape-derived)."""
-    return [(um, nt, fm) for fm in _FLASH_QTILES for um in _FLASH_WARPS for nt in _FLASH_KEY_ATOMS]
-
-
 def map_tile_moves() -> list[TilePlan]:
     """The pointwise-map register-strip candidates — the **scalar output tile** (the same ``f<fn>``
     register sub-tile a contraction's output rides, here with no ``n`` unit-tile / atom since the
@@ -420,37 +420,48 @@ def map_tile_moves() -> list[TilePlan]:
     inner-axis elements (blocked: thread t owns ``[t·r, t·r+r)``) as ``r`` grouped loads + ``r``
     grouped writes, which ``050_vectorize_loads`` / ``080_vectorize_stores`` merge into one
     ``float<r>`` access — matching torch's ``vectorized_elementwise_kernel<r>``. These EXTEND the
-    per-cell option-0 (``""``, 1 elem/thread) the scheduler leads with; legality (a static inner
-    free axis divisible by r) is the scheduler's. The ladder stops at ``f4``: ``f8`` regressed both
-    pointwise goldens (register pressure — 22 vs 14 regs — outweighs the wider access)."""
-    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4))]  # (m, n): the strip widens the INNER axis
+    flat per-cell tile (``""``, 1 elem/thread) the scheduler offers beside them; legality (a static
+    inner free axis divisible by r) is the scheduler's. The full legal ladder is offered — ``f8`` has
+    measured slower than ``f4`` on past pointwise goldens (register pressure outweighed the wider
+    access), but a domain is not a preference history: evidence ranks it, never the ladder."""
+    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4)), TilePlan(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
 
 
 def stage_moves(*, warp: bool) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
     double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
     scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
-    by the scalar stage resolver). The warp tier additionally offers the synchronous-copy ring for
-    atoms that lack an asynchronous copy instruction. Its depths use the same slot schedule but do
-    not promise copy/compute overlap. The ``p2`` smem→register double-buffer is warp-only.
+    by the scalar stage resolver). The warp tier additionally offers ``smem`` (the synchronous
+    thread fill: a byte-copy of materialized edges on the atoms that lack an asynchronous copy
+    instruction, or the operand's values COMPUTED from a nested edge into the
+    slab — a computed edge's only staged transport, and a converting one for a materialized edge
+    whose dtype the atom cannot bind directly). The ``p2`` smem→register double-buffer is
+    warp-only.
 
-    ``split`` — one transport PER staged edge instead of one over all of them — joins the warp list.
-    It resolves only where the fold's edges are consumed at DISTINCT positions of its derived
-    evaluation (``_legality.stage_split_groups``), which a contraction's single multiply never is,
-    so the matmul resolvers decline it and the streaming pair is where it lands.
-
-    Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the enumeration
-    leads with it as the conservative option-0. Emission is resolver-gated: a candidate is offered
-    only when it RESOLVES against the built node, and the row carries the RESOLVED spelling."""
-    depths = [Stage.parse(s) for s in ("d1/cp", "d2/cp", "d3/cp", "d4/cp", "d1/tma", "d2/tma", "d3/tma", "d4/tma")]
+    Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the scheduler
+    offers it beside these. Emission is resolver-gated: a candidate is offered only when it
+    RESOLVES against the built node, and the row carries the RESOLVED spelling."""
+    depths = [
+        Stage.parse(s)
+        for s in (
+            "d1/smem-async",
+            "d2/smem-async",
+            "d3/smem-async",
+            "d4/smem-async",
+            "d1/smem-tma",
+            "d2/smem-tma",
+            "d3/smem-tma",
+            "d4/smem-tma",
+        )
+    ]
     if not warp:
         return depths
-    sync = [Stage.parse(s) for s in ("d1/sync", "d2/sync", "d3/sync", "d4/sync", "d1/sync/p2", "d2/sync/p2")]
-    return [*sync, *depths, Stage.parse("d2/cp/p2"), Stage.parse("d1/cp/split"), Stage.parse("d1/tma/split")]
+    smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
+    return [*smems, *depths, Stage.parse("d2/smem-async/p2")]
 
 
-# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor / occupancy legality is
-# the scheduler's.
+# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width
+# must divide K, and the per-CTA remainder must tile the warp K-step — is the scheduler's.
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
 
 
@@ -459,27 +470,26 @@ def splitk_moves() -> list[ReducePlan]:
     (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
     ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
     packed-pair red). The scheduler's ``atomic_ok`` gate keeps atomic rows
-    off multi-fold / non-distributive-projection nodes. These EXTEND the serial option-0. Both tiers share the
-    catalog — per-node legality lives with the enumeration's gates, not here."""
+    off multi-fold / non-distributive-projection nodes. These EXTEND the serial fold the scheduler
+    offers beside them. Both tiers share the catalog — per-node legality lives with the
+    enumeration's gates, not here."""
     return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
 
 
 def coop_reduce_moves() -> list[ReducePlan]:
     """The cooperative / ILP K-partition ``REDUCE`` candidates for a NON-output-tiled contraction
     (the coop reduce spec's contract — the per-cell tier folds K across the coop threads / ILP
-    register chains). These EXTEND the serial option-0. The 16- / 32-wide coop folds are recorded
-    reduce-golden winners (the wide-row folds) — kept enumerable so the reduce goldens stay
-    reachable. The 64–512-wide folds are the memory-bound normalizer band: a wide-K softmax /
-    rms_norm saturates bandwidth only with a full-block coop row (``softmax.k2048`` wants 512 —
-    2.6× over 32). The scheduler's coop reduce spec declines a band wider than the row has
-    work for, so enumerating them is safe on small K. The TRANSPOSED band is the k-major-B matvec
-    partition (warp lanes sweep the output axis — the M=1 gemv tier's coalescing fix);
-    The reduce-candidate enumeration gates it structurally (plain contraction, 32-divisible inner free axis)
-    AND by layout: the band is offered only on k-major B, and the plain band only on K-contiguous B
-    at the matvec tier. Measurement used to decide the layout, but ShapeKey is layout-blind —
-    cross-orientation golden/evidence rows tie, and a cold/tied pick landed the band on the wrong
-    operand three times in one day (10-100× regressions; the WS5 cold-poison hardening). An env pin
-    bypasses the gate (exploration)."""
+    register chains). These EXTEND the serial fold the scheduler offers beside them. The 16- /
+    32-wide coop folds are recorded reduce-golden winners (the wide-row folds) — kept enumerable so
+    the reduce goldens stay reachable. The 64–512-wide folds are the memory-bound normalizer band:
+    a wide-K softmax / rms_norm saturates bandwidth only with a full-block coop row
+    (``softmax.k2048`` wants 512 — 2.6× over 32). The scheduler's coop reduce spec declines a band
+    wider than the row has work for, so enumerating them is safe on small K. The TRANSPOSED band is
+    the k-major-B matvec partition (warp lanes sweep the output axis — the M=1 gemv coalescing). The
+    scheduler's reduce spec gates candidates STRUCTURALLY only (plain contraction, 32-divisible
+    inner free axis). Both lane orientations are always enumerated: B's stored layout decides
+    which one coalesces, and that is a question for measured evidence, not for the catalog or for
+    any ordering of it."""
     return [
         *(ReducePlan.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
         ReducePlan.of(reg=2),

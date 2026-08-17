@@ -8,26 +8,31 @@ scope/coordinate demand; no frontend treeification is needed. The splicer also
 handles multiple consumer loads and shared external inputs uniformly
 (first-seen slot assignment + splice-edge routing).
 
-The materialization-policy guards are duplicated contraction work and aggregate compute growth:
-a contraction that feeds separate statistic/value paths stays materialized, because splicing would
-re-run the whole contraction. Then
-``_total_work`` sums the enclosing free×reduce iteration count of every compute
-leaf, and a merge is refused when that grows by more than
-``_BLOWUP_FACTOR``. Structural region ownership, a real splicer rejection,
-and the fence around an already-realized ``__cut_`` workspace remain
-invariants rather than candidate-selection gates.
-
-The factor was picked empirically by sweeping 2…1024 on a TinyLlama block at
-sequence length 32. Values 2–16 tied at roughly 4.18 ms / 18 launches; 32–512
-shifted to roughly 4.7 ms / 17 launches; 1024 unlocked an approximately 1000×
-up-projection-to-down-projection nesting and took 433 ms. Eight is the middle
-of the best plateau while retaining useful epilogue fusion.
+Fusion is greedy-maximal and algebra-only: every legal merge is taken. Which form of a region is
+worth deploying — fused, or split into smaller kernels — is decided by the deploy evidence
+hierarchy (tuned goldens, measurements, the prior); this rule never weighs shapes, hardware, or
+downstream pattern knowledge. Its refusals are semantic — structural region ownership, a real
+splicer rejection, the fence around an already-realized ``__cut_`` workspace (which keeps a
+placement decision from being re-fused), and two readable-seam refusals judged on the MERGED
+form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, and must not
+entangle a multi-statistic compound (the online-softmax pair) beyond its readable tails — the
+flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
+expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
+one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
+``PLACE`` seam), so evidence could never price the split back — plus one boundedness bound:
+``_total_work`` sums the
+enclosing free×reduce iteration count of every compute leaf, and a merge that grows it by more
+than ``_BLOWUP_FACTOR`` is refused. That bound is what keeps the downstream problem finite, not a
+performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest
+(measured: 57 nested loops with the row statistic replayed inside a ~10¹³-iteration nest) — a
+form no schedule can run and recognition cannot certify. Within the bound, every fused/split
+tradeoff belongs to measured evidence.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp
+from emmy.compiler.ir.loop import Accum, Assign, Loop, LoopOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
@@ -57,6 +62,73 @@ def _walk_leaf_costs(loop_op: LoopOp):
     yield from walk(loop_op.body, 1, 1)
 
 
+def _nests_reduce(loop_op: LoopOp) -> bool:
+    """Whether the body carries a reduce ``Loop`` (transitively) inside another reduce ``Loop``.
+    That shape is unreadable downstream: ``_lift_cell`` keeps only the raw-loop escape for a
+    cell with more than one top-level reduce or a reduce nested in a reduce, so no schedule
+    tier beyond option-0 exists and no ``PLACE`` seam can split it back apart."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def walk(stmts: Body, inside: bool) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, Loop):
+                is_reduce = stmt.axis.name in reduce_names
+                if is_reduce and inside:
+                    return True
+                if walk(stmt.body, inside or is_reduce):
+                    return True
+        return False
+
+    return walk(loop_op.body, False)
+
+
+def _entangled_multi_stat(loop_op: LoopOp) -> bool:
+    """Whether a body holds ≥2 sibling reduce ``Loop``s (a multi-statistic compound — the
+    online-softmax pair) entangled with anything beyond its readable tails. Two tail shapes are
+    readable: a flat sibling loop over the same extent (the normalize sweep the online-softmax
+    pairing consumes), and a free sibling sweep whose directly nested loops are all flat
+    same-extent single-``Accum`` additive reduce loops with pure companions — the expectation
+    channels the pairing sinks into and joins (a fused softmax·V region: one additive fold per
+    output cell). A sibling loop over a FOREIGN extent outside these shapes, or any deeper
+    nesting, replays or expands the statistics into a cell recognition can only keep as the
+    raw-loop escape — no schedule tier, no ``PLACE`` seam."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def additive_folds(lp: Loop, extent) -> bool:
+        inner = [s for s in lp.body if isinstance(s, Loop)]
+        if not inner:
+            return False
+        for t in inner:
+            if t.axis.name not in reduce_names or t.axis.extent != extent:
+                return False
+            if any(isinstance(s, Loop) for s in t.body):
+                return False
+            accs = [s for s in t.body if isinstance(s, Accum)]
+            if len(accs) != 1 or accs[0].op.reduce_canon != "add":
+                return False
+            if any(not s.pure for s in t.body if not isinstance(s, Accum)):
+                return False
+        return True
+
+    def walk(stmts: Body) -> bool:
+        loops = [s for s in stmts if isinstance(s, Loop)]
+        reds = [lp for lp in loops if lp.axis.name in reduce_names]
+        if len(reds) >= 2:
+            first = reds[0].axis.extent
+            if any(r.axis.extent != first for r in reds[1:]):
+                return True
+            for lp in loops:
+                if lp.axis.extent == first and not any(isinstance(s, Loop) for s in lp.body):
+                    continue  # the flat same-extent tail (a further statistic / the normalize sweep)
+                if lp.axis.name not in reduce_names and additive_folds(lp, first):
+                    continue  # a free sweep of same-extent additive folds (expectation channels)
+                return True
+            return False
+        return any(walk(lp.body) for lp in loops)
+
+    return walk(loop_op.body)
+
+
 def _total_work(loop_op: LoopOp) -> int:
     """Sum enclosing-loop iterations over arithmetic leaves.
 
@@ -64,104 +136,6 @@ def _total_work(loop_op: LoopOp) -> int:
     the previous maximum-nest approximation.
     """
     return sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, (Assign, Accum))) or 1
-
-
-def _duplicated_contraction(graph: Graph, region: set[str]) -> str | None:
-    """Return the first contraction duplicated across statistic/value paths.
-
-    A contraction producer is a materialized common subexpression. The splicer shares repeated
-    equal-coordinate demands, but a statistic/value fan-out duplicates the reduction. The
-    aggregate work cap deliberately permits a 2× increase; a duplicated weight reduction is
-    already catastrophic, so keep that producer as the shared buffer instead.
-    """
-
-    def source_buffers(producer_id: str, seen_nodes: frozenset[str] = frozenset()) -> frozenset[str]:
-        if producer_id in seen_nodes:
-            return frozenset()
-        producer = graph.nodes.get(producer_id)
-        if producer is None or not isinstance(producer.op, LoopOp):
-            return frozenset({producer_id})
-        next_seen = seen_nodes | {producer_id}
-        return frozenset().union(*(source_buffers(input_id, next_seen) for input_id in producer.inputs))
-
-    def contraction_sources(producer_id: str, seen_nodes: frozenset[str] = frozenset()) -> frozenset[str]:
-        """Distinct load buffers that feed an internal additive reduction.
-
-        Lifting initially separates the pointwise product and ``ReduceOp`` into
-        neighboring LoopOps, so recognize the contraction across that internal
-        producer edge as well as after it has been spliced into one body.
-        """
-
-        producer = graph.nodes[producer_id]
-        op = producer.op
-        if not isinstance(op, LoopOp):
-            return frozenset()
-        defs = op.analyze().defs
-
-        def load_buffers(name: str, seen_names: frozenset[str] = frozenset()) -> frozenset[str]:
-            if name in seen_names or (stmt := defs.get(name)) is None:
-                return frozenset()
-            if isinstance(stmt, Load):
-                return source_buffers(stmt.input, seen_nodes | {producer_id})
-            next_seen = seen_names | {name}
-            return frozenset().union(*(load_buffers(dep, next_seen) for dep in stmt.deps()))
-
-        sources: set[str] = set()
-        for accum in (stmt for stmt in op.body.iter() if isinstance(stmt, Accum) and stmt.op.name == "add"):
-            sources.update(load_buffers(accum.value))
-        if sources:
-            return frozenset(sources)
-        next_seen = seen_nodes | {producer_id}
-        return frozenset().union(*(contraction_sources(input_id, next_seen) for input_id in producer.inputs))
-
-    region_stmts = tuple(stmt for node_id in region for stmt in graph.nodes[node_id].op.body.iter())
-    # Regions grow incrementally, so the softmax sum may not have joined the region yet when this
-    # guard runs. The running-maximum statistic beside an exp value path already identifies online
-    # softmax; the duplication this guard targets carries an additive statistic instead.
-    online_softmax_region = any(isinstance(stmt, Accum) and stmt.op.name == "maximum" for stmt in region_stmts) and any(
-        isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in region_stmts
-    )
-
-    def branch_reaches_reduce(start: str) -> bool:
-        pending = [start]
-        seen: set[str] = set()
-        while pending:
-            node_id = pending.pop()
-            if node_id in seen or node_id not in region:
-                continue
-            seen.add(node_id)
-            op = graph.nodes[node_id].op
-            if any(isinstance(stmt, Accum) for stmt in op.body.iter()):
-                return True
-            pending.extend(set(graph.users(node_id)) & region)
-        return False
-
-    def consumer_has_statistic_and_value(consumer: LoopOp, producer_id: str) -> bool:
-        loads = tuple(load for load in consumer.loads if load.input == producer_id)
-        if len(loads) < 2:
-            return False
-        closures = consumer.body.deps_closure
-        statistic_loads = {
-            load.name for load in loads if any(load.name in closures.get(accum.value, frozenset()) for accum in consumer.body.accums)
-        }
-        return bool(statistic_loads) and any(load.name not in statistic_loads for load in loads)
-
-    for producer_id in region:
-        producer = graph.nodes[producer_id]
-        if not isinstance(producer.op, LoopOp) or len(contraction_sources(producer_id)) < 2:
-            continue
-        branches = set(graph.users(producer_id)) & region
-        split_statistic_value = (
-            len(branches) > 1
-            and any(branch_reaches_reduce(branch) for branch in branches)
-            and any(not branch_reaches_reduce(branch) for branch in branches)
-        )
-        joined_statistic_value = any(
-            consumer_has_statistic_and_value(graph.nodes[consumer_id].op, producer_id) for consumer_id in region - {producer_id}
-        )
-        if (split_statistic_value or joined_statistic_value) and not online_softmax_region:
-            return producer_id
-    return None
 
 
 PATTERN = [Pattern("producer", LoopOp)]
@@ -176,34 +150,18 @@ def _merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
-    # Finish a materialized product's reduction before growing its producer cone. Tensor
-    # decomposition spells a contraction as ``pointwise product -> sum``. If an upstream
-    # activation reaches the product first, splicing it there creates the full ``M x K x N``
-    # product workspace; the subsequent reduction merge can then exceed the work-growth cap
-    # and strand that enormous buffer. Deferring one scan lets the product and reduction reunite
-    # first, after which the upstream cone can fuse into the complete contraction normally.
-    # This is an ordering rule, not a shape specialization: it applies to an activation-bearing
-    # producer cone feeding a multiplicative product whose sole Loop consumer add-reduces it.
-    # The activation condition keeps ordinary softmax/attention reduction order unchanged.
-    sink_users = list(graph.users(sink.id))
-    sink_stmts = tuple(sink.op.body.iter())
-    region_stmts = tuple(stmt for node_id in region - {sink.id} for stmt in graph.nodes[node_id].op.body.iter())
-    has_activation = not any(isinstance(stmt, Accum) for stmt in region_stmts) and any(
-        isinstance(stmt, Assign) and stmt.op.name in {"exp", "silu", "tanh"} for stmt in region_stmts
-    )
-    is_product = any(isinstance(stmt, Assign) and stmt.op.name == "multiply" for stmt in sink_stmts)
-    if has_activation and is_product and not any(isinstance(stmt, Accum) for stmt in sink_stmts) and len(sink_users) == 1:
-        consumer = graph.nodes[sink_users[0]]
-        if isinstance(consumer.op, LoopOp) and any(isinstance(stmt, Accum) and stmt.op.name == "add" for stmt in consumer.op.body.iter()):
-            raise RuleSkipped(f"consumer {consumer.id!r} must absorb the product before its producer cone")
-
-    duplicated = _duplicated_contraction(graph, region)
-    if duplicated is not None:
-        raise RuleSkipped(f"contraction {duplicated!r} would be duplicated across statistic/value paths")
-
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
+    if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region):
+        raise RuleSkipped("merge nests a reduce loop inside a reduce loop — an unreadable seam (raw-loop escape only)")
+    if _entangled_multi_stat(merged) and not any(_entangled_multi_stat(graph.nodes[node_id].op) for node_id in region):
+        # The single-statistic computed-A shape is readable (the fused norm→linear kind); a
+        # multi-statistic compound (the online-softmax pair) stays readable only with its flat
+        # same-extent normalize tail or a free sweep of same-extent additive folds (the
+        # expectation channels the pairing joins). A merge that entangles the pair with any
+        # other tail produces a cell recognition keeps as the raw-loop escape.
+        raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:

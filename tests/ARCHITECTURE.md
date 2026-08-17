@@ -139,10 +139,11 @@ directly; they never import from another test module or from `conftest.py`.
 ## Running
 
 ```bash
-pytest tests/ -v                       # all tests (skips `perf`-marked tests)
+pytest tests/ -v                       # all tests (skips `perf`- and `corpus`-marked tests)
 pytest tests/deploy/test_recipe.py -v  # single file
 pytest tests/planner/ -v               # single directory
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+make test-goldens                      # whole-corpus golden decode (`corpus` marker)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -183,6 +184,15 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
+The `corpus` marker gates the same way and exists for a different cost. `test_golden_decode.py` proves every stored
+golden row still decodes to exactly one enumerated leaf, so proving one row enumerates its whole schedule fork and the
+gate's cost is record count **times** fork size. Warm it is a memo lookup; cold it is minutes per golden file, and cold
+is every CI run because the memo lives in `~/.cache/emmy`. It is a corpus tripwire rather than a code test — only a
+golden edit or a change to the codec, recognition, or legality can move a verdict — so it runs from `make test-goldens`,
+one file per process (the biggest set needs ~21 GB in a single worker). Run it before landing any of those; a change
+that touches none of them cannot invalidate a row. Reserve `corpus` for whole-corpus sweeps: a test that reads a
+handful of records belongs in the default lane, unmarked.
+
 Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
 requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gigabyte checkpoint.
@@ -195,8 +205,8 @@ at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a war
 carry `requires_sm90` so they skip below sm_90 instead of faulting (a single warp-tier fault corrupts the shared `cuda`
 context and cascades `cudaErrorIllegalAddress` into every later test on the worker, CUDA or not). The warp-tier matmul
 coverage all lives in `test_matmul_coverage.py` — the scalar vs warp `TILE` accuracy/structure matrix, the
-masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic parity across the `STAGE=d2/cp` and
-`d2/tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/cp`) and the smem→register
+masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic parity across the `STAGE=d2/smem-async` and
+`d2/smem-tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/smem-async`) and the smem→register
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same

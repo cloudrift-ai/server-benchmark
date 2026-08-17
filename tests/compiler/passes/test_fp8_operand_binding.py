@@ -181,14 +181,14 @@ def test_resolve_warp_stage_offers_the_byte_staged_b():
     legality/parity battery is ``test_fp8_staged``)."""
     node, tile = _warp_contraction()
     inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 4096), F8E4M3)}
-    for spec in ("d2/cp", "d2/tma"):
+    for spec in ("d2/smem-async", "d2/smem-tma"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
 
 
 def test_resolve_warp_stage_admits_matched_dtypes():
     node, tile = _warp_contraction()
     inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 4096), F16)}
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is not None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is not None
 
 
 def test_f8_atoms_are_the_gated_k32_family():

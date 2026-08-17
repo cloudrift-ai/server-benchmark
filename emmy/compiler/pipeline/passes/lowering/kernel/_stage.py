@@ -346,6 +346,12 @@ class Operand:
     # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
     dtype: str | None = None
     elem_bytes: int | None = None
+    # The companion BLOCK-SCALE slab of a PACKED-PAIR operand (NVFP4 weights) — ``(slab name, the
+    # k block the scale spans)``. One stored byte is two logical K elements and every ``block`` of
+    # them share one scale, so the drain reads this slab beside the bits and applies the scale as
+    # it decodes. The scale slab itself is a :class:`SyncOperand`: its values are DECODED from the
+    # checkpoint's e4m3 codes, which is compute, not a copy. ``None`` on every other operand.
+    scale: tuple[str, int] | None = None
 
     @property
     def slab(self) -> str:
@@ -478,10 +484,21 @@ class SyncTransport:
 
     def slab_decls(self, ring: int) -> list[Stmt]:
         # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); only the
-        # async (cp.async B) slabs allocate the ring.
+        # async (cp.async) slabs allocate the ring. Each of those is sized by its OWN element
+        # width and row pad — the same rule :class:`CpAsyncTransport` states, because a copied
+        # peer here is a copied operand there (a packed-pair weight's byte slab beside an f16 A).
         return [
             *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands),
-            *(slab_smem(op.slab, ring * op.shape[0], op.shape[1], self.slab_dtype) for op in self.async_operands),
+            *(
+                slab_smem(
+                    op.slab,
+                    ring * op.shape[0],
+                    op.shape[1] + op.pad_cols,
+                    op.dtype or self.slab_dtype,
+                    align=16 if (op.elem_bytes or self.elem_bytes) == 1 else 0,
+                )
+                for op in self.async_operands
+            ),
         ]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
@@ -563,13 +580,14 @@ class SyncTransport:
         # below runs; at ``depth >= 2`` (the B-only ring) ``k0``/``slot`` are the skeleton's
         # PREFETCH chunk/slot, so they additionally fly under the previous chunk's drain.
         for op in self.async_operands:
+            assert op.swizzle == "NONE" or op.pad_cols == 0, "a padded slab must stay NONE-swizzle"
             out += cp_async_fill(
                 slab=op.slab,
                 shape=op.shape,
                 src=op.buf,
                 gmem_index=op.index(k0),
                 cta=self.cta,
-                elem_bytes=self.elem_bytes,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
                 name=op.tag,
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,

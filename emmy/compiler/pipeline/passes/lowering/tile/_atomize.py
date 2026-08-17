@@ -36,7 +36,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.tile import Channel, Fold, Store
-from emmy.compiler.ir.tile.ir import refs_axis
+from emmy.compiler.ir.tile.ir import operand_body, refs_axis
 from emmy.compiler.pipeline.pipeline import LoweringError
 
 
@@ -228,6 +228,25 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs) -> PackedKBlockB | No
     if len(blocks) != 1:
         return None
     return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)))
+
+
+def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
+    """The contraction ``node``'s packed-pair k-block B operand, or ``None``.
+
+    The whole node shape the packed byte-slab stage stands on: a MATERIALIZED A, one channel, and
+    a computed B whose cone is :func:`match_packed_kblock_b`'s. Asked here rather than spelled at
+    each consumer, so the schedule's offer, the stage resolver and the materializer recognize one
+    set of nodes and cannot drift apart. Everything else answers ``None`` and keeps the generic
+    computed-B reading, which computes the same values through the sync compute-fill.
+    """
+    if inputs is None or not isinstance(node, Fold) or node.axis is None:
+        return None
+    if not isinstance(node.a, Load) or len(node.channels) != 1:
+        return None
+    b = node.channels[0].b
+    if not isinstance(b, Fold) or b.axis is not None:
+        return None
+    return match_packed_kblock_b(list(operand_body(b)), node.axis.name, inputs)
 
 
 def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
@@ -564,4 +583,12 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, (Store(write=write),)
 
 
-__all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]
+__all__ = [
+    "PackedKBlockB",
+    "bind_contraction",
+    "bind_prologue_contraction",
+    "make_cone",
+    "map_cone",
+    "match_packed_b_node",
+    "match_packed_kblock_b",
+]

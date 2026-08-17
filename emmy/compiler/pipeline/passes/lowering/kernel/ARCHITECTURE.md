@@ -302,6 +302,29 @@ TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured confli
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
 the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
 
+**Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
+the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
+moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
+reading keeps it. `_atomize.match_packed_b_node` recognizes the node (the ONE question the offer, the resolver and
+the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs where the
+ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
+`SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
+elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
+rather than through the cone's flattened reshape arithmetic, which says the same thing in a form no fill can chunk.
+The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is compute, which runs on the drain's own
+threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
+exactly the block-invariance the matcher proved.
+
+The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
+`emmy_mma_load_b_smem_trans_f4s_f16`): per fragment element pair it reads one byte, looks both 4-bit codes up in an
+f16 value table (`render._F4_STAGED_PRELUDE`, generated from `dtype.F4_VALUES` so the kernel and the numpy decode
+stay one table — every e2m1 value is exact in f16), and multiplies each by the block's scale. The mma B fragment's
+own lane map is what makes the byte read whole: a lane's two adjacent K positions ARE a stored pair. Legality
+(`resolve_warp_stage`'s packed arm) scopes it to what that loader is written for — `cp.async`, an N-major weight of
+16-value blocks under a 16-bit atom whose K step is that same 16, an A already at the atom's dtype, and the byte
+row's 16-divisibility for the same chunking reason the fp8 slab has. The budget carries the padded byte rows per
+ring slot plus the one scale slab. Everything outside the scope declines and keeps the general reading.
+
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two
 warp bands instead of software-pipelining them in-warp (`_stage._wspec_kloop` — the workers arm of `staged_kloop`,

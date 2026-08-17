@@ -54,6 +54,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
+from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_b_node
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -233,6 +234,7 @@ def _staged_inner_atom_loop(
     trans=None,
     byte_slabs=None,
     pads=None,
+    scales=None,
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -270,33 +272,50 @@ def _staged_inner_atom_loop(
     (``LdmatrixLoad(byte_slab=True)`` — the gmem fragment-loader lane map pointed at the slab; a
     16-bit fragment converts per element, an fp8 fragment repacks raw bytes). NONE-swizzle by
     construction; ``pads`` (per-slab row pad in elements, the cp.async byte slabs'
-    ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows."""
+    ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows.
+
+    ``scales`` (per-slab, aligned with ``slabs``): a ``(scale slab, its row stride, the k block)``
+    triple on a PACKED-PAIR byte slab (NVFP4 weights — one stored byte is two logical K elements
+    sharing one block scale). The slab's K columns are then BYTE columns, so the drain halves its
+    K coordinate to address them and reads the block's scale at ``K / block`` of the companion
+    slab; the loader decodes both nibbles and applies the scale. ``None`` on every other slab."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
     swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
     trans = trans if trans is not None else (False,) * len(slabs)
     byte_slabs = byte_slabs if byte_slabs is not None else (False,) * len(slabs)
     pads = pads if pads is not None else (0,) * len(slabs)
+    scales = scales if scales is not None else (None,) * len(slabs)
     atom_m, atom_n, atom_k = atom.shape
     n_steps = bk_elems // atom_k
     # Per-operand drain spec: (frag base fn, slab, ldm, tile-is-slab-row, reg count, warp-unit var,
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
-    specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems + pads[0], True, m.reg, m.unit, atom_m, offs[0], swizzles[0], byte_slabs[0])]
+    specs = [
+        (lambda x: f"_a{x}", "a", a_slab, bk_elems + pads[0], True, m.reg, m.unit, atom_m, offs[0], swizzles[0], byte_slabs[0], scales[0])
+    ]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f)
-        tr = trans[1 + f]
-        ldm_b = (bk_elems if tr else n.tile) + pads[1 + f]
-        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f]))
+        tr, sc = trans[1 + f], scales[1 + f]
+        # A packed-pair slab's K columns are BYTE columns — half as many as the chunk's logical K.
+        k_cols = bk_elems // 2 if sc is not None else bk_elems
+        ldm_b = (k_cols if tr else n.tile) + pads[1 + f]
+        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f], sc))
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
         reads: list[Stmt] = []
-        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8 in specs:
+        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc in specs:
             assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
                 prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
                 row, col = (prim, kexpr) if is_row else (kexpr, prim)
+                scale_slab, scale_index, scale_ldm = None, (), 0
+                if sc is not None:
+                    scale_slab, scale_ldm, block = sc
+                    # The scale slab is single-buffer, so its row is the bare within-tile coord.
+                    scale_index = (prim, BinaryExpr("/", kexpr, Literal(block, "int")))
+                    col = BinaryExpr("/", col, Literal(2, "int"))
                 if off is not None:
                     row = BinaryExpr("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
@@ -311,6 +330,9 @@ def _staged_inner_atom_loop(
                         swizzle=swz,
                         b_trans=role == "b" and is_row,
                         byte_slab=b8,
+                        scale_buffer=scale_slab,
+                        scale_index=scale_index,
+                        scale_ldm=scale_ldm,
                         fragment_layout=atom.fragment_layout,
                     )
                 )
@@ -614,6 +636,79 @@ def _sync_operands(
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
 
 
+def _packed_operands(
+    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...]]:
+    """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
+
+    Three slabs where the ordinary matmul has two, because the weight arrives as two tensors that
+    are cheapest to move apart and combine at the fragment: the packed BITS copy verbatim (one
+    byte per two K elements, so the slab is half the K width of a 16-bit one and the copy moves
+    half the traffic), and the block SCALES are decoded once per k block into their own small
+    f16 slab. The drain reads both and does the decode-and-scale per fragment element; nothing
+    ever materializes a decoded weight tile.
+
+    A copied edge takes the index its gmem tensor really has, so BITS is addressed canonically —
+    row ``n``, byte column ``k / 2`` over the checkpoint's ``[N, K/2]`` buffer — rather than
+    through the decode cone's flattened reshape arithmetic, which says the same thing in a form no
+    fill can chunk. The SCALES ride the sync compute-fill because decoding them is compute: the
+    checkpoint stores e4m3 codes and one f32 per tensor, and the cone that combines them is
+    :attr:`~...tile._atomize.PackedKBlockB.factor`, evaluated at the block's own k. That the cone
+    may be evaluated at ONE k per block — instead of at every k — is exactly the block-invariance
+    the matcher proved.
+
+    Returns ``(drain-ordered operands, sync operands, async operands)``. The scale slab is absent
+    from the drain order: it is not a fragment source of its own, it is the bits drain's second
+    input (``Operand.scale``).
+    """
+    m, n = mn
+    row_base, col_base = _tile_base(mn)
+    k_axis, block = c.axis, packed.block
+    two = Literal(2, "int")
+
+    def n_coord(row) -> Expr:
+        t = BinaryExpr("+", col_base, row)
+        return _clamp_last(t, n.ext) if n.mask else t
+
+    a_op = Operand(
+        tag="a",
+        buf=c.a.input,
+        shape=(m.tile, bk_elems),
+        coords=_box_origin(c.a.index, tile=m, tile_base=row_base, k_axis=k_axis, sibling=n),
+        index=_slab_index(c.a.index, tile=m, tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=n),
+        swizzle=a_swizzle,
+    )
+
+    factor_cone = map_cone(list(operand_body(c.b)), packed.factor)
+
+    def scale_value(k0, row, col):
+        k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
+        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
+        return [s.rewrite(lambda nm: nm, sigma) for s in factor_cone], packed.factor
+
+    scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
+
+    def bits_index(k0):
+        def gmem(row, col):
+            return (n_coord(row), BinaryExpr("+", BinaryExpr("/", k0, two), col))
+
+        return gmem
+
+    bits_op = Operand(
+        tag="b",
+        buf=packed.bits.input,
+        shape=(n.tile, bk_elems // 2),
+        coords=lambda k0: (col_base, BinaryExpr("/", k0, two)),
+        index=bits_index,
+        trans=True,
+        pad_cols=BYTE_SLAB_PAD,
+        dtype=cuda_name(bits_dtype),
+        elem_bytes=bits_dtype.nbytes,
+        scale=(scale_op.slab, block),
+    )
+    return (a_op, bits_op), (scale_op,), (a_op, bits_op)
+
+
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     """The **one** STAGED K-loop driver, atom-agnostic — build the ``(A, B)`` operand pair, the
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
@@ -631,7 +726,23 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K = k_axis.extent.as_static()  # static K (the resolution eligibility rule)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    if stage.transport == "sync" and tile.atom.sync_copy_staging:
+    packed = match_packed_b_node(c, ops.inputs) if stage.transport == "cp.async" else None
+    if packed is not None:
+        # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
+        # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
+        # A compute fill sits in the transport, so this is the ``sync`` producer with the two
+        # copied slabs as its asynchronous peers — the same shape the fused norm→linear edge takes.
+        operands, sync_ops, async_ops = _packed_operands(
+            c, packed, stage.bk_elems, mn, ops.slab_swizzles(mn, elem.nbytes)[0], ops.inputs[packed.bits.input].dtype
+        )
+        transport = SyncTransport(
+            operands=sync_ops,
+            async_operands=async_ops,
+            slab_dtype=cuda_name(elem),
+            elem_bytes=elem.nbytes,
+            cta=cta,
+        )
+    elif stage.transport == "sync" and tile.atom.sync_copy_staging:
         assert isinstance(c.a, Load) and isinstance(c.b, Load), "sync-copy staging requires materialized A and B edges"
         assert len(ops.channels) == 1, "sync-copy staging is single-fold"
         elems = ops.slab_elems()
@@ -951,7 +1062,8 @@ class _MmaOps(_AtomOps):
         ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
         sync transport's :class:`SyncOperand`, which has no swizzle field); a 1-byte operand slab
         (``Operand.elem_bytes == 1`` — staged fp8) drains through the cooperative byte gather
-        instead of ldmatrix, its row pad riding the drain ``ldm``. An f16-accumulate
+        instead of ldmatrix, its row pad riding the drain ``ldm``; a PACKED-PAIR operand
+        (``Operand.scale``) additionally hands the drain its block-scale slab. An f16-accumulate
         atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
         bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
         stmts = _staged_inner_atom_loop(
@@ -966,10 +1078,17 @@ class _MmaOps(_AtomOps):
             trans=tuple(getattr(op, "trans", False) for op in operands),
             byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
             pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            scales=tuple(self._drain_scale(op) for op in operands),
         )
         if _f16acc(self.tile.atom):
             stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels))]
         return stmts
+
+    def _drain_scale(self, op):
+        """The drain's ``(scale slab, its row stride, the k block)`` for a PACKED-PAIR operand, or
+        ``None``. The stride is the chunk's block count — the scale slab is ``tile × bk/block``."""
+        scale = getattr(op, "scale", None)
+        return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row

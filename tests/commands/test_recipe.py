@@ -105,3 +105,41 @@ def test_recipe_query_exposes_one_external_candidate_option(run_cli):
     assert "--candidate MODEL GPU COUNT" in stdout
     for removed_option in ("--require", "--model MODEL", "--gpu GPU", "--gpu-count", "--allow-missing-model"):
         assert removed_option not in stdout
+
+
+def test_recipe_discovery_builds_task_and_assembles_manifest(run_cli, tmp_path):
+    root = tmp_path / "recipes"
+    recipe_path = root / "ready" / "recipe.yaml"
+    recipe_path.parent.mkdir(parents=True)
+    recipe_path.write_text(
+        f"model:\n  huggingface: org/ready\n  rationale: Existing rationale.\n  heat: 50\n"
+        f"engine:\n  llm:\n    tensor_parallel_size: 1\n"
+        f"matrices:\n  deploy.gpu: {GPU}\n  deploy.gpu_count: 1\n"
+    )
+
+    returncode, stdout, stderr = run_cli("recipe", "discovery", "task", "--root", str(root), "--maintained-count", "1", "--batch-size", "1")
+
+    assert returncode == 0, stderr
+    task = json.loads(stdout)
+    assert [[recipe["model_id"] for recipe in batch] for batch in task["recipe_batches"]] == [["org/ready"]]
+
+    task_path = tmp_path / "task.json"
+    selection_path = tmp_path / "selection.json"
+    task_path.write_text(json.dumps(task))
+    selection_path.write_text(
+        json.dumps(
+            {
+                "scores": [{"model_id": "org/ready", "rationale": "Strong current demand.", "heat": 80}],
+                "maintained_model_ids": ["org/ready"],
+                "obsolete_models": [],
+                "new_onboarding_models": [],
+            }
+        )
+    )
+
+    returncode, stdout, stderr = run_cli("recipe", "discovery", "assemble", "--task", str(task_path), "--selection", str(selection_path))
+
+    assert returncode == 0, stderr
+    manifest = json.loads(stdout)
+    assert manifest["maintained_models"] == [{"model_id": "org/ready", "rationale": "Strong current demand.", "heat": 80}]
+    assert manifest["best_effort_models"] == []

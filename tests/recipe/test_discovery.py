@@ -1,14 +1,8 @@
-import importlib.util
 import json
-from pathlib import Path
 
 import pytest
 
-MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "discovery_agent.py"
-SPEC = importlib.util.spec_from_file_location("discovery_agent", MODULE_PATH)
-discovery_agent = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(discovery_agent)
+from emmy.recipe import discovery
 
 GPU = "NVIDIA H200 141GB"
 
@@ -45,7 +39,7 @@ def test_builds_deterministic_recipe_batches(tmp_path):
     for index in range(5):
         _recipe(tmp_path, f"model-{index}", f"org/model-{index}")
 
-    task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=2, batch_size=2)
+    task = discovery.build_task(tmp_path / "recipes", maintained_count=2, batch_size=2)
 
     assert task["schema_version"] == 1
     assert task["maintained_count"] == 2
@@ -59,7 +53,7 @@ def test_builds_deterministic_recipe_batches(tmp_path):
 def test_assembles_existing_onboarding_from_task_instead_of_agent_output(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"], task="embed")
-    task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=1, batch_size=1)
+    task = discovery.build_task(tmp_path / "recipes", maintained_count=1, batch_size=1)
     selection = _selection(
         [_score("org/ready", 70), _score("org/pending", 85)],
         ["org/ready"],
@@ -74,7 +68,7 @@ def test_assembles_existing_onboarding_from_task_instead_of_agent_output(tmp_pat
         ],
     )
 
-    manifest = discovery_agent.assemble_manifest(task, selection)
+    manifest = discovery.assemble_manifest(task, selection)
 
     assert manifest["maintained_models"] == [_score("org/ready", 70)]
     assert manifest["best_effort_models"] == []
@@ -92,7 +86,7 @@ def test_derives_best_effort_and_obsolete_decisions(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     _recipe(tmp_path, "useful", "org/useful")
     _recipe(tmp_path, "old", "org/old")
-    task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=1, batch_size=2)
+    task = discovery.build_task(tmp_path / "recipes", maintained_count=1, batch_size=2)
     scores = [_score("org/old", 10), _score("org/ready", 80), _score("org/useful", 40)]
     selection = _selection(
         scores,
@@ -100,7 +94,7 @@ def test_derives_best_effort_and_obsolete_decisions(tmp_path):
         obsolete=[{"model_id": "org/old", "replacement_model_id": "org/ready"}],
     )
 
-    manifest = discovery_agent.assemble_manifest(task, selection)
+    manifest = discovery.assemble_manifest(task, selection)
 
     assert manifest["maintained_models"] == [_score("org/ready", 80)]
     assert manifest["best_effort_models"] == [_score("org/useful", 40)]
@@ -110,19 +104,19 @@ def test_derives_best_effort_and_obsolete_decisions(tmp_path):
 def test_rejects_missing_existing_recipe_score(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
-    task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=1, batch_size=2)
+    task = discovery.build_task(tmp_path / "recipes", maintained_count=1, batch_size=2)
     selection = _selection([_score("org/ready")], ["org/ready"])
 
     with pytest.raises(ValueError, match="Existing recipes must be scored: org/pending"):
-        discovery_agent.assemble_manifest(task, selection)
+        discovery.assemble_manifest(task, selection)
 
 
 def test_extracts_last_complete_selection_from_agent_text(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
-    task = discovery_agent.build_task(tmp_path / "recipes", maintained_count=1, batch_size=1)
+    task = discovery.build_task(tmp_path / "recipes", maintained_count=1, batch_size=1)
     first = _selection([_score("org/ready", 40)], ["org/ready"])
     final = _selection([_score("org/ready", 80)], ["org/ready"])
 
-    manifest = discovery_agent.assemble_manifest(task, f"Draft: {first}\nFinal: {final}\nIncomplete: {{")
+    manifest = discovery.assemble_manifest(task, f"Draft: {first}\nFinal: {final}\nIncomplete: {{")
 
     assert manifest["maintained_models"] == [_score("org/ready", 80)]

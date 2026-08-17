@@ -112,7 +112,7 @@ directly; they never import from another test module or from `conftest.py`.
   bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
-  Discovery-agent tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
+  Recipe-discovery tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
   shells, filtering of repeated existing candidates, derived best-effort decisions, and the bounded tool-free scoring
   subagent. Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved
   lifecycle tag

@@ -74,8 +74,8 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
     assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
     assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
-    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" task' in agent_script
-    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" assemble' in agent_script
+    assert "emmy recipe discovery task" in agent_script
+    assert "emmy recipe discovery assemble" in agent_script
     assert '--file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md"' in agent_script
@@ -372,7 +372,7 @@ def test_discovery_inventory_uses_exact_catalog_code_against_rolling_recipes():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
 
-    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" task' in script
+    assert "emmy recipe discovery task" in script
     assert "--root recipes" in script
     assert "recipe list --json" not in script
     assert "recipe_inventory_document" not in script

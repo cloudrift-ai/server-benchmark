@@ -166,7 +166,7 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" task \
+          ./venv/bin/emmy recipe discovery task \
             --root recipes \
             --maintained-count "$MAINTAINED_MODEL_COUNT" \
             --batch-size 6 > "$AGENT_TASK"
@@ -192,7 +192,7 @@ jobs:
           if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_SELECTION" ]; then
             exit "$agent_status"
           fi
-          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" assemble \
+          ./venv/bin/emmy recipe discovery assemble \
             --task "$AGENT_TASK" \
             --selection "$AGENT_SELECTION" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ]; then

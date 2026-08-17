@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""Prepare discovery tasks and assemble lifecycle manifests from agent selections."""
+"""Prepare model-discovery tasks and assemble lifecycle manifests from agent selections."""
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
 from emmy.recipe.catalog import recipe_inventory_document
@@ -186,36 +183,3 @@ def assemble_manifest(task: dict, selection_text: str) -> dict:
         )
     manifest["onboarding_models"].extend(new_onboarding)
     return manifest
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    task = subparsers.add_parser("task", help="Build a compact discovery task")
-    task.add_argument("--root", type=Path, default=Path("recipes"))
-    task.add_argument("--maintained-count", type=int, required=True)
-    task.add_argument("--batch-size", type=int, default=6)
-
-    assemble = subparsers.add_parser("assemble", help="Assemble a lifecycle manifest from agent output")
-    assemble.add_argument("--task", type=Path, required=True)
-    assemble.add_argument("--selection", type=Path, required=True)
-    return parser
-
-
-def main() -> int:
-    args = _parser().parse_args()
-    try:
-        if args.command == "task":
-            result = build_task(args.root, args.maintained_count, args.batch_size)
-        else:
-            result = assemble_manifest(json.loads(args.task.read_text()), args.selection.read_text())
-        sys.stdout.write(json.dumps(result, separators=(",", ":"), sort_keys=True) + "\n")
-        return 0
-    except Exception as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

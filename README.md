@@ -251,6 +251,10 @@ emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
+
+# Prepare bounded discovery batches, then assemble the agent selection into a lifecycle manifest.
+emmy recipe discovery task --root recipes --maintained-count 10 --batch-size 6 > task.json
+emmy recipe discovery assemble --task task.json --selection selection.json > manifest.json
 ```
 
 `recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
@@ -263,6 +267,8 @@ runnable recipe bundle.
 optional `--candidate MODEL GPU COUNT` source hydrates lifecycle metadata from an existing recipe or represents a new
 model as onboarding work. CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require
 `CLOUDRIFT_TEAM_ID`.
+`recipe discovery` is the deterministic boundary around model-discovery agents: `task` batches the exact inventory,
+while `assemble` validates exact score coverage and derives the complete lifecycle manifest without editing recipes.
 
 ```yaml
 tags:

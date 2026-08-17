@@ -12,6 +12,7 @@ validation.
   `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
 - `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
 - `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
+- `discovery.py` — deterministic discovery-task batching and lifecycle-manifest assembly from agent selections
 - `query.py` — constrained predicates, deployment-row expansion, ordering, and the versioned query result
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
@@ -70,6 +71,12 @@ no catalog-selection arguments, so its consumers observe the same installation-a
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
 Manual creation starts at heat zero; discovery supplies and later refreshes the evidence-based value.
+
+`emmy recipe discovery task` turns an exact recipe root into bounded inventory batches for scoring agents.
+`emmy recipe discovery assemble` validates that the resulting agent selection scores every exact recipe once, checks
+the maintained and obsolete selections, derives best-effort recipes, and restores existing onboarding task and
+deployment data from the trusted task. It emits the four-list lifecycle manifest consumed by repository automation;
+the agent supplies judgments while this library owns deterministic inventory bookkeeping.
 
 `emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
 expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.

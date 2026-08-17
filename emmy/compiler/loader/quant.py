@@ -193,9 +193,9 @@ def _fp4_quant_config(model_dir: Path) -> dict | None:
     values, different scale dtype and block. Anything else → ``None``.
 
     A MIXED_PRECISION checkpoint answers BOTH this and :func:`_fp8_quant_config`, by design:
-    nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP in
-    NVFP4, so both spellers must run over it and each takes the leaves whose stored siblings are
-    its own. The two recognizers still decline each other's PURE checkpoints.
+    nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and
+    lm_head in NVFP4, so both spellers must run over it and each takes the leaves whose stored
+    siblings are its own. The two recognizers still decline each other's PURE checkpoints.
     """
     qc = _quantization_config(model_dir)
     if qc is None:

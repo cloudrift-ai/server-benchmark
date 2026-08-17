@@ -93,7 +93,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ steps.rolling.outputs.branch || github.ref_name }}
+          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -166,10 +166,16 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/emmy recipe discovery task \
+          ./venv/bin/emmy recipe query \
             --root recipes \
-            --maintained-count "$MAINTAINED_MODEL_COUNT" \
-            --batch-size 6 > "$AGENT_TASK"
+            --sort 'model_id asc' \
+            --sort 'deployment.index asc' \
+            --json \
+            | jq \
+                --argjson maintained_count "$MAINTAINED_MODEL_COUNT" \
+                --argjson batch_size 6 \
+                -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
+            > "$AGENT_TASK"
           set +e
           opencode run \
             "Complete the attached lifecycle task exactly." \
@@ -192,9 +198,10 @@ jobs:
           if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_SELECTION" ]; then
             exit "$agent_status"
           fi
-          ./venv/bin/emmy recipe discovery assemble \
-            --task "$AGENT_TASK" \
-            --selection "$AGENT_SELECTION" > "$AGENT_MANIFEST"
+          jq \
+            --rawfile selection "$AGENT_SELECTION" \
+            -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
+            "$AGENT_TASK" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ]; then
             echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
           fi
@@ -205,7 +212,7 @@ jobs:
       - name: Validate and apply model lifecycle
         id: lifecycle
         run: |
-          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/discovery_lifecycle.py" \
+          ./venv/bin/python "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_lifecycle.py" \
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
           maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --json | jq '.rows | length')"

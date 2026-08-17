@@ -11,7 +11,7 @@ import yaml
 
 from emmy.recipe.catalog import MAX_STUB_DEPLOYMENTS
 
-MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "discovery_lifecycle.py"
+MODULE_PATH = Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "discovery_lifecycle.py"
 SPEC = importlib.util.spec_from_file_location("discovery_lifecycle", MODULE_PATH)
 discovery_lifecycle = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -59,6 +59,7 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     job = document["jobs"]["discover"]
     steps = job["steps"]
+    checkout = next(step for step in steps if step.get("name") == "Checkout discovery branch")
     install_index = next(index for index, step in enumerate(steps) if step.get("name") == "Install Emmy")
     load_index = next(index for index, step in enumerate(steps) if step.get("name") == "Load exact workflow source")
     agent_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run discover-models agent")
@@ -69,18 +70,20 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup discovery credentials and output")
 
     assert install_index < load_index < agent_index < validation_index
+    assert checkout["with"]["ref"] == "${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}"
     assert 'git archive "$WORKFLOW_SHA"' in load_script
     assert "GIT_LFS_SKIP_SMUDGE" in steps[load_index]["env"]
     assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
     assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
     assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
-    assert "emmy recipe discovery task" in agent_script
-    assert "emmy recipe discovery assemble" in agent_script
+    assert "emmy recipe query" in agent_script
+    assert '"$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq"' in agent_script
+    assert '"$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md"' in agent_script
     assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
-    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_lifecycle.py"' in validation_script
+    assert '"$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_lifecycle.py"' in validation_script
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
@@ -368,12 +371,15 @@ def test_discovery_prompt_keeps_obsolete_classification_conservative():
     assert "Every unselected complete recipe defaults to best-effort" in prompt
 
 
-def test_discovery_inventory_uses_exact_catalog_code_against_rolling_recipes():
+def test_discovery_inventory_uses_recipe_query_against_rolling_recipes():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
 
-    assert "emmy recipe discovery task" in script
+    assert "emmy recipe query" in script
     assert "--root recipes" in script
+    assert "--sort 'deployment.index asc'" in script
+    assert "discovery_task.jq" in script
+    assert "discovery_manifest.jq" in script
     assert "recipe list --json" not in script
     assert "recipe_inventory_document" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)

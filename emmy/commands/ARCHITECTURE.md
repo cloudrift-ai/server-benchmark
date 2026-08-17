@@ -9,14 +9,14 @@ commands/bench ──► provisioning (cloud VM lifecycle)
 commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
-commands/recipe ─► recipe (catalog queries, onboarding shells, and discovery manifest assembly)
+commands/recipe ─► recipe (catalog queries and onboarding shell creation)
 recipe/query ───► provisioning (read-only CloudRift availability and team access)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
 **Dependency rule:** `commands/` is the CLI-only layer. All reusable business logic lives in top-level library packages:
 - `emmy/recipe/` — recipe loading, dataclass types (`Recipe`, `LLMConfig`, etc.), engine flag mapping, catalog
-  queries, onboarding shell creation, and deterministic discovery manifest assembly
+  queries, and onboarding shell creation
 - `emmy/deploy/` — compose generation, deploy orchestration
 - `emmy/provisioning/` — VM types, SSH polling, shell helpers, cloud providers
 - `emmy/publish.py` — the canonical serving-image name parser, model slug, Docker metadata gates, and publication
@@ -332,9 +332,6 @@ emmy
 |   +-- list      -- inspect and filter compact recipe metadata
 |   +-- query     -- filter and order normalized recipe or deployment rows
 |   +-- create    -- create a validated onboarding shell
-|   +-- discovery
-|       +-- task      -- batch an exact recipe inventory for scoring agents
-|       +-- assemble  -- validate an agent selection and assemble its lifecycle manifest
 +-- vm
     +-- create
     |   +-- gpu        -- name a GPU from the hardware table (orchestrator: retries + fallback)
@@ -373,9 +370,6 @@ installation-aware catalog.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
 directory. A manually created shell starts with `model.heat: 0` until discovery refreshes it.
-`recipe discovery task` emits a versioned exact-inventory task in bounded batches. `recipe discovery assemble`
-accepts that task and an agent selection, requires exact score coverage, and deterministically derives the complete
-lifecycle manifest without changing recipes.
 
 ```bash
 emmy recipe list [--json]
@@ -383,8 +377,6 @@ emmy recipe query [--filter EXPRESSION]... [--sort EXPRESSION]... [--limit N] \
   [--candidate MODEL GPU COUNT] [--root ROOT] [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
-emmy recipe discovery task --root ROOT --maintained-count N [--batch-size N]
-emmy recipe discovery assemble --task PATH --selection PATH
 ```
 
 ### `emmy deploy local`

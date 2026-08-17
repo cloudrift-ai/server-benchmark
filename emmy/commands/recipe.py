@@ -12,7 +12,6 @@ import httpx
 from emmy.provisioning.errors import TerminalProvisionError
 from emmy.recipe.bundled import default_recipe_root
 from emmy.recipe.catalog import create_recipe_stub, recipe_inventory, recipe_inventory_document
-from emmy.recipe.discovery import assemble_manifest, build_task
 from emmy.recipe.query import (
     RecipeCandidate,
     build_query_rows,
@@ -52,24 +51,6 @@ def _handle_create(args) -> None:
     except (OSError, ValueError) as exc:
         logger.error(str(exc))
         raise SystemExit(2) from exc
-
-
-def _handle_discovery_task(args) -> None:
-    try:
-        result = build_task(args.root, args.maintained_count, args.batch_size)
-    except (OSError, ValueError) as exc:
-        logger.error(str(exc))
-        raise SystemExit(2) from exc
-    logger.info(json.dumps(result, separators=(",", ":"), sort_keys=True))
-
-
-def _handle_discovery_assemble(args) -> None:
-    try:
-        result = assemble_manifest(json.loads(args.task.read_text()), args.selection.read_text())
-    except (OSError, ValueError) as exc:
-        logger.error(str(exc))
-        raise SystemExit(2) from exc
-    logger.info(json.dumps(result, separators=(",", ":"), sort_keys=True))
 
 
 def _resolve_cloudrift_api_key() -> str:
@@ -193,17 +174,3 @@ def register_recipe_command(subparsers) -> None:
         help="Candidate deploy.gpu and deploy.gpu_count; repeat for up to three setups",
     )
     create_parser.set_defaults(func=_handle_create)
-
-    discovery_parser = actions.add_parser("discovery", help="Prepare and validate model-discovery agent data")
-    discovery_actions = discovery_parser.add_subparsers(dest="discovery_action", required=True)
-
-    task_parser = discovery_actions.add_parser("task", help="Build a compact model-discovery task")
-    task_parser.add_argument("--root", type=Path, default=Path("recipes"), help="Recipe root (default: recipes)")
-    task_parser.add_argument("--maintained-count", type=int, required=True)
-    task_parser.add_argument("--batch-size", type=int, default=6)
-    task_parser.set_defaults(func=_handle_discovery_task)
-
-    assemble_parser = discovery_actions.add_parser("assemble", help="Assemble a lifecycle manifest from agent output")
-    assemble_parser.add_argument("--task", type=Path, required=True)
-    assemble_parser.add_argument("--selection", type=Path, required=True)
-    assemble_parser.set_defaults(func=_handle_discovery_assemble)

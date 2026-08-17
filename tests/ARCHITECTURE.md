@@ -29,7 +29,7 @@ source lives outside the package:
 | `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
 | `compiler/fixtures/` | checked-in traces and model configs, not tests |
 | `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
-| `github/` | unit tests for repository automation helpers under `.github/scripts/` |
+| `github/` | unit tests for repository automation helpers under `.github/scripts/` and `.github/workflows/scripts/` |
 | `scripts/` | tests for executable helpers under the repository's `scripts/` directory |
 | `architecture/` | repository-wide dependency and layering invariants |
 
@@ -112,7 +112,7 @@ directly; they never import from another test module or from `conftest.py`.
   bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
-  Recipe-discovery tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
+  Discovery-filter tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
   shells, filtering of repeated existing candidates, derived best-effort decisions, and the bounded tool-free scoring
   subagent. Qualification-manifest tests also pin the requested operation mode, exact model ID, target, preserved
   lifecycle tag

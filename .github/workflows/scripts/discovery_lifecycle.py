@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and apply the model lifecycle manifest from discovery."""
+"""Validate and apply the model lifecycle manifest for the discovery workflow."""
 
 from __future__ import annotations
 

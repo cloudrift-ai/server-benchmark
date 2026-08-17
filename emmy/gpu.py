@@ -183,6 +183,18 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         peak_fp32_tflops=126.0,
         peak_fp16_tflops=504.0,
     ),  # measured
+    # A LAPTOP part on the same cc 12.0 architecture, and a much smaller one: 60 SMs against the
+    # desktop 5090's 170, in a chassis whose clocks fall under sustained load. Timings measured
+    # here are noisier than a desktop card's, so its goldens carry the laptop name.
+    GpuSpec(
+        name="NVIDIA GeForce RTX 5080 Laptop GPU",
+        pci_device_ids=("2c59",),
+        short_name="rtx5080laptop",
+        compute_capability=(12, 0),
+        sm_count=60,
+        smem_per_sm=102400,
+        vram_mib=16303,
+    ),  # measured
     # --- other PRO 6000 Blackwell variants (same GB202 die, cc 12.0) ------
     GpuSpec(
         name="NVIDIA RTX PRO 6000 Blackwell Workstation Edition",

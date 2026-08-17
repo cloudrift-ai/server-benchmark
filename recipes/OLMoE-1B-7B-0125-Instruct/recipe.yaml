@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Low momentum, not on OR; niche compiler test model."
+  rationale: "Niche compiler model with minimal cross-platform community evidence"
   heat: 20
   task: generate
 matrices:

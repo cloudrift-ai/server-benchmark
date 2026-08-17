@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "Brand new exllamav3 format; minimal downloads and evidence."
+  rationale: "New exllamav3 format variant with minimal evidence and downloads"
   heat: 10
   task: generate
 matrices:

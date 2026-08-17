@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "Not found on HF (gated?); no adoption evidence."
+  rationale: "No shared evidence found; possible gated model with no adoption signal"
   heat: 10
   task: generate
 matrices:

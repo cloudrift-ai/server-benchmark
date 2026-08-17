@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Low downloads; no mindshare; niche FP8 on V100."
+  rationale: "Moderate coding discussion; lower HF downloads; niche FP8 on V100"
   heat: 25
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate

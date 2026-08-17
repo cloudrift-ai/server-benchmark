@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Legacy flagship; no current trending; high total downloads."
+  rationale: "High downloads but no current trending; cooled by Qwen3.8 cycle"
   heat: 25
 engine:
   llm:

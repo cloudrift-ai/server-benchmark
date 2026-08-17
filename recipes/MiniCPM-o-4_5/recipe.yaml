@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM-o-4_5
-  rationale: "Any-to-any multimodal, 993K downloads; steady niche interest."
-  heat: 60
+  rationale: "Any-to-any multimodal with 993K downloads and strong video/audio signals"
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

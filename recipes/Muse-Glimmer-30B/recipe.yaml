@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Low downloads; no OR access; minimal mindshare."
+  rationale: "Strong Reddit engagement from Meta release; open-weight 30B multimodal signal"
   heat: 20
   task: generate
 matrices:

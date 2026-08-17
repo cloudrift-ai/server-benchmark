@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "FP8 niche hardware coverage; Qwen3.6/3.8 trending cools interest."
-  heat: 50
+  rationale: "FP8 tier coverage on H200; overshadowed by newer Qwen releases"
+  heat: 55
 engine:
   llm:
     pipeline_parallel_size: 1

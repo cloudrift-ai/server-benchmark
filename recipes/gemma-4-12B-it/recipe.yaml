@@ -22,7 +22,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Strong downloads; zero Reddit mindshare; moderate maintained signal."
+  rationale: "Gemma 4 family with solid downloads; higher priority than base variant"
   heat: 45
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 

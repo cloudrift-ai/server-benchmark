@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM5-1B
-  rationale: "Solid edge metrics; no OR, quiet Reddit; useful for constrained serving."
-  heat: 50
+  rationale: "Solid edge metrics with 1.09M downloads for constrained serving"
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

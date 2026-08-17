@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-  rationale: "New NVIDIA MoE; low downloads, no OR or Reddit mindshare."
+  rationale: "Low downloads and niche NVIDIA MoE with no OR or Reddit mindshare"
   heat: 25
   task: generate
 matrices:

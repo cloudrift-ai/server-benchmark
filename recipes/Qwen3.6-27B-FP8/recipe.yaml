@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "FP8 novelty with strong context; eclipsed by Qwen3.8 breakout."
-  heat: 70
+  rationale: "FP8 with 262K context; 2266 HF likes support strong score despite Qwen3.8"
+  heat: 75
 engine:
   llm:
     tensor_parallel_size: 1

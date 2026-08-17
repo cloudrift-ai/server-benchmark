@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "FP8 MoE with limited OR presence and no Reddit discussion."
-  heat: 15
+  rationale: "Older GLM variant; family momentum from GLM 5.3 but no specific signal"
+  heat: 35
 engine:
   llm:
     tensor_parallel_size: 8

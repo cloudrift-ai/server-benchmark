@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Legacy NVIDIA targeting; no OR access; low mindshare."
+  rationale: "FP8 derivative of gemma-4-31B; lacks primary HF momentum"
   heat: 25
 engine:
   llm:

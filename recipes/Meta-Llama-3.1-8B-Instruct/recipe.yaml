@@ -5,7 +5,7 @@ tags:
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
-  rationale: "Established model no trending. Stable OpenRouter presence and base downloads."
+  rationale: "Zero evidence in sources; stable but no current trending momentum"
   heat: 35
   revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
     FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned

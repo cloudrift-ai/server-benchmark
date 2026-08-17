@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "OpenAI open-weights 120B MoE, sustained heavy downloads, OR available."
-  heat: 85
+  rationale: "High HF downloads for open-weights but no OR or Arena presence"
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

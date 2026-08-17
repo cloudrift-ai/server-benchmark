@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "OpenRouter flagship MoE; strong community mindshare as workhorse."
+  rationale: "Extensively referenced in Qwen3.8 comparison threads as current workhorse"
   heat: 80
 engine:
   llm:

@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Embedding task lacks consumer mindshare and trending momentum."
+  rationale: "Embedding task natural low mindshare without general-purpose model traffic"
   heat: 15
   task: embed
 

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "Top downloads on list, OR available; no Reddit mindshare."
-  heat: 75
+  rationale: "Top downloads but no OR or Arena data; open-weights interest only"
+  heat: 70
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

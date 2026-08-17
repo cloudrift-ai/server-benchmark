@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "2.8T MoE, highest HF downloads, OR available; strong API mindshare."
+  rationale: "Record 2.8T MoE; viral Reddit; 10800 HF likes; strong Arena agent rank"
   heat: 95
   task: generate
 matrices:

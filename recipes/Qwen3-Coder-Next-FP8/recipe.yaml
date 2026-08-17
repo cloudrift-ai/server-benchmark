@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Flagship coding model but absent from OR limits reach."
+  rationale: "Flagship Qwen coding model; strong OR presence but no dedicated Reddit buzz"
   heat: 75
 engine:
   llm:

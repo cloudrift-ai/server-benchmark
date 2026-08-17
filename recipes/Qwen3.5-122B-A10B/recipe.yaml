@@ -6,8 +6,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "Qwen3.8 breakout overshadows 122B; legacy hardware constrained."
-  heat: 45
+  rationale: "Overshadowed by Qwen3.8 but retains useful V100 hardware coverage signal"
+  heat: 55
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 

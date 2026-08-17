@@ -2011,7 +2011,7 @@ def test_raster_gn_pin_groups_the_transpose(monkeypatch):
 def test_raster_default_is_the_flat_order(monkeypatch):
     """Unpinned, a cold greedy pick takes the conservative option-0 (``""`` — the flat
     N-fastest order, byte-identical to the historical codegen) and stamps the decided-empty
-    value; the ``gm8`` sibling is a fork row for the search/goldens to arbitrate, never a
+    value; the ``gm8`` sibling is a fork row for the golden evidence to arbitrate, never a
     silent default."""
     kop = _raster_kop(monkeypatch, 1280)
     assert kop.knobs.get("RASTER") == ""

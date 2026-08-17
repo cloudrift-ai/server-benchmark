@@ -25,8 +25,10 @@ They do three jobs at once:
 
 ## What one looks like
 
-Golden configurations live in one file per GPU. A file embeds its program pool, then lists structural targets whose
-realization arrays hold bindings, regimes, schedules, and paired measurements:
+Model golden configurations live under `recipes/<model>/golden/`, in one file per exact GPU model and compute
+capability. Model-agnostic hardware goldens remain under `emmy/compiler/pipeline/search/goldens/`. A file embeds its
+program pool, then lists structural targets whose realization arrays hold bindings, regimes, schedules, and paired
+measurements:
 
 ```yaml
 gpu_name: NVIDIA GeForce RTX 5090
@@ -122,10 +124,10 @@ own process, is reported as a failure, and the remaining rows continue.
   times faster than keeping the work fused.
 
 - **A recording is a pinned measurement, and replay is exact.** The knobs are decoded against the kernel's recognized
-  structure — there is no fuzzy matching between a recording and a live compile, so a row either replays into
-  exactly the measured kernel or fails loudly. The corpus is gated on that contract: every checked-in record must
-  decode strictly (the `test_golden_decode` tripwire), and a structural change that invalidates one fails the suite
-  with the reason instead of silently unkeying the row.
+  structure — there is no fuzzy matching between a recording and a live compile, so a row either replays into exactly
+  the measured kernel or fails loudly. Nightly model onboarding gates that contract: it repository-validates and
+  strictly decodes every checked-in record for the model, then audits and replays the file on its exact GPU. A
+  structural change that invalidates a row fails that nightly job with the reason instead of silently unkeying it.
 
 ## Validating a file
 
@@ -160,15 +162,15 @@ next page.
 Read a real file — they are plain YAML, and the comments in them are the record of why each entry is what it is:
 
 ```bash
-ls emmy/compiler/pipeline/search/goldens/
-grep -n -A9 "kernel: norm_linear" emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml | head -30
+find recipes -path '*/golden/*.yaml' -print
+grep -n -A9 "name: gemma4_12b.norm" recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml | head -30
 ```
 
 Then run the file-scoped validation on the GPU named by the serving config. It needs model configuration and
 allocation metadata, but no weight payload:
 
 ```bash
-emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \
+emmy eval golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 

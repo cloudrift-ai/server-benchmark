@@ -52,7 +52,7 @@ the FAST_MATH configuration; 131,072 is the largest qualified power-of-two conte
 
 ## Compiler qualification
 
-The base-checkpoint [RTX 5090 Gemma 4 golden](../../emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4_base.yaml)
+The base-checkpoint [RTX 5090 Gemma 4 golden](golden/rtx5090_sm120.yaml)
 contains 25 exact Loop targets and 200 realizations. Standard and FAST_MATH full-model audits each reported 99
 matches, zero gaps, zero drift, and zero compile failures. The base and instruction-tuned checkpoints have identical
 execution geometry; their only configuration difference affecting generation is `eos_token_id`, so the baked

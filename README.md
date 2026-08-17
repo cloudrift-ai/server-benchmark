@@ -39,7 +39,7 @@ emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/r
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
-emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \
+emmy eval golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
@@ -307,6 +307,11 @@ every recipe's `model` block. Useful lower-priority recipes stay runnable as `be
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
 three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
 
+Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
+file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
+recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
+`emmy/compiler/pipeline/search/goldens/`.
+
 Generic workload (run any tool on the VM, pull back result files):
 
 ```yaml
@@ -359,9 +364,9 @@ a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
 Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
 dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
 
-`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
-the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub
-URLs, which the workflow runs because PyPI renders the README detached from the repo.
+`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
+recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
+links to absolute GitHub URLs, which the workflow runs because PyPI renders the README detached from the repo.
 
 ## Project Structure
 
@@ -402,8 +407,8 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
     (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
-- [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
-  (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
+- [recipes/](recipes/) — The recommended serving configuration and per-GPU model goldens, one directory per model —
+  what `emmy deploy` runs (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)

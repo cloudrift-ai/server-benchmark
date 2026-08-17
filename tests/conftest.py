@@ -191,9 +191,9 @@ _UNKNOWN_COST = 0.05
 _GATE_SECONDS = 5.0
 #: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
 #: so they are exempt from the staleness gate and from the written baseline — otherwise every
-#: `make bench-kernels` / `make test-goldens` run would fail demanding entries that `make test`,
-#: which skips them, can never record.
-_OFF_LANE_MARKERS = ("perf", "corpus")
+#: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
+#: can never record.
+_OFF_LANE_MARKERS = ("perf",)
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 
@@ -371,19 +371,6 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "perf" in item.keywords:
                 item.add_marker(skip_perf)
-
-    # ``corpus`` deselects on the same terms, for the same reason in a different currency:
-    # the golden decode gate re-enumerates every schedule fork in the corpus, so its cost
-    # scales with the record count TIMES the fork size and it is minutes per file on a cold
-    # cache — which is every CI run, since the memo lives in ``~/.cache/emmy``. It is a
-    # corpus tripwire, not a code test: it catches a stored row that a structural change
-    # invalidated, so it belongs with `make test-goldens` before a golden edit or a codec
-    # change, not in the per-commit lane.
-    if "corpus" not in selected:
-        skip_corpus = pytest.mark.skip(reason="corpus marker not selected; run with `make test-goldens`")
-        for item in items:
-            if "corpus" in item.keywords:
-                item.add_marker(skip_corpus)
 
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for

@@ -229,8 +229,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   input knob pins, the selected schedule knobs, and (after verification) paired measurements.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
-- **Canonical golden file** — A reviewed per-GPU YAML under `compiler/pipeline/search/goldens/`. Every realization
-  contains verified deployable measurements; `emmy tune` refuses to mutate these files directly.
+- **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
+  `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
+  refuses to mutate these files directly.
 - **Evidence** — A compatible recorded measurement used to select between schedule candidates.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly

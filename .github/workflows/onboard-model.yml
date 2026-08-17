@@ -492,8 +492,9 @@ jobs:
           Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
           filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
           Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
-          output. Allowed areas are recipes/, experiments/, docker/vllm-emmy-serve/models/, canonical golden YAML,
-          and a bounded small fix under emmy/ with its focused tests and nearest ARCHITECTURE.md updates.
+          output. Allowed areas are recipes/ (including the model's golden/ subdirectory), experiments/,
+          docker/vllm-emmy-serve/models/, and a bounded small fix under emmy/ with its focused tests and nearest
+          ARCHITECTURE.md updates.
           Include one-line deployment_summary and performance_summary values drawn from the exact selected recipe lane.
           On failure, set failure.regression=true only when a previously qualified behavior or performance lane
           regressed and the bounded fix attempt could not restore it; include a concise, credential-free message for

@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-goldens lint format git-sha-guard pypi-dist \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -21,7 +21,6 @@ help:
 	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
-	@echo "  test-goldens   - Strict-decode the whole golden corpus (deselected from make test)"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
@@ -72,19 +71,6 @@ format: setup
 # pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
-
-# The whole-corpus golden decode tripwire (`corpus` marker, deselected from `make test`).
-# Proving one row enumerates its entire schedule fork, so the cost is record count TIMES fork
-# size — minutes per golden file cold, which is every CI run. Run it before landing a golden
-# edit or a change to the codec, recognition, or legality; those are the changes that can
-# invalidate a stored row. One file per process: the biggest set needs ~21 GB in a single
-# worker, so xdist would OOM it.
-test-goldens: setup
-	@set -e; for f in emmy/compiler/pipeline/search/goldens/*.yaml; do \
-		n=$$(basename $$f); echo "--- $$n"; \
-		./venv/bin/pytest "tests/compiler/pipeline/search/test_golden_decode.py::test_every_migrated_record_decodes_strictly[$$n]" \
-			-m corpus -q -p no:randomly --no-header; \
-	done
 
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs serially: xdist

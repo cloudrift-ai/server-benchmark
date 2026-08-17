@@ -1,0 +1,11 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: riftstack/Laguna-S-2.1-exl3
+  rationale: "Compiler evidence exists for RTX 5090; serving qualification and a deployable recipe remain pending."
+  heat: 0
+  task: generate
+matrices:
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+    deploy.gpu_count: 1

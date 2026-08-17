@@ -31,7 +31,7 @@ because they have different writers, different readers and different lifetimes.
 
 | Store | Where it lives | Written by | Read by |
 | --- | --- | --- | --- |
-| **Golden configurations** | one file per GPU, checked into the repository | recorded by hand from measured comparisons | an ordinary compile, first of all; also the training data for the offline prior |
+| **Golden configurations** | model files under `recipes/<model>/golden/`, one per exact GPU; model-agnostic files under compiler search | promoted from measured comparisons | an ordinary compile, first of all; also the training data for the offline prior |
 | **Reservoir** | inside the online prior's checkpoint, `~/.cache/emmy/online.json` | `emmy tune`, every training row | the online prior's own training; and an ordinary compile, for the rows measured at deployable settings |
 | **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
 | **Search-tree table** | the same database | `emmy tune`, one row per point in its search; also `emmy run --bench` for hand-forced measurements | the `emmy eval` diagnostics only — **never** consulted when compiling |
@@ -106,11 +106,13 @@ Look at what a tuned machine actually has:
 ls -la ~/.cache/emmy/
 ```
 
-The golden configuration files are in the repository instead, one per GPU:
+Model golden configuration files live beside their recipes, one file per exact GPU model and compute capability:
 
 ```bash
-ls emmy/compiler/pipeline/search/goldens/
+find recipes -path '*/golden/*.yaml' -print
 ```
+
+The central `emmy/compiler/pipeline/search/goldens/` directory contains only model-agnostic hardware goldens.
 
 If a tuning database exists, the measured configurations for each kernel can be listed as a table, best first, with
 the one an ordinary compile would choose marked:

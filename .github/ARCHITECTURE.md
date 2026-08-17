@@ -107,7 +107,9 @@ lifecycle tag. Both modes preserve discovery-managed `model.heat`. Before the ag
 small remote Python/rsync prerequisite set and
 requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
-the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The shared serving experiment
+the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. For the selected recipe and GPU,
+the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored row, and
+replays it on the exact card; pull-request tests do not load checked-in golden YAML. The shared serving experiment
 retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its system-only
 row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark output,
 top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image
@@ -131,9 +133,10 @@ lines, and any Python source change requires a focused test change. Broader chan
 remain follow-up work.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe, experiment, serving-image, canonical-golden, and bounded implementation/test paths. The validator
-requires the shared experiment recipe and report plus the exact `results_<gpu-short>x<gpu-count>.tar.gz` archive, and
-it opens that archive to require matching current-platform row records.
+allowed recipe (including `golden/<gpu-slug>_<compute-cap>.yaml`), experiment, serving-image, and bounded
+implementation/test paths. The validator requires the shared experiment recipe and report plus the exact
+`results_<gpu-short>x<gpu-count>.tar.gz` archive, and it opens that archive to require matching current-platform row
+records.
 It rejects changes to another platform snapshot and requires the current archive to be created or updated. Optional
 outputs must remain in `artifacts`; unmanifested or exploratory output is rejected. The job installs a pinned,
 checksum-verified Git LFS binary in the runner's temporary directory when needed, then configures LFS locally before

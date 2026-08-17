@@ -1,7 +1,7 @@
 """The distribution staging step that `make wheel` and the publish workflow run.
 
 Two things it must get right. Recipes live outside the `emmy` package, so a wheel only
-carries them because this script copies them in — and it must copy the recipe files alone,
+carries them because this script copies in runnable recipe files and canonical model goldens,
 not local benchmark output or ``RESULTS.md``. The README's repo-relative links
 resolve on GitHub but 404 on PyPI, which renders it detached from the repo.
 """
@@ -75,9 +75,20 @@ def test_stages_only_runnable_recipes(fake_repo):
         model = fake_repo / "recipes" / name
         model.mkdir(parents=True)
         (model / "recipe.yaml").write_text(f"tags: {tags!r}\nmodel:\n  huggingface: org/{name}\n")
+        golden = model / "golden" / "rtx5090_sm120.yaml"
+        golden.parent.mkdir()
+        golden.write_text("gpu_name: NVIDIA GeForce RTX 5090\n")
 
     assert prepare_dist.stage_recipes() == 2
-    assert sorted(p.name for p in (fake_repo / "emmy" / "recipes").iterdir()) == ["best-effort", "maintained"]
+    staged = fake_repo / "emmy" / "recipes"
+    assert sorted(p.name for p in staged.iterdir()) == ["best-effort", "maintained", "obsolete", "onboarding"]
+    assert (staged / "maintained" / "recipe.yaml").is_file()
+    assert (staged / "best-effort" / "recipe.yaml").is_file()
+    assert not (staged / "obsolete" / "recipe.yaml").exists()
+    assert not (staged / "onboarding" / "recipe.yaml").exists()
+    assert all(
+        (staged / name / "golden" / "rtx5090_sm120.yaml").is_file() for name in ("maintained", "best-effort", "obsolete", "onboarding")
+    )
 
 
 def test_refuses_to_build_a_recipe_less_package(fake_repo):

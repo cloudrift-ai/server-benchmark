@@ -16,7 +16,7 @@ artifacts:
 - one reusable serving experiment under `experiments/<model>/` with a cumulative report and one Git LFS evidence
   archive, including the system-only row records, per exact GPU platform;
 - one compact, self-contained `recipes/<model>/RESULTS.md` only when a valid final deployment recipe exists;
-- a complete compiler golden under `emmy/compiler/pipeline/search/goldens/` when full coverage qualifies;
+- a complete compiler golden under `recipes/<model>/golden/` when full coverage qualifies;
 - when Emmy is eligible, tuned kernels and a verified, prebuilt
   `cloudriftai/vllm-emmy-<model-slug>:<tag>` image.
 
@@ -164,16 +164,19 @@ Use `tune-kernels` to run its equal-budget model-proposal-versus-MCTS workflow o
 by repeated O3 correctness and finalist checks. For complete coverage, finish one deployable O3 measurement and one
 positive reference-backend measurement for every retained target. When search finds no acceptable winner, measure a
 correct greedy fallback instead of dropping the target. Strip working `ranking` metadata and commit the resulting
-self-contained, fully verified document to the usual location:
+self-contained, fully verified document beside the model's recipe:
 
-`emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml`
+`recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`
+
+Keep exactly one file per exact GPU model and compute capability. If the model has no recipe directory yet, create an
+`onboarding`/`untested` recipe shell first, preserving the discovery-managed lifecycle fields when they are known.
 
 That complete model golden is required even when serving, checkpoint loading, or full-model accuracy is blocked. It
 must contain every traced target, explicit knobs (an empty mapping is valid for a forkless anchor), paired positive
 `emmy_us` / reference timings, the exact GPU identity and compute capability, and the immutable model ID as provenance.
 Validate it with repository-golden validation and lower every entry again from the committed file.
 
-Do not put a partially traced model in the repository golden directory. Preserve a partial working inventory and its
+Do not put a partially traced model in the recipe's `golden/` directory. Preserve a partial working inventory and its
 diagnostics only in the caller-supplied external output or an ignored task directory; do not commit them or create an
 experiment `RESULTS.md` unless the caller explicitly requests that exact evidence. If no path emits a target, do not
 invent an empty file. Trace incompleteness is the only model-coverage reason to omit the usual golden YAML; tuning
@@ -308,7 +311,10 @@ Also verify:
 
 - the compiler coverage manifest accounts for every layer and non-layer seam; a complete trace has a repository
   golden whose every entry has paired positive O3/reference measurements and reconstructs and lowers on the requested
-  compute capability, while a partial trace has no file under the repository golden directory;
+  compute capability, while a partial trace has no file under the recipe's `golden/` directory;
+- nightly verification is the checked-in golden gate: repository-validate and strictly decode every realization in
+  every `recipes/<model>/golden/*.yaml` file for the model, then run the file-scoped audit and exact pinned replay for
+  the file matching this job's supplied GPU; nightly orchestration must schedule every recipe/GPU golden pair;
 - every reported tuning winner identifies its O1 ranking lane, and only repeated O3 rows are described as deployable;
 - when a serving recipe exists, at least one successful result for that exact recipe lane exists and the report embeds
   only numbers from that complete run;
@@ -356,13 +362,13 @@ platforms or the ignored dated run directory.
   "artifacts": [
     "recipes/<model>/recipe.yaml",
     "recipes/<model>/RESULTS.md",
-    "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
+    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
     "experiments/<model>/serving/recipe.yaml",
     "experiments/<model>/serving/RESULTS.md",
     "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz"
   ],
   "compiler_artifacts": [
-    "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml"
+    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml"
   ],
   "experiment_artifacts": [
     "experiments/<model>/serving/recipe.yaml",
@@ -372,7 +378,7 @@ platforms or the ignored dated run directory.
   "report": "recipes/<model>/RESULTS.md",
   "compiler": {
     "coverage": "complete",
-    "golden": "emmy/compiler/pipeline/search/goldens/<gpu-slug>_<compute-cap>_<model-slug>.yaml",
+    "golden": "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
     "traced_targets": 42,
     "tuned_targets": 42,
     "blocked_paths": []

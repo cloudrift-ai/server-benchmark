@@ -50,7 +50,7 @@ chat, separated reasoning, and structured tool-call probes. The tool parser retu
 
 ## Compiler qualification
 
-The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml)
+The [canonical V100 golden](golden/v100_sm70.yaml)
 contains 279 exact Loop realizations across 13 programs. Every retained realization has positive deployable O3 and
 reference timings. The current schema passed all 279 stored-record and offer checks. The in-model audit traced four
 exact representative DeepSeek graphs with 945, 1,156, 1,087, and 1,156 Graph IR nodes, but `audit_card` returned no

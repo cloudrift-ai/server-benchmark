@@ -79,7 +79,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | promoted by hand from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
+| **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
@@ -96,7 +96,7 @@ emmy tune ─┬─ sweep benches ─────────▶ perf table   (a
            ├─ -O3 re-benches ────────▶ reservoir + node table                online prior refits
            └─ every tree node ───────▶ node table   (autotune.db) ─────────▶ emmy eval only (never a deploy)
 run --bench pinned/golden/--ab rows ─▶ node table   (autotune.db)
-recorded by hand from those rows ────▶ search/goldens/*.yaml (repo) ───────▶ greedy compile, tier 1 + pinned replay
+recorded from those rows ────────────▶ recipe-local / hardware golden YAML ─▶ greedy compile, tier 1 + pinned replay
                                                                   └─ emmy fit ─▶ offline_weights.json (repo)
                                        offline_weights.json ──────────────▶ greedy compile, tier 4 (cold)
                                        online prior model (online.json) ──▶ greedy compile, tier 4 (trusted)
@@ -545,11 +545,10 @@ loop passes, selects its one target kernel, and recognizes it through the SAME c
 (`_lift.recognized_tile`) — so record-side and fork-side identity cannot drift, and there is no classified shape
 anywhere (the old `ShapeKey.kind` classifier and its offer-signal special cases are gone for good). The row decode
 is exact equality of the schedule-family view after the one recording canonicalizer; a record that stops equaling
-any enumerated row fails the corpus decode tripwire (`test_golden_decode` — per golden set) loudly with the
-reason, and at deploy it warns and decides nothing. That tripwire proves a row by enumerating its whole fork, so it
-costs record count times fork size and is deselected from the default suite (`corpus` marker); run it with
-`make test-goldens` before landing a golden edit or a codec, recognition, or legality change — the only changes
-that can invalidate a stored row. A target that lowers to more than one kernel cannot carry a
+any enumerated row warns and decides nothing at deploy. The nightly `onboard-model` workflow strictly decodes and
+replays the selected recipe's golden on its exact GPU. Per-commit tests do not load checked-in goldens because proving
+a row enumerates its whole fork and costs record count times fork size. A target that lowers to more than one kernel
+cannot carry a
 row (a row decorates exactly one kernel) and must be re-seeded as a per-kernel Loop IR target.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
@@ -1016,9 +1015,8 @@ paths and stable DB operation identity.
 
 **Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
 tunes and merges keep writing into it — so a model fit read straight from it is not reproducible. A *freeze* (v3) is a
-snapshot of it, written into a local DIRECTORY laid out like `goldens/`: one YAML file per `(gpu, compute_cap)`
-(a `gpu_name`/`compute_cap` header plus a `configs` list), beside a `manifest.json` holding the provenance header and
-the content digests.
+snapshot written into a local directory: one YAML file per `(gpu, compute_cap)` (a `gpu_name`/`compute_cap` header plus
+a `configs` list), beside a `manifest.json` holding the provenance header and the content digests.
 
 - **Each row records DB `op_sig`, its measured `S_*` structural row, tunable knobs, and measurement metadata.** This
   is a regenerable measurement snapshot, not the stable golden format. Device `H_*` facts are derived faithfully from
@@ -1121,8 +1119,9 @@ directly. There are no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
-every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
-working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
+every recipe-local and model-agnostic repository golden in the same change. The loader does not carry migrations or
+legacy decoders for working files outside the repository; keeping the checked-in corpus loadable is the compatibility
+gate. Programs are
 a plain list and structural configs refer to them by integer index; no program digest or persistent identifier is
 stored. Loop IR
 fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
@@ -1473,7 +1472,7 @@ M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 36
 (A streamed); empty = the flat N-fastest row-major order. Changes
 no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
-shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
+shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
 
 **`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
 loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the

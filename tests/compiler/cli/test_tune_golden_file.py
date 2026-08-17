@@ -195,23 +195,35 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
 
 
-def test_working_file_rejects_canonical_path_and_symlink(tmp_path):
+def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+
     from emmy.compiler.pipeline.search import golden
 
-    canonical = next(golden._GOLDENS_DIR.glob("*.yaml"))
-    for path in (canonical, tmp_path / "canonical-link.yaml"):
-        if path != canonical:
-            path.symlink_to(canonical)
+    hardware_dir = tmp_path / "hardware-goldens"
+    hardware_dir.mkdir()
+    hardware = hardware_dir / "gpu.yaml"
+    recipe_root = tmp_path / "recipes"
+    recipe = recipe_root / "model" / "golden" / "gpu.yaml"
+    dump_golden_file(_document(_matmul("hardware")), hardware)
+    dump_golden_file(_document(_matmul("recipe")), recipe)
+
+    @contextmanager
+    def default_recipe_root():
+        yield recipe_root
+
+    monkeypatch.setattr(golden, "_HARDWARE_GOLDENS_DIR", hardware_dir)
+    monkeypatch.setattr(golden, "default_recipe_root", default_recipe_root)
+    alias = tmp_path / "canonical-link.yaml"
+    alias.symlink_to(recipe)
+    for path in (hardware, recipe, alias):
         with pytest.raises(ValueError, match="canonical repository goldens"):
             load_working_targets(path)
 
 
-def test_copied_repository_rows_resolve_as_working_candidates(tmp_path):
-    from emmy.compiler.pipeline.search import golden
-
-    canonical = golden._GOLDENS_DIR / "rtx4080_sm89.yaml"
-    document = load_golden_file(canonical)
-    copied = tmp_path / canonical.name
+def test_copied_verified_rows_resolve_as_working_candidates(tmp_path):
+    document = _document(_matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0))
+    copied = tmp_path / "copied.yaml"
     dump_golden_file(document, copied)
 
     _loaded, targets = load_working_targets(copied)

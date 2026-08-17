@@ -182,7 +182,8 @@ flags and never writes the trusted
 event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
-rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+rejects any `--golden-file` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
+`search/goldens/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.

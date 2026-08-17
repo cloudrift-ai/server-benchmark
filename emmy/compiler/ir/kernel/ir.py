@@ -1410,6 +1410,16 @@ class LdmatrixLoad(Stmt):
     # repacks raw bytes via the ``_b8`` family. NONE-swizzle by construction; the padded row
     # stride rides ``ldm``. Staged only.
     byte_slab: bool = False
+    # The PACKED-PAIR byte slab's companion block-scale slab. A packed byte holds two logical K
+    # elements, so its drain decodes both halves through the 16-entry e2m1 value table and scales
+    # them by the weight's per-k-block scale — one drain reading TWO shared buffers. The bits are
+    # ``src_buffer`` (``src_index`` is the fragment's ``(row, byte column)`` base, ``ldm`` its byte
+    # row stride); the scales are here, ``scale_index`` the fragment's ``(row, k-block)`` base and
+    # ``scale_ldm`` that slab's row stride in elements. ``None`` on every other drain — an fp8 byte
+    # slab carries a k-INVARIANT scale, which commutes out of the fold into the epilogue instead.
+    scale_buffer: str | None = None
+    scale_index: tuple = ()
+    scale_ldm: int = 0
     fragment_layout: str = "m16n8k16"
 
     def deps(self) -> tuple[str, ...]:
@@ -1419,12 +1429,12 @@ class LdmatrixLoad(Stmt):
         return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
 
     def external_reads(self) -> tuple[str, ...]:
-        return (self.src_buffer,)
+        return (self.src_buffer,) if self.scale_buffer is None else (self.src_buffer, self.scale_buffer)
 
     def exprs(self) -> tuple[Expr, ...]:
         guard = () if self.gmem_guard is None else self.gmem_guard
         kz = () if self.k_zero is None else self.k_zero
-        return (*self.src_index, *guard, *kz)
+        return (*self.src_index, *guard, *kz, *self.scale_index)
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
@@ -1432,7 +1442,9 @@ class LdmatrixLoad(Stmt):
             variant = "x4 pair" if self.b_trans else "x4.trans pair"
             pair = f"({self.frag}, {self.pair_frag})"
             return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
-        if self.byte_slab:
+        if self.scale_buffer is not None:
+            variant = f"pair decode x {self.scale_buffer}"
+        elif self.byte_slab:
             variant = "byte gather"
         elif self.fragment_layout == "m8n8k4" and self.staged:
             variant = "shared gather"
@@ -1563,6 +1575,13 @@ class LdmatrixLoad(Stmt):
             # ``ldm`` carries the same padded row stride, so the two agree by construction.
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f8e4m3")
             frag_dt = ctx.ssa_dtypes.get(self.frag) or "f16"
+            if self.scale_buffer is not None:
+                # Packed-pair (NVFP4) B: each byte decodes to two f16 values through the e2m1
+                # value table and both take the k block's scale, read from the companion slab.
+                scale_flat = render_index(self.scale_buffer, self.scale_index, ctx)
+                call = "emmy_mma_load_b_smem_trans_f4s_f16"
+                args = f"&{self.src_buffer}[{flat}], {ldm}, &{self.scale_buffer}[{scale_flat}], {self.scale_ldm}"
+                return [f"{_pad(ctx.indent)}{call}({self.frag}, {args});"]
             k_contig = self.role == "a" or self.b_trans  # each lane's K run is slab-contiguous
             if frag_dt in ("f8e4m3", "f8e5m2"):
                 # k32 byte repack. Contiguous-K lanes load one u32 (the ``_smem_b8v`` family);
@@ -2535,6 +2554,9 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         b_trans=s.b_trans,
         pair_frag=None if s.pair_frag is None else rename(s.pair_frag),
         byte_slab=s.byte_slab,
+        scale_buffer=s.scale_buffer,
+        scale_index=tuple(sigma.apply(e) for e in s.scale_index),
+        scale_ldm=s.scale_ldm,
     )
 
 

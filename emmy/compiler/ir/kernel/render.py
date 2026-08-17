@@ -8,10 +8,12 @@ method does the per-line emission.
 
 from __future__ import annotations
 
+import numpy as np
+
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, CpAsyncCopy, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
@@ -817,6 +819,47 @@ static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_b8v(unsigned* 
 
 """
 
+# The staged PACKED-PAIR (NVFP4) B drain — appended only when the kernel carries a scale-bearing
+# byte-slab ``LdmatrixLoad``, so every other kernel's source stays byte-identical. One stored byte
+# holds two adjacent K values as 4-bit e2m1 codes (low nibble first), and every 16 of them share
+# one scale, which the fill already decoded into f16 in a companion slab. So a lane's fragment
+# element pair is: one byte read, two table lookups, one multiply each. ``EMMY_F4_LUT`` is
+# ``dtype.F4_VALUES`` emitted as f16 bit patterns — every e2m1 value is exact in f16, so the table
+# IS the decode, and generating it here keeps the kernel and the numpy decode on one table.
+#
+# The lane→element map is the k16 B fragment's, the same one the fp8 transposed drain walks: an
+# N-major slab (N rows × K columns), each lane owning K positions ``2·(lane & 3)`` and that + 8 of
+# its group's row. ``k >> 1`` turns a K position into its byte column, ``k >> 4`` into its scale
+# column — the block is 16, which the staged offer requires.
+_F4_LUT_ROWS = "\n".join(
+    "    " + ", ".join(f"0x{int(b):04X}" for b in np.array(F4_VALUES[i : i + 8], dtype=np.float16).view(np.uint16)) + "," for i in (0, 8)
+)
+_F4_STAGED_PRELUDE = (
+    f"""\
+__constant__ unsigned short EMMY_F4_LUT[16] = {{
+{_F4_LUT_ROWS}
+}};
+
+"""
+    + """\
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_f4s_f16(
+    unsigned* r, const unsigned char* g, int ldm, const __half* s, int sldm) {
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
+        unsigned char byte = g[grp * ldm + (k >> 1)];
+        __half lo = __ushort_as_half(EMMY_F4_LUT[byte & 0xF]);
+        __half hi = __ushort_as_half(EMMY_F4_LUT[byte >> 4]);
+        __half sc = s[grp * sldm + (k >> 4)];
+        __half2 h2 = __halves2half2(__hmul(lo, sc), __hmul(hi, sc));
+        r[i] = *reinterpret_cast<unsigned*>(&h2);
+    }
+}
+
+"""
+)
+
 
 def _swizzle_prelude(kernel_op: KernelOp) -> str:
     """One ``emmy_swizzle_<mode>`` helper per swizzle mode the body uses — on ``LdmatrixLoad``
@@ -1021,8 +1064,11 @@ def render_kernelop(
     # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.
     if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
         mma_sync_prelude += _MMA_F8_PRELUDE
-    if any(isinstance(s, LdmatrixLoad) and s.byte_slab for s in kernel_op.body.iter()):
+    byte_drains = [s for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.byte_slab]
+    if any(s.scale_buffer is None for s in byte_drains):
         mma_sync_prelude += _F8_STAGED_PRELUDE
+    if any(s.scale_buffer is not None for s in byte_drains):
+        mma_sync_prelude += _F4_STAGED_PRELUDE
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""

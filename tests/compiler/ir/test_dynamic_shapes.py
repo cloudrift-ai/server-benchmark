@@ -11,7 +11,6 @@ runtime input shape.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from emmy.compiler import dtype as dt
 from emmy.compiler.dim import Dim
@@ -480,30 +479,11 @@ def test_qwen_batched_dynamic_matches_eager_b2():
     _batched_dynamic_case(2, (32, 17, 512))
 
 
-# These two run out of DEVICE memory, not out of correctness. Loop fusion regressed in #482:
-# a compute producer merges INTO a broadcast, which makes the broadcast the region's output and
-# writes the whole free-axes x contraction-axis product to gmem. The trunk plans a 6.006 GiB
-# scratch slab at batch 1 where the pre-#482 tree planned 0.031 GiB, so batch 4 asks for 25.8 GB
-# and batch 32 for 206 GB on a 32 GB card. b2 stays under the line and passes.
-#
-# They used to fail differently: those buffers passed 2^31 elements and the kernels addressed
-# them in 32-bit, so the access wrapped negative and poisoned the CUDA context for every later
-# test in the worker. That part is fixed (``render_index`` widens past ``INT_MAX``) and is why
-# these now fail alone instead of taking 51 tests with them.
-_SCRATCH_BLOWUP = pytest.mark.xfail(
-    strict=False,
-    reason="loop fusion materializes the contraction product (#482 regression): 25.8 GB at batch 4, "
-    "206 GB at batch 32. Fails as a clean OOM — the context-poisoning half is fixed.",
-)
-
-
-@_SCRATCH_BLOWUP
 @requires_cuda
 def test_qwen_batched_dynamic_matches_eager_b4():
     _batched_dynamic_case(4, (32, 512))
 
 
-@_SCRATCH_BLOWUP
 @requires_cuda
 def test_qwen_batched_dynamic_matches_eager_b32():
     _batched_dynamic_case(32, (32, 512))

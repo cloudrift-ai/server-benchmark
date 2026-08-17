@@ -546,7 +546,10 @@ loop passes, selects its one target kernel, and recognizes it through the SAME c
 anywhere (the old `ShapeKey.kind` classifier and its offer-signal special cases are gone for good). The row decode
 is exact equality of the schedule-family view after the one recording canonicalizer; a record that stops equaling
 any enumerated row fails the corpus decode tripwire (`test_golden_decode` — per golden set) loudly with the
-reason, and at deploy it warns and decides nothing. A target that lowers to more than one kernel cannot carry a
+reason, and at deploy it warns and decides nothing. That tripwire proves a row by enumerating its whole fork, so it
+costs record count times fork size and is deselected from the default suite (`corpus` marker); run it with
+`make test-goldens` before landing a golden edit or a codec, recognition, or legality change — the only changes
+that can invalidate a stored row. A target that lowers to more than one kernel cannot carry a
 row (a row decorates exactly one kernel) and must be re-seeded as a per-kernel Loop IR target.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains

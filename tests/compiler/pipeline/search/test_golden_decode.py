@@ -7,11 +7,16 @@ record's own pins (``decode_record``). A structural change that invalidates a st
 HERE, loudly, with the reason — the row is then re-recorded or removed by hand, never silently
 carried.
 
-The gate is unconditional over the whole corpus: every checked-in set has been strict-replayed
-onto the current codec. Verdicts memo to the fingerprinted identity store
-(``~/.cache/emmy/golden_identity.json``): an unchanged compiler tree revalidates in seconds; any
-compiler edit invalidates the memo and the next run re-pays the full decode — exactly when the
-corpus must actually be re-proven."""
+The gate covers the whole corpus, but it is **deselected by default** (``corpus`` marker) and runs
+via ``make test-goldens``. Proving a row means enumerating its entire schedule fork, so the cost is
+record count TIMES fork size — minutes per file on a cold cache, and cold is every CI run, since the
+memo below lives outside the repo. Run it before landing a golden edit or a change to the codec,
+recognition, or legality, which is when a stored row can actually be invalidated; a change that
+touches neither cannot move a verdict.
+
+Verdicts memo to the fingerprinted identity store (``~/.cache/emmy/golden_identity.json``): an
+unchanged compiler tree revalidates in seconds; any compiler edit invalidates the memo and the next
+run re-pays the full decode — exactly when the corpus must actually be re-proven."""
 
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ _FILES = sorted(glob.glob(os.path.join(_GOLDEN_DIR, "*.yaml")))
 assert _FILES, f"no golden YAMLs under {_GOLDEN_DIR}"
 
 
+@pytest.mark.corpus
 @pytest.mark.parametrize("path", _FILES, ids=[os.path.basename(f) for f in _FILES])
 def test_every_migrated_record_decodes_strictly(path):
     fname = os.path.basename(path)

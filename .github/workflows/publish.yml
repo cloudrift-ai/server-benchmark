@@ -12,6 +12,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Same bound as the pull-request suite: a hung run must fail rather than hold a runner.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

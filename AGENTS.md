@@ -49,6 +49,11 @@ dodges the cicc/LLVM unroll blowup on big register-tile kernels, ~3× faster wal
 run at `-O3` via `make bench-kernels`. To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or
 run `pytest` directly.
 
+The whole-corpus golden decode tripwire is also skipped here (`corpus` marker) and runs via `make test-goldens`.
+Proving one stored row enumerates its entire schedule fork, so the gate costs record count times fork size — minutes
+per golden file whenever the memo is cold, which is every CI run. **Run `make test-goldens` before landing a golden
+edit or a change to the codec, recognition, or legality**; those are the only changes that can invalidate a stored row.
+
 Or for a specific test file:
 
 ```bash
@@ -99,6 +104,8 @@ Quick test models / scripts (for local iteration):
 - `make setup` — create venv and install dependencies (includes ruff)
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
   kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
+- `make test-goldens` — strict-decode every golden record in the corpus (`corpus` marker, one file per process).
+  Deselected from `make test` because it enumerates each row's whole fork; run it before a golden or codec change
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`

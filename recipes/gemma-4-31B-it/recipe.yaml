@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Legacy flagship with no current trending or OpenRouter dominance."
+  rationale: "Legacy flagship; no current trending; high total downloads."
   heat: 25
 engine:
   llm:

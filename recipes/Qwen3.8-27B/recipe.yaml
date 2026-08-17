@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Highest HF trending and breakout attention across all sources."
+  rationale: "Undisputed #1 HF trending with breakout mindshare across all sources."
   heat: 95
   task: generate
 matrices:

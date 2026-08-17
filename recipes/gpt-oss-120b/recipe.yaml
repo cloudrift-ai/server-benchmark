@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: OpenAI open-weight 120B MoE with MXFP4; very high trending and serving demand.
+  rationale: "OpenAI open-weights 120B MoE, sustained heavy downloads, OR available."
   heat: 85
   task: generate
 matrices:

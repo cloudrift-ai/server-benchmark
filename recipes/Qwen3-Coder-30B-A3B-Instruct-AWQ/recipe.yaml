@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Qwen3 family dominates OpenRouter; strong consumer coding MoE."
-  heat: 75
+  rationale: "Strong coding MoE, family demand, OR availability, good consumer quant."
+  heat: 72
 engine:
   llm:
     tensor_parallel_size: 1

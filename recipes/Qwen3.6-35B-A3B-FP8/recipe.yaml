@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "FP8 variant benefits from Qwen3.6 MoE demand but trails flagship."
-  heat: 65
+  rationale: "Not on OR; lower interest than base model; niche FP8 signal."
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

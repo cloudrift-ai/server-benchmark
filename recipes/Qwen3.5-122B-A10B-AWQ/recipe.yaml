@@ -18,14 +18,14 @@
 # host (no NVLink/NVSwitch -- PHB only) limits KV cache budget and concurrent throughput.
 
 tags:
-  - obsolete
+  - best-effort
 
 model:
   # Qwen did not publish an AWQ for 122B; cyankiwi's 4-bit AWQ is the most-downloaded
   # community quant (60k+ downloads, group_size=32, pack-quantized int4). Matches the
   # Qwen3.5-122B-A10B-AWQ model class that 1Cat-vLLM v1.0.0 explicitly supports.
   huggingface: "cyankiwi/Qwen3.5-122B-A10B-AWQ-4bit"
-  rationale: "Known MoE bug and no current evidence of demand."
+  rationale: "Retained on a best-effort basis because discovery did not establish an all-around better replacement."
   heat: 10
 engine:
   llm:

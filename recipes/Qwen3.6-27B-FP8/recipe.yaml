@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "FP8 technical novelty with strong MoE context; eclipsed by newer breakout."
+  rationale: "FP8 novelty with strong context; eclipsed by Qwen3.8 breakout."
   heat: 70
 engine:
   llm:

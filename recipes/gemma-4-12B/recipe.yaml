@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Base checkpoint receives less attention than instruction variant."
+  rationale: "Base checkpoint receiving less attention than IT variant."
   heat: 25
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion

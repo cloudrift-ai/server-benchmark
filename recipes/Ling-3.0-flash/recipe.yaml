@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "New hybrid-linear MoE with no current adoption evidence."
-  heat: 15
+  rationale: "Not found on HF (gated?); no adoption evidence."
+  heat: 10
   task: generate
 matrices:
   - deploy.gpu: NVIDIA H200 141GB

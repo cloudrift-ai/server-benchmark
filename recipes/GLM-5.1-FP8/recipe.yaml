@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Limited OpenRouter presence and low HF trending indicate cooling agentic interest."
+  rationale: "FP8 MoE with limited OR presence and no Reddit discussion."
   heat: 15
 engine:
   llm:

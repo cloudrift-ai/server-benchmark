@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Qwen3 family dominates OpenRouter; flagship 80B coding with strong downloads."
-  heat: 80
+  rationale: "Flagship coding model but absent from OR limits reach."
+  heat: 75
 engine:
   llm:
     tensor_parallel_size: 1

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Large FP8 MoE constrained by resource needs; older architecture cooling."
+  rationale: "Large FP8 MoE constrained by resource needs; older architecture."
   heat: 40
 engine:
   llm:

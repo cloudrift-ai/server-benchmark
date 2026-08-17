@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Embedding model with no current demand or trending signals."
+  rationale: "Embedding model; no current demand or trending signals."
   heat: 20
   task: embed
 

@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: openbmb/MiniCPM-o-4_5
-  rationale: Any-to-any multimodal 7B with 993k downloads; novel full-duplex modality.
-  heat: 55
+  rationale: "Any-to-any multimodal, 993K downloads; steady niche interest."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

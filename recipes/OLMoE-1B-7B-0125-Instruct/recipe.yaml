@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Compiler evidence exists for RTX 5090; serving qualification and a deployable recipe remain pending."
-  heat: 0
+  rationale: "Low momentum, not on OR; niche compiler test model."
+  heat: 20
   task: generate
 matrices:
   - deploy.gpu: NVIDIA GeForce RTX 5090

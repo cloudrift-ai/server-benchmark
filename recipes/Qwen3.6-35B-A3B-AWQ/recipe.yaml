@@ -39,8 +39,8 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Unique V100 MoE support and Qwen3.6 family demand."
-  heat: 55
+  rationale: "Solid Qwen3.6 family, unique V100 support but lacks breakout signal."
+  heat: 50
 engine:
   llm:
     tensor_parallel_size: 1

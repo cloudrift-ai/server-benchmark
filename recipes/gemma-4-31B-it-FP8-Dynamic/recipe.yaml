@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Legacy NVIDIA hardware targeting and low HF trending reduce heat."
+  rationale: "Legacy NVIDIA targeting; no OR access; low mindshare."
   heat: 25
 engine:
   llm:

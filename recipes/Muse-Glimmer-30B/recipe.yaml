@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Agentic VLM with no current community interest evidence."
+  rationale: "Low downloads; no OR access; minimal mindshare."
   heat: 20
   task: generate
 matrices:

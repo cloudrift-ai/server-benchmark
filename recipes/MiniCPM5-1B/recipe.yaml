@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: openbmb/MiniCPM5-1B
-  rationale: 1B edge model with 1M downloads; excellent for resource-constrained serving.
-  heat: 45
+  rationale: "Solid edge metrics; no OR, quiet Reddit; useful for constrained serving."
+  heat: 50
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

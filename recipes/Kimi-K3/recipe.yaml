@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Massive HF trending score and strong Reddit discussion drive breakout heat."
+  rationale: "2.8T MoE, highest HF downloads, OR available; strong API mindshare."
   heat: 95
   task: generate
 matrices:

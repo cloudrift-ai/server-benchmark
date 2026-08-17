@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "124B hybrid-linear MoE with 256K context and native reasoning; unique for Emmy serving."
-  heat: 62
+  rationale: "New hybrid-linear MoE with no current adoption evidence."
+  heat: 15
   task: generate
 matrices:
   - deploy.gpu: NVIDIA H200 141GB

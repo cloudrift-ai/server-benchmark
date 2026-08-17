@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "FP8 dynamic Gemma 4 on one H200 doubles context to 262K where the BF16 checkpoint is KV-limited."
-  heat: 40
+  rationale: "Legacy NVIDIA hardware targeting and low HF trending reduce heat."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

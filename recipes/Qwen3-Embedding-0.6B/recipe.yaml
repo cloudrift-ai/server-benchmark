@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Lightweight Qwen3 embedding and Emmy compiler-plugin smoke test target on consumer RTX cards."
-  heat: 40
+  rationale: "Embedding model lacks current heat signals and breakout momentum."
+  heat: 20
   task: embed
 
 engine:

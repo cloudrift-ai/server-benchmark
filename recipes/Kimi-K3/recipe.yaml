@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: World's first open 2.8T MoE with MXFP4; beats frontier on coding and reasoning; native vLLM support.
-  heat: 88
+  rationale: "Massive HF trending score and strong Reddit discussion drive breakout heat."
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

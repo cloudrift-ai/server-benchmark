@@ -1,11 +1,11 @@
 # Volta deployment for the exact public FP8 checkpoint on 8x V100 SXM3 32GB.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Unique 118B agentic-coding FP8 path on eight V100s at 1M context with distinct poolside_v1 parser."
-  heat: 68
+  rationale: "Niche FP8 on V100 lacks broad community or HF momentum."
+  heat: 20
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

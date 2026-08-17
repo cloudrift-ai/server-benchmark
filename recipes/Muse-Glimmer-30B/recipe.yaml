@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "29.6B agentic vision-language with tool use and failure recovery; strong Reddit discussion confirmed."
-  heat: 68
+  rationale: "Agentic VLM with no current community interest evidence."
+  heat: 20
   task: generate
 matrices:
   - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

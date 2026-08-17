@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Middle Qwen3 embedding size for stock-vLLM versus Emmy plugin comparison runs on consumer GPUs."
-  heat: 40
+  rationale: "Embedding model with no current demand or trending signals."
+  heat: 20
   task: embed
 
 engine:

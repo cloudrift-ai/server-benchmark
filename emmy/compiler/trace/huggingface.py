@@ -499,6 +499,19 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
     head_dim = attn.head_dim
     num_heads = attn.q_proj.out_features // head_dim
     num_kv_heads = attn.k_proj.out_features // head_dim
+    # Every head count here is READ OFF THE PROJECTION WIDTHS, which assumes the query projection
+    # carries queries and nothing else. Qwen3.5's full-attention layer breaks that: its q_proj is
+    # ``num_heads · head_dim · 2`` wide and its forward chunks the result into queries and an
+    # output gate. Carving it here would infer twice the heads and silently drop the gate — a
+    # wrong answer, not an error. The module states the true ratio itself, so compare against it.
+    groups = getattr(attn, "num_key_value_groups", None)
+    if groups and num_kv_heads and num_heads // num_kv_heads != groups:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: this attention module declares {groups} query heads per key/value head, "
+            f"but its projection widths give {num_heads // num_kv_heads} — the query projection carries something "
+            f"besides queries (Qwen3.5 fuses the output gate into it). The carve reads its head counts off those "
+            f"widths, so it would mis-shape q and drop whatever shares the projection"
+        )
     q_norm = getattr(attn, "q_norm", None)
     k_norm = getattr(attn, "k_norm", None)
     v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
@@ -645,6 +658,99 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
             return h + self.mlp(xn)  # residual2 + MLP
 
     return pre, Post()
+
+
+def build_linear_attention_split_wrapper(block, *, float32_residual: bool = False):
+    """Carve the gated delta rule out of one hybrid decoder layer's LINEAR-attention block.
+
+    The Qwen3.5 family (text config ``model_type`` ``qwen3_5_text``, and its MoE sibling) alternates
+    two token mixers down the layer stack: ordinary attention every fourth layer, a gated delta net
+    on the other three. The delta net's recurrence — a causal depthwise convolution over the
+    sequence, then a chunked or single-step scan carrying a recurrent state across calls — is
+    sequence-structured and cache-bearing, so it stays in torch. What Emmy compiles is what
+    surrounds it, and that is where the block's weight lives: four projections in front, one behind.
+
+    Returns ``(pre, post)`` ``nn.Module``s over the same flattened ``[num_tokens, H]`` per-token
+    layout :func:`build_attention_split_wrapper` uses, for the same reason — serving packs the
+    tokens of many requests into one axis. "The core" below is the torch-side recurrence the two
+    wrappers bracket:
+
+    - ``pre(hidden[T, H]) -> (mixed_qkv[T, conv_dim], z[T, value_dim], b[T, Hv], a[T, Hv])`` runs
+      ``input_layernorm`` then the block's four input projections. ``mixed_qkv`` is the
+      convolution's input, still interleaved q/k/v and still un-convolved; ``z`` is the gate the
+      core's gated RMSNorm applies at the far end, so it crosses the seam as a pre output and
+      comes back as a core input. ``b`` and ``a`` stay RAW, and they are not the same shape of
+      thing: ``b`` becomes the delta rule's write strength through a plain ``sigmoid`` with no
+      parameter at all, while ``a`` becomes its decay through the MIXER's own ``dt_bias`` and
+      ``A_log`` — two vectors one element per value head wide, which the forward casts to float32
+      to keep ``A_log.exp()`` finite. Neither is worth a seam.
+    - ``post(core_out[T, value_dim], residual[T, H]) -> layer_out[T, H]`` runs ``out_proj`` →
+      ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual — the same
+      two-RMSNorm layer shape the Llama/Qwen attention layer has. A DENSE ``mlp`` only: the MoE
+      sibling's routed block needs the expert carve :func:`build_moe_split_wrapper` performs, which
+      this builder does not do.
+
+    Two things the eager block does that ``pre`` deliberately does not. It skips the padding-mask
+    multiply the delta net opens with: the flattened layout has no padding rows, and all four
+    projections are bias-free, so the multiply commutes with them and the core can apply it to its
+    own inputs unchanged. And it skips the ``[B, S, ·]`` reshapes and the transpose into the
+    convolution's channel-first layout — those describe a batched sequence, which the flat seam
+    does not have, so the core reshapes into whatever its own kernels want (the same "no transpose
+    hazard" the attention carve carries).
+
+    Layout only, like the attention carve: there is no separate dynamic-sequence form, because the
+    modules are shape-agnostic and a dynamic token count is a tracing argument, not a second build.
+    """
+    import torch.nn as nn
+
+    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if ple_dim:
+        raise NotImplementedError(
+            f"build_linear_attention_split_wrapper: block carries Per-Layer Embeddings "
+            f"(hidden_size_per_layer_input={ple_dim}) — the carve would silently drop the per_layer_input multiply"
+        )
+    mixer = getattr(block, "linear_attn", None)
+    if mixer is None or not all(hasattr(mixer, n) for n in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")):
+        raise NotImplementedError(
+            "build_linear_attention_split_wrapper: expected a gated-delta-net block exposing "
+            "linear_attn.{in_proj_qkv,in_proj_z,in_proj_b,in_proj_a,out_proj}"
+        )
+    if any(getattr(mixer, n).bias is not None for n in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")):
+        raise NotImplementedError(
+            "build_linear_attention_split_wrapper: an input projection carries a bias — the padding-mask "
+            "multiply the carve leaves to the core no longer commutes with it"
+        )
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_layernorm = block.input_layernorm
+            self.in_proj_qkv = mixer.in_proj_qkv
+            self.in_proj_z = mixer.in_proj_z
+            self.in_proj_b = mixer.in_proj_b
+            self.in_proj_a = mixer.in_proj_a
+
+        def forward(self, hidden):
+            h = self.input_layernorm(hidden)  # [T, H]
+            if float32_residual:
+                h = h.to(self.in_proj_qkv.weight.dtype)
+            return self.in_proj_qkv(h), self.in_proj_z(h), self.in_proj_b(h), self.in_proj_a(h)
+
+    class Post(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.out_proj = mixer.out_proj
+            self.post_attention_layernorm = block.post_attention_layernorm
+            self.mlp = block.mlp
+
+        def forward(self, core_out, residual):
+            h = residual + self.out_proj(core_out)
+            xn = self.post_attention_layernorm(h)
+            if float32_residual:
+                xn = xn.to(core_out.dtype)
+            return h + self.mlp(xn)
+
+    return Pre(), Post()
 
 
 def moe_block_parts(mlp):

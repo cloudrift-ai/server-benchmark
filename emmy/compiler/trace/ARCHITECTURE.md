@@ -113,6 +113,33 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
   specialization, a rate mismatch, or a width where top-k is selective fails closed.
 
+- `build_linear_attention_split_wrapper(block) → (pre, post)` is the carve for a HYBRID architecture's
+  linear-attention layer. The Qwen3.5 family (text config `model_type` `qwen3_5_text`, and its `qwen3_5_moe`
+  sibling) alternates two token mixers down the stack: ordinary attention every fourth layer, a gated delta net on
+  the other three. The delta net is a causal depthwise convolution over the sequence, then a chunked or single-step
+  scan carrying a recurrent state across calls. That recurrence is sequence-structured and cache-bearing, so it
+  stays in torch — "the core" below — and the carve compiles what brackets it: the four input projections in front
+  and the output projection behind, which is where the block's weight lives. Same flattened `[num_tokens, H]` seam
+  as the attention carve. `pre(hidden) → (mixed_qkv, z, b, a)` runs `input_layernorm` then `in_proj_qkv` /
+  `in_proj_z` / `in_proj_b` / `in_proj_a`; `mixed_qkv` is un-convolved and still interleaved q/k/v, `z` is the gate
+  the core's gated RMSNorm applies at the far end (a `pre` output that returns as a core input), and `b` / `a` stay
+  RAW — `b` becomes the delta rule's write strength through a parameterless `sigmoid`, `a` its decay through the
+  mixer's own `dt_bias` and `A_log`, one element per value head each. `post(core_out, residual)` is `out_proj` then
+  the same two-RMSNorm layer shape the Llama/Qwen attention layer has, over a DENSE `mlp`; the MoE sibling's routed
+  block needs the expert carve `build_moe_split_wrapper` performs. `pre` deliberately omits the padding-mask
+  multiply the eager mixer opens with: the flat layout has no padding rows and the four projections are bias-free,
+  so the multiply commutes with them and belongs to the core — a projection that grew a bias is rejected, since it
+  would no longer commute. It also omits the `[B, S, ·]` reshapes and the channel-first transpose, which describe a
+  batched sequence the flat seam does not have.
+
+- **The same architecture's `full_attention` layer does NOT carve.** Qwen3.5 fuses the attention output gate into
+  `q_proj`, making it twice as wide as its query heads and splitting the result with `chunk(2)`. Every head count in
+  the attention carve is read off the projection widths, so it would infer twice the heads and silently drop the
+  gate. The refusal lives in the shared `_build_pre_wrapper`, so the dense and MoE attention carves both raise: it
+  compares those widths against the attention module's own declared query-heads-per-kv-head ratio
+  (`num_key_value_groups`), which catches a fused query projection without naming a model — a module that declares
+  no such ratio passes through unchecked.
+
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
   `gate` (OLMoE/Qwen lineage) or `router` (gpt-oss) beside 3-D `gate_up_proj` / `down_proj` expert parameters).

@@ -1006,8 +1006,16 @@ class EmmyGenRunner:
         # :func:`_retarget_constants`). Everything else keeps the module lane.
         ckpt = None
         if (expert_store or {}).get("trunk") == "codes":
+            # VALUES are checkpoint keys, not twin paths: the coded-weight spellers resolve
+            # ``source_path`` against the safetensors index, where a family whose checkpoint names
+            # differ from its parameter names (a vision-language wrapper's ``model.language_model.``)
+            # has no such entry. Transformers' registered mapping, run backwards, supplies the real
+            # name — the same table the forward load reads.
+            from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
+
+            to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
             id_to_key = {
-                id(t): path
+                id(t): to_checkpoint(path)
                 for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
             }
             ckpt = (expert_store["dir"], id_to_key)

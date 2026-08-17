@@ -1033,3 +1033,76 @@ def test_checkpoint_to_model_key_composes_the_two_translations():
     assert _checkpoint_to_model_key(laguna) == "model.layers.0.mlp.shared_experts.gate_proj.weight"
     assert _checkpoint_to_model_key(laguna, lambda k: k.replace("model.", "model.x.", 1)).startswith("model.x.")
     assert _checkpoint_to_model_key("a.weight") == "a.weight"
+
+
+# --- the serving lane's reverse direction ------------------------------------------------------
+# Retargeting re-addresses a traced constant from its wrapper-relative path to the key its weight
+# came from, and only the checkpoint knows that name. For a family whose checkpoint names differ
+# from its parameter names the two are not the same string, so the map's values must be checkpoint
+# keys — otherwise the birth-time spellers resolve nothing and quietly leave the weight unspelled.
+
+
+def _wrapper_prefixed_nvfp4_checkpoint(dirpath, twin, leaf: str):
+    """Write ``leaf``'s weight as an NVFP4 trio under the checkpoint's OWN wrapper-prefixed name,
+    every other parameter as a plain tensor. Returns that checkpoint key."""
+    import json
+
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer
+
+    to_checkpoint = _checkpoint_key_renamer(twin, reverse=True)
+    key = to_checkpoint(leaf)
+    assert key != leaf, "the fixture must reproduce the naming mismatch, not hide it"
+    out, k = dict(twin.named_parameters())[leaf].shape
+    rng = np.random.default_rng(5)
+    tensors = {
+        key: torch.from_numpy(rng.integers(0, 256, (out, k // 2)).astype(np.uint8)),
+        key + "_scale": torch.from_numpy(rng.integers(0, 0x7F, (out, k // 16)).astype(np.uint8)).view(torch.float8_e4m3fn),
+        key + "_scale_2": torch.tensor(0.25, dtype=torch.float32),
+    }
+    dirpath.mkdir(exist_ok=True)
+    save_file(tensors, str(dirpath / "model.safetensors"))
+    (dirpath / "config.json").write_text(
+        json.dumps({"model_type": "test", "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": []}})
+    )
+    return key
+
+
+def test_serving_retargeting_lands_on_checkpoint_keys_so_the_speller_fires(tmp_path):
+    """The reverse direction, end to end: a constant carrying the wrapper-relative path a split
+    trace stamps is retargeted, and the NVFP4 speller then finds its trio and rewrites the
+    constant into the decode cone. Before the map carried checkpoint keys this resolved nothing —
+    quietly, since the speller's miss is a bare ``continue``."""
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.loader.quant import spell_quantized_constants
+    from emmy.compiler.trace.huggingface import (
+        _auto_model_from_config,
+        build_linear_attention_split_wrapper,
+        retarget_constants_to_model,
+    )
+
+    torch.manual_seed(0)
+    twin = _auto_model_from_config(_qwen3_5_multimodal_config()).eval()
+    leaf = "model.layers.0.mlp.gate_proj.weight"
+    ckpt_key = _wrapper_prefixed_nvfp4_checkpoint(tmp_path / "ck", twin, leaf)
+
+    # The split wrapper holds the block's own submodules, so tensor identity bridges its
+    # wrapper-relative spelling to the twin's path — the mechanism retargeting relies on.
+    _pre, post = build_linear_attention_split_wrapper(twin.model.layers[0])
+    wrapper_path = next(p for p, t in post.named_parameters() if t is dict(twin.named_parameters())[leaf])
+
+    shape = tuple(dict(twin.named_parameters())[leaf].shape)
+    g = Graph()
+    op = ConstantOp(name="w", source_path=wrapper_path, source_shape=shape, source_dtype="f32")
+    g.add_node(op=op, inputs=[], output=Tensor("w", shape, "f32"), node_id="w")
+    g.inputs, g.outputs = [], ["w"]
+
+    retarget_constants_to_model(g, post, twin)
+    assert g.nodes["w"].op.source_path == ckpt_key, "retargeting must land on the checkpoint's own key"
+    assert spell_quantized_constants(g, str(tmp_path / "ck")) == 1, "the NVFP4 speller must fire through the serving lane's path"

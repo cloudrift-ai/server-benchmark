@@ -924,7 +924,13 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
     live-module binding miss, and the CUDA runtime then materializes zero-filled RoPE tables.
     Quantization spellers target weight parameters, so buffers have no reason to cross this seam.
     """
-    id_to_key = {id(tensor): path for path, tensor in model.named_parameters(remove_duplicate=False)}
+    # The map's VALUES are checkpoint keys, not twin paths — the checkpoint-driven spellers read
+    # ``source_path`` against the safetensors index, and for a family whose checkpoint names differ
+    # from its parameter names (a vision-language wrapper's ``model.language_model.``) a twin path
+    # resolves to nothing there. The registered mapping run backwards is what supplies the real
+    # name (:func:`_checkpoint_key_renamer`), so the forward and reverse directions stay one table.
+    to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    id_to_key = {id(tensor): to_checkpoint(path) for path, tensor in model.named_parameters(remove_duplicate=False)}
     key_map = {}
     for path, tensor in wrapper.named_parameters(remove_duplicate=False):
         if (full := id_to_key.get(id(tensor))) is not None:
@@ -1452,8 +1458,9 @@ def _checkpoint_to_model_key(key: str, rename=None) -> str:
     return key if rename is None else rename(key)
 
 
-def _checkpoint_key_renamer(model):
-    """The checkpoint-key → parameter-name translation Transformers would apply to ``model``.
+def _checkpoint_key_renamer(model, *, reverse: bool = False):
+    """The checkpoint-key → parameter-name translation Transformers would apply to ``model``,
+    or with ``reverse``, the same mapping run backwards: parameter name → checkpoint key.
 
     A checkpoint may store its tensors under names the twin's own modules do not have, and the
     mismatch is silent: every parameter simply stays on the meta device, so the twin holds no
@@ -1478,6 +1485,11 @@ def _checkpoint_key_renamer(model):
     legacy renames (``LayerNorm.gamma`` / ``beta``, ``.weight_g`` / ``.weight_v``) attach to every
     model, so almost every twin gets a renamer. They are unchanged because none of those patterns
     matches a modern checkpoint key.
+
+    ``reverse`` is what the serving lane needs. It re-addresses a traced constant to the key its
+    weight came from, and only the checkpoint knows that name — so the same mapping, inverted,
+    turns the twin path back into it. One table, read both ways, rather than two rules that can
+    disagree.
     """
     try:
         from transformers.conversion_mapping import get_model_conversion_mapping  # noqa: PLC0415
@@ -1487,7 +1499,10 @@ def _checkpoint_key_renamer(model):
     renamings = [t for t in get_model_conversion_mapping(model) if isinstance(t, WeightRenaming)]
     if not renamings:
         return None
-    return lambda key: rename_source_key(key, renamings, [])[0]
+    if not reverse:
+        return lambda key: rename_source_key(key, renamings, [])[0]
+    inverted = [t.reverse_transform() for t in renamings]
+    return lambda path: rename_source_key(path, inverted, [], reverse=True)[0]
 
 
 def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:

@@ -16,8 +16,9 @@ current community and serving value so the small maintained set stays focused, u
 available on a best-effort basis, and only technically superseded or unusable models become obsolete.
 
 Everything here is **keyless and read-only**: `scripts/new_models.py` hits public OpenRouter + HuggingFace
-endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a JSON
-manifest; repository-owned workflow code validates it and writes recipe tags and onboarding shells.
+endpoints, and the rest is web search. No servers are touched. In automated lifecycle mode the skill returns a compact
+selection; repository-owned workflow code restores existing onboarding data, derives the complete manifest, validates
+it, and writes recipe tags and onboarding shells.
 
 ## Automated rolling PR prerequisite
 
@@ -44,13 +45,11 @@ OpenRouter/Arena ───┘       (parent agent)          (0-100)     (params�
 
 ## Step 0 — Choose the output mode
 
-Use **survey mode** for an interactive shortlist or hardware matrix. Use **lifecycle mode** when the prompt requests
-`maintained_models`, `best_effort_models`, `obsolete_models`, and `onboarding_models` JSON for repository automation.
-The prompt owns the exact maintained-set size and any supplied hardware constraints; do not ask follow-up questions
-in lifecycle mode. When the prompt does not supply target hardware, choose one to three useful deployment setups per
-onboarding model. Keep lifecycle research bounded by the prompt. Prefer repository inventory and a few targeted
-searches over an exhaustive survey, and write the required manifest as soon as the conservative partition is
-supported.
+Use **survey mode** for an interactive shortlist or hardware matrix. For automated **lifecycle mode**, read
+`prompts/discover-models/lifecycle.md` and `prompts/discover-models/score-recipes.md` from the repository root
+completely before research. Those files are the canonical automation prompts and define the task payload, delegation,
+and output contract used by GitHub Actions. Do not ask follow-up questions in lifecycle mode. Keep research bounded by
+the lifecycle prompt and return the required selection as soon as the evidence supports it.
 
 For survey mode, ask only if the user has not already implied it:
 
@@ -64,9 +63,10 @@ For survey mode, ask only if the user has not already implied it:
 
 ## Step 1 — Inventory recipes and candidates
 
-In lifecycle mode, inventory every `recipes/*/recipe.yaml` first. Use one compact query that returns only the recipe
-path, model ID, tags, task, deployment matrix, and existing rationale. Read a complete recipe only when a specific
-classification needs closer inspection. Treat the top-level tags as follows:
+In interactive lifecycle work, inventory every `recipes/*/recipe.yaml` first with one compact query that returns only
+the recipe path, model ID, tags, task, deployment matrix, and existing rationale. In automated lifecycle mode, use the
+attached task's deterministic recipe batches instead; never rebuild that inventory. Read a complete recipe only when
+a specific obsolete comparison needs closer inspection. Treat the top-level tags as follows:
 
 - `maintained` — a tested recipe selected for periodic testing and optimization;
 - `best-effort` — a useful runnable recipe that is not selected for periodic testing and optimization;
@@ -126,11 +126,12 @@ Do not use Reddit only to validate candidates already returned by the script. In
 threads as an independent source, then merge those model names with the Hugging Face and OpenRouter/Arena candidate
 lists. Resolve an exact open-weight Hugging Face ID before accepting a Reddit-only discovery.
 
-In automated lifecycle mode, invoke the named `discover-reddit`, `discover-huggingface`, and `discover-openrouter`
-subagents once and in parallel. Each investigator stays read-only, uses at most three public-web calls, and returns a
-compact source-specific candidate list. The parent discovery agent alone deduplicates identities, compares evidence,
-assigns heat, classifies lifecycle state, and writes the manifest. Source investigators never edit recipes or choose
-the final lifecycle.
+In automated lifecycle mode, follow `prompts/discover-models/lifecycle.md`: invoke the three named source investigators
+once and in parallel, then invoke `discover-scorer` once per deterministic recipe batch and in parallel. Each source
+investigator stays read-only, uses at most three public-web calls, and returns a compact source-specific candidate
+list. Each scorer follows `prompts/discover-models/score-recipes.md` without doing more research or choosing lifecycle
+state. The parent alone reconciles identities, compares scores globally, selects the maintained set, and proposes new
+onboarding models.
 
 Layer quantitative demand with qualitative mindshare — what people are actually saying. For each top candidate,
 search for:
@@ -173,27 +174,11 @@ Drop: tiny fine-tuning bases riding download counts, models with no engine suppo
 and anything the user explicitly doesn't care about. Aim for a spread of **sizes** so the next step can fill
 several hardware tiers (don't pick five 400B MoEs).
 
-In lifecycle mode:
-
-- choose exactly the requested number of existing, fully configured recipes as maintained;
-- classify every other fully configured recipe as best-effort or obsolete, with every complete recipe appearing in
-  exactly one of the three lifecycle lists;
-- give every maintained, best-effort, obsolete, and onboarding decision a heat score and concise evidence-backed
-  rationale;
-- prefer best-effort whenever a recipe remains useful; use obsolete only when a named maintained or best-effort
-  replacement is all-around better for the same task at a comparable or lower practical VRAM footprint, or when a
-  technical limitation means the recipe should no longer be used;
-- include that replacement and a concise technical rationale with the qualified target VRAM comparison and why the
-  old recipe retains no material advantage for every superseded obsolete decision; otherwise explain why the recipe
-  should be dropped without a replacement;
-- keep every existing onboarding/untested shell in `onboarding_models`, refreshing its heat and rationale without
-  changing its task or proposed deployment matrix;
-- add every genuinely promising new model supported by the bounded investigation; there is no onboarding-shell count
-  limit;
-- propose one to three deployment setups for each new model using only canonical `deploy.gpu` and positive
-  `deploy.gpu_count` values;
-- use exact `model.huggingface` IDs from recipe YAML for maintained entries;
-- prefer current demand and serving value, while keeping a useful mix of sizes, modalities, and architectures.
+In automated lifecycle mode, `prompts/discover-models/lifecycle.md` is the complete selection contract. Score every
+existing recipe, select the requested number of complete recipes as maintained, make only conservative obsolete
+proposals, and return new onboarding candidates. Repository code keeps every existing onboarding shell in that
+lifecycle and derives every unselected, non-obsolete complete recipe as best-effort. The agent never reproduces those
+mechanical lists.
 
 ## Step 4 — Hardware requirements per finalist
 
@@ -257,21 +242,14 @@ why. Cover the spectrum — small flagships on consumer cards, mid-size on Pro60
 
 Flag any model with **no engine support yet** or **no suitable quant** as "watch, revisit" rather than slotting it.
 
-## Step 6 — Return the lifecycle manifest
+## Step 6 — Return the lifecycle result
 
-When lifecycle mode is requested, produce exactly the JSON shape in the prompt and no prose or Markdown fence. Every
-lifecycle entry includes an integer `heat` from 0 through 100, every existing recipe appears exactly once across the
-four lists, and `onboarding_models` contains both existing shells and selected new models. If the
-prompt supplies a manifest path, use `write_file` to store the JSON there before the final response. Every lifecycle
-row needs a rationale. Each new onboarding row needs `generate` or `embed` and a `deployments` list containing one to
-three objects with exactly `deploy.gpu` and `deploy.gpu_count`. Empty `best_effort_models`, `obsolete_models`, and
-`onboarding_models` lists are valid when the complete partition permits them. Do not edit recipe files yourself: the
-workflow validates exact model IDs, the maintained count, the complete lifecycle partition, active replacements for
-obsolete recipes, canonical hardware, deployment counts, duplicates, and rationales before making any change. It
-demotes a superseded obsolete decision to best-effort unless the replacement is active, serves the same task, and its
-smallest known qualified deployment uses no more total physical GPU memory than the old recipe's smallest deployment.
-If the agent omits a complete recipe, the workflow rejects the manifest because that recipe did not receive a heat
-score or lifecycle decision.
+In automated lifecycle mode, return exactly the compact selection in `prompts/discover-models/lifecycle.md` with no
+prose or Markdown fence. Do not edit recipe files. The workflow requires one score for every exact existing recipe,
+reconstructs existing onboarding entries from the task, derives best-effort entries, and validates the complete
+manifest before applying it. It demotes a superseded obsolete decision to best-effort unless the replacement is active,
+serves the same task, and its smallest known qualified deployment uses no more total physical GPU memory than the old
+recipe's smallest deployment.
 
 ## Step 7 — Hand off in survey mode
 

@@ -32,7 +32,7 @@ def test_opencode_message_precedes_variadic_file_option(workflow, message):
     scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
     script = next(script for script in scripts if "opencode run" in script)
 
-    assert script.index(message) < script.index('--file "$AGENT_PROMPT"')
+    assert script.index(message) < script.index("--file ")
 
 
 def test_onboarding_loads_control_code_from_exact_workflow_commit():
@@ -74,10 +74,15 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     assert 'echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"' in load_script
     assert 'echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"' in load_script
     assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
-    assert "older skill copy in the rolling lifecycle worktree" in agent_script
+    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" task' in agent_script
+    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" assemble' in agent_script
     assert '--file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md"' in agent_script
-    assert "sed 's/^/discover-models: /' \"$AGENT_MANIFEST\"" in agent_script
+    assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md"' in agent_script
+    assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md"' in agent_script
+    assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
     assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_lifecycle.py"' in validation_script
+    assert '"$AGENT_TASK"' in cleanup_script
+    assert '"$AGENT_SELECTION"' in cleanup_script
     assert 'rm -rf -- "$WORKFLOW_SOURCE"' in cleanup_script
 
 
@@ -354,23 +359,24 @@ def test_discovery_counts_lifecycle_with_recipe_query():
 
 
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
-    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
-    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+    prompt = (Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text()
 
-    assert "A replacement that is merely comparable is not" in script
-    assert "read both recipe files" in script
-    assert "configured context, concurrency, quantization, hardware support, or model" in script
-    assert '"Comparable reasoning"' in script
-    assert "replacement_model_id is allowed" in script
-    assert "only in obsolete_models" in script
+    assert "A replacement that is merely comparable is not" in prompt
+    assert "read both recipe files" in prompt
+    assert "configured context, concurrency, quantization, hardware support, model capability" in prompt
+    assert "replacement_model_id" in prompt
+    assert "Every unselected complete recipe defaults to best-effort" in prompt
 
 
 def test_discovery_inventory_uses_exact_catalog_code_against_rolling_recipes():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
 
-    assert 'recipe_inventory_document("recipes")' in script
+    assert '"$WORKFLOW_SOURCE/.github/scripts/discovery_agent.py" task' in script
+    assert "--root recipes" in script
     assert "recipe list --json" not in script
+    assert "recipe_inventory_document" not in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 
 
 def test_discovery_uses_source_subagents_and_scores_every_model():
@@ -378,20 +384,39 @@ def test_discovery_uses_source_subagents_and_scores_every_model():
     document = yaml.safe_load((workspace / ".github" / "workflows" / "discover-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
     agent = (workspace / ".opencode" / "agents" / "discover-models.md").read_text()
+    skill = (workspace / ".agents" / "skills" / "discover-models" / "SKILL.md").read_text()
+    lifecycle_prompt = (workspace / "prompts" / "discover-models" / "lifecycle.md").read_text()
+    scoring_prompt = (workspace / "prompts" / "discover-models" / "score-recipes.md").read_text()
 
     for source in ("discover-reddit", "discover-huggingface", "discover-openrouter"):
         source_agent = (workspace / ".opencode" / "agents" / f"{source}.md").read_text()
         source_config = yaml.safe_load(source_agent.split("---", 2)[1])
-        assert source in script
+        assert source in lifecycle_prompt
         assert f'"{source}": allow' in agent
         assert source_config["mode"] == "subagent"
         assert source_config["hidden"] is True
         assert source_config["steps"] == 16
         assert source_config["permission"] == {"*": "deny", "webfetch": "allow", "websearch": "allow"}
         assert "Use at most three public-web calls" in " ".join(source_agent.splitlines())
-    assert "Every existing recipe must" in script
-    assert "integer heat score from 0 through 100" in script
-    assert "there is no onboarding-model count limit" in script
+    scorer = (workspace / ".opencode" / "agents" / "discover-scorer.md").read_text()
+    scorer_config = yaml.safe_load(scorer.split("---", 2)[1])
+    assert '"discover-scorer": allow' in agent
+    assert scorer_config == {
+        "description": "Score one exact batch of existing recipes from shared discovery evidence",
+        "mode": "subagent",
+        "hidden": True,
+        "temperature": 0.1,
+        "steps": 4,
+        "permission": {"*": "deny"},
+    }
+    assert "once per recipe batch and in parallel" in lifecycle_prompt
+    assert "every existing recipe from every batch exactly once" in lifecycle_prompt
+    assert "there is no candidate-count limit" in lifecycle_prompt
+    assert "Heat is current onboarding priority" in scoring_prompt
+    assert "Do not perform additional research" in " ".join(scoring_prompt.splitlines())
+    assert "prompts/discover-models/lifecycle.md" in skill
+    assert "prompts/discover-models/score-recipes.md" in skill
+    assert "Path(os.environ" not in script
 
 
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1, heat=50):

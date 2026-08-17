@@ -374,6 +374,7 @@ links to absolute GitHub URLs, which the workflow runs because PyPI renders the 
   Claude Code
 - [.agents/skills/](.agents/skills/) — canonical repository skills; [.claude/skills/](.claude/skills/) exposes them
   through compatibility symlinks
+- [prompts/](prompts/) — reusable agent prompts shared by repository skills and non-interactive workflows
 - [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))

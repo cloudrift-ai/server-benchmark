@@ -162,21 +162,93 @@ def test_the_carve_refuses_a_full_attention_block():
         build_linear_attention_split_wrapper(model.layers[1])
 
 
-def test_attention_split_refuses_the_gate_fused_query_projection():
-    """Qwen3.5's full-attention layer fuses its output gate into ``q_proj``, which is twice as wide
-    as its heads. The attention carve reads head counts off that width, so it would infer twice the
-    heads and drop the gate — silently. It must refuse instead, and the module's own declared
-    query-heads-per-kv-head ratio is what catches it.
+def _repeat_kv(x, n_rep):
+    """[1, Hkv, T, D] -> [1, Hkv*n_rep, T, D] (GQA head expansion)."""
+    b, h, t, d = x.shape
+    return x if n_rep == 1 else x[:, :, None, :, :].expand(b, h, n_rep, t, d).reshape(b, h * n_rep, t, d)
+
+
+def test_attention_split_carves_the_fused_query_gate_projection():
+    """Qwen3.5's full-attention layer fuses its output gate into ``q_proj``: the projection is
+    twice its query width and the forward chunks it per head. The carve splits the same way, hands
+    the gate across the seam as a fourth ``pre`` output, and ``post`` applies it before ``o_proj``.
+
+    The reference reconstructs what the seam leaves out — RoPE, then causal GQA attention — so a
+    match proves the carve moved no arithmetic across it.
     """
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+    from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper, build_causal_mask
+
+    model, _ = _tiny_model(torch.float32)
+    block = model.layers[1]
+    assert block.block_type == "full_attention"
+    attn = block.self_attn
+    head_dim, n_heads = attn.head_dim, TINY["num_attention_heads"]
+    n_kv = TINY["num_key_value_heads"]
+    assert attn.q_proj.out_features == 2 * n_heads * head_dim, "the fused layout under test"
+
+    t = 6
+    hidden3d = torch.randn(1, t, TINY["hidden_size"])
+    cos, sin = model.rotary_emb(hidden3d, torch.arange(t).unsqueeze(0))
+    mask = build_causal_mask(t, torch.float32)
+
+    with torch.no_grad():
+        eager = block(hidden3d, position_embeddings=(cos, sin), attention_mask=mask)
+        eager = eager[0] if isinstance(eager, tuple) else eager
+
+        pre, post = build_attention_split_wrapper(block)
+        assert pre.emits_gate, "the fused layout must widen the seam"
+        q2d, k2d, v2d, gate = pre(hidden3d.squeeze(0))
+        assert tuple(gate.shape) == (t, n_heads * head_dim)
+
+        q = q2d.view(t, n_heads, head_dim).transpose(0, 1).unsqueeze(0)
+        k = k2d.view(t, n_kv, head_dim).transpose(0, 1).unsqueeze(0)
+        v = v2d.view(t, n_kv, head_dim).transpose(0, 1).unsqueeze(0)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        attn_out = F.scaled_dot_product_attention(
+            q, _repeat_kv(k, n_heads // n_kv), _repeat_kv(v, n_heads // n_kv), attn_mask=mask, scale=attn.scaling
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(t, n_heads * head_dim)
+        out = post(attn_out, hidden3d.squeeze(0), gate)
+
+    assert tuple(out.shape) == (t, TINY["hidden_size"])
+    torch.testing.assert_close(out, eager.squeeze(0), rtol=1e-4, atol=1e-4)
+
+
+def test_the_fused_gate_actually_changes_the_answer():
+    """Guard against a vacuous parity test: dropping the gate must break it. Otherwise a carve that
+    silently ignored the gate — the bug this whole shape exists to prevent — would still pass."""
     torch = pytest.importorskip("torch")
 
     from emmy.compiler.trace.huggingface import build_attention_split_wrapper
 
     model, _ = _tiny_model(torch.float32)
     block = model.layers[1]
-    assert block.block_type == "full_attention"
-    attn = block.self_attn
-    assert attn.q_proj.out_features == 2 * TINY["num_attention_heads"] * TINY["head_dim"], "the fused layout under test"
+    pre, post = build_attention_split_wrapper(block)
+    t = 6
+    hidden = torch.randn(t, TINY["hidden_size"])
+    attn_out = torch.randn(t, TINY["num_attention_heads"] * block.self_attn.head_dim)
+    with torch.no_grad():
+        *_, gate = pre(hidden)
+        gated, ungated = post(attn_out, hidden, gate), post(attn_out, hidden)
+    assert not torch.allclose(gated, ungated, rtol=1e-3, atol=1e-3), "the gate must move the output"
+
+
+def test_attention_split_refuses_a_query_projection_wider_for_another_reason():
+    """The carve admits exactly two query-projection layouts: plain, and the fused gate's exact
+    doubling. Anything else still refuses rather than mis-shaping q."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+
+    model, _ = _tiny_model(torch.float32)
+    block = model.layers[1]
+    head_dim = block.self_attn.head_dim
+    # 3x the query width: neither the plain layout nor the fused one.
+    block.self_attn.q_proj = torch.nn.Linear(TINY["hidden_size"], 3 * TINY["num_attention_heads"] * head_dim, bias=False)
     with pytest.raises(NotImplementedError, match="besides queries"):
         build_attention_split_wrapper(block)
 

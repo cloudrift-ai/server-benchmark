@@ -132,13 +132,19 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   would no longer commute. It also omits the `[B, S, ·]` reshapes and the channel-first transpose, which describe a
   batched sequence the flat seam does not have.
 
-- **The same architecture's `full_attention` layer does NOT carve.** Qwen3.5 fuses the attention output gate into
-  `q_proj`, making it twice as wide as its query heads and splitting the result with `chunk(2)`. Every head count in
-  the attention carve is read off the projection widths, so it would infer twice the heads and silently drop the
-  gate. The refusal lives in the shared `_build_pre_wrapper`, so the dense and MoE attention carves both raise: it
-  compares those widths against the attention module's own declared query-heads-per-kv-head ratio
-  (`num_key_value_groups`), which catches a fused query projection without naming a model — a module that declares
-  no such ratio passes through unchecked.
+- **The fused query/gate layout** is the one shape where the attention seam widens. Qwen3.5's full-attention layer
+  puts its output gate in `q_proj`, making it twice as wide as its query heads and splitting the result per head with
+  `chunk(2)`; the gate then multiplies the attention result before `o_proj`. Every head count in the attention carve
+  is read off the projection widths, so taking them at face value would infer twice the heads and silently drop the
+  gate. The shared `_build_pre_wrapper` instead compares those widths against the module's own declared
+  query-heads-per-key/value-head ratio (`num_key_value_groups`), which identifies the layout without keying on a
+  model name. `pre` then returns a FOURTH tensor, the gate at `[tokens, Hq·D]`, and `post` takes it as a third
+  argument and applies `attn_out * sigmoid(gate)` — the same choice the linear-attention carve makes for its own
+  gate, and for the same reason: it comes out of the same projection as q, so recomputing it would run that
+  projection twice. `Pre.emits_gate` says which arity a caller got. The dense and MoE posts both take the argument.
+  A query projection whose excess width is anything OTHER than that exact doubling still raises, as does a block
+  carrying both a fused gate and a separate `g_proj` (two gates, undefined order); a module declaring no ratio
+  passes through unchecked.
 
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named

@@ -499,18 +499,28 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
     head_dim = attn.head_dim
     num_heads = attn.q_proj.out_features // head_dim
     num_kv_heads = attn.k_proj.out_features // head_dim
-    # Every head count here is READ OFF THE PROJECTION WIDTHS, which assumes the query projection
-    # carries queries and nothing else. Qwen3.5's full-attention layer breaks that: its q_proj is
-    # ``num_heads · head_dim · 2`` wide and its forward chunks the result into queries and an
-    # output gate. Carving it here would infer twice the heads and silently drop the gate — a
-    # wrong answer, not an error. The module states the true ratio itself, so compare against it.
-    groups = getattr(attn, "num_key_value_groups", None)
-    if groups and num_kv_heads and num_heads // num_kv_heads != groups:
+    # Head counts are READ OFF THE PROJECTION WIDTHS, which assumes the query projection carries
+    # queries and nothing else. Qwen3.5's full-attention layer breaks that: its q_proj is
+    # ``num_heads · head_dim · 2`` wide and its forward chunks the result into queries and a
+    # per-element OUTPUT GATE, which multiplies the attention result before ``o_proj``. Taking the
+    # widths at face value there would infer twice the heads and drop the gate — a wrong answer,
+    # not an error. The module declares the true ratio, so ask it, and carve the gate when the
+    # excess is exactly the doubling that layout produces.
+    declared = getattr(attn, "num_key_value_groups", None)
+    true_heads = declared * num_kv_heads if declared and num_kv_heads else num_heads
+    fused_gate = num_heads == 2 * true_heads
+    if num_heads != true_heads and not fused_gate:
         raise NotImplementedError(
-            f"build_attention_split_wrapper: this attention module declares {groups} query heads per key/value head, "
-            f"but its projection widths give {num_heads // num_kv_heads} — the query projection carries something "
-            f"besides queries (Qwen3.5 fuses the output gate into it). The carve reads its head counts off those "
-            f"widths, so it would mis-shape q and drop whatever shares the projection"
+            f"build_attention_split_wrapper: this attention module declares {declared} query heads per key/value head, "
+            f"but its projection widths give {num_heads // max(num_kv_heads, 1)} — the query projection carries something "
+            f"besides queries, and not the one extra query-width the fused output-gate layout carries. The carve reads "
+            f"its head counts off those widths, so it would mis-shape q and drop whatever shares the projection"
+        )
+    num_heads = true_heads
+    if fused_gate and getattr(attn, "g_proj", None) is not None:
+        raise NotImplementedError(
+            "build_attention_split_wrapper: this attention module has BOTH a fused query/gate projection and a "
+            "separate g_proj gate; which one multiplies the attention result, and in what order, is undefined here"
         )
     q_norm = getattr(attn, "q_norm", None)
     k_norm = getattr(attn, "k_norm", None)
@@ -521,6 +531,10 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
     flat_qk_norm = q_norm is not None and q_norm.weight.numel() != head_dim
 
     class Pre(nn.Module):
+        #: Whether ``forward`` returns a fourth tensor, the attention OUTPUT GATE. True only for a
+        #: fused query/gate projection; the paired ``post`` reads the same flag and consumes it.
+        emits_gate = fused_gate
+
         def __init__(self) -> None:
             super().__init__()
             self.input_layernorm = block.input_layernorm
@@ -537,7 +551,13 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
                 k = self.k_norm(self.k_proj(h)).view(t, num_kv_heads, head_dim)
                 v = self.v_proj(h).view(t, num_kv_heads, head_dim)
                 return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
-            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
+            gate = None
+            if fused_gate:
+                # One projection, two halves per head: queries then the gate, split on the LAST
+                # axis of the per-head view — NOT on the flat width, where the two would interleave.
+                q, gate = self.q_proj(h).view(t, num_heads, head_dim * 2).chunk(2, dim=-1)
+            else:
+                q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
             kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
             # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
             # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
@@ -548,7 +568,8 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
                 k = self.k_norm(kp)
             if self.v_norm is not None:
                 v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
-            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+            out = (q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim))
+            return (*out, gate.reshape(t, num_heads * head_dim)) if gate is not None else out
 
     return Pre()
 
@@ -590,7 +611,7 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
       **un-rotated** q,k,v in the 2-D seam ABI ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what
       vLLM's ``Attention.forward`` consumes. RoPE is applied downstream (by vLLM, or by the
       test/oracle reference).
-    - ``post(attn_out[T, Hq·D], residual[T, H]) -> layer_out[T, H]`` runs ``o_proj`` →
+    - ``post(attn_out[T, Hq·D], residual[T, H], gate=None) -> layer_out[T, H]`` runs ``o_proj`` →
       ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual. **Gemma-3/4** is
       instead a 4-norm layer: ``o_proj(attn)`` and ``mlp(...)`` each get wrapped in their OWN
       RMSNorm (``post_attention_layernorm`` / ``post_feedforward_layernorm``) BEFORE the residual
@@ -605,9 +626,21 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
     is the Llama/Qwen 2-norm form or the Gemma 4-norm form above.
 
+    **The fused query/gate layout** (Qwen3.5's full-attention layer) is the one shape where the seam
+    widens. Its ``q_proj`` is twice its query width and its forward chunks the result per head into
+    queries and a per-element OUTPUT GATE that multiplies the attention result before ``o_proj``.
+    ``pre`` then returns a FOURTH tensor, that gate at ``[T, Hq·D]``, and ``post`` takes it as a
+    third argument and applies ``attn_out * sigmoid(gate)``. Carrying it across the seam rather than
+    recomputing it is the same choice the linear-attention carve makes for its own gate: it comes
+    out of the same projection as q, so recomputing would run that projection twice. ``Pre`` and the
+    builder both expose the flag (``pre.emits_gate``) so a caller can tell which arity it got.
+
     Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
-    (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
+    (in :func:`_build_pre_wrapper`), a query projection whose excess width is anything OTHER than
+    the fused gate's exact doubling, and a block carrying both a fused gate and a separate
+    ``g_proj``: the carve has no seam for any of them and would silently drop or double-apply
     them, corrupting outputs."""
+    import torch
     import torch.nn as nn
 
     pre = _build_pre_wrapper(block, float32_residual=float32_residual)  # carries PLE / clip_qkv rejects before attribute reads
@@ -637,7 +670,12 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
             self.register_buffer("layer_scalar", getattr(block, "layer_scalar", None))
             self._emmy_laguna_exl3_post = "dense" if float32_residual else None
 
-        def forward(self, attn_out, residual):
+        def forward(self, attn_out, residual, gate=None):
+            if gate is not None:
+                # The fused query/gate projection's half, carried across the seam by ``pre``
+                # (``Pre.emits_gate``) rather than recomputed: it comes out of the SAME projection
+                # as q, so recomputing it would run that whole projection a second time.
+                attn_out = attn_out * torch.sigmoid(gate)
             if self.g_proj is not None:
                 gate_input = self.gate_input_layernorm(residual)
                 if float32_residual:
@@ -968,7 +1006,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             self._emmy_shared_expert_float32 = shared_experts is not None and routed_scale_folded and float32_residual
             self._emmy_laguna_exl3_post = "sparse" if float32_residual else None
 
-        def forward(self, attn_out, residual):
+        def forward(self, attn_out, residual, gate=None):
+            if gate is not None:
+                attn_out = attn_out * torch.sigmoid(gate)  # the fused query/gate projection's half
             if self.g_proj is not None:
                 gate_input = self.gate_input_layernorm(residual)
                 if float32_residual:

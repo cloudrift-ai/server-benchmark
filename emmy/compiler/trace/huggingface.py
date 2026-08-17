@@ -1443,7 +1443,9 @@ def _checkpoint_to_model_key(key: str, rename=None) -> str:
 
     Two translations compose. ``rename`` is the model-family one Transformers itself would apply
     (:func:`_checkpoint_key_renamer`); the two literal substitutions below are original Laguna
-    checkpoint names, which have no registered mapping upstream.
+    checkpoint names. Transformers registers those two as well, so on a Laguna twin they are now
+    redundant — they stay because this function is also reached with no model-derived renamer at
+    all, and dropping them is a separate change that wants a Laguna checkpoint to verify.
     """
     key = key.replace(".mlp.shared_expert.", ".mlp.shared_experts.")
     key = key.replace(".mlp.experts.e_score_correction_bias", ".mlp.gate.e_score_correction_bias")
@@ -1463,13 +1465,19 @@ def _checkpoint_key_renamer(model):
     Transformers registers these translations per model type and applies them inside
     ``from_pretrained``, a path this shard-streamed loader deliberately does not take (it never
     materializes the whole dequantized dict). So read the same table instead of hand-writing one
-    family's rule: every family with a registered mapping becomes loadable here on the same terms
-    upstream loads it on, and a family without one gets the identity.
+    family's rule: a family whose mapping is renamings becomes loadable here on the same terms
+    upstream loads it on.
 
-    RENAMINGS ONLY. The table also carries converters, which combine or split the tensors
-    themselves (stacking a per-expert stack, concatenating a convolution's halves) — work this
-    loader does not do, so firing their renames would produce a name whose tensor was never
-    assembled. Their keys stay unmatched, exactly as they are today.
+    RENAMINGS ONLY. The mapping also carries converters, which combine or divide the tensors
+    themselves (stacking a per-expert stack, concatenating a hybrid model's three separate q/k/v
+    convolution weights into one) — work this loader does not do, so firing their renames would
+    produce a name whose tensor was never assembled. A converter's key still goes unmatched, as it
+    does today, though its spelling may now differ where the same family also carries a renaming.
+
+    Pre-existing loads are unchanged, but not because unmapped families answer ``None``: four
+    legacy renames (``LayerNorm.gamma`` / ``beta``, ``.weight_g`` / ``.weight_v``) attach to every
+    model, so almost every twin gets a renamer. They are unchanged because none of those patterns
+    matches a modern checkpoint key.
     """
     try:
         from transformers.conversion_mapping import get_model_conversion_mapping  # noqa: PLC0415

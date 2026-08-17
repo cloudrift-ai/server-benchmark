@@ -186,20 +186,27 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
   trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
-  Checkpoint keys are translated to the twin's own parameter names first (`_checkpoint_key_renamer`): a
-  vision-language release stores its text decoder one module deeper than a text-only twin has it — Qwen3.5 puts
-  every decoder weight under `model.language_model.layers.N.*`, of which a text-only twin matched one name in 851,
-  leaving every parameter on the meta device with no error. Transformers registers that translation per model type
-  and applies it inside `from_pretrained`, a path this shard-streamed loader does not take, so the loader reads the
-  same table instead of hand-writing one family's rule. Renamings only: the table's converters combine or split the
-  tensors themselves, work this loader does not do, so their keys stay unmatched exactly as before. A family with no
-  registered mapping gets the identity, so every pre-existing load is unchanged.
   (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
   and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
   as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An NVFP4 dense-trunk weight
   streams as values too: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on
   read and consumes the scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert
-  lane has no packed-trio decode. An EXL3 checkpoint takes the same split at the trellis format's own shapes
+  lane has no packed-trio decode.
+
+  Checkpoint keys are translated to the twin's own parameter names before any of that
+  (`_checkpoint_key_renamer`). They are not always the same names: a vision-language release stores its text
+  decoder one module deeper than a text-only twin has it — Qwen3.5 puts every decoder weight under
+  `model.language_model.layers.N.*`, of which a text-only twin matched one name in 851. Nothing raises when they
+  disagree; the load is `strict=False, assign=True`, so unmatched parameters keep their meta tensors and the twin
+  comes back looking complete. Transformers registers that translation per model type and applies it inside
+  `from_pretrained`, a path this loader does not take, so the loader reads the same conversion mapping
+  (`get_model_conversion_mapping`) and applies it with upstream's own `rename_source_key`, rather than
+  hand-writing one family's rule. RENAMINGS only: the mapping also carries converters, which combine or divide the
+  tensors themselves (stacking a per-expert stack, concatenating a hybrid model's three separate q/k/v convolution
+  weights into one), work this loader does not do — so a converter's key still goes unmatched, though its spelling
+  may now differ. Pre-existing loads are unchanged not because unmapped families exist but because the mappings
+  they do carry — four legacy `LayerNorm.gamma`/`weight_g` renames attach to every model — match no modern
+  checkpoint key. An EXL3 checkpoint takes the same split at the trellis format's own shapes
   (`fmt == "exl3"`). Laguna EXL3 additionally stores routed up projections with the architecture's
   `interm_div=128` scale; the loader folds the inverse and the model's base routed scale into selected routing
   weights and marks their combine for fp32 accumulation, matching the reference runtime without scaling expert

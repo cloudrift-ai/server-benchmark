@@ -1025,7 +1025,8 @@ def test_checkpoint_key_renamer_leaves_a_plain_text_model_alone():
 
 def test_checkpoint_to_model_key_composes_the_two_translations():
     """The Laguna literal substitutions and the registered family mapping both apply, in that
-    order — the hand-written ones name modules the mapping never mentions."""
+    order. Transformers registers the Laguna pair too, so on a Laguna twin the literals are
+    redundant; they still run for a call with no model-derived renamer."""
     from emmy.compiler.trace.huggingface import _checkpoint_to_model_key
 
     laguna = "model.layers.0.mlp.shared_expert.gate_proj.weight"

@@ -1,7 +1,7 @@
 # Qwen/Qwen3-Embedding-8B — RTX 4090 Verification Report
 
-**Date:** 2026-08-16
-**Repository revision:** `a3d9e021`
+**Date:** 2026-08-17
+**Repository revision:** `0afb4b06`
 **Model revision:** `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af`
 **Target GPU:** 1× NVIDIA GeForce RTX 4090 (sm_89, 24 GB)
 **Driver:** 580.65.06
@@ -9,25 +9,24 @@
 
 ## Summary
 
-Verification of the maintained Qwen3-Embedding-8B recipe on a single RTX 4090. The stock vLLM pooling lane
-deployed, passed health checks, and benchmarked at both short-query (input_len=32) and document (input_len=512)
-regimes. The Emmy compiled-kernel lane could not be measured because the prebuilt serving image
-(`cloudriftai/vllm-emmy:0.22.1-90c70d5e`) requires publication — publication was not authorized for this run.
-Compiler qualification traced 6 kernel targets successfully but O3 tuning and golden promotion were not completed.
+Verification of the maintained Qwen3-Embedding-8B recipe on a single RTX 4090. The stock vLLM pooling lane deployed,
+passed health checks, and benchmarked at both short-query (input_len=32) and document (input_len=512) regimes. The Emmy
+compiled-kernel lane could not be measured because the prebuilt serving image
+(`cloudriftai/vllm-emmy:0.22.1-90c70d5e`) requires publication — publication was not authorized for this run. Compiler
+qualification traced 6 kernel targets on layer 0; full O3 tuning did not complete.
 
 ## Benchmark results — stock vLLM (pooling runner)
 
 | Regime | Input len | Prompts | Concurrency | Throughput (req/s) | Token throughput (tok/s) | Mean E2EL (ms) | P99 E2EL (ms) |
 |---|---|---|---|---|---|---|---|
-| Short query | 32 | 256 | 32 | 87.98 | 2,815.28 | 338.24 | 636.03 |
-| Document | 512 | 256 | 32 | 20.08 | 10,281.71 | 1,500.78 | 1,801.83 |
+| Short query | 32 | 256 | 32 | 99.62 | 3,187.68 | 297.85 | 670.16 |
+| Document | 512 | 256 | 32 | 20.74 | 10,620.61 | 1,451.46 | 1,701.63 |
 
-All 512 requests across both regimes succeeded (0 failures). The model loaded in ~5 s on cache hit and compiled
-(torch.compile) in ~28 s on first boot.
+All 512 requests across both regimes succeeded (0 failures).
 
 ## Emmy eligibility
 
-**Ineligible** — compiler qualification traced 6 targets but O3 verification and a canonical golden were not
+**Ineligible** — compiler qualification traced 6 targets on layer 0 but O3 tuning and a canonical golden were not
 completed on this run. The image lane is also blocked by the missing serving image publication.
 
 ## Recipe

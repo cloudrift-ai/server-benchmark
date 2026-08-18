@@ -20,6 +20,7 @@ from emmy.compiler.loader.quant import (
     dequantize_awq4,
     dequantize_nvfp4,
     fuse_nvfp4_scales,
+    quantize_nvfp4,
     spell_dynamic_fp8_activations,
     spell_quantized_constants,
     spell_quantized_inputs,
@@ -1392,3 +1393,62 @@ def test_quantization_concepts_stay_in_the_frontend_band():
         "code may key on dtypes and the decode trait, never on checkpoint formats or scale "
         "pairing (see the invariant comment above)."
     )
+
+
+def test_quantize_nvfp4_returns_the_checkpoint_carriers():
+    # The trio must be storable as-is: packed pairs halve the last axis, one e4m3 scale per 16
+    # elements, one f32 for the tensor.
+    x = np.random.default_rng(0).standard_normal((3, 64)).astype(np.float32)
+    packed, scale_bits, scale_2 = quantize_nvfp4(x)
+    assert (packed.dtype, packed.shape) == (np.uint8, (3, 32))
+    assert (scale_bits.dtype, scale_bits.shape) == (np.uint8, (3, 4))
+    assert (scale_2.dtype, scale_2.shape) == (np.float32, (1,))
+    # Non-negative block scales, so the same bits read as the unsigned ue4m3 the hardware wants.
+    assert not (scale_bits >> 7).any()
+
+
+def test_quantize_nvfp4_stays_within_the_format_over_a_wide_range():
+    # Rows three decades apart, which is the case a single scale level would clip. The bound is
+    # the format's own: within a block the largest magnitude maps to 6.0, where the grid steps by
+    # 2, so nearest-rounding cannot miss by more than 1 in 6 of that block's largest value.
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal((3, 64)) * np.array([[0.01], [1.0], [80.0]])).astype(np.float32)
+    back = dequantize_nvfp4(*quantize_nvfp4(x))
+    block_amax = np.abs(x).reshape(3, 4, 16).max(axis=-1).repeat(16, axis=-1).reshape(3, 64)
+    assert (np.abs(back - x) <= block_amax / 6 + 1e-6).all()
+
+
+def test_quantize_nvfp4_is_idempotent_through_a_dequantize():
+    # Values already ON the grid must quantize to themselves, which is what makes the pair a
+    # round trip rather than a lossy pass that keeps drifting.
+    x = np.random.default_rng(1).standard_normal((2, 32)).astype(np.float32)
+    once = dequantize_nvfp4(*quantize_nvfp4(x))
+    np.testing.assert_array_equal(dequantize_nvfp4(*quantize_nvfp4(once)), once)
+
+
+def test_quantize_nvfp4_keeps_a_zero_block_zero():
+    packed, scale_bits, scale_2 = quantize_nvfp4(np.zeros((1, 16), dtype=np.float32))
+    assert not dequantize_nvfp4(packed, scale_bits, scale_2).any()
+
+
+def test_quantize_nvfp4_rejects_a_ragged_last_axis():
+    with pytest.raises(AssertionError):
+        quantize_nvfp4(np.zeros((1, 20), dtype=np.float32))
+
+
+@pytest.mark.parametrize("magnitude", [0.0, 1e-42, 1e-30])
+def test_quantize_nvfp4_survives_a_vanishing_tensor(magnitude):
+    # Without a floor on the tensor amax, scale_2 underflows to zero and the block-scale division
+    # blows up. The result stays finite and stays zero.
+    x = np.full((1, 16), magnitude, dtype=np.float32)
+    packed, scale_bits, scale_2 = quantize_nvfp4(x)
+    assert scale_2[0] > 0
+    back = dequantize_nvfp4(packed, scale_bits, scale_2)
+    assert np.isfinite(back).all()
+
+
+def test_quantize_nvfp4_rejects_a_tensor_too_large_for_an_f16_fused_scale():
+    # fuse_nvfp4_scales hands back f16, so a tensor whose block scale overflows f16 has no
+    # representable fused scale — an error beats a silent inf.
+    with pytest.raises(AssertionError, match="f16 fused scale"):
+        quantize_nvfp4(np.full((1, 16), 3e38, dtype=np.float32))

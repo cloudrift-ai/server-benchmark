@@ -52,7 +52,14 @@ from pathlib import Path
 
 import numpy as np
 
-from emmy.compiler.dtype import F8E4M3, F4E2M1x2, decode_f4x2, decode_f8  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+from emmy.compiler.dtype import (  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+    F8E4M3,
+    F4E2M1x2,
+    decode_f4x2,
+    decode_f8,
+    encode_f4x2,
+    encode_f8,
+)
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.loader.exl3 import HAD_BLOCK, decode_trellis, fold_hadamard
@@ -125,6 +132,46 @@ def dequantize_nvfp4(packed: np.ndarray, scale_bits: np.ndarray, scale_2: np.nda
     """
     assert packed.dtype == np.uint8, f"dequantize_nvfp4 expects the uint8 packed carrier, got {packed.dtype}"
     return dequantize(decode_f4x2(packed), fuse_nvfp4_scales(scale_bits, scale_2).astype(np.float32))
+
+
+#: Elements per block scale along the last axis, and the two formats' largest finite values.
+#: An NVFP4 checkpoint always uses 16, and the hardware's block-scaled mma reads 16 as well.
+NVFP4_BLOCK = 16
+_F4_MAX, _E4M3_MAX = 6.0, 448.0
+
+
+def quantize_nvfp4(values: np.ndarray, *, block: int = NVFP4_BLOCK) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quantize f32 values TO the NVFP4 trio — the inverse of :func:`dequantize_nvfp4`, returning
+    ``(packed, scale_bits, scale_2)`` in exactly the carriers a checkpoint stores: packed e2m1
+    pairs, e4m3 block-scale BITS one per ``block`` elements along the last axis, and one f32 for
+    the tensor.
+
+    Two levels, because one is not enough: a block's scale must itself be stored in e4m3, whose
+    range would clip on a tensor with a wide dynamic range. So ``scale_2`` carries the tensor's
+    magnitude and each block's e4m3 scale is relative to it. Choosing ``scale_2 = amax /
+    (6 * 448)`` puts the largest block scale near the top of e4m3 without exceeding it.
+
+    The divisor applied per block is the FUSED scale, so quantize and dequantize meet on the one
+    tensor :func:`fuse_nvfp4_scales` defines and share its single rounding story. A zero block
+    keeps a zero scale, which dequantizes back to zero.
+
+    The block scales come out non-negative, and an e4m3 bit pattern with a clear sign bit is
+    also its unsigned ue4m3 reading — the form the hardware's block-scaled mma wants."""
+    x = np.asarray(values, dtype=np.float32)
+    assert x.shape[-1] % block == 0, f"quantize_nvfp4 needs the last axis divisible by {block}, got {x.shape[-1]}"
+    blocks = x.reshape(*x.shape[:-1], x.shape[-1] // block, block)
+    # Floored the same way the dynamic FP8 activation scale is, so an all-zero or vanishingly
+    # small tensor cannot drive scale_2 to zero and make the block-scale division blow up.
+    amax = max(float(np.abs(x).max()), 1e-12)
+    # The fused scale is an f16 tensor, so the largest block scale has to fit one. That bounds the
+    # tensor, and overshooting it would otherwise surface as a silent inf rather than an error.
+    assert amax / _F4_MAX <= 65504.0, f"quantize_nvfp4 needs |values| <= {_F4_MAX * 65504.0:g} for an f16 fused scale, got {amax:g}"
+    scale_2 = np.float32(amax / (_F4_MAX * _E4M3_MAX))
+    block_scale = np.abs(blocks).max(axis=-1) / _F4_MAX
+    scale_bits = encode_f8(block_scale / scale_2, F8E4M3.name)
+    fused = fuse_nvfp4_scales(scale_bits, np.asarray(scale_2, dtype=np.float32).reshape(1)).astype(np.float32)
+    packed = encode_f4x2(np.divide(blocks, fused[..., None], out=np.zeros_like(blocks), where=fused[..., None] != 0))
+    return packed.reshape(*x.shape[:-1], x.shape[-1] // 2), scale_bits, np.asarray(scale_2, dtype=np.float32).reshape(1)
 
 
 def _quantization_config(model_dir: str | Path) -> dict | None:

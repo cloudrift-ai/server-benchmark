@@ -5,7 +5,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, I16, DataType, F4E2M1x2, F16x2, StructuredType, decode_f4, decode_f4x2, get
+from emmy.compiler.dtype import (
+    BF16,
+    F8E4M3,
+    F8E5M2,
+    F16,
+    F32,
+    I16,
+    DataType,
+    F4E2M1x2,
+    F16x2,
+    StructuredType,
+    decode_f4,
+    decode_f4x2,
+    encode_f4,
+    encode_f4x2,
+    get,
+)
 
 
 def test_scalars_are_not_structured():
@@ -104,3 +120,40 @@ def test_decode_f4_single_codes():
         decode_f4(np.array([16], dtype=np.int32))  # upper bits set
     with pytest.raises(AssertionError):
         decode_f4(np.array([1.0]))  # non-integer carrier
+
+
+def test_encode_f4_round_trips_every_representable_code():
+    # encode_f4 is decode_f4's inverse, so every code must come back as itself — including the
+    # two zeros, whose sign survives.
+    codes = np.arange(16, dtype=np.uint8)
+    np.testing.assert_array_equal(encode_f4(decode_f4(codes)), codes)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0.25, 0.0), (0.75, 1.0), (1.25, 1.0), (1.75, 2.0), (2.5, 2.0), (3.5, 4.0), (5.0, 4.0)],
+)
+def test_encode_f4_breaks_ties_to_even(value, expected):
+    # Every midpoint of the e2m1 grid, so the round-to-nearest-EVEN claim is pinned rather than
+    # asserted. Ties land on the even code, which is the one with a clear low mantissa bit.
+    assert float(decode_f4(encode_f4(np.float32(value)))) == expected
+
+
+def test_encode_f4_saturates_and_keeps_sign():
+    # e2m1 has no inf code, so a huge magnitude clamps to +-6 rather than overflowing.
+    assert float(decode_f4(encode_f4(np.float32(1e9)))) == 6.0
+    assert float(decode_f4(encode_f4(np.float32(-1e9)))) == -6.0
+    assert encode_f4(np.float32(-0.0)) == 8  # negative zero has its own code
+    with pytest.raises(AssertionError):
+        encode_f4(np.array([np.nan], dtype=np.float32))  # nowhere for a NaN to go
+
+
+def test_encode_f4x2_inverts_decode_f4x2():
+    # Bit identity over random packed bytes: the pair order must match, not merely the values.
+    bits = np.random.default_rng(0).integers(0, 256, size=(4, 8), dtype=np.uint8)
+    np.testing.assert_array_equal(encode_f4x2(decode_f4x2(bits)), bits)
+
+
+def test_encode_f4x2_rejects_an_odd_last_axis():
+    with pytest.raises(AssertionError):
+        encode_f4x2(np.zeros((3,), dtype=np.float32))

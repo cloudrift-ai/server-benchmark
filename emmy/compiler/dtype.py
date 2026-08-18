@@ -248,7 +248,9 @@ def decode_f4(codes: np.ndarray) -> np.ndarray:
     in ``[0, 16)`` — a set bit above the low 4 is a caller bug, not data."""
     a = np.asarray(codes)
     assert np.issubdtype(a.dtype, np.integer), f"decode_f4 expects integer codes, got {a.dtype}"
-    assert np.all((a & ~0xF) == 0), "decode_f4 expects codes in [0, 16); upper bits set"
+    # Masked rather than compared against ~0xF: that literal is negative, which an unsigned
+    # carrier (the one encode_f4 returns) refuses outright.
+    assert np.all((a & 0xF) == a), "decode_f4 expects codes in [0, 16); upper bits set"
     return _F4_LUT[a]
 
 
@@ -262,6 +264,40 @@ def decode_f4x2(bits: np.ndarray) -> np.ndarray:
     out[..., 0::2] = _F4_LUT[bits & 0x0F]
     out[..., 1::2] = _F4_LUT[bits >> 4]
     return out
+
+
+#: The non-negative half of :data:`F4_VALUES`, which is already ascending in code order —
+#: the encode's search table, the direct analogue of :func:`_f8_finite_values`.
+_F4_POSITIVE = np.array(F4_VALUES[:8], dtype=np.float64)
+
+
+def encode_f4(values: np.ndarray) -> np.ndarray:
+    """Encode an f32/f16 array to e2m1 codes (uint8, ``[0, 16)``) — round-to-nearest-EVEN onto
+    :data:`F4_VALUES`, SATURATING at ±6. The exact inverse of :func:`decode_f4`, and the same
+    rounding contract :func:`encode_f8` carries for the fp8 formats.
+
+    e2m1 has no inf or NaN code, so there is nowhere for a NaN to go; a NaN input is a caller
+    bug rather than something to map onto a finite value silently."""
+    x = np.asarray(values, dtype=np.float64)
+    assert not np.isnan(x).any(), "encode_f4 got NaN, which e2m1 cannot represent"
+    a = np.abs(x)
+    # Same argument as encode_f8: the table IS the representable set, so nearest-neighbour with a
+    # tie-to-even-CODE rule is round-to-nearest-even (adjacent codes differ in the low mantissa
+    # bit, and the higher code across an exponent step has mantissa 0 — even either way).
+    idx = np.clip(np.searchsorted(_F4_POSITIVE, a), 1, 7)
+    lo, hi = _F4_POSITIVE[idx - 1], _F4_POSITIVE[idx]
+    take_hi = (a - lo > hi - a) | ((a - lo == hi - a) & (idx % 2 == 0))
+    code = np.where(take_hi, idx, idx - 1).astype(np.uint8)
+    code = np.where(a >= _F4_POSITIVE[-1], np.uint8(7), code)  # saturate, no inf code exists
+    return (code | (np.signbit(x).astype(np.uint8) << 3)).astype(np.uint8)
+
+
+def encode_f4x2(values: np.ndarray) -> np.ndarray:
+    """Encode to PACKED e2m1 pairs (the f4e2m1x2 uint8 carrier), halving the last axis — the
+    inverse of :func:`decode_f4x2`, so it writes the same ``b = v_even + 16 * v_odd`` order."""
+    codes = encode_f4(values)
+    assert codes.shape[-1] % 2 == 0, f"encode_f4x2 needs an even last axis to pair, got {codes.shape[-1]}"
+    return (codes[..., 0::2] | (codes[..., 1::2] << 4)).astype(np.uint8)
 
 
 def get(dtype: str | DataType) -> DataType:

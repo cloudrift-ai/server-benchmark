@@ -84,3 +84,31 @@ def test_float_precision_boundaries_use_host_cpp_spelling():
     x = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
     actual = backend.run(compiled, input_data={"x": x})[0].outputs["wide"]
     np.testing.assert_array_equal(actual, x)
+
+
+def test_bf16_declared_input_keeps_numeric_float_reference_values():
+    """The generic BF16 carrier must not reinterpret numeric feeds as uint16."""
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "bf16"), node_id="x")
+    graph.add_node(op=ElementwiseOp("copy"), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    x = np.array([0.5, 1.25, -2.5, 4.75], dtype=np.float32)
+    from emmy.compiler.backend.loop import LoopBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    compiled = LoopBackend().compile(graph)
+    loop = next(node.op for node in compiled.nodes.values() if isinstance(node.op, LoopOp))
+    np.testing.assert_array_equal(loop.forward(x), x)
+
+
+def test_i64_declared_input_executes_through_fixed_width_host_abi():
+    """NumPy int64 binds to the platform's fixed-width C++ carrier."""
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "i64"), node_id="x")
+    graph.add_node(op=ElementwiseOp("copy"), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    x = np.array([1, -2, 7, 123_456_789], dtype=np.int64)
+    actual = _run_loop(graph, x)
+    np.testing.assert_array_equal(actual, x.astype(np.float32))

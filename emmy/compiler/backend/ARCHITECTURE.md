@@ -87,8 +87,9 @@ ground truth the loop and CUDA backends are triangulated against.
 ## Loop backend (`loop/`)
 
 Runs the fusion pipeline to turn the graph into `Graph[LoopOp]`, then
-executes via the inherited `Backend.run`. Since `LoopOp.forward` works,
-this is the numpy backend with fusion in front.
+executes via the inherited `Backend.run`. `LoopOp.forward` renders a host C++ correctness kernel and executes it
+through cppyy. Floating inputs use the backend's FP32 reference ABI; integer inputs retain their declared storage
+width, with fixed-width C++ carriers for 64-bit values so NumPy buffers bind consistently across host platforms.
 
 Used as the second axis of triangulation: **loop vs numpy disagreement
 implicates fusion; loop vs CUDA disagreement implicates codegen.**

@@ -100,7 +100,7 @@ class ReshapeOp(Op):
 class SliceOp(Op):
     """Extract a sub-tensor along a dimension.
 
-    ``dim`` / ``start`` are recorded by the tracer from the raw FX args —
+    ``dim`` / ``start`` / ``step`` are recorded by the tracer from the raw FX args —
     the constant-input convention below can't represent them when the FX
     ``start`` is ``None`` or the ``end`` is a SymInt (``_resolve_inputs``
     drops both, leaving the surviving constants positionally ambiguous).
@@ -115,6 +115,13 @@ class SliceOp(Op):
     shape: tuple[int | str, ...]
     dim: int | None = None
     start: int | None = None
+    step: int = 1
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.step, int) or isinstance(self.step, bool):
+            raise TypeError("slice step must be a static integer")
+        if self.step <= 0:
+            raise ValueError("slice step must be positive")
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(self.shape)
@@ -122,17 +129,23 @@ class SliceOp(Op):
     def forward(self, *inputs):
         tensor = inputs[0]
         if self.dim is not None:
-            dim, start = self.dim, self.start or 0
-            if start < 0:
-                start += tensor.shape[dim]  # Python-negative start counts back from the end
+            dim = self.dim % tensor.ndim
+            start = self.start
             extent = self.shape[dim]
-            end = start + int(extent) if isinstance(extent, int) else tensor.shape[dim]
+            if isinstance(extent, int):
+                # ``slice.indices`` applies Python's exact default, negative-index,
+                # and bounds-clamping rules.  The output shape supplies the end
+                # indirectly, so materialize precisely that many source positions.
+                norm_start = slice(start, None, self.step).indices(tensor.shape[dim])[0]
+                indices = norm_start + np.arange(extent, dtype=np.intp) * self.step
+                return np.take(tensor, indices, axis=dim)
+            end = None
         else:
             dim = int(inputs[1].flat[0]) if len(inputs) > 1 else 0
             start = int(inputs[2].flat[0]) if len(inputs) > 2 else 0
             end = int(inputs[3].flat[0]) if len(inputs) > 3 else tensor.shape[dim]
         slices = [slice(None)] * tensor.ndim
-        slices[dim] = slice(start, end)
+        slices[dim] = slice(start, end, self.step)
         return tensor[tuple(slices)]
 
 

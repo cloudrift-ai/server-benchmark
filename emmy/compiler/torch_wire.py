@@ -33,6 +33,7 @@ from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
+    FixedSinkhornOp,
     GatherOp,
     IndexMapOp,
     IndexSource,
@@ -63,7 +64,7 @@ _OP_SPECS: dict[str, tuple[type[Op], tuple[str, ...]]] = {
     ),
     "torch.transpose": (TransposeOp, ("axes",)),
     "torch.reshape": (ReshapeOp, ("shape",)),
-    "torch.slice": (SliceOp, ("shape", "dim", "start")),
+    "torch.slice": (SliceOp, ("shape", "dim", "start", "step")),
     "torch.cat": (CatOp, ()),
     "torch.unsqueeze": (UnsqueezeOp, ("dim",)),
     "torch.linear": (LinearOp, ("has_bias",)),
@@ -77,6 +78,7 @@ _OP_SPECS: dict[str, tuple[type[Op], tuple[str, ...]]] = {
     "tensor.cast": (CastOp, ("dtype",)),
     "tensor.bitcast": (BitcastOp, ("dtype",)),
     "tensor.elementwise": (ElementwiseOp, ("op",)),
+    "tensor.fixed_sinkhorn": (FixedSinkhornOp, ("eps", "iterations")),
     "tensor.reduce": (ReduceOp, ("op", "axis")),
     "tensor.scan": (ScanOp, ("op", "axis")),
     "tensor.gather": (GatherOp, ("axis",)),
@@ -259,6 +261,10 @@ def op_to_wire(op: Op) -> dict:
         raise ValueError(f"Torch IR wire does not support {type(op).__name__}")
     _cls, semantic_fields = _OP_SPECS[tag]
     attrs = {name: _value_to_wire(getattr(op, name)) for name in semantic_fields}
+    # Keep pre-step slice records byte-stable: absence means the dataclass
+    # default (unit step), while non-unit steps are persisted explicitly.
+    if isinstance(op, SliceOp) and op.step == 1:
+        attrs.pop("step")
     return {"op": tag, "attrs": attrs}
 
 

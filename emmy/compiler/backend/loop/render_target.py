@@ -7,23 +7,25 @@ _TYPE_NAME = {
     **{dtype: "float" for dtype in _FLOAT_DTYPES},
     "i16": "short",
     "i32": "int",
-    "i64": "long long",
+    "i64": "std::int64_t",
+    "u8": "unsigned char",
     "u16": "unsigned short",
     "u32": "unsigned int",
-    "u64": "unsigned long long",
+    "u64": "std::uint64_t",
     "bool": "bool",
 }
 _HOST_NBYTES = {
     "float": 4,
     "short": 2,
     "int": 4,
-    "long long": 8,
+    "std::int64_t": 8,
+    "unsigned char": 1,
     "unsigned short": 2,
     "unsigned int": 4,
-    "unsigned long long": 8,
+    "std::uint64_t": 8,
     "bool": 1,
 }
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_NATIVE_OPS = frozenset(
     {
         "add",

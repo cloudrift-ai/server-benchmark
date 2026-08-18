@@ -74,6 +74,31 @@ _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
 _AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
 
 
+def decode_ue8m0(bits: np.ndarray) -> np.ndarray:
+    """Decode unsigned E8M0 scale bytes to float32 values.
+
+    Codes 0..254 represent ``2 ** (code - 127)``. Code 255 is NaN. The
+    checkpoint scale is a generic one-byte floating storage value here; the
+    caller decides how its block layout applies to a weight.
+    """
+    codes = np.asarray(bits, dtype=np.uint8)
+    finite_codes = np.where(codes == 255, np.uint8(127), codes)
+    values = np.exp2(finite_codes.astype(np.float32) - 127.0)
+    return np.where(codes == 255, np.nan, values).astype(np.float32)
+
+
+def decode_mxfp4(packed: np.ndarray) -> np.ndarray:
+    """Decode packed E2M1 nibbles, low nibble then high nibble, to float32."""
+    words = np.asarray(packed).view(np.uint8)
+    codes = np.stack((words & np.uint8(0xF), words >> np.uint8(4)), axis=-1).reshape(*words.shape[:-1], words.shape[-1] * 2)
+    magnitude_code = codes & np.uint8(0x7)
+    exponent = magnitude_code >> np.uint8(1)
+    mantissa = magnitude_code & np.uint8(1)
+    normal = np.exp2(np.maximum(exponent.astype(np.int16) - 1, 0)) * (1.0 + 0.5 * mantissa)
+    magnitude = np.where(exponent == 0, 0.5 * mantissa, normal)
+    return np.where(codes & np.uint8(0x8), -magnitude, magnitude).astype(np.float32)
+
+
 def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) -> np.ndarray:
     """Apply a quantization scale to a decoded weight, deriving the block from the shapes.
 
@@ -1247,6 +1272,221 @@ def spell_quantized_inputs(
         graph.replace_node(tmp, final)  # the original consumers now read the cone's value
         graph.remove_node(tmp)
         out_map[name] = sid
+    return out_map
+
+
+def spell_mxfp4_inputs(
+    graph: Graph,
+    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    *,
+    validated_ue8m0_range: tuple[int, int] | None = None,
+) -> dict[str, str]:
+    """Spell packed E2M1 weight inputs and unsigned E8M0 block scales.
+
+    ``specs`` maps a logical ``(..., out, in)`` weight input to its packed-byte
+    and scale shapes. Leading dimensions, such as an expert axis, are preserved.
+    Two nibbles occupy each checkpoint byte; one scale covers 32 contiguous
+    logical input channels. The emitted graph uses
+    only byte inputs, integer extraction, ordinary floating algebra, layouts,
+    and the original linear. No decoded weight is stored by the loader.
+
+    ``validated_ue8m0_range`` may describe a range that the caller has already
+    checked across every external scale byte. Exceptional-code branches that
+    cannot occur in that range are then omitted from the executable algebra;
+    the default preserves the full UE8M0 code space, including code 0 and NaN
+    code 255.
+
+    Returns ``{weight input: scale input}``. Geometry mismatches fail at graph
+    birth rather than silently changing the weight layout.
+    """
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp, IndexMapOp, IndexSource  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    if validated_ue8m0_range is None:
+        validated_min, validated_max = 0, 255
+    else:
+        if len(validated_ue8m0_range) != 2:
+            raise ValueError("spell_mxfp4_inputs: validated_ue8m0_range must be a (minimum, maximum) pair")
+        validated_min, validated_max = (int(code) for code in validated_ue8m0_range)
+        if not 0 <= validated_min <= validated_max <= 255:
+            raise ValueError("spell_mxfp4_inputs: validated_ue8m0_range must satisfy 0 <= minimum <= maximum <= 255")
+
+    out_map: dict[str, str] = {}
+    for name, (packed_shape, scale_shape) in specs.items():
+        node = graph.nodes.get(name)
+        if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
+            raise ValueError(f"spell_mxfp4_inputs: {name!r} is not a graph input")
+        logical = node.output
+        if any(not dim.is_static for dim in logical.shape) or len(logical.shape) < 2:
+            raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be a static (..., out, in) weight")
+        logical_shape = tuple(dim.as_static() for dim in logical.shape)
+        lead, n, k = logical_shape[:-2], logical_shape[-2], logical_shape[-1]
+        packed_shape = tuple(int(dim) for dim in packed_shape)
+        scale_shape = tuple(int(dim) for dim in scale_shape)
+        if packed_shape != (*lead, n, k // 2) or k % 32 or scale_shape != (*lead, n, k // 32):
+            raise ValueError(f"spell_mxfp4_inputs: packed={packed_shape}, scale={scale_shape} does not reproduce logical {logical_shape}")
+        # The packed byte keeps the logical input's identity and graph-input
+        # slot. The decoded value later replaces the parked logical tensor.
+        tmp = f"{name}__packed_src"
+        graph.rename_node(name, tmp)
+        packed = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, packed_shape, "u8"), node_id=name)
+        graph.inputs = [packed if item == tmp else item for item in graph.inputs]
+        scale = graph.add_node(
+            op=InputOp(),
+            inputs=[],
+            output=Tensor(f"{name}_scale", scale_shape, "u8"),
+            node_id=f"{name}_scale",
+        )
+        graph.inputs.append(scale)
+
+        def _ew(op: str, inputs: list[str], shape: tuple[int, ...], dtype: str, suffix: str, prefix: str = name) -> str:
+            return graph.add_node(op=ElementwiseOp(op=op), inputs=inputs, output=Tensor(f"{prefix}_{suffix}", shape, dtype))
+
+        def _indexed(src: str, shape: tuple[int, ...], coords: tuple, dtype: str, suffix: str, prefix: str = name) -> str:
+            return graph.add_node(
+                op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=coords),)),
+                inputs=[src],
+                output=Tensor(f"{prefix}_{suffix}", shape, dtype),
+            )
+
+        coords = tuple(placeholder(axis) for axis in range(len(logical_shape)))
+        *leading_coords, row, col = coords
+        packed_full = _indexed(
+            packed,
+            logical_shape,
+            (*leading_coords, row, col / Literal(2, "int")),
+            "u8",
+            "packed4_full",
+        )
+        packed_u32 = _ew("copy", [packed_full], logical_shape, "u32", "packed4_u32")
+
+        low_shift = graph.add_node(
+            op=ConstantOp(name=f"{name}_low_nibble_shift", value=0),
+            inputs=[],
+            output=Tensor(f"{name}_low_nibble_shift", (1,), "u32"),
+        )
+        high_shift = graph.add_node(
+            op=ConstantOp(name=f"{name}_high_nibble_shift", value=4),
+            inputs=[],
+            output=Tensor(f"{name}_high_nibble_shift", (1,), "u32"),
+        )
+        nibble_shift = graph.add_node(
+            op=IndexMapOp(
+                out_shape=logical_shape,
+                sources=(
+                    IndexSource(
+                        input_idx=0,
+                        coord_map=(Literal(0, "int"),),
+                        select=(col % Literal(2, "int")).lt(Literal(1, "int")),
+                    ),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[low_shift, high_shift],
+            output=Tensor(f"{name}_nibble_shift", logical_shape, "u32"),
+        )
+        one = const_bc(graph, name=f"{name}_one", value=1, target_shape=logical_shape, dtype="u32")
+        fifteen = const_bc(graph, name=f"{name}_fifteen", value=15, target_shape=logical_shape, dtype="u32")
+        shifted = _ew("right_shift", [packed_u32, nibble_shift], logical_shape, "u32", "packed4_shifted")
+        codes = _ew("bitwise_and", [shifted, fifteen], logical_shape, "u32", "packed4_codes")
+
+        # Construct the E2M1 values directly as IEEE-f32 bits. This is the
+        # exact 16-code table, including signed zero, without a float decision
+        # tree in every contraction cell.
+        zero = const_bc(graph, name=f"{name}_zero", value=0, target_shape=logical_shape, dtype="u32")
+        seven = const_bc(graph, name=f"{name}_seven", value=7, target_shape=logical_shape, dtype="u32")
+        eight = const_bc(graph, name=f"{name}_eight", value=8, target_shape=logical_shape, dtype="u32")
+        exponent_bias = const_bc(graph, name=f"{name}_exponent_bias", value=126, target_shape=logical_shape, dtype="u32")
+        exponent_shift = const_bc(graph, name=f"{name}_exponent_shift", value=23, target_shape=logical_shape, dtype="u32")
+        mantissa_shift = const_bc(graph, name=f"{name}_mantissa_shift", value=22, target_shape=logical_shape, dtype="u32")
+        sign_shift = const_bc(graph, name=f"{name}_sign_shift", value=28, target_shape=logical_shape, dtype="u32")
+        magnitude = _ew("bitwise_and", [codes, seven], logical_shape, "u32", "magnitude_code")
+        exponent_delta = _ew("right_shift", [magnitude, one], logical_shape, "u32", "exponent_delta")
+        exponent = _ew("add", [exponent_delta, exponent_bias], logical_shape, "u32", "biased_exponent")
+        exponent_bits = _ew("left_shift", [exponent, exponent_shift], logical_shape, "u32", "exponent_bits")
+        mantissa = _ew("bitwise_and", [magnitude, one], logical_shape, "u32", "mantissa")
+        mantissa_valid = _ew("greater", [magnitude, one], logical_shape, "u32", "mantissa_valid")
+        mantissa = _ew("bitwise_and", [mantissa, mantissa_valid], logical_shape, "u32", "mantissa_checked")
+        mantissa_bits = _ew("left_shift", [mantissa, mantissa_shift], logical_shape, "u32", "mantissa_bits")
+        value_bits = _ew("bitwise_or", [exponent_bits, mantissa_bits], logical_shape, "u32", "magnitude_bits")
+        nonzero = _ew("greater", [magnitude, zero], logical_shape, "u32", "magnitude_nonzero")
+        value_bits = _ew("where", [nonzero, value_bits, zero], logical_shape, "u32", "nonzero_bits")
+        sign = _ew("bitwise_and", [codes, eight], logical_shape, "u32", "sign")
+        sign_bits = _ew("left_shift", [sign, sign_shift], logical_shape, "u32", "sign_bits")
+        value_bits = _ew("bitwise_or", [value_bits, sign_bits], logical_shape, "u32", "value_bits")
+        value = graph.add_node(
+            op=BitcastOp(dtype="f32"),
+            inputs=[value_bits],
+            output=Tensor(f"{name}_value", logical_shape, "f32"),
+        )
+
+        scale_u32 = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[scale],
+            output=Tensor(f"{name}_scale_u32", scale_shape, "u32"),
+        )
+        scale_shift = const_bc(graph, name=f"{name}_scale_shift", value=23, target_shape=scale_shape, dtype="u32")
+        scale_bits = graph.add_node(
+            op=ElementwiseOp(op="left_shift"),
+            inputs=[scale_u32, scale_shift],
+            output=Tensor(f"{name}_scale_bits", scale_shape, "u32"),
+        )
+        if validated_min == 0:
+            scale_zero = const_bc(graph, name=f"{name}_scale_zero_code", value=0, target_shape=scale_shape, dtype="u32")
+            scale_is_zero = _ew("equal", [scale_u32, scale_zero], scale_shape, "u32", "scale_is_zero")
+            scale_subnormal = const_bc(
+                graph,
+                name=f"{name}_scale_subnormal_bits",
+                value=0x00400000,
+                target_shape=scale_shape,
+                dtype="u32",
+            )
+            scale_bits = _ew(
+                "where",
+                [scale_is_zero, scale_subnormal, scale_bits],
+                scale_shape,
+                "u32",
+                "scale_zero_checked_bits",
+            )
+        if validated_max == 255:
+            scale_nan_code = const_bc(graph, name=f"{name}_scale_nan_code", value=255, target_shape=scale_shape, dtype="u32")
+            scale_is_nan = _ew("equal", [scale_u32, scale_nan_code], scale_shape, "u32", "scale_is_nan")
+            scale_nan = const_bc(
+                graph,
+                name=f"{name}_scale_nan_bits",
+                value=0x7FC00000,
+                target_shape=scale_shape,
+                dtype="u32",
+            )
+            scale_bits = _ew("where", [scale_is_nan, scale_nan, scale_bits], scale_shape, "u32", "scale_checked_bits")
+        scale_value = graph.add_node(
+            op=BitcastOp(dtype="f32"),
+            inputs=[scale_bits],
+            output=Tensor(f"{name}_scale_value", scale_shape, "f32"),
+        )
+        scale_full = _indexed(
+            scale_value,
+            logical_shape,
+            (*leading_coords, row, col / Literal(32, "int")),
+            "f32",
+            "scale_full",
+        )
+        scaled = graph.add_node(
+            op=ElementwiseOp(op="multiply"),
+            inputs=[value, scale_full],
+            output=Tensor(f"{name}_scaled", logical_shape, "f32"),
+        )
+        decoded = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[scaled],
+            output=Tensor(f"{name}_decoded", logical_shape, logical.dtype),
+        )
+        graph.replace_node(tmp, decoded)
+        graph.remove_node(tmp)
+        out_map[name] = scale
     return out_map
 
 

@@ -145,7 +145,7 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -184,7 +184,7 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
         # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
         # wins a tie, while a strictly wider signed type can represent the narrower unsigned
         # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
-        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        widths = {"u8": 8, "i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
         signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
         unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
         if unsigned_width >= signed_width:
@@ -357,7 +357,7 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
     return out
 
 
-def select_to_ternary(s: Select) -> Expr:
+def select_to_ternary(s: Select, ctype: str = "float") -> Expr:
     """Build a chained ternary from a ``Select``'s branch list.
 
     Each branch value is cast to ``float`` to match the ``float`` result
@@ -368,9 +368,9 @@ def select_to_ternary(s: Select) -> Expr:
     rejects. The casts are no-ops when a value is already ``float``.
     """
     branches = list(s.branches)
-    result: Expr = CastExpr("float", Var(branches[-1].value))
+    result: Expr = CastExpr(ctype, Var(branches[-1].value))
     for b in reversed(branches[:-1]):
-        result = TernaryExpr(cond=b.select, if_true=CastExpr("float", Var(b.value)), if_false=result)
+        result = TernaryExpr(cond=b.select, if_true=CastExpr(ctype, Var(b.value)), if_false=result)
     return result
 
 

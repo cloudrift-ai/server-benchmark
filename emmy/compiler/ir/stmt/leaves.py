@@ -922,6 +922,7 @@ class Select(Stmt):
 
     name: str
     branches: tuple[SelectBranch, ...]
+    dtype: DataType | None = None
 
     def __post_init__(self) -> None:
         if not self.branches:
@@ -938,14 +939,18 @@ class Select(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         lines: list[str] = []
+        typed_name = self.name if self.dtype is None else f"{self.name}:{self.dtype.name}"
         for bi, br in enumerate(self.branches):
-            prefix = f"{self.name} =" if bi == 0 else f"{' ' * len(self.name)}  "
+            prefix = f"{typed_name} =" if bi == 0 else f"{' ' * len(typed_name)}  "
             lines.append(f"{indent}{prefix} {br.value} when ({br.select.pretty()})")
         return lines
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        expr = select_to_ternary(self)
-        return [f"{_pad(ctx.indent)}float {self.name} = {expr.render(ctx)};"]
+        dtype = self.dtype.name if self.dtype is not None else "f32"
+        ctype = ctx.type_name(dtype)
+        expr = select_to_ternary(self, ctype)
+        ctx.ssa_dtypes[self.name] = dtype
+        return [f"{_pad(ctx.indent)}{ctype} {self.name} = {expr.render(ctx)};"]
 
 
 @dataclass(frozen=True)

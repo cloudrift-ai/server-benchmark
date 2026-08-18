@@ -59,3 +59,30 @@ def test_run_once_external_rejects_incompatible_bindings(name, value, error):
 def test_run_once_external_rejects_tma_pointer_rebinding():
     with pytest.raises(ValueError, match="TMA descriptors"):
         _program(tma=True).run_once_external({"x": np.empty((2, 3), dtype=np.float32)})
+
+
+def test_external_only_program_requires_every_live_binding(monkeypatch):
+    program = _program()
+    program.external_buffers = frozenset({"x", "y"})
+
+    with pytest.raises(RuntimeError, match="external-only"):
+        program.run_once()
+    with pytest.raises(RuntimeError, match="external-only"):
+        program.rebind({})
+    with pytest.raises(RuntimeError, match="captured by the owning runtime"):
+        program.capture_program_graph()
+    with pytest.raises(RuntimeError, match="external-only"):
+        program.iter_once()
+    with pytest.raises(ValueError, match="missing external-only buffers.*y"):
+        program.run_once_external({"x": np.empty((2, 3), dtype=np.float32)})
+
+    calls = []
+    monkeypatch.setattr(program, "run_once", lambda: calls.append(program._external_active))
+    program.run_once_external(
+        {
+            "x": np.empty((2, 3), dtype=np.float32),
+            "y": np.empty((2, 3), dtype=np.float32),
+        }
+    )
+    assert calls == [True]
+    assert not program._external_active

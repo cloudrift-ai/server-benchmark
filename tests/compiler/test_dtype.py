@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, I16, DataType, F16x2, StructuredType, get
+from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, I16, U8, DataType, F16x2, StructuredType, get
 
 
 def test_scalars_are_not_structured():
@@ -31,13 +31,15 @@ def test_f8_bits_carriers():
         assert get(alias) is dt
 
 
-def test_i16_packed_code_carrier():
-    # int16 carries trellis-coded (EXL3) checkpoint code words bit-identically
-    # through the loader; like i32/i64 it never reaches a kernel.
-    assert I16.np == np.dtype(np.int16)
-    assert I16.nbytes == 2
-    assert get("i16") is I16
-    assert get("int16") is I16
+def test_packed_integer_code_carriers():
+    for dtype, numpy_dtype, canonical, alias, nbytes in (
+        (U8, np.uint8, "u8", "uint8", 1),
+        (I16, np.int16, "i16", "int16", 2),
+    ):
+        assert dtype.np == np.dtype(numpy_dtype)
+        assert dtype.nbytes == nbytes
+        assert get(canonical) is dtype
+        assert get(alias) is dtype
 
 
 def test_structured_keeps_scalar_carrier_info():

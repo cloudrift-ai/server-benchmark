@@ -1,9 +1,9 @@
-"""Lower SliceOp(x, dim, start, end) → IndexMapOp.
+"""Lower SliceOp(x, dim, start, end, step) → IndexMapOp.
 
-dim/start come from ``SliceOp.dim`` / ``SliceOp.start`` (recorded by the
+dim/start/step come from ``SliceOp`` fields (recorded by the
 tracer; pre-field IR dumps fall back to the legacy constant-input convention
 ``inputs = [tensor, dim_const, start_const, end_const]``). After
-decomposition: IndexMapOp.inputs = [tensor]; dim/start are baked into the
+decomposition: IndexMapOp.inputs = [tensor]; dim/start/step are baked into the
 coord_map (orphan constants get cleaned up by the rewriter). The slice end is
 never needed — ``out.shape`` carries the extent, symbolic or static.
 """
@@ -30,6 +30,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_dim: Node | None, inp_sta
     if root.op.dim is not None and root.op.start is not None:
         dim = int(root.op.dim)
         start = int(root.op.start)
+        step = root.op.step
     else:
         if inp_dim is None or inp_start is None:
             raise RuleSkipped("slice carries no dim/start fields and no dim/start constant inputs")
@@ -39,6 +40,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_dim: Node | None, inp_sta
             raise RuleSkipped("slice dim/start ConstantOp has no value")
         dim = int(inp_dim.op.value)
         start = int(inp_start.op.value)
+        step = 1
     norm_dim = dim if dim >= 0 else ndim + dim
     # Python-style negative start counts back from the INPUT extent along the sliced
     # dim — normalize before baking into the coord_map (a raw ``-1`` would reach
@@ -50,10 +52,13 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_dim: Node | None, inp_sta
 
     coord_map = []
     for i in range(ndim):
-        if i == norm_dim and start != 0:
-            coord_map.append(placeholder(i) + offset)
-        else:
-            coord_map.append(placeholder(i))
+        coord = placeholder(i)
+        if i == norm_dim:
+            if step != 1:
+                coord = coord * Literal(step, "int")
+            if start != 0:
+                coord = coord + offset
+        coord_map.append(coord)
 
     frag = open_fragment(graph, [inp_x])
     new_node = single_indexmap(frag, inp_x, out_shape=out_shape, coord_map=coord_map, name=out.name)

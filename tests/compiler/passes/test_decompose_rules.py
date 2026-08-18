@@ -735,6 +735,27 @@ def test_slice_to_indexmap_correctness():
     _assert_close(before, after)
 
 
+def test_slice_nonunit_step_to_indexmap_correctness():
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, 8, 512)), node_id="x")
+    g.add_node(
+        op=SliceOp(shape=(1, 8, 32), dim=2, start=448, step=2),
+        inputs=["x"],
+        output=Tensor("out", (1, 8, 32)),
+        node_id="out",
+    )
+    g.inputs, g.outputs = ["x"], ["out"]
+
+    x = rng.standard_normal((1, 8, 512)).astype(np.float32)
+    before = _run(g, {"x": x})
+    rewritten = _apply(g, "140_slice.py")
+    after = _run(rewritten, {"x": x})
+    _assert_close(before, after)
+    np.testing.assert_array_equal(next(iter(after.values())), x[..., 448::2])
+    (imap,) = [n.op for n in rewritten.nodes.values() if isinstance(n.op, IndexMapOp)]
+    assert imap.sources[0].coord_map[2] == placeholder(2) * Literal(2, "int") + Literal(448, "int")
+
+
 def test_slice_negative_start_normalizes_static():
     """``x[:, -3:]`` (field-form SliceOp, static extent): the Python-negative start must
     normalize against the input extent — a raw ``-3`` baked into the coord_map reaches

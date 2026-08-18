@@ -69,6 +69,11 @@ statement, helper, pass branch, schedule feature, environment gate, comment, or 
 loader and its birth-time speller must emit only generic algebra. `tests/architecture/test_layering.py` scans every
 post-decomposition Python source file for known format names.
 
+The bounded `FixedSinkhornOp` lifting is a generic compound-operation boundary, not a checkpoint specialization. It
+accepts only static FP32 `[M,N,N]` matrices within the operation's declared size/iteration limits and expands each
+matrix to straight-line Loop-IR SSA under the leading `M` loop. From that point on, recognition, scheduling, and
+materialization consume the same ordinary pointwise `LoopOp` path as every other scalar body.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its

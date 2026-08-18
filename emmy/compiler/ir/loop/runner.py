@@ -23,6 +23,7 @@ Module-level state:
 
 from __future__ import annotations
 
+import ctypes
 import logging
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,7 @@ _INTRINSICS_CPP: dict[str, str] = {
 PRELUDE = """\
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 static inline float rsqrtf_(float x) { return 1.0f / sqrtf(x); }
 template <typename To, typename From>
 static inline To emmy_bitcast(From value) {
@@ -74,14 +76,23 @@ static inline To emmy_bitcast(From value) {
 def render_loopop_cpp(loop: LoopOp, fn_name: str, input_shapes: dict[str, tuple[int, ...]], output_shape: tuple[int, ...]) -> str:
     """Emit a complete ``extern "C" void <fn_name>(...)`` definition.
 
-    Inputs become ``const float*`` params in ``loop.inputs`` order; the
-    sole output (first ``loop.outputs`` key) becomes a trailing ``float*`` param.
+    Inputs use their declared storage dtype in ``loop.inputs`` order; the sole
+    output (first ``loop.outputs`` key) uses the Loop reference's float ABI.
     """
     output_name = next(iter(loop.outputs))
     shapes: dict[str, tuple[int, ...]] = {**input_shapes, output_name: output_shape}
-    ctx = RenderCtx(target=LoopRenderTarget(), shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
+    target = LoopRenderTarget()
+    buffer_dtypes = {name: tensor.dtype.name for name, tensor in loop.inputs.items()}
+    buffer_dtypes[output_name] = "f32"
+    ctx = RenderCtx(
+        target=target,
+        shapes=shapes,
+        indent=1,
+        intrinsics=_INTRINSICS_CPP,
+        buffer_dtypes=buffer_dtypes,
+    )
 
-    sig_parts = [f"const float* {n}" for n in loop.inputs]
+    sig_parts = [f"const {target.type_name(loop.inputs[n].dtype.name)}* {n}" for n in loop.inputs]
     sig_parts.append(f"float* {output_name}")
     params_text = ", ".join(sig_parts)
 
@@ -149,11 +160,24 @@ def execute_loop_op_cpp(
 
     output = np.zeros(out_shape, dtype=np.float32)
 
-    # cppyy accepts numpy arrays of matching dtype as ``const float*`` /
-    # ``float*`` parameters via the buffer protocol. Ensure C-contiguous
-    # float32 so the buffer matches the parameter type.
-    coerced = [np.ascontiguousarray(input_arrays[n], dtype=np.float32) for n in bufs]
-    fn(*coerced, output)
+    # cppyy accepts matching numpy buffers for most typed input pointers. Its
+    # std::int64_t/std::uint64_t binding is canonicalized to long long even on
+    # hosts where numpy.int64 uses long, so pass those fixed-width buffers as
+    # explicit ctypes pointers instead of relying on buffer-format spelling.
+    target = LoopRenderTarget()
+    coerced = [
+        np.ascontiguousarray(
+            input_arrays[n],
+            dtype=np.float32 if target.type_name(loop.inputs[n].dtype.name) == "float" else loop.inputs[n].dtype.np,
+        )
+        for n in bufs
+    ]
+    fixed_width_64 = {"i64": ctypes.c_int64, "u64": ctypes.c_uint64}
+    bound = [
+        array.ctypes.data_as(ctypes.POINTER(fixed_width_64[dtype])) if (dtype := loop.inputs[name].dtype.name) in fixed_width_64 else array
+        for name, array in zip(bufs, coerced, strict=True)
+    ]
+    fn(*bound, output)
     return output
 
 

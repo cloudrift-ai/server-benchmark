@@ -215,6 +215,7 @@ def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Select(
         name=rename(s.name),
         branches=tuple(SelectBranch(value=rename(b.value), select=sigma.apply(b.select)) for b in s.branches),
+        dtype=s.dtype,
     )
 
 
@@ -284,7 +285,7 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: Select, ctx: SimplifyCtx) -> Stmt:
-    return Select(name=s.name, branches=tuple(SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches))
+    return Select(name=s.name, branches=tuple(SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches), dtype=s.dtype)
 
 
 @simplify.register

@@ -31,15 +31,10 @@ class _RmsNormModule:
 
 
 def _build_rms_norm_program():
-    import numpy as np
     import torch
 
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.backend.cuda.program import CompiledProgram
-    from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.compiler.backend.plan import plan_from_graph
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.external import build_external_program
 
     examples = (
         torch.zeros((1, 4096), dtype=torch.float16),
@@ -48,16 +43,10 @@ def _build_rms_norm_program():
     graph = trace_module(_RmsNormModule(), examples)
     # The deployment recipe records one realized winner. The compiler still
     # enumerates every legal schedule outside this bounded serving boundary.
-    with pinned_knobs({"WORK": "t256", "REDUCE": "coop"}):
-        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    program, plan = build_external_program(graph, pins={"WORK": "t256", "REDUCE": "coop"})
     if len(plan.launches) != 1:
         raise RuntimeError(f"1Cat RMSNorm expected one Emmy compiler launch, got {len(plan.launches)}")
-    feed = {
-        name: np.zeros(tuple(int(dim.as_static()) for dim in graph.buffer(name).shape), dtype=graph.buffer(name).dtype.np)
-        for name in plan.inputs
-    }
-    with gpu_lock():
-        return CompiledProgram.build_from_plan(plan, feed), plan.inputs, plan.outputs[0]
+    return program, plan.inputs, plan.outputs[0]
 
 
 class _RmsNormAdapter:

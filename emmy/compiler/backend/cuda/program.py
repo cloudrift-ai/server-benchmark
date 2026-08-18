@@ -336,13 +336,18 @@ def _arena_view(arena: BufferArena, buf: _Buffer, shape: tuple[int, ...], src, c
 
 
 def _allocate(
-    compiled: _Compiled, input_data: dict[str, np.ndarray] | None, arena: BufferArena | None = None
+    compiled: _Compiled,
+    input_data: dict[str, np.ndarray] | None,
+    arena: BufferArena | None = None,
+    external_buffers: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
     """Materialize every buffer. ``scratch`` buffers become typed views into one
     liveness-planned persistent slab (dead intervals share memory);
     input/constant/output buffers stay standalone (persistent across the call) —
     unless an ``arena`` is supplied, in which case input/output buffers (and the
     slab) become views into its cross-program backings; constants stay standalone."""
+    import cupy as cp  # noqa: PLC0415
+
     input_data = input_data or {}
     sym_values = _resolve_symbolic(compiled, input_data)
     constants = _resolved_constants(compiled, sym_values)
@@ -354,6 +359,9 @@ def _allocate(
         for buf in compiled.bufs:
             if buf.role == "scratch":
                 continue  # placed into the slab below
+            if buf.name in external_buffers:
+                arrays[buf.name] = cp.empty((1,), dtype=cupy_dtype(buf.dtype))
+                continue
             shape = buf.resolve_shape(sym_values) or (1,)
             if arena is not None and buf.role in ("input", "output"):
                 arrays[buf.name] = _arena_view(arena, buf, shape, input_data.get(buf.name), constants)
@@ -708,6 +716,11 @@ class CompiledProgram:
     # (``None`` → standalone allocation, the non-serving default). ``rebind`` re-takes
     # its views from the same arena so sharing survives symbolic re-sizing.
     arena: BufferArena | None = None
+    # Input/output buffers that exist only as caller-owned bindings. Their
+    # one-element placeholders keep the pointer table complete without
+    # reserving capacity-sized copies inside a serving adapter.
+    external_buffers: frozenset[str] = frozenset()
+    _external_active: bool = field(default=False, repr=False)
     # Per-launch timing events, lazily created on first ``iter_once``
     # and reused across every subsequent call so multi-iter bench loops
     # don't churn the cupy ``Event`` pool (the pre-unification
@@ -759,11 +772,18 @@ class CompiledProgram:
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
+        external_buffers: frozenset[str] = frozenset(),
     ) -> CompiledProgram:
         """Compile ``graph`` and build — ``plan_from_graph`` + :meth:`build_from_plan`; the
         graph is never consulted after the projection (one runtime path whether the plan came
         from a fresh compile or from a stored pack)."""
-        return cls.build_from_plan(plan_from_graph(graph), input_data, compile_timeout_s=compile_timeout_s, arena=arena)
+        return cls.build_from_plan(
+            plan_from_graph(graph),
+            input_data,
+            compile_timeout_s=compile_timeout_s,
+            arena=arena,
+            external_buffers=external_buffers,
+        )
 
     @classmethod
     def build_from_plan(
@@ -773,6 +793,7 @@ class CompiledProgram:
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
+        external_buffers: frozenset[str] = frozenset(),
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
         buffer (the plan's generated constants fill themselves — see
@@ -789,7 +810,15 @@ class CompiledProgram:
         compiled = _load_plan(plan)
         input_data = _with_generated_constants(plan, input_data or {})
         sym_values = _resolve_symbolic(compiled, input_data)
-        arrays, slab_plan = _allocate(compiled, input_data, arena)
+        unknown_external = external_buffers - compiled.buf_by_name.keys()
+        if unknown_external:
+            raise KeyError(f"external buffers are absent from the plan: {sorted(unknown_external)}")
+        invalid_external = {name for name in external_buffers if compiled.buf_by_name[name].role not in ("input", "output")}
+        if invalid_external:
+            raise ValueError(f"external buffers must be inputs or outputs, got {sorted(invalid_external)}")
+        if external_buffers and any(launch.tma_descriptors for launch in compiled.launches):
+            raise ValueError("external-only buffers do not support programs with TMA descriptors")
+        arrays, slab_plan = _allocate(compiled, input_data, arena, external_buffers)
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
@@ -808,7 +837,15 @@ class CompiledProgram:
                 slab_plan.naive_bytes / max(1, slab_plan.total_bytes),
                 len(slab_plan.offsets),
             )
-        return cls(compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena)
+        return cls(
+            compiled=compiled,
+            arrays=arrays,
+            descs=descs,
+            sym_values=sym_values,
+            slab_plan=slab_plan,
+            arena=arena,
+            external_buffers=external_buffers,
+        )
 
     def rebind(self, input_data: dict[str, np.ndarray]) -> None:
         """Re-bind ``input_data`` on an already-built program, re-sizing
@@ -824,6 +861,8 @@ class CompiledProgram:
         re-allocated, TMA descriptors are rebuilt (they embed device pointers
         and shapes) and captured CUDA graphs are dropped (they bake old
         pointers). Caller must hold ``gpu_lock()``."""
+        if self.external_buffers:
+            raise RuntimeError("rebind is unavailable for external-only programs; bind every live buffer at launch")
         new_sym = _resolve_symbolic(self.compiled, input_data)
         realloc = False
         reuse = self.slab_plan is not None
@@ -876,6 +915,8 @@ class CompiledProgram:
         buffer capacity (the caller falls back to ``rebind`` above capacity)."""
         merged = {**self.sym_values, **values}
         for buf in self.compiled.bufs:
+            if buf.name in self.external_buffers:
+                continue
             want = buf.resolve_shape(merged) or (1,)
             if math.prod(want) > self.arrays[buf.name].size:
                 raise ValueError(
@@ -889,6 +930,8 @@ class CompiledProgram:
         record/sync/watchdog — the serving hot path (timing semantics live in
         :meth:`iter_once`). The default stream orders the launches; the
         caller's subsequent ``outputs()`` ``.get()`` synchronizes."""
+        if self.external_buffers and not self._external_active:
+            raise RuntimeError("run_once requires run_once_external bindings for external-only buffers")
         descs = self._descs_now()
         for i, launch in enumerate(self.compiled.launches):
             _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
@@ -911,6 +954,9 @@ class CompiledProgram:
         if any(launch.tma_descriptors for launch in self.compiled.launches):
             raise ValueError("run_once_external does not support programs with TMA descriptors")
 
+        missing_external = self.external_buffers - bindings.keys()
+        if missing_external:
+            raise ValueError(f"run_once_external is missing external-only buffers {sorted(missing_external)}")
         original: dict[str, cp.ndarray] = {}
         for name, external in bindings.items():
             buf = self.compiled.buf_by_name.get(name)
@@ -928,9 +974,11 @@ class CompiledProgram:
             original[name] = self.arrays[name]
 
         self.arrays.update(bindings)
+        self._external_active = True
         try:
             self.run_once()
         finally:
+            self._external_active = False
             self.arrays.update(original)
 
     def _descs_now(self) -> dict[int, dict[str, cp.ndarray]]:
@@ -1023,6 +1071,9 @@ class CompiledProgram:
         Cache hit ⇒ no re-capture. Same error contract as
         :meth:`capture_launch_graphs`: raises :class:`GraphCaptureError` after
         draining any partial capture state."""
+        if self.external_buffers:
+            raise RuntimeError("external-only programs are captured by the owning runtime around run_once_external")
+
         import cupy as cp
 
         key = self._sym_key()
@@ -1162,6 +1213,9 @@ class CompiledProgram:
         window and the timing for a sub-100µs kernel ends up
         contaminated by 0.5-0.8 ms of phantom stream-stall time. The
         watchdog also catches hung kernels independently per launch."""
+        if self.external_buffers and not self._external_active:
+            raise RuntimeError("iter_once requires run_once_external bindings for external-only buffers")
+
         import cupy as cp
 
         n = len(self.compiled.launches)

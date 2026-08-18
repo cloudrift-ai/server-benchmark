@@ -131,7 +131,7 @@ autotuning cache doesn't bust on cosmetic edits.
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
   CPU — fusion correctness can be checked without a GPU.
 
-## Quantized checkpoints (FP8)
+## Quantized checkpoints
 
 A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
 (quantization is a property of the checkpoint, not the architecture). Immediately post-trace,
@@ -164,6 +164,15 @@ mma and the M=1 coop-reduce tiers. Whether the down matmul's cone (the down proj
 SwiGLU activation) inlines or stays materialized is loop fusion's ordinary outcome — a fusion-band decision upstream
 of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
+
+**MXFP4 input weights.** `loader.quant.spell_mxfp4_inputs` applies the same birth-time rule to packed E2M1 weights
+and UE8M0 block scales supplied as program inputs. It accepts static leading dimensions such as the expert axis,
+preserves low-nibble-first checkpoint order, and emits only unsigned integer extraction, bitcasts, index maps, and
+ordinary floating algebra. A routed `GatherOp` can therefore fuse into the consumer contraction and address the
+selected expert's compact bytes directly, without materializing a decoded or gathered weight tensor. Callers may
+supply a previously validated UE8M0 code interval to remove unreachable exceptional-code branches; the default
+preserves the complete storage format, including code 255 as NaN. Block geometry and scale shapes are checked at
+graph birth.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

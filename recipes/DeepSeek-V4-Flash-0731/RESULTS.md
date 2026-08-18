@@ -77,6 +77,37 @@ The maintained recipe remains on the published stock image because the derived i
 requires separate human approval. Raw evidence and the exact scope are in
 [`emmy_rmsnorm_v100_sxm3`](../../experiments/DeepSeek-V4-Flash-0731/emmy_rmsnorm_v100_sxm3/RESULTS.md).
 
+## Exact-boundary compiler follow-up
+
+After rebasing onto `650e196d`, the follow-up expanded the exact runtime-boundary compiler inventory instead of
+treating the fixed-S512 architecture golden as serving coverage. The new traces preserve the deployed FP32 mHC
+parameters, strided Q/KV views, interleaved inverse-RoPE indexing, and compact expert bytes. Every candidate passed its
+component numerical gate on a V100, but none beat the corresponding 1Cat hot path, so the maintained recipe does not
+enable them.
+
+| Exact boundary | Emmy result | Matched 1Cat result | Decision |
+| --- | ---: | ---: | --- |
+| Fused Q/KV RMSNorm, `M=1/2/4/8/128` | 6.82–7.62 µs | 1.65–3.07 µs | Retain compiler coverage; 2.46–4.48× slower |
+| Inverse RoPE, `M=1/2/4/8/128` | 1.67–4.35 µs | 1.50–3.43 µs | Retain compiler coverage; 9–27% slower |
+| C4 compressor projection, `N=2048`, measured `M=1/2/4` | 21.98–40.59 µs | 20.79–29.70 µs | Retain; 5–37% slower |
+| C128 compressor projection, `N=1024`, measured `M=1/4/8` | 12.51–29.27 µs | 11.93–19.61 µs | Retain; 5–49% slower |
+| Full fused mHC transition, `M=1`, mixed per-node schedules | 21.254 µs | 12.831 µs | Retain; 1.66× slower |
+| Routed compact MXFP4 W13/W2, six experts with 48 rows | 333.824 / 236.288 µs | 125.261 / 43.735 µs | Retain; 2.67× / 5.40× slower |
+
+The mHC result uses eight launches. A generic bounded `FixedSinkhornOp` collapses the fixed 20-round 4×4 normalization
+from 39 launches to one, while per-node evidence selects serial work for the short reductions and `t512/coop` for the
+16K and 4K reductions. Applying one global `t512` pin instead takes 107.520 µs, which confirms that schedule evidence
+must remain node-specific. The compact MXFP4 loader spelling consumes the checkpoint's packed E2M1 bytes and UE8M0
+scales directly; format-specific behavior disappears into generic integer, bitcast, gather, and contraction algebra
+at graph birth. The exact checkpoint's 9.26 billion expert scale bytes are all codes 118–126, inside the validated
+FP16-exact 113–142 interval.
+
+This work also fixed three model-agnostic compiler defects exposed by the live boundaries: non-unit Torch slice steps
+were previously dropped, scoped tile paths could not replay a literal axis named `a0`, and typed 64-bit Loop inputs
+used a host ABI spelling that cppyy could not bind on Darwin. These fixes have focused numerical and wire-compatibility
+tests. The follow-up does not claim that stateful HCA/CSA cache mutation, sparse attention, expert routing, TP/PP
+collectives, or the complete model execute in Emmy.
+
 ## Reproduce
 
 ```bash

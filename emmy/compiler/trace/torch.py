@@ -32,7 +32,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, FixedSinkhornOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp
 
 if TYPE_CHECKING:
     import torch
@@ -1038,6 +1038,31 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         _handle_getitem(fx_node, node_map)
         return
 
+    schema = getattr(fx_node.target, "_schema", None)
+    if getattr(schema, "name", None) == "emmy::fixed_sinkhorn":
+        source_ref = node_map.get(getattr(fx_node.args[0], "name", None)) if fx_node.args else None
+        if not isinstance(source_ref, str):
+            raise ValueError("emmy::fixed_sinkhorn input did not resolve to a tensor")
+        raw_eps = fx_node.args[1] if len(fx_node.args) > 1 else fx_node.kwargs.get("eps")
+        raw_iterations = fx_node.args[2] if len(fx_node.args) > 2 else fx_node.kwargs.get("iterations")
+        if not isinstance(raw_eps, float):
+            raise NotImplementedError("emmy::fixed_sinkhorn requires a static float eps")
+        if not isinstance(raw_iterations, int) or isinstance(raw_iterations, bool):
+            raise NotImplementedError("emmy::fixed_sinkhorn requires a static integer iteration count")
+        shape = _get_shape(fx_node, sym_rename)
+        dtype = _get_dtype(fx_node)
+        if dtype != "float32":
+            raise TypeError(f"emmy::fixed_sinkhorn requires float32 output, got {dtype}")
+        op = FixedSinkhornOp(eps=raw_eps, iterations=raw_iterations)
+        op.infer_output_shape([tuple(g.nodes[source_ref].output.shape)])
+        node_map[fx_node.name] = g.add_node(
+            op=op,
+            inputs=[source_ref],
+            output=Tensor(fx_node.name, shape, dtype),
+            node_id=fx_node.name,
+        )
+        return
+
     op_name = _op_name(fx_node.target)
     if op_name == "chunk":
         _handle_chunk(g, fx_node, node_map, sym_rename=sym_rename)
@@ -1778,8 +1803,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # --- Slice ---
     if op_name == "slice":
         if input_ids:
-            # Record dim/start from the raw FX args: ``aten.slice.Tensor(self,
-            # dim, start, end)`` may carry ``start=None`` (``x[:, :s]``) or a
+            # Record dim/start/step from the raw FX args: ``aten.slice.Tensor(self,
+            # dim, start, end, step)`` may carry ``start=None`` (``x[:, :s]``) or a
             # SymInt ``end`` — ``_resolve_inputs`` drops both, leaving the
             # surviving ConstantOp inputs positionally ambiguous. A non-int
             # dim/start (a SymInt slice origin) stays ``None`` so the
@@ -1787,10 +1812,15 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             args = fx_node.args
             dim_raw = args[1] if len(args) > 1 else 0
             start_raw = args[2] if len(args) > 2 else None
+            step_raw = args[4] if len(args) > 4 else (fx_node.kwargs or {}).get("step", 1)
+            if not isinstance(step_raw, int) or isinstance(step_raw, bool):
+                raise NotImplementedError("aten.slice requires a static integer step")
+            if step_raw <= 0:
+                raise ValueError("aten.slice step must be positive")
             dim = dim_raw if isinstance(dim_raw, int) and not isinstance(dim_raw, bool) else None
             start = 0 if start_raw is None else (start_raw if isinstance(start_raw, int) and not isinstance(start_raw, bool) else None)
             nid = g.add_node(
-                op=SliceOp(shape=_dim_tuple_to_op_shape(shape), dim=dim, start=start),
+                op=SliceOp(shape=_dim_tuple_to_op_shape(shape), dim=dim, start=start, step=step_raw),
                 inputs=input_ids,
                 output=Tensor(name, shape, dtype),
                 node_id=name,

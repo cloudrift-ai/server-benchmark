@@ -216,6 +216,15 @@ def test_literal_axis_name_wins_over_an_ordinal_reading() -> None:
     assert resolve(root, "REDUCE@k2").node is root
 
 
+def test_literal_segment_shaped_axis_roundtrips_for_placement() -> None:
+    child = _contraction_fold("a0")
+    sibling = _contraction_fold("a1", acc="acc1", w="W1")
+    root = Fold.projection(body=Body((Assign(name="y", op="add", args=(child.out, sibling.out)),)), operands=(child, sibling))
+    key = spell(root, "PLACE", child)
+    assert key == "PLACE@a0"
+    assert resolve(root, key).node is child
+
+
 # ---- reserved grammar ---------------------------------------------------------------------------- #
 
 

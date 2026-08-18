@@ -125,6 +125,9 @@ remain.
 | Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.                 |
 | Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, normalization/reduction ops — rewrite to elementwise + reduce chains. |
 
+`SliceOp` stores a static positive step. Its decomposition maps the sliced output coordinate to
+`start + output_coordinate * step`; a missing step in a legacy Torch-IR wire record means the unit step.
+
 ## `tensor/ir.py`
 
 Minimal IR fusion consumes. `IndexMapOp` is the unified layout-only op;
@@ -135,6 +138,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
+| `FixedSinkhornOp`                    | Bounded static FP32 Sinkhorn normalization over `[M,N,N]`.     |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
@@ -143,6 +147,11 @@ it replaces the frontend layout ops via `coord_map` expressions.
 `RangeOp`, `CastOp`, and `BitcastOp` are generic value operations, not checkpoint-format operations. Their current
 consumer is static reconstruction algebra, so `032_fold_constant_subgraphs` removes them before Loop lifting. A
 future runtime consumer may add ordinary lifting for the same semantics without changing checkpoint ingestion.
+
+`FixedSinkhornOp` is the explicit tensor boundary for a stable row softmax plus alternating column/row
+normalizations. Its matrix dimensions and iteration count are static and bounded; `loop/lifting` expands one matrix
+into a straight-line scalar SSA body inside the leading `M` loop. Every later stage sees an ordinary `LoopOp`, so
+tile scheduling and CUDA emission require no named operation path.
 
 Op metadata (arity / `commutative` / `associative` / `identity` /
 `has_identity` / `selecting` / `semiring_product`) lives on `ElementwiseImpl` in

@@ -29,6 +29,7 @@ from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
+    FixedSinkhornOp,
     GatherOp,
     IndexMapOp,
     IndexSource,
@@ -84,7 +85,7 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
         ConstantOp(name="parts", source_parts=(("a", (4, 8)), ("b", (4, 8))), source_shape=(8, 8), source_dtype="f16"),
         TransposeOp((0, 1)),
         ReshapeOp((2, -1)),
-        SliceOp((2, 4), dim=1, start=2),
+        SliceOp((2, 4), dim=1, start=2, step=2),
         CatOp(),
         UnsqueezeOp(1),
         LinearOp(has_bias=True),
@@ -98,6 +99,7 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
         CastOp("f16"),
         BitcastOp("u16"),
         ElementwiseOp("silu"),
+        FixedSinkhornOp(eps=2e-6, iterations=4),
         ReduceOp("sum", -1),
         ScanOp("sum", 0),
         GatherOp(axis=1),
@@ -143,6 +145,32 @@ def test_program_round_trip_is_deterministic():
     assert "inputs" not in input_node
     restored = graph_from_wire(json.loads(json.dumps(wire)))
     assert graph_to_wire(restored) == wire
+
+
+def test_fixed_sinkhorn_program_round_trip_is_deterministic():
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("logits", (2, 4, 4), "f32"), node_id="logits")
+    graph.add_node(
+        FixedSinkhornOp(eps=2e-6, iterations=4),
+        ["logits"],
+        Tensor("normalized", (2, 4, 4), "f32"),
+        node_id="normalized",
+    )
+    graph.inputs = ["logits"]
+    graph.outputs = ["normalized"]
+
+    wire = graph_to_wire(graph)
+    assert wire["nodes"][1]["op"] == "tensor.fixed_sinkhorn"
+    assert wire["nodes"][1]["attrs"] == {"eps": 2e-6, "iterations": 4}
+    assert graph_to_wire(graph_from_wire(json.loads(json.dumps(wire)))) == wire
+
+
+def test_legacy_slice_wire_defaults_to_unit_step_without_reencoding_drift():
+    legacy = op_to_wire(SliceOp((2, 4), dim=1, start=2))
+    assert "step" not in legacy["attrs"]
+    restored = op_from_wire(json.loads(json.dumps(legacy)))
+    assert restored.step == 1
+    assert op_to_wire(restored) == legacy
 
 
 def test_program_pool_uses_document_local_indexes_and_deduplicates():

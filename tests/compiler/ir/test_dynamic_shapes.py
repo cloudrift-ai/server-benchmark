@@ -98,6 +98,24 @@ def test_loop_forward_same_kernel_different_seq_lens():
         np.testing.assert_allclose(out, np.exp(x), rtol=1e-5, atol=1e-6)
 
 
+def test_loop_reference_preserves_symbolic_u8_input_dtype():
+    """Symbolic specialization must retain matcher-populated byte I/O."""
+    from emmy.compiler.backend.loop import LoopBackend
+
+    graph = Graph()
+    shape = (Dim("seq_len"), Dim(2))
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("lhs", shape, dt.U8), node_id="lhs")
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("rhs", shape, dt.U8), node_id="rhs")
+    graph.add_node(op=ElementwiseOp("bitwise_and"), inputs=["lhs", "rhs"], output=Tensor("out", shape, dt.U8), node_id="out")
+    graph.inputs, graph.outputs = ["lhs", "rhs"], ["out"]
+
+    lhs = np.array([[1, 2], [4, 10], [7, 12]], dtype=np.uint8)
+    rhs = np.array([[3, 1], [5, 6], [3, 10]], dtype=np.uint8)
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"lhs": lhs, "rhs": rhs})
+    np.testing.assert_array_equal(result.outputs["out"], np.bitwise_and(lhs, rhs))
+
+
 @requires_cuda
 def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
     """M2 validation slice: same symbolic graph compiles to ONE CudaOp

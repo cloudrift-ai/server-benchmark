@@ -6,11 +6,13 @@ from importlib import import_module
 
 import pytest
 
-from emmy.compiler.dtype import U32
+from emmy.compiler.dtype import F32, I32, U32
 from emmy.compiler.graph import Node, Tensor
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expr import Literal, SimplifyCtx, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, RenderCtx, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, RenderCtx, Select, Write
+from emmy.compiler.ir.stmt.leaves import SelectBranch
+from emmy.compiler.ir.stmt.passes import simplify
 
 
 @pytest.mark.parametrize(
@@ -68,3 +70,37 @@ def test_stamp_types_preserves_integer_assign_and_write(op):
     write = next(stmt for stmt in stamped.body if isinstance(stmt, Write))
     assert assign.dtype == U32
     assert write.value_dtype == U32
+
+
+def test_typed_select_is_structural_and_survives_rewrites():
+    branches = (SelectBranch("a", Var("p")), SelectBranch("b", Literal(1, "int")))
+    integer = Select(name="v", branches=branches, dtype=I32)
+    floating = Select(name="v", branches=branches, dtype=F32)
+
+    assert Body((integer,)).structural_key() != Body((floating,)).structural_key()
+    assert integer.rewrite(lambda name: f"{name}_r").dtype == I32
+    assert simplify(integer, SimplifyCtx.empty()).dtype == I32
+
+    ctx = RenderCtx(ssa_dtypes={"a": "i32", "b": "i32"})
+    assert integer.render(ctx) == ["    int v = ((p) ? (((int)(a))) : (((int)(b))));"]
+    assert ctx.ssa_dtypes["v"] == "i32"
+
+
+def test_stamp_types_infers_untyped_select_from_branches():
+    idx = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="a", input="lhs", index=idx),
+            Load(name="b", input="rhs", index=idx),
+            Select(name="selected", branches=(SelectBranch("a", Var("p")), SelectBranch("b", Literal(1, "int")))),
+            Write(output="out", index=idx, value="selected"),
+        )
+    )
+    tensor = Tensor("lhs", (1,), I32)
+    kernel = KernelOp(body=body, name="integer_select", inputs={"lhs": tensor, "rhs": Tensor("rhs", (1,), I32)}, outputs={"out": tensor})
+    root = Node(id="out", op=kernel, inputs=["lhs", "rhs"], outputs=(tensor,))
+
+    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
+    assert stamped is not None
+    select = next(stmt for stmt in stamped.body if isinstance(stmt, Select))
+    assert select.dtype == I32

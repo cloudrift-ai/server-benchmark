@@ -307,6 +307,52 @@ def test_packed_gated_activation_still_fuses_into_contraction():
     _assert_close(before, _run(result, inputs))
 
 
+def test_packed_gated_two_linear_chain_materializes_only_activation():
+    """A W13 → gated activation → W2 chain keeps the narrow activation seam.
+
+    The W2 input layout must merge into W2 before greedy fusion considers its
+    compute producer. Otherwise the layout materializes an ``(M, H, I)``
+    broadcast instead of the intended ``(M, I)`` activation.
+    """
+    m, hidden, inter = 2, 16, 8
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, hidden)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w13", (2 * inter, hidden)), node_id="w13")
+    g.add_node(InputOp(), [], Tensor("w2", (hidden, inter)), node_id="w2")
+    g.add_node(LinearOp(), ["x", "w13"], Tensor("packed", (m, 2 * inter)), node_id="packed")
+    g.add_node(
+        IndexMapOp(out_shape=(m, inter), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1))),)),
+        ["packed"],
+        Tensor("gate", (m, inter)),
+        node_id="gate",
+    )
+    g.add_node(
+        IndexMapOp(
+            out_shape=(m, inter),
+            sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1) + Literal(inter, "int"))),),
+        ),
+        ["packed"],
+        Tensor("up", (m, inter)),
+        node_id="up",
+    )
+    g.add_node(ElementwiseOp("tanh"), ["gate"], Tensor("activated", (m, inter)), node_id="activated")
+    g.add_node(ElementwiseOp("multiply"), ["activated", "up"], Tensor("gated", (m, inter)), node_id="gated")
+    g.add_node(LinearOp(), ["gated", "w2"], Tensor("out", (m, hidden)), node_id="out")
+    g.inputs, g.outputs = ["x", "w13", "w2"], ["out"]
+
+    inputs = {
+        "x": rng.standard_normal((m, hidden)).astype(np.float32),
+        "w13": rng.standard_normal((2 * inter, hidden)).astype(np.float32),
+        "w2": rng.standard_normal((hidden, inter)).astype(np.float32),
+    }
+    before = _run(g, inputs)
+    result = _decompose_and_fuse(g)
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 2
+    assert sorted(tuple(dim.as_static() for dim in node.output.shape) for node in kernels) == [(m, inter), (m, hidden)]
+    _assert_close(before, _run(result, inputs))
+
+
 # ===================================================================
 # Copy elimination: transitive alias chain + port-ref rewriting
 # ===================================================================

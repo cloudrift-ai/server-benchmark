@@ -57,10 +57,6 @@ PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 
-#: A SEGMENT token carrying an ordinal (``a2``) — strict, because :func:`parse_key` only splits one
-#: off when the head is a known segment token. Anything else on the final component is an axis NAME.
-_SEGMENT_ORDINAL_RE = re.compile(r"^([a-z]+)(\d+)$")
-
 #: The same split, LOOSER, for :func:`resolve`'s retry: any prefix plus a trailing number. The two
 #: are deliberately different strictnesses of one question, and the difference IS the rule — a key
 #: is read as a literal axis name FIRST (so an axis genuinely called ``k2`` wins), and only when
@@ -243,7 +239,7 @@ class _Key:
 def parse_key(key: str) -> _Key:
     """Split a knob key into ``(family, path segments, axis, ordinal)``, rejecting the RESERVED
     graph-level placement forms. Non-final components must be exact segment tokens; the final
-    component is read as an axis name unless it is a segment token (an ordinal on the final
+    component is read as an axis name unless it is an exact segment token (an ordinal on the final
     component is split off at match time — see :func:`resolve` — so an axis literally named
     ``k2`` keeps winning over an ordinal reading)."""
     family, at, suffix = key.partition("@")
@@ -266,12 +262,11 @@ def parse_key(key: str) -> _Key:
                 raise ValueError(f"knob key {key!r}: path segment {comp!r} after the axis")
             segments.append(comp)
         elif last:
-            m = _SEGMENT_ORDINAL_RE.match(comp)
-            if m and m.group(1) in _SEGMENT_TOKENS:
-                segments.append(m.group(1))
-                ordinal = int(m.group(2))
-            else:
-                axis = comp
+            # A final component is always tried as a literal axis first.  Resolve may reinterpret
+            # its trailing digits as an ordinal only after that literal spelling names no site.
+            # Eagerly parsing ``a0`` as segment ``a`` plus ordinal zero made the codec unable to
+            # replay its own canonical spelling for a real axis named ``a0``.
+            axis = comp
         else:
             raise ValueError(f"knob key {key!r}: unknown path segment {comp!r} (expect {sorted(_SEGMENT_TOKENS)} or a final axis)")
     return _Key(family=family, segments=tuple(segments), axis=axis, ordinal=ordinal)
@@ -382,7 +377,16 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     if not matches and parsed.axis is not None and parsed.ordinal is None:
         m = _AXIS_ORDINAL_RE.match(parsed.axis)
         if m and m.group(1):
-            retry = _Key(family=parsed.family, segments=parsed.segments, axis=m.group(1), ordinal=int(m.group(2)))
+            head = m.group(1)
+            if head in _SEGMENT_TOKENS:
+                retry = _Key(
+                    family=parsed.family,
+                    segments=(*parsed.segments, head),
+                    axis=None,
+                    ordinal=int(m.group(2)),
+                )
+            else:
+                retry = _Key(family=parsed.family, segments=parsed.segments, axis=head, ordinal=int(m.group(2)))
             matches = _match(retry, fam_sites)
     if not matches:
         raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")

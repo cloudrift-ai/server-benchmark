@@ -972,6 +972,70 @@ def test_trace_split_with_sizes_materializes_static_slices_and_matches_eager():
         np.testing.assert_array_equal(got, expected.numpy())
 
 
+def test_trace_nonunit_slice_matches_numpy_loop_and_cuda_source():
+    """The inverse-RoPE pair split keeps its affine stride through every lowering boundary."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.frontend.ir import SliceOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    class RotaryEvens(nn.Module):
+        def forward(self, x):
+            return x[..., 448::2]
+
+    x = torch.arange(2 * 8 * 512, dtype=torch.float32).reshape(2, 8, 512)
+    graph = trace_module(RotaryEvens(), (x,))
+    (sliced,) = [node for node in graph.nodes.values() if isinstance(node.op, SliceOp)]
+    assert (sliced.op.dim, sliced.op.start, sliced.op.step) == (2, 448, 2)
+
+    input_data = {graph.inputs[0]: x.numpy()}
+    expected = RotaryEvens()(x).numpy()
+    for backend in (NumpyBackend(), LoopBackend()):
+        result, _ = backend.run(backend.compile(graph.copy()), input_data=input_data)
+        np.testing.assert_array_equal(next(iter(result.outputs.values())), expected)
+
+    lowered = Pipeline.build(CUDA_PASSES).run(graph.copy(), ctx=Context.from_target((7, 0)))
+    [source] = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert "* 2" in source and "+ 448" in source
+
+
+@pytest.mark.parametrize(
+    ("step", "error", "message"),
+    [
+        (0, ValueError, "step must be positive"),
+        (-1, ValueError, "step must be positive"),
+        (object(), NotImplementedError, "static integer step"),
+    ],
+)
+def test_trace_slice_rejects_nonpositive_or_nonstatic_step(step, error, message):
+    from types import SimpleNamespace
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.trace.torch import _handle_call_function
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
+    source = SimpleNamespace(name="x_fx")
+    value = SimpleNamespace(shape=(2, 4), dtype="float32")
+    fx_node = SimpleNamespace(
+        target="aten.slice.Tensor",
+        name="slice",
+        args=(source, 1, 0, 8, step),
+        kwargs={},
+        meta={"val": value},
+    )
+    with pytest.raises(error, match=message):
+        _handle_call_function(graph, fx_node, {"x_fx": "x"})
+
+
 def test_trace_unbind_materializes_axis_index_maps_and_matches_eager():
     """Unbind results fix the removed input coordinate to each tuple index."""
     import numpy as np

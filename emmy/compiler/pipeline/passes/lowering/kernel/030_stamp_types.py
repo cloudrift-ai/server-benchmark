@@ -30,7 +30,7 @@ from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Pack, Stmt, Unpack, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Pack, Select, Stmt, Unpack, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -65,6 +65,8 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):
         return _stamp_assign(s, ctx)
+    if isinstance(s, Select):
+        return _stamp_select(s, ctx)
     if isinstance(s, Write):
         return _stamp_write(s, ctx)
     if isinstance(s, Accum):
@@ -130,6 +132,17 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
     return replace(s, dtype=result_dt)
+
+
+def _stamp_select(s: Select, ctx: _StampCtx) -> Select:
+    """Keep a select narrow when every branch carries the same dtype."""
+    if s.dtype is not None:
+        ctx.ssa_dtypes[s.name] = s.dtype
+        return s
+    branch_dtypes = [ctx.ssa_dtypes.get(branch.value) or F32 for branch in s.branches]
+    result_dtype = branch_dtypes[0] if branch_dtypes and all(dtype == branch_dtypes[0] for dtype in branch_dtypes) else F32
+    ctx.ssa_dtypes[s.name] = result_dtype
+    return replace(s, dtype=result_dtype)
 
 
 def _is_overflow_prone(s: Assign) -> bool:

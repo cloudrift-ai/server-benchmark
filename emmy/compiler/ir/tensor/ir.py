@@ -8,6 +8,7 @@ remain in the graph:
 - ``ElementwiseOp`` — scalar function per element (add, mul, exp, silu, ...).
 - ``CastOp`` / ``BitcastOp`` — numeric conversion / same-width bit reinterpretation.
 - ``RangeOp`` — a static one-dimensional integer sequence.
+- ``FixedSinkhornOp`` — bounded static FP32 Sinkhorn normalization.
 - ``ReduceOp`` — collapse one axis via an associative binary op.
 - ``ScanOp`` — cumulative variant of ``ReduceOp``.
 - ``GatherOp`` / ``ScatterOp`` — data-dependent reads/writes along an axis.
@@ -28,7 +29,9 @@ elementwise, reduce, scan, and accumulator use sites; read straight from
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import numpy as np
 
@@ -106,6 +109,60 @@ class BitcastOp(Op):
 # ---------------------------------------------------------------------------
 # Elementwise / reduce / scan
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class FixedSinkhornOp(Op):
+    """Bounded static FP32 Sinkhorn normalization over square matrix batches.
+
+    The operation starts with a stable row softmax plus ``eps``, performs one
+    column normalization, then ``iterations - 1`` row/column pairs. Static
+    bounds keep its Loop-IR lowering finite enough to remain register-resident.
+    """
+
+    MAX_SIZE: ClassVar[int] = 8
+    MAX_ITERATIONS: ClassVar[int] = 32
+
+    eps: float = 1e-6
+    iterations: int = 20
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.eps) or self.eps <= 0:
+            raise ValueError(f"FixedSinkhornOp eps must be finite and positive, got {self.eps}")
+        if not 1 <= self.iterations <= self.MAX_ITERATIONS:
+            raise ValueError(f"FixedSinkhornOp iterations must be in [1,{self.MAX_ITERATIONS}], got {self.iterations}")
+
+    def matrix_size(self, shape: tuple) -> int:
+        if len(shape) != 3:
+            raise ValueError(f"FixedSinkhornOp requires rank-3 [M,N,N] input, got shape {shape}")
+        dims = tuple(to_dim(dim) for dim in shape)
+        if any(not dim.is_static for dim in dims):
+            raise ValueError(f"FixedSinkhornOp requires a static shape, got {shape}")
+        rows, cols = (dim.as_static() for dim in dims[-2:])
+        if rows != cols:
+            raise ValueError(f"FixedSinkhornOp requires square matrices, got {rows}x{cols}")
+        if not 1 <= rows <= self.MAX_SIZE:
+            raise ValueError(f"FixedSinkhornOp matrix size must be in [1,{self.MAX_SIZE}], got {rows}")
+        return rows
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        shape = tuple(input_shapes[0])
+        self.matrix_size(shape)
+        return shape
+
+    def forward(self, *inputs):
+        values = np.asarray(inputs[0])
+        self.matrix_size(values.shape)
+        if values.dtype != np.float32:
+            raise TypeError(f"FixedSinkhornOp requires float32 input, got {values.dtype}")
+        eps = np.float32(self.eps)
+        values = np.exp(values - np.max(values, axis=-1, keepdims=True))
+        values = values / np.sum(values, axis=-1, keepdims=True) + eps
+        values = values / (np.sum(values, axis=-2, keepdims=True) + eps)
+        for _ in range(self.iterations - 1):
+            values = values / (np.sum(values, axis=-1, keepdims=True) + eps)
+            values = values / (np.sum(values, axis=-2, keepdims=True) + eps)
+        return values
 
 
 @dataclass

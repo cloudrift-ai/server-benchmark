@@ -26,6 +26,7 @@ def test_cuda_name_int_dtypes():
     # integer dtype (input_ids / position_ids from HF whole-model traces).
     assert cuda_name(dt.I32) == "int"
     assert cuda_name(dt.I64) == "long long"
+    assert cuda_name(dt.U8) == "unsigned char"
     # Aliases route through the same mapping.
     assert cuda_name("int32") == "int"
     assert cuda_name("int64") == "long long"
@@ -37,6 +38,7 @@ def test_canonical_from_cuda_name_int_dtypes():
     # canonical DataType from a kernel-internal C name.
     assert canonical_from_cuda_name("int") == "i32"
     assert canonical_from_cuda_name("long long") == "i64"
+    assert canonical_from_cuda_name("unsigned char") == "u8"
 
 
 def test_nbytes_of_int_dtypes():
@@ -44,6 +46,7 @@ def test_nbytes_of_int_dtypes():
     # / smem accounting. Must agree with the canonical DataType sizes.
     assert nbytes_of(dt.I32) == 4
     assert nbytes_of(dt.I64) == 8
+    assert nbytes_of("u8") == 1
     assert nbytes_of("i32") == 4
     assert nbytes_of("i64") == 8
 

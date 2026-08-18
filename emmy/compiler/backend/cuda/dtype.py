@@ -27,10 +27,11 @@ _CUDA_NAME: dict[DataType, str] = {
     _dtype.F8E4M3: "__nv_fp8_e4m3",
     _dtype.F8E5M2: "__nv_fp8_e5m2",
     _dtype.F16x2: "__half2",
-    # Raw int16 checkpoint carriers are represented directly in generic tensor algebra.
+    # Raw packed checkpoint carriers are represented directly in generic tensor algebra.
     _dtype.I16: "short",
     _dtype.I32: "int",
     _dtype.I64: "long long",
+    _dtype.U8: "unsigned char",
     _dtype.U16: "unsigned short",
     _dtype.U32: "unsigned int",
     _dtype.U64: "unsigned long long",
@@ -89,6 +90,7 @@ _C_NAME_BYTES: dict[str, int] = {
     "i32": 4,
     "i64": 8,
     "f64": 8,
+    "unsigned char": 1,
     "unsigned short": 2,
     "unsigned int": 4,
     "unsigned long long": 8,

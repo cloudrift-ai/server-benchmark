@@ -33,7 +33,7 @@ Free-function companions (used by passes that work on raw
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -213,7 +213,10 @@ class LoopOp(BodyOp):
         bufs = tuple(self.inputs)
         if len(inputs) != len(bufs):
             raise ValueError(f"LoopOp.forward: expected {len(bufs)} inputs (matching input_bufs={list(bufs)}), got {len(inputs)}")
-        input_arrays = {name: np.asarray(x, dtype=np.float32) for name, x in zip(bufs, inputs, strict=True)}
+        # Preserve numeric floating inputs here. The Loop runner owns the one
+        # target-ABI coercion; eagerly casting BF16 to its numpy uint16 carrier
+        # would reinterpret values as integers before the float reference runs.
+        input_arrays = {name: np.asarray(x) for name, x in zip(bufs, inputs, strict=True)}
         loop = _specialize_symbolic_axes(self, input_arrays)
         out_shape = loop._infer_write_shape()
         return execute_loop_op_cpp(loop, input_arrays, out_shape)
@@ -232,19 +235,22 @@ class LoopOp(BodyOp):
         if not writes:
             reduce_names = self.reduce_axis_names
             return tuple(a.extent for a in self.axes if a.name not in reduce_names)
-        w = writes[0]
+        primary_output = writes[0].output
+        primary_writes = [write for write in writes if write.output == primary_output]
+        rank = len(primary_writes[0].index)
+        if any(len(write.index) != rank for write in primary_writes):
+            raise ValueError(f"LoopOp output {primary_output!r} has writes with inconsistent index ranks")
         env: dict[str, object] = {}
         for i, a in enumerate(self.axes):
             shape = [1] * len(self.axes)
             shape[i] = a.extent.as_static()
             env[a.name] = np.arange(a.extent.as_static()).reshape(shape)
-        dims: list[int] = []
-        for e in w.index:
-            vals = e.eval(env)
-            if isinstance(vals, np.ndarray):
-                dims.append(int(vals.max()) + 1)
-            else:
-                dims.append(int(vals) + 1)
+        dims = [0] * rank
+        for write in primary_writes:
+            for index, expr in enumerate(write.index):
+                values = expr.eval(env)
+                extent = int(values.max()) + 1 if isinstance(values, np.ndarray) else int(values) + 1
+                dims[index] = max(dims[index], extent)
         return tuple(dims)
 
 
@@ -301,7 +307,9 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
             new.append(s)
         return Body(tuple(new))
 
-    return LoopOp(body=_sub_body(loop.body))
+    # Keep matcher-populated typed I/O and metadata. Reconstructing a bare
+    # LoopOp here would reseed every symbolic input as a placeholder f32.
+    return replace(loop, body=_sub_body(loop.body))
 
 
 # ---------------------------------------------------------------------------

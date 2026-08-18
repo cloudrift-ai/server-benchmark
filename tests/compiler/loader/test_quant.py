@@ -13,9 +13,12 @@ from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
     decode_f8,
+    decode_mxfp4,
+    decode_ue8m0,
     dequantize,
     dequantize_awq4,
     spell_dynamic_fp8_activations,
+    spell_mxfp4_inputs,
     spell_quantized_constants,
     spell_quantized_inputs,
     unpack_awq4,
@@ -698,6 +701,201 @@ def test_spell_inputs_rejects_bad_specs():
     spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")})
     with pytest.raises(ValueError, match="already carries the f8 storage dtype"):
         spell_quantized_inputs(g, {"w": ("f8e4m3", (1, 16), "f32")})
+
+
+# ===================================================================
+# Input-sourced packed E2M1 experts
+# ===================================================================
+
+
+def test_decode_mxfp4_all_codes_and_nibble_order():
+    packed = np.array([[0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE]], dtype=np.uint8)
+    got = decode_mxfp4(packed)
+    expected = np.array(
+        [[0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_decode_ue8m0_values_and_nan():
+    got = decode_ue8m0(np.array([0, 125, 126, 127, 128, 129, 255], dtype=np.uint8))
+    np.testing.assert_array_equal(got[:-1], np.array([2.0**-127, 0.25, 0.5, 1.0, 2.0, 4.0], dtype=np.float32))
+    assert np.isnan(got[-1])
+
+
+def _mxfp4_linear_graph(m=2, n=4, k=32, dtype="f16"):
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), dtype), node_id="x")
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("w", (n, k), dtype), node_id="w")
+    graph.add_node(op=LinearOp(has_bias=False), inputs=["x", "w"], output=Tensor("y", (m, n), dtype), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    return graph
+
+
+def _mxfp4_routed_graph(rows=4, experts=3, n=16, k=32, dtype="f16"):
+    from emmy.compiler.trace.torch import trace_module
+
+    torch_dtype = {"f16": torch.float16, "f32": torch.float32}[dtype]
+
+    class RoutedLinear(torch.nn.Module):
+        def forward(self, x, weight, expert_ids):
+            selected = weight[expert_ids]
+            return torch.bmm(x.unsqueeze(1), selected.transpose(1, 2)).squeeze(1)
+
+    return trace_module(
+        RoutedLinear(),
+        (
+            torch.zeros((rows, k), dtype=torch_dtype),
+            torch.zeros((experts, n, k), dtype=torch_dtype),
+            torch.zeros((rows,), dtype=torch.int64),
+        ),
+    )
+
+
+def test_spell_mxfp4_inputs_keeps_compact_carriers_and_matches_values():
+    graph = _mxfp4_linear_graph()
+    packed = rng.integers(0, 256, (4, 16), dtype=np.uint8)
+    scale_bits = np.array([[127], [128], [126], [129]], dtype=np.uint8)
+    x = rng.standard_normal((2, 32)).astype(np.float16)
+
+    mapping = spell_mxfp4_inputs(graph, {"w": ((4, 16), (4, 1))})
+    graph.validate()
+    assert mapping == {"w": "w_scale"}
+    assert graph.inputs == ["x", "w", "w_scale"]
+    assert graph.nodes["w"].output.dtype.name == "u8"
+    assert graph.nodes["w_scale"].output.dtype.name == "u8"
+    assert tuple(dim.as_static() for dim in graph.nodes["w"].output.shape) == (4, 16)
+
+    got = _run_numpy(graph, {"x": x, "w": packed, "w_scale": scale_bits})
+    weight = decode_mxfp4(packed) * decode_ue8m0(scale_bits)
+    expected = x.astype(np.float32) @ weight.astype(np.float32).T
+    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-3)
+
+
+def test_spell_mxfp4_inputs_preserves_expert_axis_and_fuses_routed_gather():
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    graph = _mxfp4_routed_graph()
+    packed = rng.integers(0, 256, (3, 16, 16), dtype=np.uint8)
+    scale_bits = rng.integers(118, 127, (3, 16, 1), dtype=np.uint8)
+    x = rng.standard_normal((4, 32)).astype(np.float16)
+    expert_ids = np.array([2, 0, 2, 1], dtype=np.int64)
+    spell_mxfp4_inputs(graph, {"weight": ((3, 16, 16), (3, 16, 1))}, validated_ue8m0_range=(113, 142))
+
+    graph.validate()
+    assert tuple(dim.as_static() for dim in graph.nodes["weight"].output.shape) == (3, 16, 16)
+    got = _run_numpy(graph, {"x": x, "weight": packed, "expert_ids": expert_ids, "weight_scale": scale_bits})
+    decoded = decode_mxfp4(packed) * np.repeat(decode_ue8m0(scale_bits), 32, axis=-1)
+    expected = np.einsum("rk,rnk->rn", x.astype(np.float32), decoded[expert_ids])
+    np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-3)
+
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 1
+    assert tuple(dim.as_static() for dim in loops[0].output.shape) == (4, 16)
+
+
+def test_spell_mxfp4_inputs_preserves_ue8m0_nan_code():
+    graph = _mxfp4_linear_graph(m=1, n=1, k=32)
+    spell_mxfp4_inputs(graph, {"w": ((1, 16), (1, 1))})
+    got = _run_numpy(
+        graph,
+        {
+            "x": np.ones((1, 32), dtype=np.float16),
+            "w": np.full((1, 16), 0x11, dtype=np.uint8),
+            "w_scale": np.full((1, 1), 255, dtype=np.uint8),
+        },
+    )
+    assert np.isnan(got).all()
+
+
+def test_spell_mxfp4_inputs_preserves_ue8m0_zero_code():
+    graph = _mxfp4_linear_graph(m=1, n=1, k=32, dtype="f32")
+    spell_mxfp4_inputs(graph, {"w": ((1, 16), (1, 1))})
+    got = _run_numpy(
+        graph,
+        {
+            "x": np.ones((1, 32), dtype=np.float32),
+            "w": np.full((1, 16), 0x22, dtype=np.uint8),
+            "w_scale": np.zeros((1, 1), dtype=np.uint8),
+        },
+    )
+    np.testing.assert_array_equal(got, np.array([[32 * 2.0**-127]], dtype=np.float32))
+
+
+def test_spell_mxfp4_validated_scale_range_omits_impossible_special_codes():
+    default = _mxfp4_linear_graph()
+    optimized = _mxfp4_linear_graph()
+    spell_mxfp4_inputs(default, {"w": ((4, 16), (4, 1))})
+    spell_mxfp4_inputs(
+        optimized,
+        {"w": ((4, 16), (4, 1))},
+        validated_ue8m0_range=(113, 142),
+    )
+    default_ops = [node.op.op.name for node in default.nodes.values() if isinstance(node.op, ElementwiseOp)]
+    optimized_ops = [node.op.op.name for node in optimized.nodes.values() if isinstance(node.op, ElementwiseOp)]
+    assert default_ops.count("equal") == 2
+    assert default_ops.count("where") == optimized_ops.count("where") + 2
+    assert "equal" not in optimized_ops
+
+    feed = {
+        "x": rng.standard_normal((2, 32)).astype(np.float16),
+        "w": rng.integers(0, 256, (4, 16), dtype=np.uint8),
+        "w_scale": rng.integers(118, 127, (4, 1), dtype=np.uint8),
+    }
+    np.testing.assert_array_equal(_run_numpy(optimized, feed), _run_numpy(default, feed))
+
+
+def test_spell_mxfp4_inputs_executes_through_loop_reference():
+    from emmy.compiler.backend.loop.backend import LoopBackend
+
+    graph = _mxfp4_linear_graph(m=1, n=4, k=32)
+    spell_mxfp4_inputs(graph, {"w": ((4, 16), (4, 1))})
+    feed = {
+        "x": rng.standard_normal((1, 32)).astype(np.float16),
+        "w": rng.integers(0, 256, (4, 16), dtype=np.uint8),
+        "w_scale": rng.integers(124, 131, (4, 1), dtype=np.uint8),
+    }
+    expected = _run_numpy(graph, feed)
+    result, _ = LoopBackend().run(LoopBackend().compile(graph), input_data=feed)
+    actual = result.outputs[graph.outputs[0]]
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_spell_mxfp4_inputs_rejects_bad_geometry():
+    with pytest.raises(ValueError, match="does not reproduce"):
+        spell_mxfp4_inputs(_mxfp4_linear_graph(), {"w": ((4, 15), (4, 1))})
+    with pytest.raises(ValueError, match="does not reproduce"):
+        spell_mxfp4_inputs(_mxfp4_linear_graph(), {"w": ((4, 16), (4,))})
+    with pytest.raises(ValueError, match="does not reproduce"):
+        spell_mxfp4_inputs(_mxfp4_linear_graph(k=64), {"w": ((4, 32), (4, 1))})
+    with pytest.raises(ValueError, match="minimum <= maximum"):
+        spell_mxfp4_inputs(_mxfp4_linear_graph(), {"w": ((4, 16), (4, 1))}, validated_ue8m0_range=(142, 113))
+
+
+@requires_cuda
+def test_spell_mxfp4_linear_cuda_keeps_one_fused_kernel():
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda import CudaOp
+
+    graph = _mxfp4_linear_graph(m=1, n=64, k=64)
+    packed = rng.integers(0, 256, (64, 32), dtype=np.uint8)
+    scale_bits = rng.integers(122, 132, (64, 2), dtype=np.uint8)
+    x = rng.standard_normal((1, 64)).astype(np.float16)
+    spell_mxfp4_inputs(graph, {"w": ((64, 32), (64, 2))})
+
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    kernels = [node for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(kernels) == 1
+    result, _ = backend.run(compiled, input_data={"x": x, "w": packed, "w_scale": scale_bits})
+    got = result.outputs[compiled.outputs[0]]
+
+    weight = (decode_mxfp4(packed) * decode_ue8m0(scale_bits).repeat(32, axis=1)).astype(np.float16)
+    expected = (x.astype(np.float32) @ weight.astype(np.float32).T).astype(np.float16)
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-2)
 
 
 # ===================================================================

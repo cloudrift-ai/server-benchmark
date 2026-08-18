@@ -39,6 +39,11 @@ fail closed.
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
 
+The compiler-owned `emmy::fixed_sinkhorn` custom-op schema is a deliberate stable trace boundary for bounded static
+FP32 `[M,N,N]` normalization. The walker matches the registered schema name—not an FX node name—and records a
+`FixedSinkhornOp` with its literal epsilon and iteration count. Unsupported dtype, rank, dynamic matrix extent, square
+shape, size, or iteration count fails during capture instead of expanding into a long chain of reductions.
+
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
 `operator.getitem` resolves an integer tuple index to the matching slice, so no multi-output Graph IR is introduced.
@@ -198,10 +203,11 @@ write through a view of a returned tensor. An unsupported operation on an observ
 loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
 `copy_` and `fill_` handle the bounded local view forms above and separately reject aliases that cannot be versioned.
 
-`SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
+`SliceOp` nodes record `dim`/`start`/`step` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —
 `_resolve_inputs` drops both, leaving the surviving constants positionally ambiguous. Pre-field IR dumps still
-decompose via the constant-input fallback.
+decompose via the constant-input fallback, where an absent step means `1`. A traced step must be a positive static
+integer; decomposition preserves a non-unit step as an affine output-to-input coordinate map.
 
 ### `dit.py` — fixed DiT block adapter
 
@@ -236,7 +242,7 @@ shared with CausalLM traces.
 
 ## Rule
 
-Frontend capture is **upstream of decomposition** — `trace/` emits
-`ir/frontend/` ops only, never primitives. Decomposition rules
-(`pipeline/passes/frontend/decomposition/`) rewrite frontend ops into tensor-IR
-primitives; `trace/` is unaware of that rewrite.
+Frontend capture is **upstream of decomposition** for compound ATen operations: decomposition rules
+(`pipeline/passes/frontend/decomposition/`) rewrite those frontend ops into Tensor IR. Operators that already name a
+compiler-owned tensor boundary, including `emmy::fixed_sinkhorn`, may be captured directly as that Tensor-IR op; the
+schema is the explicit contract and the walker does not rediscover it from an expanded ATen pattern.

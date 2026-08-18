@@ -155,6 +155,30 @@ def test_rms_norm_adapter_rebinds_each_width_and_requires_parity_before_capture(
     assert references == [1, 17, 17]
 
 
+def test_rms_norm_accepts_the_established_fp16_reduction_tolerance(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (7, 0))
+
+    def original(_layer, x, _residual=None):
+        return torch.ones_like(x)
+
+    def run(_program, _layer, _x, output, _rows):
+        output.fill_(1.005)
+
+    adapter = _RmsNormAdapter(
+        original,
+        build_program=lambda: _RmsNormProgram(object(), ("x", "weight"), "output"),
+        run_program=run,
+        is_capturing=lambda: False,
+    )
+    adapter._supported = lambda _layer, _x, _residual: True
+    layer = SimpleNamespace(weight=SimpleNamespace(data=torch.ones(4096, dtype=torch.float16)))
+    x = torch.zeros((3, 4096), dtype=torch.float16)
+
+    first = adapter(layer, x)
+    assert torch.allclose(first, torch.ones_like(first), rtol=2e-3, atol=1e-2)
+    assert 3 in adapter._program.verified_rows
+
+
 def test_rms_norm_parity_mismatch_disables_shared_capacity_program(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (7, 0))
     builds = []

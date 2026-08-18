@@ -27,10 +27,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `emmy` CLI).
 - `onecat.py` — guarded 1Cat final-RMSNorm adapter. With `EMMY_ONECAT_RMS_NORM=1`, one bounded symbolic-capacity
   SM70 program covers every DeepSeek serving width from 1 through 4096 rows and launches directly over 1Cat-owned
-  device buffers through `CompiledProgram.run_once_external`. First-use bitwise parity and CUDA-graph eligibility are
-  tracked per concrete width. The exact live shape/dtype/platform contract is checked before dispatch; a build or
-  launch failure, unsupported call, capture-time cold or unverified call, or parity failure uses the original vLLM
-  kernel. This narrow opt-in leaves the rest of the model in 1Cat and is distinct from the broad DeepSeek adapter.
+  device buffers through `CompiledProgram.run_once_external`. First-use FP16 numerical parity and CUDA-graph
+  eligibility are tracked per concrete width. The exact live shape/dtype/platform contract is checked before dispatch;
+  a build or launch failure, unsupported call, capture-time cold or unverified call, or parity failure uses the
+  original vLLM kernel. This narrow opt-in leaves the rest of the model in 1Cat and is distinct from the broad
+  DeepSeek adapter.
 - `onecat_deepseek.py`, `onecat_fp8_linear.py`, `onecat_linear.py`, `onecat_mhc.py`, `onecat_output.py`,
   `onecat_vocab.py`, `onecat_indexer.py`, and `onecat_experts.py` — the broader opt-in
   `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve 1Cat's scheduler, TP/PP collectives, and stateful paged

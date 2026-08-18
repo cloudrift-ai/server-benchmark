@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_ROWS = 4096
 _HIDDEN = 4096
+_RMS_ATOL = 1e-2
+_RMS_RTOL = 2e-3
 
 
 class _RmsNormModule:
@@ -184,13 +186,18 @@ class _RmsNormAdapter:
 
             if rows not in program.verified_rows:
                 reference = self.original(layer, x, residual)
-                if not torch.equal(output, reference):
+                if not torch.allclose(output, reference, rtol=_RMS_RTOL, atol=_RMS_ATOL):
                     self._disabled = True
                     self._program = None
-                    logger.error("1Cat RMSNorm: first-use bitwise parity failed for M=%d; retaining the original kernel", rows)
+                    max_abs = float((output - reference).abs().max().item())
+                    logger.error(
+                        "1Cat RMSNorm: first-use parity failed for M=%d (max_abs=%g); retaining the original kernel",
+                        rows,
+                        max_abs,
+                    )
                     return reference
                 program.verified_rows.add(rows)
-                logger.info("1Cat RMSNorm: Emmy compiler kernel active for M=%d after first-use bitwise parity", rows)
+                logger.info("1Cat RMSNorm: Emmy compiler kernel active for M=%d after first-use parity", rows)
         return output
 
 

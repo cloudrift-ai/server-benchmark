@@ -132,6 +132,10 @@ matrices:
   benchmark.max_concurrency: [1, 2, 4, 8, 16, 32, 64, 128]
 ```
 
+`matrices` may also be a **list of entries**, each an implicit `zip`, whose expansions are concatenated. Experiment
+records store their expanded matrix that way, and a recipe uses the same form when one sweep needs several
+differently shaped groups of rows — for example a lane that runs ten operators beside a lane that runs five.
+
 Rules:
 - **`cross` node**: scalars broadcast, lists are independent cross-product axes, nested `zip` dicts are one compound axis
 - **`zip` node**: scalars broadcast, lists are zipped element-wise (must all be the same length), nested `cross` dicts are one zip axis

@@ -8,6 +8,7 @@ An experiment answers a comparison or qualification question. It uses the recipe
 ```text
 experiments/<model>/<workload_or_question>/
   recipe.yaml
+  golden/                                   # optional committed working goldens the recipe replays
   <YYYY-MM-DD_HH-MM-SS>/                    # temporary ignored raw output
   results_<gpu-short>x<gpu-count>.tar.gz    # one Git LFS archive per exact platform, including row records
   RESULTS.md                                # one interpretation across all platforms
@@ -17,6 +18,19 @@ Use the model's established repository slug and a short `snake_case` experiment 
 `emmy.hardware.gpu_short_name`; `results_rtx4090x1.tar.gz` is the archive for one RTX 4090. Keep one protocol in one
 recipe when platforms differ only by hardware allocation or a small control; use a zipped matrix rather than copied
 command bodies. Split directories only when the workload or raw evidence set differs.
+
+## Search state as a lane input
+
+An experiment that compares tuned Emmy against another system separates the search from the measurement: one matrix
+lane traces and tunes, and its working golden files are committed under `golden/` as an input the comparison lane
+replays. Keeping the search in its own lane makes the comparison cheap to repeat after a compiler change and keeps
+the tune result reviewable in Git. The committed files remain search state, so the comparison lane re-measures every
+schedule they pin and its own records stay the experiment's evidence; the goldens are per-card and are retuned when
+the platform changes.
+
+Give each lane and each measured operator (or other workload split) its own matrix parameter so `--filter` can
+re-measure one slice. Command rows for one GPU share a single execution group and therefore a single VM, so splitting
+a long sweep into rows costs staging, not hardware.
 
 ## Last-run artifacts
 

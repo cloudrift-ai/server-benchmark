@@ -2,6 +2,40 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from contextlib import contextmanager
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_PACK_PROGRAM = "external"
+
+
+def _external_pack_key(graph, pins: dict[str, str] | None, tune_db: str | None, symbolic_values: dict[str, int] | None) -> dict:
+    """Return the complete persistent identity of one external program."""
+    return {
+        "model": "external-program",
+        "graph": graph.to_dict(),
+        "pins": dict(sorted((pins or {}).items())),
+        "tune_db": None if tune_db is None else str(tune_db),
+        "symbolic_values": dict(sorted((symbolic_values or {}).items())),
+    }
+
+
+@contextmanager
+def _pack_lock(path: Path):
+    """Serialize a first pack build across serving worker processes."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 
 def _override_symbolic_hints(plan, values: dict[str, int] | None):
     if not values:
@@ -22,6 +56,41 @@ def _override_symbolic_hints(plan, values: dict[str, int] | None):
     return replace(plan, symbolic_hints=hints)
 
 
+def _resolve_external_plan(graph, pins, tune_db, symbolic_values, compile_plan):
+    """Load one external plan pack or serialize its first process-wide build."""
+    from emmy import config
+    from emmy.compiler.backend.pack import load_pack, pack_path, save_pack
+
+    pack_root = config.pack_dir()
+    if pack_root is None:
+        return compile_plan()
+
+    key = _external_pack_key(graph, pins, tune_db, symbolic_values)
+    # Fail before touching the filesystem if a new graph field is not part of
+    # the stable JSON wire form expected by the pack manifest.
+    json.dumps(key, sort_keys=True)
+    pack_at = pack_path(pack_root, key)
+    loaded = load_pack(pack_at, key=key)
+    plan = loaded.get(_PACK_PROGRAM) if loaded is not None else None
+    if plan is not None:
+        return plan
+
+    lock_at = pack_at.with_name(f"{pack_at.name}.lock")
+    with _pack_lock(lock_at):
+        # Another TP/PP worker may have completed the same program while this
+        # process waited. Only the first worker performs graph passes.
+        loaded = load_pack(pack_at, key=key)
+        plan = loaded.get(_PACK_PROGRAM) if loaded is not None else None
+        if plan is not None:
+            return plan
+        plan = compile_plan()
+        try:
+            save_pack(pack_at, {_PACK_PROGRAM: plan}, key=key, provenance={"kind": "external-program"})
+        except Exception:  # noqa: BLE001 -- a pack miss must not disable a correct live program
+            logger.warning("external program pack save failed at %s; continuing with the compiled plan", pack_at, exc_info=True)
+        return plan
+
+
 def build_external_program(
     graph,
     *,
@@ -29,16 +98,20 @@ def build_external_program(
     tune_db: str | None = "auto",
     symbolic_values: dict[str, int] | None = None,
 ):
-    """Compile a graph with no private copies of its live boundary buffers."""
+    """Compile or load a graph with no private copies of its live boundary buffers."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with pinned_knobs(pins or {}):
-        plan = plan_from_graph(CudaBackend(tune_db=tune_db).compile(graph))
-    plan = _override_symbolic_hints(plan, symbolic_values)
+    def compile_plan():
+        with pinned_knobs(pins or {}):
+            compiled = plan_from_graph(CudaBackend(tune_db=tune_db).compile(graph))
+        return _override_symbolic_hints(compiled, symbolic_values)
+
+    plan = _resolve_external_plan(graph, pins, tune_db, symbolic_values, compile_plan)
+
     external = frozenset((*plan.inputs, *plan.outputs))
     with gpu_lock():
         return CompiledProgram.build_from_plan(plan, external_buffers=external), plan

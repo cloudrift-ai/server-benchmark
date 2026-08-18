@@ -31,11 +31,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   dispatch; a build failure, unsupported call, capture-time cold call, or failed first-use numerical comparison uses
   the original vLLM kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache
   state, routing, and MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
-- `onecat_deepseek.py`, `onecat_linear.py`, and `onecat_mhc.py` — the broader opt-in
+- `onecat_deepseek.py`, `onecat_linear.py`, `onecat_mhc.py`, and `onecat_output.py` — the broader opt-in
   `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve 1Cat's scheduler, TP/PP collectives, and stateful paged
   sparse-attention/cache ownership. Exact guarded compiler programs cover the qualified dense-attention widths, the
-  five batch-one unquantized projection profiles, and all five mHC boundaries; unsupported widths and cold or
-  unverified CUDA-graph calls retain the original 1Cat functions.
+  five unquantized projection profiles through 4096 token rows, all five mHC boundaries, TP-local vocabulary
+  embedding and full logits, and the shared-expert clamp-SwiGLU activation. 1Cat retains vocabulary masking and
+  reduction, compact top-1 logits, packed-weight linear operations, and shared/routed output combination. Unsupported
+  widths and cold or unverified CUDA-graph calls retain the original 1Cat functions.
 - `mhc.py` — exact FP32 multi-stream residual algebra used by the DeepSeek V4 serving adapter traces. Its
   `fixed_sinkhorn` helper is a lazy torch custom-op boundary for static `[M,N,N]` matrices (`N <= 8`, at most 32
   iterations): eager execution retains the original stable softmax-plus-epsilon order, while Emmy lowers the boundary
@@ -51,7 +53,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   boundary. MXFP4 is dissolved at graph birth, leaving generic integer, scale, gather, and contraction graphs.
 - `external.py` — builds programs whose complete input/output boundary is caller-owned. Capacity-sized private
   copies are omitted, and the owner must supply every external pointer for each launch. A symbolic capacity override
-  sizes only internal scratch at build time; the owner still binds exact runtime shapes before each launch.
+  sizes only internal scratch at build time; the owner still binds exact runtime shapes before each launch. When
+  `EMMY_PACK_DIR` is set, the exact graph, pins, tune source, and symbolic capacity key an execution-plan pack. A file
+  lock serializes a first build across TP/PP worker processes; waiters recheck and load the completed pack instead of
+  repeating graph passes and fork resolution. Pack damage or a save failure retains the ordinary compile path.
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

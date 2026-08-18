@@ -192,7 +192,7 @@ def test_resolve_warp_stage_declines_packed_pair_b():
 
     node, tile = _warp_contraction()
     inputs = {"x": Tensor("x", (512, 4096), F16), "w_bits": Tensor("w_bits", (4096, 2048), F4E2M1x2)}
-    for spec in ("d2/cp", "d2/tma"):
+    for spec in ("d2/smem-async", "d2/smem-tma"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None
 
 

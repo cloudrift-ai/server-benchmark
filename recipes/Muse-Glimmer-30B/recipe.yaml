@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Strong Reddit engagement from Meta release; open-weight 30B multimodal signal"
-  heat: 20
+  rationale: "370 Reddit upvotes; open-weight multimodal release from Meta"
+  heat: 70
   task: generate
 matrices:
   - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

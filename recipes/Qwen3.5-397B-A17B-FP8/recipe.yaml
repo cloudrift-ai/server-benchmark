@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "FP8 on consumer-grade GPUs; useful coverage despite older architecture"
-  heat: 45
+  rationale: "FP8 consumer-GPU niche; older architecture with no current signals"
+  heat: 20
 engine:
   llm:
     pipeline_parallel_size: 1

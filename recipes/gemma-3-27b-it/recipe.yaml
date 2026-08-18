@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: google/gemma-3-27b-it
+  rationale: Gemma 3 MoE on OpenRouter; strong mid-range serving signal
+  heat: 70
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

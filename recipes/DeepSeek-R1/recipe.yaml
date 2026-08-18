@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: deepseek-ai/DeepSeek-R1
+  rationale: '#1 arena model; 13.5K HF likes; massive open-weights impact'
+  heat: 90
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8

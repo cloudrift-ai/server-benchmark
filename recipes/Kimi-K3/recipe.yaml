@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Record 2.8T MoE; viral Reddit; 10800 HF likes; strong Arena agent rank"
-  heat: 95
+  rationale: "647 upvotes; record 2.8T MoE; 10.8K HF likes; breakout"
+  heat: 92
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

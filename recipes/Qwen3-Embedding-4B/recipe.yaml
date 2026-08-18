@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Embedding model with expected low consumer demand signals"
-  heat: 20
+  rationale: "Embedding model with minimal consumer demand signals"
+  heat: 15
   task: embed
 
 engine:

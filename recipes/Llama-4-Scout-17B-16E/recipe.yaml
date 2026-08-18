@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: meta-llama/Llama-4-Scout-17B-16E
+  rationale: Llama 4 family; 416 upvotes; gated but strong OR and Meta release signal
+  heat: 80
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 1

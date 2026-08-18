@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "High HF downloads for open-weights but no OR or Arena presence"
-  heat: 75
+  rationale: "4.6M HF downloads; no OR or Arena signal but download strength"
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

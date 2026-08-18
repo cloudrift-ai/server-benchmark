@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Embedding task natural low mindshare without general-purpose model traffic"
+  rationale: "Specialized embedding task with naturally low mindshare"
   heat: 15
   task: embed
 

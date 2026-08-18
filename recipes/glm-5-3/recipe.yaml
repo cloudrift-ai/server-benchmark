@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: 743B params via post-training; strong Reddit signal; Zhipu momentum; new family for Emmy
-  heat: 75
+  rationale: "555 upvotes; GLM-5.2 has 2.7M HF downloads; strong family momentum"
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

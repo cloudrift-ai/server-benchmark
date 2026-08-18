@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "FP8 derivative of gemma-4-31B; lacks primary HF momentum"
-  heat: 25
+  rationale: "No current signals; gemma-3-27b IT is on OR instead"
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 1

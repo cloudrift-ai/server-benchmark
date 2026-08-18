@@ -7,8 +7,8 @@ tags:
 
 model:
   huggingface: "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
-  rationale: "Established quantized 8B on V100; no current breakout interest"
-  heat: 25
+  rationale: "No breakout interest; Llama 4 released; outdated generation quant"
+  heat: 15
   revision: db1f81ad4b8c7e39777509fac66c652eb0a52f91
     Public 4-bit AWQ preserves the Llama 3.1 8B Instruct chat and tool-use contract
     while fitting one 16 GB V100; the official FP16 checkpoint does not fit there.

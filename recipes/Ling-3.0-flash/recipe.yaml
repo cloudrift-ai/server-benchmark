@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "No shared evidence found; possible gated model with no adoption signal"
+  rationale: "Zero evidence across all sources; possible gated model"
   heat: 10
   task: generate
 matrices:

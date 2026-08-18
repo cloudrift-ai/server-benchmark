@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "High downloads but no current trending; cooled by Qwen3.8 cycle"
-  heat: 25
+  rationale: "No current signals; Qwen3.8 cycle cooled gemma attention"
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 1

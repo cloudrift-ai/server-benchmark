@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "FP8 with 262K context; 2266 HF likes support strong score despite Qwen3.8"
-  heat: 75
+  rationale: "2266 HF likes; strong FP8 with 262K context coverage"
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

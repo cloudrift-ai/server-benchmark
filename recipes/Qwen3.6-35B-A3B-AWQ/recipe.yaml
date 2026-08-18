@@ -26,7 +26,7 @@
 # max -- actual KV usage is per-request.
 
 tags:
-  - maintained
+  - best-effort
 
 model:
   # 1Cat's README quotes "tclf90/Qwen3.6-35B-A3B-AWQ" as the validated repo, but that
@@ -39,8 +39,8 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Moderate community mention in Reddit comparison discussions"
-  heat: 50
+  rationale: "Qwen3 family mentioned in comparisons; overshadowed by Qwen3.8"
+  heat: 45
 engine:
   llm:
     tensor_parallel_size: 1

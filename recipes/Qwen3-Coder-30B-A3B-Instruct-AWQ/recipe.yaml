@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Established Qwen coding MoE on OR, strong consumer quant, steady mindshare"
-  heat: 72
+  rationale: "Established Qwen coding MoE on consumer GPU; steady mindshare"
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

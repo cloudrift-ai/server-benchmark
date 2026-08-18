@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: 2.4T MoE flagship; highest HF likes; viral Reddit discussion; Qwen3.8 family expansion
-  heat: 90
+  rationale: "400+ upvotes; first Qwen-Max open; strong MoE signal"
+  heat: 92
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

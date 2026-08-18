@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "Compiler plugin comparison target; limited mainstream attention"
-  heat: 25
+  rationale: "Limited attention beyond compiler plugin comparison use"
+  heat: 20
   task: embed
 
 engine:

@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Dominant breakout release with highest Reddit engagement and HF momentum"
+  rationale: "1404+ upvotes; benchmark discussions; dominant breakout release"
   heat: 95
   task: generate
 matrices:

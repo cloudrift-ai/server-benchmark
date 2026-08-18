@@ -31,7 +31,8 @@ COPY docker/1cat-vllm-sm70/shims/kv_rope_fp8_insert.py /tmp/onecat-shims/kv_rope
 RUN pip install --no-cache-dir --no-deps /tmp/emmy-wheel/emmy_ml-*.whl \
     && pip install --no-cache-dir cupy-cuda12x==14.1.1 \
     && emmy_onecat_sm70_dir="$(python3 -c \
-        'import pathlib, vllm.models.deepseek_v4.sm70 as sm70; print(pathlib.Path(sm70.__file__).parent)')" \
+        'import pathlib, vllm.models.deepseek_v4.sm70 as sm70; print(pathlib.Path(sm70.__file__).parent)' \
+        | tail -n 1)" \
     && test "$(sha256sum "$emmy_onecat_sm70_dir/qnorm_rope_kv_fp8_insert.py" \
         | cut -d ' ' -f 1)" = "4c4031ff88c227cda4fa7e2a6b4e5c95585ba5ade2194aa26584b3aa0b49c853" \
     && cp /tmp/onecat-shims/kv_rope_fp8_insert.py \

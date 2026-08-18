@@ -204,6 +204,7 @@ def test_pinned_q_cache_shim_keeps_private_launch_inside_the_vllm_package(projec
     shim = (project_root / "docker/1cat-vllm-sm70/shims/kv_rope_fp8_insert.py").read_text()
 
     assert "4c4031ff88c227cda4fa7e2a6b4e5c95585ba5ade2194aa26584b3aa0b49c853" in dockerfile
+    assert "| tail -n 1" in dockerfile
     assert '"$emmy_onecat_sm70_dir/kv_rope_fp8_insert.py"' in dockerfile
     assert "num_heads=0" in shim
     assert "quantize_and_insert_k_cache(" in shim

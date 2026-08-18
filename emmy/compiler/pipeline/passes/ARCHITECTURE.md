@@ -78,6 +78,12 @@ materialization consume the same ordinary pointwise `LoopOp` path as every other
 dependent partial-RoPE output sweep. The pass exposes generic algebra only; deployment evidence selects the worker
 inventory and cooperative-reduction schedule through ordinary pins or measured rows.
 
+The bounded route grouping, restoration, and weighted-combine boundaries lower directly to ordinary CUDA kernels.
+They coordinate rows or preserve an explicit route-slot accumulation order that independent Loop IR cells cannot
+express. The operations carry only generic dimensions, route indices, and values; checkpoint storage has already
+disappeared at graph birth. Group order within one expert is intentionally unobservable because the inverse mapping
+restores every route before the declared weighted combination.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its

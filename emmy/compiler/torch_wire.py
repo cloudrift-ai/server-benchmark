@@ -33,6 +33,7 @@ from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
+    ExpertBucketOp,
     FixedSinkhornOp,
     GatherOp,
     IndexedTopKOp,
@@ -40,10 +41,12 @@ from emmy.compiler.ir.tensor.ir import (
     IndexSource,
     RangeOp,
     ReduceOp,
+    RouteUnbucketOp,
     RowRmsNormRopeOp,
     ScanOp,
     ScatterOp,
     StableTopKOp,
+    WeightedRouteSumOp,
 )
 from emmy.compiler.tensor import Tensor
 
@@ -82,9 +85,12 @@ _OP_SPECS: dict[str, tuple[type[Op], tuple[str, ...]]] = {
     "tensor.bitcast": (BitcastOp, ("dtype",)),
     "tensor.elementwise": (ElementwiseOp, ("op",)),
     "tensor.fixed_sinkhorn": (FixedSinkhornOp, ("eps", "iterations")),
+    "tensor.expert_bucket": (ExpertBucketOp, ("experts", "routes", "rows_per_group")),
     "tensor.row_rms_norm_rope": (RowRmsNormRopeOp, ("rope_dim", "eps")),
+    "tensor.route_unbucket": (RouteUnbucketOp, ("rows_per_group", "shard_index")),
     "tensor.stable_topk": (StableTopKOp, ("k", "scale", "normalize")),
     "tensor.indexed_topk": (IndexedTopKOp, ("k", "scale", "normalize", "reduction_lanes", "lane_chunk")),
+    "tensor.weighted_route_sum": (WeightedRouteSumOp, ("routes",)),
     "tensor.reduce": (ReduceOp, ("op", "axis")),
     "tensor.scan": (ScanOp, ("op", "axis")),
     "tensor.gather": (GatherOp, ("axis",)),

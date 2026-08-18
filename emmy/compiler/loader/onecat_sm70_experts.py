@@ -38,6 +38,20 @@ def spell_expert_inputs(graph) -> None:
     )
 
 
+def spell_grouped_w13_input(graph) -> None:
+    """Dissolve the grouped W13 carrier into ordinary graph algebra."""
+    from emmy.compiler.loader.quant import mxfp4_sm70_mma884_storage, spell_mxfp4_inputs
+
+    spell_mxfp4_inputs(graph, {"w13": mxfp4_sm70_mma884_storage((EXPERTS, 2 * INTERMEDIATE, HIDDEN))})
+
+
+def spell_grouped_w2_input(graph) -> None:
+    """Dissolve the grouped W2 carrier into ordinary graph algebra."""
+    from emmy.compiler.loader.quant import mxfp4_sm70_mma884_storage, spell_mxfp4_inputs
+
+    spell_mxfp4_inputs(graph, {"w2": mxfp4_sm70_mma884_storage((EXPERTS, HIDDEN, INTERMEDIATE))})
+
+
 def expert_method_class(module: ModuleType | None = None) -> type | None:
     """Return the exact 1Cat method class owned by this birth integration."""
     if module is None:
@@ -93,4 +107,11 @@ def bind_experts(layer: Any, x: Any, weights: Any, ids: Any, platform_supported)
     return ExpertBinding(rows, x, weights, ids, retained) if valid else None
 
 
-__all__ = ["ExpertBinding", "bind_experts", "expert_method_class", "spell_expert_inputs"]
+__all__ = [
+    "ExpertBinding",
+    "bind_experts",
+    "expert_method_class",
+    "spell_expert_inputs",
+    "spell_grouped_w13_input",
+    "spell_grouped_w2_input",
+]

@@ -8,7 +8,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.tensor.ir import IndexedTopKOp, StableTopKOp
+from emmy.compiler.ir.tensor.ir import ExpertBucketOp, IndexedTopKOp, RouteUnbucketOp, StableTopKOp, WeightedRouteSumOp
 
 
 def _stable_graph(rows=2):
@@ -37,6 +37,52 @@ def _indexed_graph(rows=2):
         node_id="weights",
     )
     graph.inputs, graph.outputs = ["payload", "table", "row_indices"], ["weights", "ids"]
+    return graph
+
+
+def _bucket_graph():
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("ids", (3, 2), "i32"), node_id="ids")
+    graph.add_node(
+        ExpertBucketOp(experts=4, routes=2, rows_per_group=2),
+        ["ids"],
+        outputs=[
+            Tensor("grouped_routes", (5, 2), "i32"),
+            Tensor("group_experts", (5,), "i32"),
+            Tensor("inverse", (3, 2), "i32"),
+        ],
+        node_id="grouped_routes",
+    )
+    graph.inputs, graph.outputs = ["ids"], ["grouped_routes", "group_experts", "inverse"]
+    return graph
+
+
+def _unbucket_graph():
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("base", (6, 2), "f16"), node_id="base")
+    graph.add_node(InputOp(), [], Tensor("grouped", (2, 2, 2), "f16"), node_id="grouped")
+    graph.add_node(InputOp(), [], Tensor("inverse", (3, 2), "i32"), node_id="inverse")
+    graph.add_node(
+        RouteUnbucketOp(rows_per_group=2, shard_index=1),
+        ["base", "grouped", "inverse"],
+        Tensor("output", (6, 2), "f16"),
+        node_id="output",
+    )
+    graph.inputs, graph.outputs = ["base", "grouped", "inverse"], ["output"]
+    return graph
+
+
+def _weighted_sum_graph(rows=2):
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("partials", (rows, 3, 4), "f16"), node_id="partials")
+    graph.add_node(InputOp(), [], Tensor("weights", (rows, 3), "f32"), node_id="weights")
+    graph.add_node(
+        WeightedRouteSumOp(routes=3),
+        ["partials", "weights"],
+        Tensor("output", (rows, 4), "f16"),
+        node_id="output",
+    )
+    graph.inputs, graph.outputs = ["partials", "weights"], ["output"]
     return graph
 
 
@@ -83,3 +129,61 @@ def test_direct_routing_cuda_lowerings_preserve_ties_guards_and_symbolic_rows():
     assert "candidate >= 0 && candidate < 16" in indexed_op.kernel_source
     assert "__shfl_xor_sync" in indexed_op.kernel_source
     assert indexed_op.block == ((4,), (1,), (1,))
+
+
+def test_expert_bucket_reference_groups_routes_and_returns_inverse_rows():
+    ids = np.array([[2, 1], [2, 3], [1, 2]], dtype=np.int32)
+    result, _ = NumpyBackend().run(_bucket_graph(), input_data={"ids": ids})
+
+    np.testing.assert_array_equal(result.outputs["grouped_routes"], [[1, 4], [0, 2], [5, -1], [3, -1], [-1, -1]])
+    np.testing.assert_array_equal(result.outputs["group_experts"], [1, 2, 2, 3, 0])
+    np.testing.assert_array_equal(result.outputs["inverse"], [[2, 0], [3, 6], [1, 4]])
+
+
+def test_route_unbucket_functionally_updates_only_one_shard():
+    base = np.arange(12, dtype=np.float16).reshape(6, 2)
+    grouped = (100 + np.arange(8, dtype=np.float16)).reshape(2, 2, 2)
+    inverse = np.array([[0, 4], [5, 7], [2, 6]], dtype=np.int32)
+    result, _ = NumpyBackend().run(
+        _unbucket_graph(),
+        input_data={"base": base, "grouped": grouped, "inverse": inverse},
+    )
+    expected = base.copy()
+    expected[[1, 2, 3, 5]] = grouped.reshape(4, 2)[[0, 1, 3, 2]]
+    np.testing.assert_array_equal(result.outputs["output"], expected)
+
+
+def test_weighted_route_sum_uses_slot_order_and_one_fp16_narrowing():
+    partials = np.arange(24, dtype=np.float16).reshape(2, 3, 4) / np.float16(8)
+    weights = np.array([[0.25, 0.5, 0.75], [0.75, 0.5, 0.25]], dtype=np.float32)
+    result, _ = NumpyBackend().run(
+        _weighted_sum_graph(),
+        input_data={"partials": partials, "weights": weights},
+    )
+    expected = np.zeros((2, 4), dtype=np.float32)
+    for slot in range(3):
+        expected = np.asarray(expected + partials[:, slot].astype(np.float32) * weights[:, slot, None], dtype=np.float32)
+    np.testing.assert_array_equal(result.outputs["output"], expected.astype(np.float16))
+
+
+def test_direct_expert_layout_cuda_lowerings_have_bounded_launch_geometry():
+    bucket = CudaBackend(tune_db=None).compile(_bucket_graph())
+    [bucket_op] = [node.op for node in bucket.nodes.values() if isinstance(node.op, CudaOp)]
+    assert bucket_op.grid == ((1,), (1,), (1,))
+    assert bucket_op.block == ((256,), (1,), (1,))
+    assert "atomicAdd(&counts[expert], 1)" in bucket_op.kernel_source
+    assert "inverse[i] = -1" in bucket_op.kernel_source
+    assert "grouped_routes[grouped_row] = route" in bucket_op.kernel_source
+
+    unbucket = CudaBackend(tune_db=None).compile(_unbucket_graph())
+    [unbucket_op] = [node.op for node in unbucket.nodes.values() if isinstance(node.op, CudaOp)]
+    assert unbucket_op.block == ((256,), (1,), (1,))
+    assert unbucket_op.kernel_source.startswith("#include <cuda_fp16.h>")
+    assert "inverse[route] - 4" in unbucket_op.kernel_source
+
+    weighted = CudaBackend(tune_db=None).compile(_weighted_sum_graph(Dim("num_tokens", hint=8)))
+    [weighted_op] = [node.op for node in weighted.nodes.values() if isinstance(node.op, CudaOp)]
+    assert weighted_op.runtime_args == ("num_tokens",)
+    assert weighted_op.block == ((256,), (1,), (1,))
+    assert weighted_op.kernel_source.startswith("#include <cuda_fp16.h>")
+    assert "for (int slot = 0; slot < 3; ++slot)" in weighted_op.kernel_source

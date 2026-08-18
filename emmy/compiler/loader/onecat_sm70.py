@@ -132,7 +132,7 @@ def bind_projection(layer: Any, x: Any, bias: Any, platform_supported) -> Projec
             0 < rows <= PROFILE_CAPACITY
             and platform_supported(x, weight, weight_scale)
             and x.dtype == torch.float16
-            and weight.dtype == torch.float8_e4m3fn
+            and weight.dtype == torch.uint8
             and weight_scale.dtype == torch.float16
             and tuple(weight.shape) == weight_shape
             and tuple(weight_scale.shape) == scale_shape

@@ -331,6 +331,86 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
             launch_count=4,
         )
     )
+    for rows, (shards, _groups) in expert_traces.WIDE_EXPERT_PROFILES.items():
+        profiles.extend(
+            (
+                _profile(
+                    f"experts.grouped.bucket.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("route_ids",),
+                    3,
+                    partial(expert_traces.trace_expert_bucket, rows=rows),
+                    launch_count=1,
+                ),
+                _profile(
+                    f"experts.grouped.pack.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("x", "grouped_routes"),
+                    1,
+                    partial(expert_traces.trace_grouped_input, rows=rows),
+                    launch_count=1,
+                ),
+                _profile(
+                    f"experts.grouped.w13.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("grouped_x", "w13", "group_experts", "w13_scale"),
+                    1,
+                    partial(expert_traces.trace_grouped_w13, rows=rows),
+                    pins=experts._W13_PINS,
+                    launch_count=1,
+                ),
+                _profile(
+                    f"experts.grouped.activation.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("gate_up",),
+                    1,
+                    partial(expert_traces.trace_grouped_activation, rows=rows),
+                    launch_count=1,
+                ),
+                _profile(
+                    f"experts.grouped.w2.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("intermediate", "w2", "group_experts", "w2_scale"),
+                    1,
+                    partial(expert_traces.trace_grouped_w2, rows=rows),
+                    pins=experts._W2_PINS,
+                    launch_count=1,
+                ),
+                _profile(
+                    f"experts.grouped.combine.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("partials", "weights"),
+                    1,
+                    partial(expert_traces.trace_weighted_route_sum, rows=rows),
+                    launch_count=1,
+                ),
+            )
+        )
+        for shard in range(shards):
+            profiles.append(
+                _profile(
+                    f"experts.grouped.unbucket{shard}.m{rows}",
+                    "routed_experts_wide",
+                    rows,
+                    False,
+                    ("base", "grouped", "inverse"),
+                    1,
+                    partial(expert_traces.trace_expert_unbucket, rows=rows, shard_index=shard),
+                    launch_count=1,
+                )
+            )
     profiles.append(
         _profile(
             "indexer.q_rope_weights.symbolic.m4096",

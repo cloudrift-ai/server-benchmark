@@ -26,7 +26,7 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
     manifest = deepseek_external_program_manifest()
     names = tuple(profile.name for profile in manifest)
 
-    assert len(manifest) == 188
+    assert len(manifest) == 208
     assert names == tuple(sorted(names))
     assert len(names) == len(set(names))
     assert Counter(profile.family for profile in manifest) == {
@@ -38,6 +38,7 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
         "route_learned": 9,
         "route_hash": 9,
         "routed_experts": 1,
+        "routed_experts_wide": 20,
         "linear": 45,
         "mhc": 45,
         "output": 3,
@@ -67,6 +68,29 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
     assert expert.name == "experts.direct.symbolic.m4096"
     assert expert.symbolic_values == (("num_tokens", 4096),)
     assert expert.launch_count == 4
+    wide = [profile for profile in manifest if profile.family == "routed_experts_wide"]
+    assert Counter((profile.rows, profile.name.split(".")[2]) for profile in wide) == {
+        (1024, "activation"): 1,
+        (1024, "bucket"): 1,
+        (1024, "combine"): 1,
+        (1024, "pack"): 1,
+        (1024, "unbucket0"): 1,
+        (1024, "unbucket1"): 1,
+        (1024, "w13"): 1,
+        (1024, "w2"): 1,
+        (4096, "activation"): 1,
+        (4096, "bucket"): 1,
+        (4096, "combine"): 1,
+        (4096, "pack"): 1,
+        (4096, "unbucket0"): 1,
+        (4096, "unbucket1"): 1,
+        (4096, "unbucket2"): 1,
+        (4096, "unbucket3"): 1,
+        (4096, "unbucket4"): 1,
+        (4096, "unbucket5"): 1,
+        (4096, "w13"): 1,
+        (4096, "w2"): 1,
+    }
 
     linear = [profile for profile in manifest if profile.family == "linear"]
     assert Counter((profile.rows, profile.symbolic) for profile in linear) == {

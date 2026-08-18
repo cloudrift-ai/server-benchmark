@@ -4,13 +4,34 @@ import torch
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.backend.plan import plan_from_graph
+from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda.ir import resolve_dim
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.serving.deepseek_experts import RoutedExpertsModule, trace_deepseek_experts, trace_deepseek_route
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.serving.deepseek_experts import (
+    RoutedExpertsModule,
+    trace_deepseek_experts,
+    trace_deepseek_route,
+    trace_expert_bucket,
+    trace_expert_unbucket,
+    trace_grouped_activation,
+    trace_grouped_input,
+    trace_grouped_w2,
+    trace_grouped_w13,
+    trace_weighted_route_sum,
+)
+from emmy.serving.onecat_experts import _W2_PINS, _W13_PINS
 
 
 def _plan(graph):
     return plan_from_graph(CudaBackend(tune_db=None).compile(graph))
+
+
+def _pinned_plan(graph, pins):
+    with pinned_knobs(pins):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    return plan_from_graph(lowered)
 
 
 def test_learned_and_hash_route_graphs_preserve_pinned_source_semantics():
@@ -85,3 +106,37 @@ def test_wide_expert_gather_keeps_its_data_dependent_index_producer():
     w2 = next(launch for launch in plan.launches if launch.node_id == "mul_1")
     assert "flatten" in w2.arg_names
     assert "const int* flatten" in plan.kernels[w2.kernel_name].source
+
+
+def test_grouped_wide_expert_stages_are_single_launch_external_programs():
+    rows = 1024
+    cases = (
+        (trace_expert_bucket(rows=rows), {}, ("route_ids",), 3, False),
+        (trace_grouped_input(rows=rows), {}, ("x", "grouped_routes"), 1, False),
+        (
+            trace_grouped_w13(rows=rows),
+            _W13_PINS,
+            ("grouped_x", "w13", "group_experts", "w13_scale"),
+            1,
+            True,
+        ),
+        (trace_grouped_activation(rows=rows), {}, ("gate_up",), 1, False),
+        (
+            trace_grouped_w2(rows=rows),
+            _W2_PINS,
+            ("intermediate", "w2", "group_experts", "w2_scale"),
+            1,
+            True,
+        ),
+        (trace_expert_unbucket(rows=rows, shard_index=0), {}, ("base", "grouped", "inverse"), 1, False),
+        (trace_weighted_route_sum(rows=rows), {}, ("partials", "weights"), 1, False),
+    )
+
+    for graph, pins, inputs, outputs, expects_mma in cases:
+        plan = _pinned_plan(graph, pins)
+        assert tuple(plan.inputs) == inputs
+        assert len(plan.outputs) == outputs
+        assert len(plan.launches) == 1
+        assert not [buffer for buffer in plan.buffers if buffer.role == "scratch"]
+        source = next(iter(plan.kernels.values())).source
+        assert ("mma.sync" in source) is expects_mma

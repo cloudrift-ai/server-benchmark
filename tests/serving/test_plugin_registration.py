@@ -13,6 +13,7 @@ def test_deepseek_opt_in_registers_every_broad_adapter(monkeypatch):
         onecat_indexer,
         onecat_linear,
         onecat_mhc,
+        onecat_native_warmup,
         onecat_output,
         onecat_vocab,
     )
@@ -37,6 +38,7 @@ def test_deepseek_opt_in_registers_every_broad_adapter(monkeypatch):
     monkeypatch.setattr(onecat_fp8_linear, "register_onecat_fp8_linear_kernels", lambda: calls.append("fp8_linear"))
     monkeypatch.setattr(onecat_linear, "register_onecat_linear_kernels", lambda: calls.append("linear"))
     monkeypatch.setattr(onecat_mhc, "register_onecat_mhc_kernels", lambda: calls.append("mhc"))
+    monkeypatch.setattr(onecat_native_warmup, "install_onecat_native_prefill_warmup", lambda: calls.append("native_warmup"))
     monkeypatch.setattr(onecat_output, "register_onecat_output_kernels", lambda: calls.append("output"))
     monkeypatch.setattr(onecat_vocab, "register_onecat_vocab_kernels", lambda: calls.append("vocab"))
     monkeypatch.setattr(onecat_indexer, "register_onecat_indexer_kernels", lambda: calls.append("indexer"))
@@ -55,4 +57,5 @@ def test_deepseek_opt_in_registers_every_broad_adapter(monkeypatch):
         "output",
         "vocab",
         "indexer",
+        "native_warmup",
     ]

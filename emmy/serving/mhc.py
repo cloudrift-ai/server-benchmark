@@ -84,6 +84,14 @@ def _weighted_rms(x, weight, eps: float = 1e-6):
     return _rms(x, eps).half() * weight
 
 
+def _pointwise_stream_sum(values, weights):
+    """Spell the fixed four-stream reduction as one wide pointwise expression."""
+    values = values.float()
+    weights = weights.float()
+    terms = tuple(values[:, index] * weights[:, index].unsqueeze(-1) for index in range(4))
+    return ((terms[0] + terms[1]) + terms[2]) + terms[3]
+
+
 def _mix(
     residual,
     fn,
@@ -91,6 +99,7 @@ def _mix(
     base,
     *,
     prenorm_residual=None,
+    pointwise_streams: bool = False,
     eps: float = 1e-6,
     sinkhorn_iters: int = 20,
 ):
@@ -106,7 +115,7 @@ def _mix(
     post = 2.0 * torch.sigmoid(post_logits * scale[1].float() + post_base)
     comb = comb_logits.view(tokens, streams, streams) * scale[2].float() + comb_base.view(streams, streams)
     comb = fixed_sinkhorn(comb, eps, sinkhorn_iters)
-    collapsed = (pre.unsqueeze(-1) * residual.float()).sum(dim=1).half()
+    collapsed = (_pointwise_stream_sum(residual, pre) if pointwise_streams else (pre.unsqueeze(-1) * residual.float()).sum(dim=1)).half()
     return post.unsqueeze(-1), comb, collapsed
 
 
@@ -114,21 +123,24 @@ def _post(x, residual, post, comb):
     return _post_float(x, residual, post, comb).half()
 
 
-def _post_float(x, residual, post, comb):
+def _post_float(x, residual, post, comb, *, pointwise_streams: bool = False):
     import torch
 
+    if pointwise_streams:
+        mixed = tuple(_pointwise_stream_sum(residual, comb[:, :, index]) for index in range(4))
+        return torch.stack(tuple(value + x.float() * post[:, index].float() for index, value in enumerate(mixed)), dim=1)
     return x.float().unsqueeze(1) * post.float() + torch.bmm(comb.float().transpose(1, 2), residual.float())
 
 
 class MhcPreModule:
     """Multi-stream pre mapping with the following layer RMSNorm."""
 
-    def __new__(cls):
+    def __new__(cls, *, pointwise_streams: bool = False):
         import torch
 
         class Module(torch.nn.Module):
             def forward(self, residual, fn, scale, base, norm_weight):
-                post, comb, collapsed = _mix(residual, fn, scale, base)
+                post, comb, collapsed = _mix(residual, fn, scale, base, pointwise_streams=pointwise_streams)
                 return post, comb, _weighted_rms(collapsed, norm_weight)
 
         return Module()
@@ -137,7 +149,7 @@ class MhcPreModule:
 class MhcBroadcastModule:
     """First-stage single-stream broadcast plus pre mapping and RMSNorm."""
 
-    def __new__(cls):
+    def __new__(cls, *, pointwise_streams: bool = False):
         import torch
         import torch.nn.functional as F
 
@@ -153,7 +165,9 @@ class MhcBroadcastModule:
                 post = 2.0 * torch.sigmoid(post_logits * scale[1].float() + post_base)
                 comb = comb_logits.view(tokens, streams, streams) * scale[2].float() + comb_base.view(streams, streams)
                 comb = fixed_sinkhorn(comb)
-                collapsed = (pre.unsqueeze(-1) * residual.float()).sum(dim=1).half()
+                collapsed = (
+                    _pointwise_stream_sum(residual, pre) if pointwise_streams else (pre.unsqueeze(-1) * residual.float()).sum(dim=1)
+                ).half()
                 return residual, post.unsqueeze(-1), comb, _weighted_rms(collapsed, norm_weight)
 
         return Module()
@@ -162,12 +176,12 @@ class MhcBroadcastModule:
 class MhcPostModule:
     """Apply one sublayer output to the four residual streams."""
 
-    def __new__(cls):
+    def __new__(cls, *, pointwise_streams: bool = False):
         import torch
 
         class Module(torch.nn.Module):
             def forward(self, x, residual, post, comb):
-                return _post(x, residual, post, comb)
+                return _post_float(x, residual, post, comb, pointwise_streams=pointwise_streams).half()
 
         return Module()
 
@@ -175,12 +189,12 @@ class MhcPostModule:
 class MhcFusedModule:
     """Post mapping followed by the next pre mapping and layer RMSNorm."""
 
-    def __new__(cls, *, fp32_stage: bool = True):
+    def __new__(cls, *, fp32_stage: bool = True, pointwise_streams: bool = False):
         import torch
 
         class Module(torch.nn.Module):
             def forward(self, x, residual, post, comb, fn, scale, base, norm_weight):
-                residual_float = _post_float(x, residual, post, comb)
+                residual_float = _post_float(x, residual, post, comb, pointwise_streams=pointwise_streams)
                 residual = residual_float.half()
                 next_post, next_comb, collapsed = _mix(
                     residual,
@@ -188,6 +202,7 @@ class MhcFusedModule:
                     scale,
                     base,
                     prenorm_residual=residual_float if fp32_stage else residual,
+                    pointwise_streams=pointwise_streams,
                 )
                 return residual, next_post, next_comb, _weighted_rms(collapsed, norm_weight)
 
@@ -197,7 +212,7 @@ class MhcFusedModule:
 class HcHeadModule:
     """Final four-stream collapse before the model's shared RMSNorm."""
 
-    def __new__(cls):
+    def __new__(cls, *, pointwise_streams: bool = False):
         import torch
         import torch.nn.functional as F
 
@@ -206,7 +221,8 @@ class HcHeadModule:
                 normalized = _rms(residual.flatten(1))
                 logits = F.linear(normalized, fn.float())
                 mix = torch.sigmoid(logits * scale.float() + base.float()) + 1e-6
-                return (mix.unsqueeze(-1) * residual.float()).sum(dim=1).half()
+                collapsed = _pointwise_stream_sum(residual, mix) if pointwise_streams else (mix.unsqueeze(-1) * residual.float()).sum(dim=1)
+                return collapsed.half()
 
         return Module()
 
@@ -227,7 +243,7 @@ def trace_mhc_fused(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic:
     import torch
 
     return _trace(
-        MhcFusedModule(fp32_stage=rows <= 16),
+        MhcFusedModule(fp32_stage=rows <= 16, pointwise_streams=rows > 16),
         (
             torch.empty((rows, hidden), dtype=torch.float16, device="meta"),
             torch.empty((rows, streams, hidden), dtype=torch.float16, device="meta"),
@@ -247,7 +263,7 @@ def trace_mhc_pre(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: b
     import torch
 
     return _trace(
-        MhcPreModule(),
+        MhcPreModule(pointwise_streams=rows > 16),
         (
             torch.empty((rows, streams, hidden), dtype=torch.float16, device="meta"),
             torch.empty((streams * (streams + 2), streams * hidden), dtype=torch.float32, device="meta"),
@@ -264,7 +280,7 @@ def trace_mhc_broadcast(*, rows: int, hidden: int = 4096, streams: int = 4, dyna
     import torch
 
     return _trace(
-        MhcBroadcastModule(),
+        MhcBroadcastModule(pointwise_streams=rows > 16),
         (
             torch.empty((rows, hidden), dtype=torch.float16, device="meta"),
             torch.empty((streams * (streams + 2), hidden), dtype=torch.float32, device="meta"),
@@ -281,7 +297,7 @@ def trace_mhc_post(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: 
     import torch
 
     return _trace(
-        MhcPostModule(),
+        MhcPostModule(pointwise_streams=rows > 16),
         (
             torch.empty((rows, hidden), dtype=torch.float16, device="meta"),
             torch.empty((rows, streams, hidden), dtype=torch.float16, device="meta"),
@@ -297,7 +313,7 @@ def trace_hc_head(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: b
     import torch
 
     return _trace(
-        HcHeadModule(),
+        HcHeadModule(pointwise_streams=rows > 16),
         (
             torch.empty((rows, streams, hidden), dtype=torch.float16, device="meta"),
             torch.empty((streams, streams * hidden), dtype=torch.float32, device="meta"),

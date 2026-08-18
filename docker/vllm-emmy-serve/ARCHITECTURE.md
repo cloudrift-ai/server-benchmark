@@ -61,6 +61,15 @@ Static route plans preserve the measured decode and prefill schedules, while one
 one bounded symbolic expert plan cover all other continuous-batch widths through 4096. 1Cat continues to own only
 scheduler orchestration, TP/PP collectives, and stateful paged sparse-attention/cache operations at these boundaries.
 
+The broad release has two distinct Triton warmup obligations. The `triton/` image asset supplies persistent device
+code for 1Cat-owned kernels. A new serving worker must still populate Triton's process-local specialization table, so
+the broad plugin runs one real 256-token scheduler prefill after CUDA-graph capture and before 1Cat activates its
+request-time JIT monitor. A release is warm only when both parts hold: the prefill changes no baked cache files and a
+representative request emits no new JIT warning. The prefill does not transfer ownership of metadata, sparse attention,
+or paged-cache mutation to Emmy; it exercises those exact 1Cat paths while requests are still unavailable. The image
+build pins the worker, scheduler-output, request, and monitor sources that form this lifecycle, so upstream drift fails
+before an expensive model boot.
+
 **The slug does not encode the checkpoint revision.** An HF id that publishes several variants under one repo — an
 EXL3 checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every
 one of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and

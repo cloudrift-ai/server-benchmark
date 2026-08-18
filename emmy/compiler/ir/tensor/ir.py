@@ -11,6 +11,7 @@ remain in the graph:
 - ``FixedSinkhornOp`` — bounded static FP32 Sinkhorn normalization.
 - ``RowRmsNormRopeOp`` — one row RMSNorm followed by partial interleaved RoPE.
 - ``StableTopKOp`` / ``IndexedTopKOp`` — deterministic fixed-width selection.
+- ``ExpertBucketOp`` / ``RouteUnbucketOp`` / ``WeightedRouteSumOp`` — stable routed-row layout and combine.
 - ``ReduceOp`` — collapse one axis via an associative binary op.
 - ``ScanOp`` — cumulative variant of ``ReduceOp``.
 - ``GatherOp`` / ``ScatterOp`` — data-dependent reads/writes along an axis.
@@ -342,6 +343,136 @@ class IndexedTopKOp(Op):
             for slot in range(self.k):
                 weights[row, slot] = np.float32(weights[row, slot] * factor)
         return weights, selected
+
+
+@dataclass
+class ExpertBucketOp(Op):
+    """Group routes by expert into fixed-width tiles.
+
+    Padding routes are ``-1``. ``inverse`` maps each original route to its
+    flattened grouped-row position, so a later operation can restore the
+    original route order without depending on within-expert tile order.
+    """
+
+    experts: int = 1
+    routes: int = 1
+    rows_per_group: int = 16
+
+    def __post_init__(self) -> None:
+        if self.experts < 1 or self.routes < 1 or self.rows_per_group < 1:
+            raise ValueError("ExpertBucketOp experts, routes, and rows_per_group must be positive")
+
+    def output_shapes(self, input_shape: tuple) -> tuple[tuple, tuple, tuple]:
+        shape = tuple(input_shape)
+        if len(shape) != 2:
+            raise ValueError(f"ExpertBucketOp requires rank-2 [rows,routes] input, got {shape}")
+        rows, routes = (to_dim(dim) for dim in shape)
+        if not rows.is_static or not routes.is_static or routes.as_static() != self.routes:
+            raise ValueError(f"ExpertBucketOp requires static routes={self.routes}, got {shape}")
+        total = rows.as_static() * self.routes
+        nonempty = min(total, self.experts)
+        groups = nonempty + max(0, total - nonempty + self.rows_per_group - 1) // self.rows_per_group
+        return (groups, self.rows_per_group), (groups,), shape
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return self.output_shapes(tuple(input_shapes[0]))[0]
+
+    def forward(self, *inputs):
+        ids = np.asarray(inputs[0])
+        grouped_shape, experts_shape, inverse_shape = self.output_shapes(ids.shape)
+        grouped_routes = np.full(grouped_shape, -1, dtype=np.int32)
+        group_experts = np.zeros(experts_shape, dtype=np.int32)
+        inverse = np.empty(inverse_shape, dtype=np.int32)
+        flat_ids = ids.reshape(-1)
+        if np.any(flat_ids < 0) or np.any(flat_ids >= self.experts):
+            raise ValueError(f"ExpertBucketOp expert IDs must be in [0,{self.experts})")
+        counts = np.bincount(flat_ids, minlength=self.experts)
+        group_base = np.empty((self.experts,), dtype=np.int32)
+        next_group = 0
+        for expert, count in enumerate(counts):
+            group_base[expert] = next_group
+            expert_groups = (int(count) + self.rows_per_group - 1) // self.rows_per_group
+            group_experts[next_group : next_group + expert_groups] = expert
+            next_group += expert_groups
+        seen = np.zeros((self.experts,), dtype=np.int32)
+        for route, expert_value in enumerate(flat_ids):
+            expert = int(expert_value)
+            position = int(seen[expert])
+            seen[expert] += 1
+            group = int(group_base[expert]) + position // self.rows_per_group
+            lane = position % self.rows_per_group
+            grouped_routes[group, lane] = route
+            inverse.reshape(-1)[route] = group * self.rows_per_group + lane
+        return grouped_routes, group_experts, inverse
+
+
+@dataclass
+class RouteUnbucketOp(Op):
+    """Restore one shard of grouped route outputs into a route-ordered tensor."""
+
+    rows_per_group: int = 16
+    shard_index: int = 0
+
+    def __post_init__(self) -> None:
+        if self.rows_per_group < 1 or self.shard_index < 0:
+            raise ValueError("RouteUnbucketOp rows_per_group must be positive and shard_index must be nonnegative")
+
+    def _shape(self, input_shapes: list[tuple]) -> tuple:
+        if len(input_shapes) != 3:
+            raise ValueError(f"RouteUnbucketOp requires base, grouped values, and inverse indices, got {input_shapes}")
+        base, grouped, inverse = (tuple(shape) for shape in input_shapes)
+        if len(base) != 2 or len(grouped) != 3 or len(inverse) != 2:
+            raise ValueError(f"RouteUnbucketOp requires [R,H], [G,P,H], [M,K], got {input_shapes}")
+        if grouped[1] != self.rows_per_group or grouped[2] != base[1] or inverse[0] * inverse[1] != base[0]:
+            raise ValueError(f"RouteUnbucketOp shapes are incompatible: {input_shapes}")
+        return base
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return self._shape(input_shapes)
+
+    def forward(self, *inputs):
+        base, grouped, inverse = (np.asarray(value) for value in inputs)
+        self._shape([base.shape, grouped.shape, inverse.shape])
+        output = base.copy()
+        grouped_rows = grouped.shape[0] * self.rows_per_group
+        shard_start = self.shard_index * grouped_rows
+        inverse_flat = inverse.reshape(-1)
+        for route, grouped_row_value in enumerate(inverse_flat):
+            local_row = int(grouped_row_value) - shard_start
+            if 0 <= local_row < grouped_rows:
+                output[route] = grouped.reshape(grouped_rows, grouped.shape[-1])[local_row]
+        return output
+
+
+@dataclass
+class WeightedRouteSumOp(Op):
+    """Combine fixed route slots in FP32 order and narrow once to FP16."""
+
+    routes: int = 1
+
+    def __post_init__(self) -> None:
+        if self.routes < 1:
+            raise ValueError(f"WeightedRouteSumOp routes must be positive, got {self.routes}")
+
+    def _shape(self, input_shapes: list[tuple]) -> tuple:
+        if len(input_shapes) != 2:
+            raise ValueError(f"WeightedRouteSumOp requires partials and weights, got {input_shapes}")
+        partials, weights = (tuple(shape) for shape in input_shapes)
+        if len(partials) != 3 or len(weights) != 2 or partials[:2] != weights or partials[1] != self.routes:
+            raise ValueError(f"WeightedRouteSumOp requires [M,{self.routes},H] and [M,{self.routes}], got {input_shapes}")
+        return partials[0], partials[2]
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return self._shape(input_shapes)
+
+    def forward(self, *inputs):
+        partials = np.asarray(inputs[0])
+        weights = np.asarray(inputs[1], dtype=np.float32)
+        shape = self._shape([partials.shape, weights.shape])
+        output = np.zeros(shape, dtype=np.float32)
+        for slot in range(self.routes):
+            output = np.asarray(output + partials[:, slot].astype(np.float32) * weights[:, slot, None], dtype=np.float32)
+        return output.astype(np.float16)
 
 
 @dataclass

@@ -37,7 +37,7 @@ def _layer(torch, spec):
         sm70_fp8_k_ld=32 * spec.k,
         sm70_fp8_q_ld=spec.n,
         sm70_fp8_meta=_Tensor((2,), torch.int64),
-        weight=_Tensor(weight_shape, torch.float8_e4m3fn),
+        weight=_Tensor(weight_shape, torch.uint8),
         weight_scale_inv=_Tensor(scale_shape, torch.float16),
     )
 
@@ -72,6 +72,17 @@ def test_bind_projection_accepts_exact_carriers_and_grouped_shape() -> None:
 
         layer.sm70_fp8_q_ld += 1
         assert bind_projection(layer, x, None, lambda *_args: True) is None
+
+
+def test_bind_projection_requires_prepared_uint8_weight_carrier() -> None:
+    torch = pytest.importorskip("torch")
+    spec = PROJECTION_SPECS[0]
+    x = _Tensor((8, spec.k), torch.float16)
+    layer = _layer(torch, spec)
+
+    assert bind_projection(layer, x, None, lambda *_args: True) is not None
+    layer.weight.dtype = torch.float8_e4m3fn
+    assert bind_projection(layer, x, None, lambda *_args: True) is None
 
 
 def test_bind_projection_requires_cached_metadata_tensor_without_reading_it() -> None:

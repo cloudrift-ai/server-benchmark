@@ -214,6 +214,78 @@ def test_expert_first_use_checks_each_width_and_reuses_one_symbolic_program():
     assert adapter.experts[1].runtime is adapter.experts[17].runtime
 
 
+def test_wide_expert_first_use_verifies_then_bypasses_the_direct_program():
+    original_calls = []
+    wide_builds = []
+    executions = []
+
+    def original(method, layer, x, weights, ids, shared, shared_input):
+        del method, layer, weights, ids, shared, shared_input
+        original_calls.append(x.shape[0])
+        return torch.full_like(x, 3.0)
+
+    wide = SimpleNamespace(verified=False)
+
+    def build_wide(rows):
+        wide_builds.append(rows)
+        return wide
+
+    adapter = _Adapter(
+        lambda *_args: None,
+        original,
+        build_experts=lambda _rows: pytest.fail("wide expert profile must not build the direct program"),
+        build_wide_experts=build_wide,
+        is_capturing=lambda: False,
+        platform_supported=lambda *_tensors: True,
+    )
+
+    def execute(programs, binding):
+        assert programs is wide
+        executions.append(binding.rows)
+        return torch.full_like(binding.x, 3.03)
+
+    adapter.execute_wide_experts = execute
+    x = torch.zeros((1024, 4096), dtype=torch.float16)
+    weights = torch.full((1024, 6), 0.25, dtype=torch.float32)
+    ids = torch.arange(6, dtype=torch.int32).reshape(1, 6).expand(1024, -1).clone()
+    layer = _expert_layer(x.device)
+
+    first = adapter.dispatch_experts(object(), layer, x, weights, ids, None, None, lambda *_args: None)
+    second = adapter.dispatch_experts(object(), layer, x, weights, ids, None, None, lambda *_args: None)
+
+    assert torch.equal(first, torch.full_like(x, 3.03))
+    assert torch.equal(second, torch.full_like(x, 3.03))
+    assert original_calls == [1024]
+    assert wide_builds == [1024]
+    assert executions == [1024, 1024]
+    assert wide.verified
+
+
+def test_cold_capture_does_not_load_or_verify_a_wide_expert_program():
+    original_calls = []
+
+    def original(method, layer, x, weights, ids, shared, shared_input):
+        del method, layer, weights, ids, shared, shared_input
+        original_calls.append(x.shape[0])
+        return torch.full_like(x, 3.0)
+
+    adapter = _Adapter(
+        lambda *_args: None,
+        original,
+        build_experts=lambda _rows: pytest.fail("cold capture must not build the direct program"),
+        build_wide_experts=lambda _rows: pytest.fail("cold capture must not build the wide program"),
+        is_capturing=lambda: True,
+        platform_supported=lambda *_tensors: True,
+    )
+    x = torch.zeros((1024, 4096), dtype=torch.float16)
+    weights = torch.full((1024, 6), 0.25, dtype=torch.float32)
+    ids = torch.zeros((1024, 6), dtype=torch.int32)
+    output = adapter.dispatch_experts(object(), _expert_layer(x.device), x, weights, ids, None, None, lambda *_args: None)
+
+    assert torch.equal(output, torch.full_like(x, 3.0))
+    assert original_calls == [1024]
+
+
 def test_expert_contract_rejects_a_cross_device_carrier_before_launch():
     adapter = _Adapter(
         lambda *_args: None,

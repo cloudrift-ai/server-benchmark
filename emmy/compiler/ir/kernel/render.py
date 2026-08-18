@@ -15,6 +15,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, CpAsyncCopy, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
+from emmy.compiler.target import compute_capability
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -937,8 +938,9 @@ def render_kernelop(
         for n, s in shapes.items():
             tmap.setdefault(n, Tensor(n, tuple(s)))
     smem_offsets, smem_total = _compute_dynamic_smem_offsets(kernel_op)
+    cuda_target = CudaRenderTarget(compute_capability())
     ctx = RenderCtx(
-        target=CudaRenderTarget(),
+        target=cuda_target,
         shapes={n: tuple(t.shape) for n, t in tmap.items()},
         indent=1,
         intrinsics=_INTRINSIC_TO_CUDA,
@@ -1037,7 +1039,7 @@ def render_kernelop(
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
-    preludes = f"{includes}{bitcast_prelude}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    preludes = f"{includes}{cuda_target.prelude}{bitcast_prelude}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

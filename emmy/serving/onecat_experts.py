@@ -13,7 +13,7 @@ from types import ModuleType
 from typing import Any
 
 from emmy.compiler.loader import onecat_sm70_experts as expert_loader
-from emmy.serving.deepseek_experts import EXPERTS, HIDDEN, TOP_K, VOCAB
+from emmy.serving.deepseek_experts import EXPERTS, HIDDEN, ROWS_PER_GROUP, TOP_K, VOCAB, WIDE_EXPERT_PROFILES
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,37 @@ class _Program:
     outputs: tuple[str, ...]
     verified: bool = False
     symbolic: bool = False
+
+
+@dataclass
+class _WidePrograms:
+    rows: int
+    shards: int
+    groups: int
+    bucket: _Program
+    pack: _Program
+    w13: _Program
+    activation: _Program
+    w2: _Program
+    unbucket: tuple[_Program, ...]
+    combine: _Program
+    verified: bool = False
+
+
+_W13_PINS = {
+    "TILE": "mma_m8n8k4_f16_f32/f1x1/k16",
+    "WORK": "w1x1",
+    "STAGE": "d1/smem",
+    "REDUCE": "",
+    "RASTER": "",
+}
+_W2_PINS = {
+    "TILE": "mma_m8n8k4_f16_f32/f1x1/k4",
+    "WORK": "w1x1",
+    "STAGE": "d1/smem",
+    "REDUCE": "",
+    "RASTER": "",
+}
 
 
 def _build_route(rows: int, kind: str) -> _Program:
@@ -80,6 +111,60 @@ def _build_experts(rows: int) -> _Program:
     return _Program(runtime, tuple(plan.inputs), tuple(plan.outputs), symbolic=True)
 
 
+def _load_wide_program(graph, expected_inputs: tuple[str, ...], *, pins: dict[str, str] | None = None) -> _Program:
+    from emmy.serving.external import load_external_program
+
+    runtime, plan = load_external_program(graph, pins=pins)
+    if tuple(plan.inputs) != expected_inputs or len(plan.outputs) != 1 or len(plan.launches) != 1:
+        raise RuntimeError(
+            "1Cat grouped expert program expected one exact-ABI launch; "
+            f"got {plan.inputs!r} -> {plan.outputs!r} in {len(plan.launches)} launch(es)"
+        )
+    scratch = [buffer.name for buffer in plan.buffers if buffer.role == "scratch"]
+    if scratch:
+        raise RuntimeError(f"1Cat grouped expert program materialized scratch storage: {scratch!r}")
+    return _Program(runtime, tuple(plan.inputs), tuple(plan.outputs))
+
+
+def _build_wide_experts(rows: int) -> _WidePrograms:
+    from emmy.serving import deepseek_experts as graphs
+    from emmy.serving.external import load_external_program
+
+    shards, groups = WIDE_EXPERT_PROFILES[rows]
+    bucket_runtime, bucket_plan = load_external_program(graphs.trace_expert_bucket(rows=rows))
+    if (
+        tuple(bucket_plan.inputs) != ("route_ids",)
+        or tuple(bucket_plan.outputs) != ("grouped_routes", "group_experts", "inverse")
+        or len(bucket_plan.launches) != 1
+    ):
+        raise RuntimeError(
+            "1Cat expert bucket expected one exact-ABI launch; "
+            f"got {bucket_plan.inputs!r} -> {bucket_plan.outputs!r} in {len(bucket_plan.launches)} launch(es)"
+        )
+    bucket = _Program(bucket_runtime, tuple(bucket_plan.inputs), tuple(bucket_plan.outputs))
+    pack = _load_wide_program(graphs.trace_grouped_input(rows=rows), ("x", "grouped_routes"))
+    w13 = _load_wide_program(
+        graphs.trace_grouped_w13(rows=rows),
+        ("grouped_x", "w13", "group_experts", "w13_scale"),
+        pins=_W13_PINS,
+    )
+    activation = _load_wide_program(graphs.trace_grouped_activation(rows=rows), ("gate_up",))
+    w2 = _load_wide_program(
+        graphs.trace_grouped_w2(rows=rows),
+        ("intermediate", "w2", "group_experts", "w2_scale"),
+        pins=_W2_PINS,
+    )
+    unbucket = tuple(
+        _load_wide_program(
+            graphs.trace_expert_unbucket(rows=rows, shard_index=shard),
+            ("base", "grouped", "inverse"),
+        )
+        for shard in range(shards)
+    )
+    combine = _load_wide_program(graphs.trace_weighted_route_sum(rows=rows), ("partials", "weights"))
+    return _WidePrograms(rows, shards, groups, bucket, pack, w13, activation, w2, unbucket, combine)
+
+
 def _run(program: _Program, tensors: dict[str, Any], device: Any) -> None:
     import cupy as cp
     import torch
@@ -120,6 +205,7 @@ class _Adapter:
         *,
         build_route: Callable[[int, str], _Program] = _build_route,
         build_experts: Callable[[int], _Program] = _build_experts,
+        build_wide_experts: Callable[[int], _WidePrograms] = _build_wide_experts,
         run: Callable[[_Program, dict[str, Any], Any], None] = _run,
         is_capturing: Callable[[], bool] = _is_capturing,
         platform_supported: Callable[..., bool] = _is_sm70,
@@ -128,13 +214,16 @@ class _Adapter:
         self.original_experts = original_experts
         self._build_route = build_route
         self._build_experts = build_experts
+        self._build_wide_experts = build_wide_experts
         self._run = run
         self._is_capturing = is_capturing
         self._platform_supported = platform_supported
         self.routes: dict[tuple[int, str], _Program] = {}
         self.experts: dict[int, _Program] = {}
+        self.wide_experts: dict[int, _WidePrograms] = {}
         self.disabled_routes: set[tuple[int, str]] = set()
         self.disabled_experts: set[int] = set()
+        self.disabled_wide_experts: set[int] = set()
         self.lock = threading.RLock()
 
     def _route_contract(self, router, hidden_states, router_logits, indices_type, input_ids):
@@ -239,6 +328,21 @@ class _Adapter:
         self.experts[rows] = program
         return program
 
+    def _wide_expert_programs(self, rows: int) -> _WidePrograms | None:
+        if rows not in WIDE_EXPERT_PROFILES or rows in self.disabled_wide_experts:
+            return None
+        programs = self.wide_experts.get(rows)
+        if programs is not None:
+            return programs
+        try:
+            programs = self._build_wide_experts(rows)
+        except Exception:  # noqa: BLE001 -- a missing wide pack falls back to the direct Emmy tier
+            self.disabled_wide_experts.add(rows)
+            logger.exception("1Cat grouped retained experts M=%d: Emmy pack load failed; retaining direct Emmy", rows)
+            return None
+        self.wide_experts[rows] = programs
+        return programs
+
     def execute_route(self, program: _Program, kind: str, router_logits, bias, table, input_ids):
         import torch
 
@@ -265,6 +369,91 @@ class _Adapter:
         }
         tensors.update(binding.carriers)
         self._run(program, tensors, binding.x.device)
+        return output
+
+    def execute_wide_experts(self, programs: _WidePrograms, binding: expert_loader.ExpertBinding):
+        import torch
+
+        carriers = dict(binding.carriers)
+        device = binding.x.device
+        grouped_routes = torch.empty((programs.shards * programs.groups, ROWS_PER_GROUP), dtype=torch.int32, device=device)
+        group_experts = torch.empty((programs.shards * programs.groups,), dtype=torch.int32, device=device)
+        inverse = torch.empty((binding.rows, TOP_K), dtype=torch.int32, device=device)
+        self._run(
+            programs.bucket,
+            {
+                "route_ids": binding.ids,
+                "grouped_routes": grouped_routes,
+                "group_experts": group_experts,
+                "inverse": inverse,
+            },
+            device,
+        )
+
+        grouped_routes = grouped_routes.view(programs.shards, programs.groups, ROWS_PER_GROUP)
+        group_experts = group_experts.view(programs.shards, programs.groups)
+        grouped_x = torch.empty((programs.groups, ROWS_PER_GROUP, HIDDEN), dtype=torch.float16, device=device)
+        gate_up = torch.empty((programs.groups, ROWS_PER_GROUP, 2 * expert_loader.INTERMEDIATE), dtype=torch.float16, device=device)
+        intermediate = torch.empty((programs.groups, ROWS_PER_GROUP, expert_loader.INTERMEDIATE), dtype=torch.float16, device=device)
+        grouped_output = torch.empty((programs.groups, ROWS_PER_GROUP, HIDDEN), dtype=torch.float16, device=device)
+        partials = torch.zeros((binding.rows * TOP_K, HIDDEN), dtype=torch.float16, device=device)
+
+        for shard in range(programs.shards):
+            shard_routes = grouped_routes[shard]
+            shard_experts = group_experts[shard]
+            self._run(
+                programs.pack,
+                {"x": binding.x, "grouped_routes": shard_routes, programs.pack.outputs[0]: grouped_x},
+                device,
+            )
+            self._run(
+                programs.w13,
+                {
+                    "grouped_x": grouped_x,
+                    "w13": carriers["w13"],
+                    "group_experts": shard_experts,
+                    "w13_scale": carriers["w13_scale"],
+                    programs.w13.outputs[0]: gate_up,
+                },
+                device,
+            )
+            self._run(
+                programs.activation,
+                {"gate_up": gate_up, programs.activation.outputs[0]: intermediate},
+                device,
+            )
+            self._run(
+                programs.w2,
+                {
+                    "intermediate": intermediate,
+                    "w2": carriers["w2"],
+                    "group_experts": shard_experts,
+                    "w2_scale": carriers["w2_scale"],
+                    programs.w2.outputs[0]: grouped_output,
+                },
+                device,
+            )
+            self._run(
+                programs.unbucket[shard],
+                {
+                    "base": partials,
+                    "grouped": grouped_output,
+                    "inverse": inverse,
+                    programs.unbucket[shard].outputs[0]: partials,
+                },
+                device,
+            )
+
+        output = torch.empty((binding.rows, HIDDEN), dtype=torch.float16, device=device)
+        self._run(
+            programs.combine,
+            {
+                "partials": partials.view(binding.rows, TOP_K, HIDDEN),
+                "weights": binding.weights,
+                programs.combine.outputs[0]: output,
+            },
+            device,
+        )
         return output
 
     def dispatch_route(self, router, hidden_states, router_logits, indices_type, input_ids, op):
@@ -314,6 +503,38 @@ class _Adapter:
         rows = binding.rows
         capturing = self._is_capturing()
         with self.lock:
+            wide = None if capturing else self._wide_expert_programs(rows)
+            if wide is not None:
+                if wide.verified:
+                    try:
+                        return self.execute_wide_experts(wide, binding)
+                    except Exception:  # noqa: BLE001 -- a launch failure permanently falls back
+                        self.disabled_wide_experts.add(rows)
+                        self.wide_experts.pop(rows, None)
+                        logger.exception("1Cat grouped retained experts M=%d: Emmy launch failed; retaining direct Emmy", rows)
+                else:
+                    reference = self.original_experts(method, layer, x, weights, ids, shared_experts, shared_input)
+                    try:
+                        output = self.execute_wide_experts(wide, binding)
+                    except Exception:  # noqa: BLE001 -- a launch failure permanently falls back
+                        self.disabled_wide_experts.add(rows)
+                        self.wide_experts.pop(rows, None)
+                        logger.exception("1Cat grouped retained experts M=%d: Emmy launch failed; retaining direct Emmy", rows)
+                        return reference
+                    import torch
+
+                    if not torch.allclose(output, reference, rtol=_EXPERT_TOL, atol=_EXPERT_TOL):
+                        self.disabled_wide_experts.add(rows)
+                        self.wide_experts.pop(rows, None)
+                        max_abs = float((output - reference).abs().max().item())
+                        logger.error(
+                            "1Cat grouped retained experts M=%d: Emmy first-use parity failed (max_abs=%g); retaining direct Emmy",
+                            rows,
+                            max_abs,
+                        )
+                        return reference
+                    wide.verified = True
+                    return output
             program = self._expert_program(rows, capturing=capturing)
             if program is None or (capturing and not program.verified):
                 return self.original_experts(method, layer, x, weights, ids, shared_experts, shared_input)

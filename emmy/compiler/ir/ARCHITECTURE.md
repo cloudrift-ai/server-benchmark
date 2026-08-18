@@ -10,7 +10,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 |-------------------|---------------------------------|-------------------------------------------------------------------------------------------------------|
 | `base`            | always                          | `Op` (base), `InputOp`, `ConstantOp`                                                                  |
 | `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
-| `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
+| `tensor/ir`       | after decomposition             | pointwise/reduce/index ops plus bounded compound-operation boundaries                                |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
 | `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + `place` / `work` / `workers` / `knobs` / `schedule` / `stores` — every per-node slice keyed into `schedule` by the tree-path codec |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
@@ -27,6 +27,10 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
   Tensor-IR ops survive only *inside* `LoopOp.body` as `Assign.op` or
   `Accum.op` (`ElementwiseOp` only — `ReduceOp` is not a valid body
   op; reductions are `Accum` statements inside a reduce `Loop`).
+  Bounded routing boundaries may instead lower directly to CUDA when their cross-row coordination cannot be
+  represented as independent loop nests. `ExpertBucketOp` groups fixed route slots and returns an inverse map;
+  `RouteUnbucketOp` restores one bounded group shard; `WeightedRouteSumOp` combines the restored route slots in
+  declared FP32 order before one FP16 narrowing. Their contracts contain no checkpoint or model format.
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
   one `Fold` kind) plus the root-global schedule fields
@@ -323,6 +327,8 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
+Storage-decode `Assign` statements are explicit casts: they render directly from the stamped storage dtype to the
+stamped result dtype instead of passing through the ordinary elementwise promotion rule.
 
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound

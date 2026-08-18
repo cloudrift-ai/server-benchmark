@@ -9,6 +9,8 @@ INTERMEDIATE = 256
 ROUTE_SCALE = 1.5
 SWIGLU_LIMIT = 10.0
 VOCAB = 129280
+ROWS_PER_GROUP = 16
+WIDE_EXPERT_PROFILES = {1024: (2, 312), 4096: (6, 296)}
 
 
 def _sqrt_softplus(values):
@@ -73,6 +75,64 @@ class RoutedExpertsModule:
                 output = torch.bmm(intermediate.unsqueeze(1), w2[ids].transpose(1, 2)).squeeze(1)
                 output = output.view(x.shape[0], top_k, hidden)
                 return (output * route_weights.unsqueeze(-1)).sum(dim=1).to(torch.float16)
+
+        return Module()
+
+
+class GroupedInputModule:
+    """Gather one grouped route tile from the token-major activation."""
+
+    def __new__(cls):
+        import torch
+
+        class Module(torch.nn.Module):
+            def forward(self, x, grouped_routes):
+                valid = grouped_routes >= 0
+                safe_routes = torch.where(valid, grouped_routes, 0)
+                grouped_x = x[torch.div(safe_routes, TOP_K, rounding_mode="floor")]
+                return torch.where(valid.unsqueeze(-1), grouped_x, 0.0)
+
+        return Module()
+
+
+class GroupedW13Module:
+    """Apply one retained W13 expert to each stable route tile."""
+
+    def __new__(cls):
+        import torch
+
+        class Module(torch.nn.Module):
+            def forward(self, grouped_x, w13, group_experts):
+                return torch.matmul(grouped_x, w13[group_experts].transpose(1, 2))
+
+        return Module()
+
+
+class GroupedActivationModule:
+    """Apply exact clamp-SwiGLU to one grouped W13 result."""
+
+    def __new__(cls):
+        import torch
+        import torch.nn.functional as F
+
+        class Module(torch.nn.Module):
+            def forward(self, gate_up):
+                gate, up = gate_up.chunk(2, dim=-1)
+                intermediate = F.silu(torch.clamp(gate, max=SWIGLU_LIMIT))
+                return intermediate * torch.clamp(up, min=-SWIGLU_LIMIT, max=SWIGLU_LIMIT)
+
+        return Module()
+
+
+class GroupedW2Module:
+    """Apply one retained W2 expert to each activated route tile."""
+
+    def __new__(cls):
+        import torch
+
+        class Module(torch.nn.Module):
+            def forward(self, intermediate, w2, group_experts):
+                return torch.matmul(intermediate, w2[group_experts].transpose(1, 2))
 
         return Module()
 
@@ -168,4 +228,152 @@ def trace_deepseek_experts(*, rows: int, symbolic: bool = False):
         dynamic_shapes=dynamic_shapes,
     )
     spell_expert_inputs(graph)
+    return graph
+
+
+def _wide_shape(rows: int) -> tuple[int, int, int]:
+    try:
+        shards, groups = WIDE_EXPERT_PROFILES[rows]
+    except KeyError as exc:
+        raise ValueError(f"no grouped expert profile for M={rows}") from exc
+    return shards, groups, shards * groups
+
+
+def trace_expert_bucket(*, rows: int):
+    """Build the route-to-expert grouping program."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ExpertBucketOp
+
+    _shards, _groups, total_groups = _wide_shape(rows)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("route_ids", (rows, TOP_K), "i32"), node_id="route_ids")
+    graph.add_node(
+        ExpertBucketOp(experts=EXPERTS, routes=TOP_K, rows_per_group=ROWS_PER_GROUP),
+        ["route_ids"],
+        outputs=[
+            Tensor("grouped_routes", (total_groups, ROWS_PER_GROUP), "i32"),
+            Tensor("group_experts", (total_groups,), "i32"),
+            Tensor("inverse", (rows, TOP_K), "i32"),
+        ],
+        node_id="grouped_routes",
+    )
+    graph.inputs = ["route_ids"]
+    graph.outputs = ["grouped_routes", "group_experts", "inverse"]
+    return graph
+
+
+def trace_grouped_w13(*, rows: int):
+    """Trace one reusable grouped W13 shard."""
+    import torch
+
+    from emmy.compiler.loader.onecat_sm70_experts import spell_grouped_w13_input
+    from emmy.compiler.trace.torch import trace_module
+
+    _shards, groups, _total_groups = _wide_shape(rows)
+    graph = trace_module(
+        GroupedW13Module(),
+        (
+            torch.empty((groups, ROWS_PER_GROUP, HIDDEN), dtype=torch.float16, device="meta"),
+            torch.empty((EXPERTS, 2 * INTERMEDIATE, HIDDEN), dtype=torch.float16, device="meta"),
+            torch.empty((groups,), dtype=torch.int32, device="meta"),
+        ),
+    )
+    spell_grouped_w13_input(graph)
+    return graph
+
+
+def trace_grouped_input(*, rows: int):
+    """Trace one reusable route-tile gather shard."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    _shards, groups, _total_groups = _wide_shape(rows)
+    return trace_module(
+        GroupedInputModule(),
+        (
+            torch.empty((rows, HIDDEN), dtype=torch.float16, device="meta"),
+            torch.empty((groups, ROWS_PER_GROUP), dtype=torch.int32, device="meta"),
+        ),
+    )
+
+
+def trace_grouped_w2(*, rows: int):
+    """Trace one reusable grouped activation-and-W2 shard."""
+    import torch
+
+    from emmy.compiler.loader.onecat_sm70_experts import spell_grouped_w2_input
+    from emmy.compiler.trace.torch import trace_module
+
+    _shards, groups, _total_groups = _wide_shape(rows)
+    graph = trace_module(
+        GroupedW2Module(),
+        (
+            torch.empty((groups, ROWS_PER_GROUP, INTERMEDIATE), dtype=torch.float16, device="meta"),
+            torch.empty((EXPERTS, HIDDEN, INTERMEDIATE), dtype=torch.float16, device="meta"),
+            torch.empty((groups,), dtype=torch.int32, device="meta"),
+        ),
+    )
+    spell_grouped_w2_input(graph)
+    return graph
+
+
+def trace_grouped_activation(*, rows: int):
+    """Trace one reusable grouped clamp-SwiGLU shard."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    _shards, groups, _total_groups = _wide_shape(rows)
+    return trace_module(
+        GroupedActivationModule(),
+        (torch.empty((groups, ROWS_PER_GROUP, 2 * INTERMEDIATE), dtype=torch.float16, device="meta"),),
+    )
+
+
+def trace_expert_unbucket(*, rows: int, shard_index: int):
+    """Build one grouped-shard restore program."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import RouteUnbucketOp
+
+    shards, groups, _total_groups = _wide_shape(rows)
+    if not 0 <= shard_index < shards:
+        raise ValueError(f"grouped expert shard must be in [0,{shards}), got {shard_index}")
+    graph = Graph()
+    for name, shape, dtype in (
+        ("base", (rows * TOP_K, HIDDEN), "f16"),
+        ("grouped", (groups, ROWS_PER_GROUP, HIDDEN), "f16"),
+        ("inverse", (rows, TOP_K), "i32"),
+    ):
+        graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+    graph.add_node(
+        RouteUnbucketOp(rows_per_group=ROWS_PER_GROUP, shard_index=shard_index),
+        ["base", "grouped", "inverse"],
+        Tensor("output", (rows * TOP_K, HIDDEN), "f16"),
+        node_id="output",
+    )
+    graph.inputs = ["base", "grouped", "inverse"]
+    graph.outputs = ["output"]
+    return graph
+
+
+def trace_weighted_route_sum(*, rows: int):
+    """Build the deterministic route-order weighted combine program."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import WeightedRouteSumOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("partials", (rows, TOP_K, HIDDEN), "f16"), node_id="partials")
+    graph.add_node(InputOp(), [], Tensor("weights", (rows, TOP_K), "f32"), node_id="weights")
+    graph.add_node(
+        WeightedRouteSumOp(routes=TOP_K),
+        ["partials", "weights"],
+        Tensor("output", (rows, HIDDEN), "f16"),
+        node_id="output",
+    )
+    graph.inputs = ["partials", "weights"]
+    graph.outputs = ["output"]
     return graph

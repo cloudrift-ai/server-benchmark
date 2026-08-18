@@ -173,9 +173,9 @@ FP8 descriptor in `loader.sm70_fp8` validates the exact HMMA884 carrier shapes a
 including grouped and gate/up-interleaved layouts, without retaining a decoded or duplicate weight. This mechanism
 does not imply a serving dispatch: a runtime adapter still needs exact live parity and target-card performance proof.
 The 1Cat integration validates its retained projection carriers and cached host metadata in `loader.onecat_sm70`,
-builds the physical descriptor here, and returns a format-free named binding to serving. The companion
-`loader.onecat_sm70_experts` boundary validates and spells the retained expert carriers. No layout, scale-pairing, or
-checkpoint-format concept crosses either loader boundary.
+including the prepared weight's exact uint8 bits-carrier dtype, builds the physical descriptor here, and returns a
+format-free named binding to serving. The companion `loader.onecat_sm70_experts` boundary validates and spells the
+retained expert carriers. No layout, scale-pairing, or checkpoint-format concept crosses either loader boundary.
 
 **MXFP4 input weights.** `loader.quant.spell_mxfp4_inputs` applies the same birth-time rule to packed E2M1 weights
 and UE8M0 block scales supplied as program inputs. It accepts static leading dimensions such as the expert axis,

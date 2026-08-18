@@ -22,6 +22,10 @@ producing a `Graph[CudaOp]` where every compute node carries a rendered
 `__global__` source plus its launch geometry (grid / block / smem /
 arg_order).
 
+Scalar casts are target-aware. In particular, an explicit E4M3-to-f16 cast on SM70 reconstructs the exact half bits
+and emits its helper only when used; this avoids CUDA's pre-FP8 scalar fallback through f32 while retaining all finite
+values, signed zero, and NaN semantics. Other targets keep the portable CUDA-header conversion.
+
 ## Dispatch (`program.py`)
 
 The graph is first projected to an **execution plan** (`plan_from_graph`, `../plan.py` — buffer specs, constants,

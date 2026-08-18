@@ -30,6 +30,14 @@ COPY dist/emmy_ml-*.whl /tmp/emmy-wheel/
 COPY docker/1cat-vllm-sm70/shims/kv_rope_fp8_insert.py /tmp/onecat-shims/kv_rope_fp8_insert.py
 RUN pip install --no-cache-dir --no-deps /tmp/emmy-wheel/emmy_ml-*.whl \
     && pip install --no-cache-dir cupy-cuda12x==14.1.1 \
+    && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_worker.py \
+        | cut -d ' ' -f 1)" = "d0b6b8570e20373bde6b8d7cd787666c38d4a0a0145350797525689f6894f6e4" \
+    && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/output.py \
+        | cut -d ' ' -f 1)" = "3f8f295f226c5e152b5dd368de5a7cba3be4af488fed7c2500fc9bbcf321f239" \
+    && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/v1/request.py \
+        | cut -d ' ' -f 1)" = "462c17cfde4308f0eb35eb0b2afa6b4ba3e628caa481dee9f476297bec373f1e" \
+    && test "$(sha256sum /usr/local/lib/python3.12/dist-packages/vllm/triton_utils/jit_monitor.py \
+        | cut -d ' ' -f 1)" = "6463bebae253f3e0229e62aef9c4c8695934edd35042a331e19eefe882e62b53" \
     && emmy_onecat_sm70_dir="$(python3 -c \
         'import pathlib, vllm.models.deepseek_v4.sm70 as sm70; print(pathlib.Path(sm70.__file__).parent)' \
         | tail -n 1)" \
@@ -53,4 +61,5 @@ ENV EMMY_CUBIN_CACHE=/opt/emmy/cubin \
 
 LABEL ai.emmy.compiler.integration="${COMPILER_INTEGRATION}" \
       ai.emmy.compiler.kernel="${COMPILER_KERNEL}" \
-      ai.emmy.onecat.q-cache-shim="d76126608"
+      ai.emmy.onecat.q-cache-shim="d76126608" \
+      ai.emmy.onecat.native-prefill-warmup="d76126608"

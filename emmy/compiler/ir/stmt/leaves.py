@@ -378,6 +378,16 @@ class Assign(Stmt):
         pad = _pad(ctx.indent)
         op_name = self.op.name
         arg_dtypes = [ctx.ssa_dtypes.get(a, "f32") for a in self.args]
+        decode_dt = self.op.decodes
+        if decode_dt is not None:
+            if len(self.args) != 1:
+                raise ValueError(f"{op_name} Assign requires one argument")
+            if arg_dtypes[0] != decode_dt:
+                raise ValueError(f"{op_name} Assign requires a {decode_dt} argument, got {arg_dtypes[0]}")
+            result_dt = self.dtype.name if self.dtype is not None else "f32"
+            body = ctx.target.convert(self.args[0], decode_dt, result_dt)
+            ctx.ssa_dtypes[self.name] = result_dt
+            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {body};"]
         if op_name == "bitcast":
             if len(self.args) != 1 or self.dtype is None:
                 raise ValueError("bitcast Assign requires one argument and an explicit destination dtype")

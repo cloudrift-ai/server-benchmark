@@ -29,6 +29,7 @@ from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
     ElementwiseOp,
+    ExpertBucketOp,
     FixedSinkhornOp,
     GatherOp,
     IndexedTopKOp,
@@ -36,10 +37,12 @@ from emmy.compiler.ir.tensor.ir import (
     IndexSource,
     RangeOp,
     ReduceOp,
+    RouteUnbucketOp,
     RowRmsNormRopeOp,
     ScanOp,
     ScatterOp,
     StableTopKOp,
+    WeightedRouteSumOp,
 )
 from emmy.compiler.tensor import Tensor
 from emmy.compiler.torch_wire import (
@@ -103,9 +106,12 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
         BitcastOp("u16"),
         ElementwiseOp("silu"),
         FixedSinkhornOp(eps=2e-6, iterations=4),
+        ExpertBucketOp(experts=8, routes=2, rows_per_group=4),
         RowRmsNormRopeOp(rope_dim=64, eps=2e-6),
+        RouteUnbucketOp(rows_per_group=4, shard_index=2),
         StableTopKOp(k=6, scale=1.5),
         IndexedTopKOp(k=6, scale=1.5, reduction_lanes=32, lane_chunk=4),
+        WeightedRouteSumOp(routes=6),
         ReduceOp("sum", -1),
         ScanOp("sum", 0),
         GatherOp(axis=1),

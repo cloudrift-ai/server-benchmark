@@ -131,10 +131,19 @@ _NATIVE_FP16_OPS: frozenset[str] = frozenset(
 class CudaRenderTarget:
     """CUDA C / cuda_fp16.h spellings for :class:`RenderTarget`.
 
-    Stateless; safe to share across render calls. The Kernel-IR
-    renderer constructs one per ``render_kernelop`` invocation (see
-    ``emmy/compiler/ir/kernel/render.py``).
+    The Kernel-IR renderer constructs one per ``render_kernelop`` invocation
+    (see ``emmy/compiler/ir/kernel/render.py``). ``compute_capability`` selects
+    architecture-specific scalar spellings; the default keeps the portable
+    CUDA-header forms used by standalone statement-render tests.
     """
+
+    def __init__(self, compute_capability: tuple[int, int] | None = None) -> None:
+        self.compute_capability = compute_capability
+        self.uses_sm70_f8_decode = False
+
+    @property
+    def prelude(self) -> str:
+        return _SM70_F8_DECODE_PRELUDE if self.uses_sm70_f8_decode else ""
 
     def type_name(self, dtype: str) -> str:
         return _TYPE_NAME.get(dtype, "float")
@@ -155,6 +164,12 @@ class CudaRenderTarget:
         if src_dt == dst_dt:
             return value
         if src_dt in _F8_DTYPES and dst_dt in ("f32", "f16"):
+            if src_dt == "f8e4m3" and dst_dt == "f16" and self.compute_capability == (7, 0):
+                # Volta has no FP8 conversion instruction. cuda_fp8.h's scalar
+                # fallback widens through f32; decode the finite-and-NaN E4M3
+                # bits directly into their exact f16 value instead.
+                self.uses_sm70_f8_decode = True
+                return f"emmy_sm70_f8e4m3_to_f16({value})"
             # fp8 decode — the ``from_f8*`` cast's device spelling. The functional
             # cast invokes ``<cuda_fp8.h>``'s explicit conversion operator, which
             # compiles on every arch the header supports (hardware ``cvt`` on
@@ -232,3 +247,17 @@ class CudaRenderTarget:
             if n == 16:
                 return ("uint4", _TYPE_NAME[dtype])
         return None
+
+
+_SM70_F8_DECODE_PRELUDE = r"""
+static __device__ __forceinline__ __half emmy_sm70_f8e4m3_to_f16(__nv_fp8_e4m3 value) {
+    const unsigned char bits = *reinterpret_cast<const unsigned char*>(&value);
+    const unsigned short sign = static_cast<unsigned short>(bits & 0x80u) << 8;
+    const unsigned short magnitude = static_cast<unsigned short>(bits & 0x7fu);
+    if (magnitude == 0x7fu) {
+        return __ushort_as_half(sign | 0x7e00u);
+    }
+    const __half unscaled = __ushort_as_half(sign | (magnitude << 7));
+    return __hmul(unscaled, __ushort_as_half(23u << 10));
+}
+"""

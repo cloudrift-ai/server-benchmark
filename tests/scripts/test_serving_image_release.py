@@ -467,6 +467,19 @@ def test_onecat_emmy_image_accepts_strict_external_program_assets():
     assert "EMMY_ONECAT_DEEPSEEK_V4=${ONECAT_DEEPSEEK_V4}" in dockerfile
 
 
+def test_onecat_native_prefill_warmup_pins_the_worker_lifecycle_sources():
+    dockerfile = (PROJECT_ROOT / "docker" / "1cat-vllm-sm70" / "Dockerfile.emmy").read_text()
+
+    for source in (
+        "vllm/v1/worker/gpu_worker.py",
+        "vllm/v1/core/sched/output.py",
+        "vllm/v1/request.py",
+        "vllm/triton_utils/jit_monitor.py",
+    ):
+        assert f"sha256sum /usr/local/lib/python3.12/dist-packages/{source}" in dockerfile
+    assert 'ai.emmy.onecat.native-prefill-warmup="d76126608"' in dockerfile
+
+
 def test_serving_images_carry_canonical_publication_labels():
     make = (PROJECT_ROOT / "Makefile").read_text()
     emmy_dockerfile = (SERVE_DIR / "Dockerfile").read_text()

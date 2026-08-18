@@ -262,3 +262,66 @@ def test_mhc_prefill_traces_share_symbolic_token_extent_across_live_state():
             token_dim = graph.nodes[name].output.shape[0]
             assert not token_dim.is_static
             assert token_dim.as_atom_name() == "num_tokens"
+
+
+def test_wide_mhc_traces_spell_fixed_stream_sums_as_pointwise_work():
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.ir.tensor.ir import ReduceOp
+
+    def fixed_stream_reductions(graph):
+        def is_fixed_stream_reduction(node):
+            return isinstance(node.op, MatmulOp) or (isinstance(node.op, ReduceOp) and node.op.axis == 1)
+
+        return [node for node in graph.nodes.values() if is_fixed_stream_reduction(node)]
+
+    assert fixed_stream_reductions(trace_mhc_post(rows=1, hidden=16))
+    assert not fixed_stream_reductions(trace_mhc_post(rows=128, hidden=16))
+    assert fixed_stream_reductions(trace_mhc_fused(rows=1, hidden=16))
+    assert not fixed_stream_reductions(trace_mhc_fused(rows=128, hidden=16))
+
+
+def test_wide_mhc_pointwise_stream_algebra_matches_the_reference_modules(mhc_inputs):
+    values = mhc_inputs
+    cases = (
+        (
+            MhcPreModule(),
+            MhcPreModule(pointwise_streams=True),
+            (values["residual"], values["fn"], values["scale"], values["base"], values["norm_weight"]),
+        ),
+        (
+            MhcBroadcastModule(),
+            MhcBroadcastModule(pointwise_streams=True),
+            (values["x"], values["fn_broadcast"], values["scale"], values["base"], values["norm_weight"]),
+        ),
+        (
+            MhcPostModule(),
+            MhcPostModule(pointwise_streams=True),
+            (values["x"], values["residual"], values["post"], values["comb"]),
+        ),
+        (
+            MhcFusedModule(),
+            MhcFusedModule(pointwise_streams=True),
+            (
+                values["x"],
+                values["residual"],
+                values["post"],
+                values["comb"],
+                values["fn"],
+                values["scale"],
+                values["base"],
+                values["norm_weight"],
+            ),
+        ),
+        (
+            HcHeadModule(),
+            HcHeadModule(pointwise_streams=True),
+            (values["residual"], values["head_fn"], values["head_scale"], values["head_base"]),
+        ),
+    )
+    for reference, pointwise, inputs in cases:
+        expected = reference(*inputs)
+        actual = pointwise(*inputs)
+        expected = expected if isinstance(expected, tuple) else (expected,)
+        actual = actual if isinstance(actual, tuple) else (actual,)
+        for got, want in zip(actual, expected, strict=True):
+            torch.testing.assert_close(got, want, rtol=2e-6, atol=2e-7)

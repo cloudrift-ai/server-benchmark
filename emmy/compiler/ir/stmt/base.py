@@ -271,11 +271,8 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
     if fn == "copy":
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
-        # fp8 decode cast: the value semantics live in the dtype conversion the
-        # target already applied to the argument (``Assign.render`` promotes the
-        # f8-typed arg through ``target.convert``, which spells the decode), so
-        # the op itself is an identity here — like ``copy``, but never a raw
-        # byte move because the arg reaches this point converted.
+        # fp8 decode casts render directly in ``Assign.render``. Keep the Expr
+        # form as an identity for callers that build algebraic expressions.
         return inputs[0]
     if fn in ("to_f8e4m3", "to_f8e5m2"):
         # fp8 encode cast — the decode twin: ``Assign.render`` computes the arg at f32 and its

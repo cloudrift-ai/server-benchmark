@@ -31,6 +31,7 @@ def register() -> None:
         from emmy.serving.onecat_indexer import register_onecat_indexer_kernels
         from emmy.serving.onecat_linear import register_onecat_linear_kernels
         from emmy.serving.onecat_mhc import register_onecat_mhc_kernels
+        from emmy.serving.onecat_native_warmup import install_onecat_native_prefill_warmup
         from emmy.serving.onecat_output import register_onecat_output_kernels
         from emmy.serving.onecat_vocab import register_onecat_vocab_kernels
 
@@ -43,6 +44,7 @@ def register() -> None:
         register_onecat_output_kernels()
         register_onecat_vocab_kernels()
         register_onecat_indexer_kernels()
+        install_onecat_native_prefill_warmup()
 
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")

@@ -47,15 +47,16 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   full logits, compact local LM-head top-1 and post-all-gather rank selection, the pure C4 indexer-Q RoPE/weight
   scaling transform, shared-expert clamp-SwiGLU, learned and hash routing, and the complete routed-expert
   projection/activation/weighted-combine path. The measured route widths keep their static programs; one bounded
-  symbolic fallback covers every other continuous-batch width through 4096. 1Cat retains scheduler orchestration,
-  TP/PP collectives, KV RoPE plus FP8 paged-cache mutation, and sparse-attention/cache operations. Serving receives
-  only format-free named physical bindings from the loader integration. Cold or unverified CUDA-graph calls retain
-  the original 1Cat functions.
+  symbolic fallback covers every other continuous-batch width through 4096. The full 1024- and 4096-row expert
+  profiles group routes by expert into fixed 16-row tiles, run the two retained-weight contractions as grouped Volta
+  MMA programs, restore route order, and combine weights in FP32 slot order. Smaller and irregular widths retain the
+  bounded direct program. 1Cat retains scheduler orchestration, TP/PP collectives, KV RoPE plus FP8 paged-cache
+  mutation, and sparse-attention/cache operations. Serving receives only format-free named physical bindings from
+  the loader integration. Cold or unverified CUDA-graph calls retain the original 1Cat functions.
 - `mhc.py` — exact FP32 multi-stream residual algebra used by the DeepSeek V4 serving adapter traces. Its
   `fixed_sinkhorn` helper is a lazy torch custom-op boundary for static `[M,N,N]` matrices (`N <= 8`, at most 32
   iterations): eager execution retains the original stable softmax-plus-epsilon order, while Emmy lowers the boundary
   to one register-resident straight-line kernel per leading matrix. The leading token dimension may be symbolic; the
-  square matrix dimensions remain statically bounded. The helper is shape/dtype generic and has no model name gate.
   Fused traces through 16 token rows preserve the FP32 post-update value for prenormalization while returning and
   collapsing the separately rounded FP16 residual. Larger prefill traces use the runtime's separate FP16 post/pre path.
 - `deepseek.py` — exact side-effect-free Q/KV RMSNorm, pure query RMSNorm plus forward RoPE, and inverse-RoPE
@@ -73,16 +74,24 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   repeating graph passes and fork resolution. General callers retain compile-on-miss behavior; the 1Cat adapters use
   the strict loader, which never compiles and treats a missing or damaged pack as an unavailable Emmy program.
 - `onecat_prewarm.py` — the release-blocking offline realization entry point for the broad DeepSeek V4 adapters. Its
-  deterministic 188-profile manifest contains final RMSNorm, Q/KV RMSNorm, query RMSNorm plus forward RoPE, inverse
+  deterministic 208-profile manifest contains final RMSNorm, Q/KV RMSNorm, query RMSNorm plus forward RoPE, inverse
   RoPE, all 54 static and symbolic retained-projection profiles, every unquantized-linear and mHC profile, the three
   symbolic output profiles, all eight rank-local embedding and LM-head top-1 profiles, post-all-gather rank
   selection, C4 indexer-Q, sixteen measured static route profiles, two bounded symbolic route fallbacks, and one
-  bounded symbolic retained-expert program. Run
+  bounded symbolic retained-expert program. Twenty additional strict packs cover grouped route bucketing, activation,
+  retained W13/W2, route restoration, and weighted combination for 1024- and 4096-row prefill. Run
   `python -m emmy.serving.onecat_prewarm` with `EMMY_PACK_DIR` and `EMMY_CUBIN_CACHE` pointing at the release caches on
   the target card before starting `vllm serve`; each profile must compile, persist, and strictly reload or the command
   fails. The pinned 1Cat image directly enters `vllm serve`, and vLLM's plugin registration is an import hook invoked
   in API, engine, and worker processes before rank-local CUDA initialization rather than a once-per-release pre-worker
   callback. Release orchestration must therefore run this separate cache-sharing phase before worker RPCs begin.
+- `onecat_native_warmup.py` — the process-local half of the pinned 1Cat release warmup. The baked Triton cache avoids
+  device-code compilation, but a fresh worker still materializes each cached specialization through Triton's JIT
+  function on first use. The broad adapter wraps the exact worker lifecycle so one real 256-token scheduler prefill
+  runs after CUDA-graph capture and before the request-time JIT monitor activates. This reaches the compressed C4
+  indexer as well as the ordinary prefill metadata, sparse-attention, query-reference, and FP8 paged-cache paths;
+  cleanup releases the synthetic request before health is reported. 1Cat continues to own and launch those stateful
+  operations. The lifecycle signature and single monitor activation are fail-closed compatibility pins.
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

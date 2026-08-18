@@ -457,7 +457,7 @@ def stage_moves(*, warp: bool) -> list[Stage]:
     if not warp:
         return depths
     smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
-    return [*smems, *depths, Stage.parse("d2/smem-async/p2")]
+    return [*smems, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width

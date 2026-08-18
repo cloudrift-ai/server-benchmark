@@ -1501,8 +1501,12 @@ def _checkpoint_key_renamer(model, *, reverse: bool = False):
         return None
     if not reverse:
         return lambda key: rename_source_key(key, renamings, [])[0]
+    # Inverting the transforms IS the reverse direction here. Transformers 5.15 grew a ``reverse``
+    # argument, but all it does is run the converters before the renamings instead of after, and
+    # the converter list passed here is empty — so it would change nothing, while costing the
+    # supported 5.14, whose ``rename_source_key`` has no such parameter.
     inverted = [t.reverse_transform() for t in renamings]
-    return lambda path: rename_source_key(path, inverted, [], reverse=True)[0]
+    return lambda path: rename_source_key(path, inverted, [])[0]
 
 
 def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:

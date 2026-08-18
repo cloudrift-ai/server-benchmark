@@ -91,7 +91,8 @@ class Reduction:
             merged = tuple(
                 Assign(name=a.name, op=a.op, args=tuple(sub.get(x, x) for x in a.args), dtype=a.dtype) for a in self.combine_states
             )
-        return StateMerge(state=self.names, merge=merged, state_b=other)
+        ids = self.identities()
+        return StateMerge(state=self.names, merge=merged, state_b=other, identities=tuple(ids[n] for n in self.names))
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:

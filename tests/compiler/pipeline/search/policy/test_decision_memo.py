@@ -55,7 +55,9 @@ def _scheduled_rows(graph: Graph) -> list[tuple]:
     return [tuple(tuning_knob_items(n.op.knobs)) for n in graph.nodes.values() if isinstance(n.op, TileOp)]
 
 
-def test_second_same_shape_kernel_replays_the_first_decision() -> None:
+def _resolve_counting(n: int) -> tuple[list[tuple], int, list[object]]:
+    """Resolve an ``n``-kernel same-shape graph, returning its rows, how often the schedule fork
+    class was scored, and every decision-memo replay attempt."""
     prior = _CountingPrior()
     replays: list[object] = []
     real = greedy._find_decided_leaf
@@ -68,13 +70,24 @@ def test_second_same_shape_kernel_replays_the_first_decision() -> None:
     greedy._find_decided_leaf, orig = counting, greedy._find_decided_leaf
     try:
         g, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
-            _matmul_graph(n=2), greedy_decide(prior=prior)
+            _matmul_graph(n=n), greedy_decide(prior=prior)
         )
     finally:
         greedy._find_decided_leaf = orig
-    rows = _scheduled_rows(g)
+    return _scheduled_rows(g), prior.schedule_scores, replays
+
+
+def test_second_same_shape_kernel_replays_the_first_decision() -> None:
+    """A second structurally identical kernel costs NOTHING to decide: it replays the first
+    decision by tree descent. Asserted as a DIFFERENCE against the one-kernel resolve rather than
+    an absolute count — the same compile also prices its structural fork, whose nested per-kernel
+    resolves score forks of their own, and how many of those there are is not this memo's
+    contract."""
+    one_rows, one_scores, _ = _resolve_counting(1)
+    rows, scores, replays = _resolve_counting(2)
+    assert len(one_rows) == 1
     assert len(rows) == 2 and rows[0] == rows[1], "both kernels must deploy the identical row"
-    assert prior.schedule_scores == 1, "the second schedule fork must replay, not re-score"
+    assert scores == one_scores, "the second schedule fork must replay, not re-score"
     assert [r for r in replays if r is not None], "the replay must go through the tree descent"
 
 

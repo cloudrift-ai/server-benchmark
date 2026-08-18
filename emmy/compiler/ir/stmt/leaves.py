@@ -998,11 +998,19 @@ class StateMerge(Stmt):
     (``Reduction.state_merge``) for the REG tree / cooperative-tree / cross-CTA finalize; it
     renders the ψ-rescale state reassignment via ``render_merge_program``. Unlike ``Accum`` it is
     not a fold carrier — it sits in a combine region, not a streaming fold loop, so it never
-    makes its enclosing loop ``is_reduce``."""
+    makes its enclosing loop ``is_reduce``.
+
+    ``identities`` is the neutral element per :attr:`state` entry, so the seed placement in
+    ``Loop.render`` can declare these states the way it declares an ``Accum``'s. It has to be
+    STORED rather than read back off ``merge``: a twisted carrier's identities come from the
+    streaming-merge generator (``l``/``O`` → add → 0, ``m`` → maximum → −1e30) and not from the
+    combine program this stmt carries, so they are not derivable here. Empty when the builder had
+    none, in which case the state must already be declared where this lands."""
 
     state: tuple[str, ...]
     merge: tuple[Stmt, ...]
     state_b: tuple[str, ...]
+    identities: tuple[float, ...] = ()
 
     def deps(self) -> tuple[str, ...]:
         """Every external name the render references: ``state_b`` plus any other outer name a

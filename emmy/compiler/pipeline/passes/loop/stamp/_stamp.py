@@ -17,7 +17,6 @@ from math import prod
 from typing import TYPE_CHECKING
 
 from emmy.compiler import provenance
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph, Node
@@ -61,16 +60,6 @@ def structure_features(body: Body, graph: Graph | None = None) -> dict[str, floa
     (e.g. ad-hoc callers without a surrounding graph) to skip dtype features.
     Values are floats so the dict drops straight into the numeric knob row."""
     return {**_skeleton(body, graph), **_extents(body)}
-
-
-def restamp_structural_features(op: LoopOp, graph: Graph | None = None) -> None:
-    """Strip stale ``S_*`` knobs off ``op`` and re-stamp the structural features
-    for its current body, in place. For fragment builders that rewrite a body
-    *after* ``020_stamp_structural_features`` already ran (the pass runs once at
-    fusion end and never revisits a spliced fragment) — without this the split
-    kernels would featurize as the fused kernel for the online prior."""
-    op.knobs = {k: v for k, v in op.knobs.items() if not k.startswith(STRUCT_PREFIX)}
-    op.knobs.update(structure_features(op.body, graph))
 
 
 def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:

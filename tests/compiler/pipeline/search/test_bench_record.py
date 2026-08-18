@@ -127,23 +127,36 @@ def test_mma_path_records_and_joins_the_scalar_pool(monkeypatch) -> None:
     """The 2026-07-16 4090 regression: the tensor-core (mma) tile-lowering preserves no
     LoopOp in ``.source``, so the loop-only offer-site predicate silently dropped every
     mma-path kernel — a golden sweep recorded ZERO rows, exactly the fast variants the
-    feature exists to capture. The tile-dialect fallback must (a) recover a site, (b)
-    group the split-K main+combine pair into ONE whole-variant leaf, and (c) produce
+    feature exists to capture. The tile-dialect fallback must recover a site AND produce
     the same ``op_sig`` as the scalar/loop path for the same shape (one pool)."""
-    mma = _compile_pinned(monkeypatch, {"TILE": "f4x8", "WORK": "t16x8", "REDUCE": "g2k", "STAGE": "d2/smem-async", "RASTER": ""})
+    pins = {"TILE": "f4x8", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": "", "RASTER": ""}
+    mma = _compile_pinned(monkeypatch, pins)
     n_mma_kernels = _n_cuda_kernels(mma)
-    assert n_mma_kernels == 2, "the pinned split-K config must compile to a main + combine pair"
+    assert n_mma_kernels == 1, "the pinned config keeps ONE kernel"
     mma_leaves = bench_leaves(mma, _fake_bench(n_mma_kernels, time_ms=0.5))
-    assert len(mma_leaves) == 1, "mma-path kernels must be recordable (split-K pair -> one leaf)"
-    # The combine kernel has NO S_* provenance anywhere in its chain — it must attribute
-    # to its producer through the graph edge, so the leaf is the WHOLE-variant value
-    # (partial-only values are fast-biased against the tune's whole-slice leaves).
-    assert mma_leaves[0].value_us == pytest.approx(1000.0)
-    assert mma_leaves[0].n_samples is None and mma_leaves[0].variance is None  # multi-kernel group
-    scalar = _compile_pinned(monkeypatch, {"TILE": "f2x4", "WORK": "t16x8", "REDUCE": "", "STAGE": "d2/smem-async", "RASTER": ""})
+    assert len(mma_leaves) == 1, "mma-path kernels must be recordable"
+    assert mma_leaves[0].value_us == pytest.approx(500.0)
+    scalar = _compile_pinned(monkeypatch, {**pins, "TILE": "f2x4"})
     scalar_leaves = bench_leaves(scalar, _fake_bench(_n_cuda_kernels(scalar)))
     assert len(scalar_leaves) == 1
     assert mma_leaves[0].op_sig == scalar_leaves[0].op_sig  # same shape, same pool, either lowering path
+
+
+def test_split_kernels_record_one_leaf_each(monkeypatch) -> None:
+    """A structural fork mints brand-new kernels, so each records its OWN leaf against its OWN
+    site: the pieces carry structural stamps re-derived from their own bodies, which is exactly
+    what makes them separately measurable, recordable and tunable. (Grouping them into one
+    whole-variant leaf was the old model, and it only existed because the pieces used to be
+    unaddressable — the partial wore the pre-split kernel's row and the finalize wore none.)"""
+    pins = {"TILE": "f4x8", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": "g2k", "RASTER": ""}
+    split = _compile_pinned(monkeypatch, pins)
+    n = _n_cuda_kernels(split)
+    assert n == 2, "the pinned split must compile to a partial + finalize pair"
+    leaves = bench_leaves(split, _fake_bench(n, time_ms=0.5))
+    assert len(leaves) == 2, "each minted kernel is its own leaf"
+    assert {leaf.op_sig for leaf in leaves} == {leaf.op_sig for leaf in leaves} and len({leaf.op_sig for leaf in leaves}) == 2, (
+        "the pieces must not share a structural signature — they are different kernels"
+    )
 
 
 # ---------------------------------------------------------------------------

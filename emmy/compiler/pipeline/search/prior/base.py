@@ -29,7 +29,7 @@ and :meth:`policy` (PUCT's ``P``, normalized within one fork's sibling set). The
 retired third one, ``score``, was a per-candidate selection signal from the
 Thompson-draw era; every model was deterministic, so it had collapsed into
 ``mean_score`` everywhere except the composite prior, where it carried a magnitude
-blend that measurement showed to be inert (HISTORY.md: "The inert offline tilt").
+blend that measurement showed to be inert.
 """
 
 from __future__ import annotations
@@ -179,7 +179,7 @@ class Prior(ABC):
         the online model predicts calibrated µs and the offline one an ordinal proxy whose
         magnitude spans ``e**±700``, and only after normalization are the two the same kind of
         quantity. It also removes the failure the raw magnitudes caused — an offline proxy fed
-        to PUCT as though it were µs (HISTORY.md: "The inert offline tilt").
+        to PUCT as though it were µs.
 
         Batched by construction: a sibling set is scored in one call, so a vectorized model pays
         its per-call overhead once per fork rather than once per candidate."""

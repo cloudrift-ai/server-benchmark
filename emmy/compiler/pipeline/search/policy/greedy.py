@@ -66,16 +66,6 @@ def _tile_pipeline():
     return Pipeline.build(["lowering/tile"])
 
 
-# The rule whose fork prices a kernel: the prior's predicted µs for the chosen
-# complete schedule row at the contraction fork (the one hierarchical tile → stage → reduce
-# fork the tile schedule offers) is the per-kernel cost the
-# structural pricing sums (defined here, not in ``two_level``, because that module imports
-# this package at module scope — the reverse would cycle). The fork moved out of recognition
-# when the two halves split: ``010_recognize`` emits the unmapped ``TileOp`` and
-# ``020_schedule`` offers the row fork, so the scored trace decision records under the latter.
-PARTITION_RULE = "020_schedule"
-
-
 def tile_identity(knobs: dict) -> frozenset:
     """The blocklist key for a tile — its canonical tuning-knob view
     (:func:`~emmy.compiler.pipeline.knob.tuning_knob_items`: the ``S_*`` / ``H_*``
@@ -221,13 +211,46 @@ def _leaf_graph(leaf: object) -> Graph:
     return leaf if isinstance(leaf, Graph) else leaf.option
 
 
+def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float | None:
+    """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
+
+    Per kernel: the price the resolution's own fork stamped (the winning leaf's µs, which the
+    deploy evidence hierarchy chose), or — when the kernel's schedule had a single option and so
+    never forked — the prior's estimate for the row it realized. ``None`` when any surviving kernel
+    can be priced by neither, which hands the caller back to the ordinary leaf ranking.
+
+    A slice that a structural fork changed the kernel SET of (a ``PLACE`` cut, a cross-CTA split)
+    ends with several kernels, and this Σ is exactly why that needs no special case: the kernel
+    those replaced does not run and has no latency of its own, so its estimate IS the sum over the
+    kernels it produced.
+
+    The summands are not all the same quantity: a fork the evidence tiers decided contributes a
+    measured µs, one the model decided contributes the model's ranking score. Mixing them in a Σ is
+    the known cost of comparing kernel SETS with a per-kernel ranker — the exposure the module
+    docstring names, and the prior's to fix by being calibrated, not this function's to paper
+    over."""
+    scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
+    total = 0.0
+    for nid, node in terminal.nodes.items():
+        if node.op.cache_key() is None:
+            continue
+        us = scored.get(nid)
+        if us is None:
+            rows = [{**ctx.features(), **(getattr(node.op, "knobs", None) or {})}]
+            us = prior.mean_scores(rows)[0] if prior is not None else None
+        if us is None:
+            return None
+        total += us
+    return total
+
+
 def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
-    single-node slice through ``lowering/tile`` only (the partition fork is
+    single-node slice through ``lowering/tile`` only (the schedule fork is
     where the prior prices a complete tile row; the kernel/cuda passes add
-    nothing and cost real CPU), reading the chosen leaf's µs off the
-    slice-resolve's trace entry at the partition fork. ``db`` rides into the
-    nested decide, so the partition-fork pick follows the same deploy evidence
+    nothing and cost real CPU), summed over the kernels that resolution ends
+    with (:func:`_resolved_price`). ``db`` rides into the
+    nested decide, so each fork's pick follows the same deploy evidence
     hierarchy as a top-level knob pick (reservoir -O3 rows, then the tune DB's
     -O1 ranking rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
@@ -243,8 +266,8 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
     us: float | None = None
     try:
         nested = greedy_decide(prior=prior, price_structural=False, db=db)
-        _, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
-        us = next((d.score for d in trace if d.rule_name == PARTITION_RULE and d.node_id == nid), None)
+        terminal, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
+        us = _resolved_price(terminal, trace, ctx, prior)
     except Exception:  # noqa: BLE001 — a price-probe failure must never break compile
         us = None
     memo[key] = us

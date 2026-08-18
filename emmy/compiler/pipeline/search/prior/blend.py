@@ -12,7 +12,7 @@ gate; a :class:`Blend` decides what to *do* with them. Two questions, and they a
 
 Why a strategy at all: the blend has never been measurable. The shipped one multiplied predicted µs by a clamped
 ``offline**W``, and measurement found 255 of 261 goldens pinned to the identical clamped constant — a documented
-mechanism contributing nothing (HISTORY.md: "The inert offline tilt"). Naming the alternatives makes the
+mechanism contributing nothing. Naming the alternatives makes the
 comparison an ordinary A/B: ``EMMY_PRIOR_BLEND=gate`` measures what the tilt is worth, and ``offline`` / ``online``
 isolate one half so a change to *that* half can be measured without the other masking it.
 """

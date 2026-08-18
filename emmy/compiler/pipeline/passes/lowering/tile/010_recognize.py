@@ -108,9 +108,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form beside one cut fragment
     # per legal seam, so tune DISCOVERS cuts and a deploy prices them like any kernel-set choice
     # (``greedy._priced_pick``). Nothing holds the fused side ahead of the cuts — this list is a
-    # set of legal placements, not a ranking. The chosen fragment's parent piece carries
-    # ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays as the exact
-    # pin.
+    # set of legal placements, not a ranking. Each fragment's parent piece is stamped
+    # ``PLACE@<seam>: cut`` so a recorded routing golden can match the OPTION by the seam it names
+    # (``greedy._verified_pick``); the splice then consumes the stamp with everything else, because
+    # the resulting kernel set is the record of what was chosen.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if verdict == "cut":

@@ -348,6 +348,7 @@ def test_collect_node_records_parent_linkage():
     branch = _node({"BR": 1}, tree.root)
     leaf = _node({"BR": 1, "BM": 64}, branch)
     leaf.realized_knobs = {"S_n_mma": 1.0, "H_opt": 1.0, "BR": 1, "BM": 64, "FK": 2}
+    leaf.bench_stats = _leaf_stats(2.0)  # what ``observe`` stashes on a DIRECTLY benched terminal
     tree.root.children = [branch]
     branch.children = [leaf]
     tree.record_terminal(leaf, 2.0)
@@ -357,7 +358,25 @@ def test_collect_node_records_parent_linkage():
     assert branch_rec.parent_key is None  # top fork → no recorded parent
     assert leaf_rec.parent_key == branch_rec.node_key  # leaf → branch edge from node.parent
     assert "FK" in leaf_rec.features and "FK" not in branch_rec.features  # stamped knob only on the leaf
-    assert leaf_rec.is_leaf and not branch_rec.is_leaf  # realized_knobs marks the directly-benched terminal
+    assert leaf_rec.is_leaf and not branch_rec.is_leaf  # the bench stats mark the directly-benched terminal
+
+
+def test_collect_node_records_skips_a_benched_leaf_with_no_single_row():
+    """A terminal a structural fork lowered to several kernels with different decisions has NO
+    single knob row (``_realized_knobs`` answers ``None``), so it records nothing here — its
+    measurement was already attributed per kernel. Recording its fork-prefix instead would key a
+    node row on a row that no kernel realized."""
+    tree = SearchTree()
+    branch = _node({"BR": 1}, tree.root)
+    leaf = _node({"BR": 1, "BM": 64}, branch)
+    leaf.realized_knobs = None  # two kernels, two rows
+    leaf.bench_stats = _leaf_stats(2.0)
+    tree.root.children = [branch]
+    branch.children = [leaf]
+    tree.record_terminal(leaf, 2.0)
+    recs = TuningSearch(tree=tree)._collect_node_records(context_key="ctx", op_sig="sig")
+    assert {r.depth for r in recs} == {1}, "only the branch records; the multi-kernel leaf has no row"
+    assert not [k for k, _ in TuningSearch(tree=tree)._collect_rows() for k in ([k] if k.get("BM") == 64 else [])]
 
 
 def test_collect_node_records_value_min_invariant():

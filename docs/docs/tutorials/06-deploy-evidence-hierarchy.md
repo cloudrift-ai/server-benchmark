@@ -118,6 +118,19 @@ structural fork (the fused form first, one fragment per legal seam), so a tuning
 split and a chosen cut records as the exact pin that replays it. Each resulting piece is recognized afresh and
 works down the same hierarchy for its own schedule.
 
+**Splitting a reduction across blocks.** Dividing a long reduction among several blocks turns one kernel into a
+kernel that computes partial results plus one that combines them (or, on the cheaper arm, a single kernel that adds
+its partials straight into the output). The pieces are treated exactly like a cut's: each is a **brand-new kernel**
+that inherits nothing from the kernel it replaced and works down this whole hierarchy for its own schedule. They
+are differently shaped kernels doing different work, so there is no reason for them to end up configured the same,
+and nothing makes them. Each also records its own measurements under its own identity, so a stored time always
+describes the kernel that earned it.
+
+Because a pinned setting is a statement about how kernels run, it reaches those new kernels too — which raises an
+obvious question: does a split kernel then split again? No. Dividing a reduction that is *already* one block's
+share of a larger one is not a further choice, it is the same choice applied twice, so the compiler does not offer
+it. What remains of the pin — how each piece folds its own share within a block, say — still applies.
+
 **A structural fork.** The prior is never asked to rank structural options against each other, because it would be
 comparing predictions across different kinds of kernel, where its errors do not cancel the way they do among siblings
 of one fork. Instead the compile *costs* each side: for every kernel each side would produce, it runs a small nested

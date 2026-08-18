@@ -37,8 +37,8 @@ def mhc_inputs():
     }
 
 
-def _reference_mix(residual, fn, scale, base):
-    flat = residual.float().flatten(1)
+def _reference_mix(residual, fn, scale, base, *, prenorm_residual=None):
+    flat = (prenorm_residual if prenorm_residual is not None else residual).float().flatten(1)
     flat = flat * torch.rsqrt((flat * flat).mean(dim=-1, keepdim=True) + 1e-6)
     logits = torch.nn.functional.linear(flat, fn)
     return _reference_mix_from_logits(residual, logits, scale, base)
@@ -148,7 +148,16 @@ def test_mhc_pre_matches_exact_fp32_state_algebra(mhc_inputs):
 
 def test_mhc_fused_and_post_share_the_same_stream_update(mhc_inputs):
     values = mhc_inputs
-    residual = MhcPostModule()(values["x"], values["residual"], values["post"], values["comb"])
+    residual_float = values["x"].float().unsqueeze(1) * values["post"] + torch.bmm(
+        values["comb"].transpose(1, 2), values["residual"].float()
+    )
+    residual = residual_float.half()
+    torch.testing.assert_close(
+        MhcPostModule()(values["x"], values["residual"], values["post"], values["comb"]),
+        residual,
+        rtol=0,
+        atol=0,
+    )
     actual = MhcFusedModule()(
         values["x"],
         values["residual"],
@@ -159,12 +168,35 @@ def test_mhc_fused_and_post_share_the_same_stream_update(mhc_inputs):
         values["base"],
         values["norm_weight"],
     )
-    post, comb, collapsed = _reference_mix(residual, values["fn"], values["scale"], values["base"])
+    post, comb, collapsed = _reference_mix(
+        residual,
+        values["fn"],
+        values["scale"],
+        values["base"],
+        prenorm_residual=residual_float,
+    )
 
     torch.testing.assert_close(actual[0], residual, rtol=0, atol=0)
     torch.testing.assert_close(actual[1], post, rtol=0, atol=0)
     torch.testing.assert_close(actual[2], comb, rtol=0, atol=0)
     torch.testing.assert_close(actual[3], _reference_weighted_rms(collapsed, values["norm_weight"]), rtol=0, atol=0)
+
+    rounded_post, rounded_comb, _ = _reference_mix(residual, values["fn"], values["scale"], values["base"])
+    assert not torch.equal(actual[1], rounded_post)
+    assert not torch.equal(actual[2], rounded_comb)
+
+    prefill = MhcFusedModule(fp32_stage=False)(
+        values["x"],
+        values["residual"],
+        values["post"],
+        values["comb"],
+        values["fn"],
+        values["scale"],
+        values["base"],
+        values["norm_weight"],
+    )
+    torch.testing.assert_close(prefill[1], rounded_post, rtol=0, atol=0)
+    torch.testing.assert_close(prefill[2], rounded_comb, rtol=0, atol=0)
 
 
 def test_mhc_broadcast_and_head_preserve_live_dtypes(mhc_inputs):

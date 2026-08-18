@@ -36,6 +36,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   iterations): eager execution retains the original stable softmax-plus-epsilon order, while Emmy lowers the boundary
   to one register-resident straight-line kernel per leading matrix. The helper is shape/dtype generic and has no model
   name gate; invalid or dynamic contracts fail at trace time.
+  Fused traces through 16 token rows preserve the FP32 post-update value for prenormalization while returning and
+  collapsing the separately rounded FP16 residual. Larger prefill traces use the runtime's separate FP16 post/pre path.
 - `deepseek.py` — exact side-effect-free Q/KV RMSNorm and inverse-RoPE boundaries used for runtime compiler
   qualification. Outputs preserve the runtime's separate contiguous buffers; non-unit interleaved slices remain
   explicit in the traced graph.

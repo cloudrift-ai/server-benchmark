@@ -84,12 +84,21 @@ def _weighted_rms(x, weight, eps: float = 1e-6):
     return _rms(x, eps).half() * weight
 
 
-def _mix(residual, fn, scale, base, *, eps: float = 1e-6, sinkhorn_iters: int = 20):
+def _mix(
+    residual,
+    fn,
+    scale,
+    base,
+    *,
+    prenorm_residual=None,
+    eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+):
     import torch
     import torch.nn.functional as F
 
     tokens, streams, _ = residual.shape
-    flat = _rms(residual.flatten(1), eps)
+    flat = _rms((prenorm_residual if prenorm_residual is not None else residual).flatten(1), eps)
     logits = F.linear(flat, fn.float())
     pre_logits, post_logits, comb_logits = logits.split((streams, streams, streams * streams), dim=-1)
     pre_base, post_base, comb_base = base.float().split((streams, streams, streams * streams), dim=-1)
@@ -102,9 +111,13 @@ def _mix(residual, fn, scale, base, *, eps: float = 1e-6, sinkhorn_iters: int = 
 
 
 def _post(x, residual, post, comb):
+    return _post_float(x, residual, post, comb).half()
+
+
+def _post_float(x, residual, post, comb):
     import torch
 
-    return (x.float().unsqueeze(1) * post.float() + torch.bmm(comb.float().transpose(1, 2), residual.float())).half()
+    return x.float().unsqueeze(1) * post.float() + torch.bmm(comb.float().transpose(1, 2), residual.float())
 
 
 class MhcPreModule:
@@ -162,13 +175,20 @@ class MhcPostModule:
 class MhcFusedModule:
     """Post mapping followed by the next pre mapping and layer RMSNorm."""
 
-    def __new__(cls):
+    def __new__(cls, *, fp32_stage: bool = True):
         import torch
 
         class Module(torch.nn.Module):
             def forward(self, x, residual, post, comb, fn, scale, base, norm_weight):
-                residual = _post(x, residual, post, comb)
-                next_post, next_comb, collapsed = _mix(residual, fn, scale, base)
+                residual_float = _post_float(x, residual, post, comb)
+                residual = residual_float.half()
+                next_post, next_comb, collapsed = _mix(
+                    residual,
+                    fn,
+                    scale,
+                    base,
+                    prenorm_residual=residual_float if fp32_stage else residual,
+                )
                 return residual, next_post, next_comb, _weighted_rms(collapsed, norm_weight)
 
         return Module()
@@ -202,7 +222,7 @@ def trace_mhc_fused(*, rows: int, hidden: int = 4096, streams: int = 4):
     import torch
 
     return _trace(
-        MhcFusedModule(),
+        MhcFusedModule(fp32_stage=rows <= 16),
         (
             torch.empty((rows, hidden), dtype=torch.float16, device="meta"),
             torch.empty((rows, streams, hidden), dtype=torch.float16, device="meta"),

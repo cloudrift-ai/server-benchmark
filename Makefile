@@ -32,7 +32,7 @@ setup-agent: venv/.setup-agent-complete
 venv/.setup-agent-complete: pyproject.toml
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
-		python3.12 -m venv venv --prompt "emmy"; \
+		python3.14 -m venv venv --prompt "emmy"; \
 	fi
 	@echo "Installing API-agent workflow dependencies..."
 	./venv/bin/pip install -e .
@@ -44,14 +44,14 @@ venv/.setup-agent-complete: pyproject.toml
 venv/.setup-complete: pyproject.toml
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
-		python3.12 -m venv venv --prompt "emmy"; \
+		python3.14 -m venv venv --prompt "emmy"; \
 	fi
 	@echo "Installing Python dependencies..."
 	./venv/bin/pip install -e ".[dev]"
 	@touch $@
 
 setup-ci:
-	python3.12 -m venv venv --prompt "emmy"
+	python3.14 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
 	./venv/bin/pip install -e ".[compile,test,image]"
 

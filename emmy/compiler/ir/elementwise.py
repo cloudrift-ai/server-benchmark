@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from emmy.compiler.dtype import decode_f4, decode_f8, encode_f8
+from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -66,6 +66,11 @@ _NAME_TO_FN: dict[str, object] = {
     # the uint8 bits carrier; the CUDA render spells the <cuda_fp8.h> constructor (same rounding).
     "to_f8e4m3": lambda x: encode_f8(x, "f8e4m3"),
     "to_f8e5m2": lambda x: encode_f8(x, "f8e5m2"),
+    # e2m1 encode — ``from_f4e2m1``'s twin, producing codes in [0, 16) on an integer carrier.
+    # Unlike the fp8 encodes it cannot ride on the conversion to its result dtype: those convert
+    # to an fp8 type whose constructor rounds, while an integer carrier would simply truncate the
+    # value. So the render spells the rounding itself (``emmy_to_f4e2m1``).
+    "to_f4e2m1": encode_f4,
 }
 
 _ARITY: dict[str, int] = {

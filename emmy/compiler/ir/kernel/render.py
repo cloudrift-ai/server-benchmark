@@ -27,6 +27,24 @@ from emmy.compiler.tensor import Tensor
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
 
+# e2m1 encode. The fp8 encodes construct a <cuda_fp8.h> type and inherit its rounding; there is no
+# fp4 type to construct, and the result here is an ordinary integer carrier, so leaving the cast to
+# the target would TRUNCATE the value (1.5 storing 1) instead of encoding it. Hence an explicit
+# helper. The seven constants are the midpoints of e2m1's representable set (0, .5, 1, 1.5, 2, 3,
+# 4, 6), and the comparisons alternate strict and non-strict so a value landing exactly on a
+# midpoint rounds to the EVEN code — round-to-nearest-even, matching ``dtype.encode_f4``, which the
+# CUDA path is checked against. Saturates at 7 because the largest comparison simply stops
+# contributing; e2m1 has no inf code to reach.
+_F4_ENCODE_PRELUDE = """\
+static __device__ __forceinline__ unsigned char emmy_to_f4e2m1(float value) {
+    float a = fabsf(value);
+    unsigned char code = (a > 0.25f) + (a >= 0.75f) + (a > 1.25f) + (a >= 1.75f)
+                       + (a > 2.5f) + (a >= 3.5f) + (a > 5.0f);
+    return code | (unsigned char)(signbit(value) << 3);
+}
+
+"""
+
 _BITCAST_PRELUDE = """\
 template <typename To, typename From>
 static __device__ __forceinline__ To emmy_bitcast(From value) {
@@ -1099,7 +1117,8 @@ def render_kernelop(
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
-    preludes = f"{includes}{bitcast_prelude}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    f4_encode = _F4_ENCODE_PRELUDE if any(isinstance(s, Assign) and s.op.name == "to_f4e2m1" for s in kernel_op.body.iter()) else ""
+    preludes = f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

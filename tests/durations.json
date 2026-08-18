@@ -124,6 +124,7 @@
  "tests/compiler/passes/test_move_catalog.py::test_two_site_rows_are_distinct_and_materialize_both_sites": 0.25,
  "tests/compiler/passes/test_move_catalog.py::test_two_site_term_merges_both_sites_under_one_inventory": 0.25,
  "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget": 4.84,
+ "tests/compiler/passes/test_nvfp4_encode.py::test_the_cuda_encode_matches_the_numpy_encode": 9.4,
  "tests/compiler/passes/test_nvfp4_staged.py::test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain": 0.09,
  "tests/compiler/passes/test_nvfp4_staged.py::test_packed_b_resolves_tma_with_dense_byte_rows": 0.06,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_packed_drain_matches_the_decoded_oracle[bf16-32-128-128-0.006-d2/cp]": 1.2,

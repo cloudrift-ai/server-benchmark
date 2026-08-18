@@ -282,6 +282,12 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
         # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
         return inputs[0]
+    if fn == "to_f4e2m1":
+        # e2m1 encode — NOT the fp8 encodes' identity. Those convert to an fp8 type whose
+        # constructor rounds; the codes here land on an ordinary integer carrier, where the same
+        # identity would truncate the value instead. The render emits the rounding as a helper
+        # (``_F4_ENCODE_PRELUDE``).
+        return FuncCallExpr("emmy_to_f4e2m1", (inputs[0],))
     if fn == "square":
         return BinaryExpr("*", inputs[0], inputs[0])
     if fn == "reciprocal":

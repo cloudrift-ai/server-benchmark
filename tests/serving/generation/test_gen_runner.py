@@ -162,7 +162,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
 
 
 # ===================================================================
-# The output-gate seam (path B): one extra tensor across the pre/post pair
+# The output-gate seam (the full-attention serving slice): one extra tensor across the pre/post pair
 # ===================================================================
 
 

@@ -278,7 +278,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
     # One row per (lane, operator): the artifact's ten operators, and the five common operators
-    # tuned and then compared against current PyTorch.
+    # compared against current PyTorch from a pre-tuned golden.
     common = ("prefill_global", "prefill_causal", "prefill_gqa", "decode_causal", "decode_gqa")
     artifact_only = ("prefill_alibi", "decode_alibi", "prefill_softcap", "decode_softcap", "prefill_windowed")
     lanes: dict[str, set[str]] = {}
@@ -286,10 +286,9 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
         lanes.setdefault(task.variant.params["lane"], set()).add(task.variant.params["operator"])
     assert lanes == {
         "neptune": set(common + artifact_only),
-        "tune": set(common),
         "emmy": set(common),
     }
-    assert len(tasks) == 20
+    assert len(tasks) == 15
 
     run = recipe.command.run
     assert "evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca" in run
@@ -301,8 +300,9 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     # Each row runs exactly one lane for exactly one operator.
     assert 'case "$lane" in' in run
     assert 'bash /experiment/run.sh "$operator"' in run
-    assert '"$$EXPERIMENT/run_tune.sh" $repo_dir/venv/bin/emmy "$operator"' in run
     assert '"$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator"' in run
+    # Tuning is the tune-kernels skill's job: the recipe only replays what it committed.
+    assert "emmy tune" not in run
     assert recipe.command.stage == [
         "emmy",
         "pyproject.toml",
@@ -311,7 +311,6 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/operators.sh",
-        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_tune.sh",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/golden",
@@ -347,9 +346,11 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "NeptuneGQARunner.e = ours.NeptuneGQARunner.create_flex_from_schedulers" in neptune_entry
     assert 'runpy.run_module("scripts.neptune_bench", run_name="__main__")' in neptune_entry
 
-    # One shared definition of the common operators, so the traced golden and the benched program
-    # are the same program by construction.
-    operators = (Path(directory) / "operators.sh").read_text()
+    # One checked-in definition of the common operators, read both by the comparison lane and by the
+    # trace that produces a committed golden, so the tuned and benched programs cannot drift apart.
+    operators_path = Path(directory) / "operators.sh"
+    assert operators_path.stat().st_mode & 0o111
+    operators = operators_path.read_text()
     for operator in common:
         assert operator in operators
     for excluded in artifact_only:
@@ -359,16 +360,8 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "q_length=1" in operators
     assert "q.reshape(1,8,8,1,128)" in operators
     assert "is_causal=False).reshape(1,64,1,128)" in operators
-
-    # The search happens in its own lane and leaves committed working goldens behind.
-    tune_runner_path = Path(directory) / "run_tune.sh"
-    assert tune_runner_path.stat().st_mode & 0o111
-    tune_runner = tune_runner_path.read_text()
-    assert "operators.sh" in tune_runner
-    assert '"$emmy" trace --code "$code" -o "$golden"' in tune_runner
-    assert '"$emmy" tune --golden-file "$golden"' in tune_runner
-    assert "tune-status.tsv" in tune_runner
-    assert 'test "$tuned_setups" -gt 0' in tune_runner
+    assert 'operator_code "$1" "$2" || exit' in operators
+    assert not (Path(directory) / "run_tune.sh").exists()
 
     # The comparison lane only measures: it replays the committed golden and never tunes.
     emmy_runner_path = Path(directory) / "run_emmy.sh"
@@ -409,7 +402,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 63
+    assert rendered == 58
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

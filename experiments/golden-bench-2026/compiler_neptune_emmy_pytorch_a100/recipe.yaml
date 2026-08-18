@@ -11,17 +11,17 @@
 #
 # Every row for one GPU shares a single execution group, so the split costs one VM, not one per row.
 #
-# The three lanes:
+# The two lanes:
 #   neptune  the pinned artifact's own tune + Nsight profile for one operator (10 operators)
-#   tune     trace one operator's sequence sweep to working golden YAML and search it (5 operators)
-#   emmy     bench eager / torch.compile / Emmy, with Emmy replaying the committed working golden
+#   emmy     bench eager / torch.compile / Emmy, with Emmy replaying a pre-tuned golden (5 operators)
 #
-# The tune lane's product is a durable lane input, not a measurement: extract its working golden files
-# from the row's artifacts.tar.gz (evidence/emmy-tune/golden/) and commit them under golden/ before
-# running the emmy lane, which fails on any setup whose golden is missing. These files stay search
-# state — the emmy lane re-measures every pinned schedule itself at deployable -O3, and its own records
-# are the experiment's evidence. Tuning therefore happens once per card and the comparison lane stays
-# cheap to repeat.
+# Tuning happens outside this recipe, through the tune-kernels skill: trace each setup from
+# operators.sh (`./operators.sh OPERATOR SEQUENCE_LENGTH` prints the exact module source this
+# experiment benches), tune the working golden on an A100, and commit the validated result under
+# golden/<operator>-b1-s<sequence_length>.golden.yaml. The emmy lane only measures, and fails on any
+# setup whose golden is missing. Those files stay search state — the lane re-measures every schedule
+# they pin at deployable -O3, and its own records are the experiment's evidence — so a compiler change
+# is re-measured by rerunning this lane alone, without repeating the search.
 command:
   stage:
     - emmy
@@ -31,7 +31,6 @@ command:
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/operators.sh
-    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_tune.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/golden
@@ -74,7 +73,7 @@ command:
           -v "$$EXPERIMENT/run_neptune.py:/experiment/run_neptune.py:ro" \
           "$$IMAGE" bash /experiment/run.sh "$operator" 2>&1 | tee "$$EVIDENCE/container.log"
         ;;
-      tune|emmy)
+      emmy)
         export PATH=/usr/local/cuda/bin:$$PATH
         cd $repo_dir
         if [ ! -x venv/bin/python ]; then
@@ -86,9 +85,8 @@ command:
         fi
         test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
         export CUDA_VISIBLE_DEVICES=$gpu_device_ids
-        # Task-local search state: the tune lane starts from a clean DB and prior, and the emmy
-        # lane's greedy row is untuned by construction, so the golden's pins are the only
-        # searched schedules it reports.
+        # Task-local search state, so the greedy row is untuned by construction and the golden's
+        # pins are the only searched schedules this lane reports.
         export EMMY_TUNE_DB=$task_dir/autotune.db
         export EMMY_ONLINE_FILE=$task_dir/online.json
         export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -97,17 +95,13 @@ command:
           > "$$EVIDENCE/emmy-torch-environment.txt"
         nvidia-smi -q > "$$EVIDENCE/emmy-nvidia-smi.txt"
         nvcc --version > "$$EVIDENCE/emmy-nvcc-version.txt"
-        sha256sum "$$EXPERIMENT/operators.sh" "$$EXPERIMENT/run_tune.sh" "$$EXPERIMENT/run_emmy.sh" \
-          "$$EXPERIMENT/run_pytorch.py" > "$$EVIDENCE/emmy-experiment-input.sha256"
-        if [ "$lane" = tune ]; then
-          "$$EXPERIMENT/run_tune.sh" $repo_dir/venv/bin/emmy "$operator" "$$EVIDENCE/emmy-tune"
-        else
-          # run_emmy.sh reports the per-setup missing-golden status, so an unmatched glob here
-          # must not pre-empt it with a bare sha256sum error.
-          sha256sum "$$EXPERIMENT"/golden/$operator-*.golden.yaml > "$$EVIDENCE/emmy-golden.sha256" 2>&1 || true
-          "$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator" "$$EVIDENCE/emmy-tcompile" \
-            "$$EXPERIMENT/golden"
-        fi
+        sha256sum "$$EXPERIMENT/operators.sh" "$$EXPERIMENT/run_emmy.sh" "$$EXPERIMENT/run_pytorch.py" \
+          > "$$EVIDENCE/emmy-experiment-input.sha256"
+        # run_emmy.sh reports the per-setup missing-golden status, so an unmatched glob here must
+        # not pre-empt it with a bare sha256sum error.
+        sha256sum "$$EXPERIMENT"/golden/$operator-*.golden.yaml > "$$EVIDENCE/emmy-golden.sha256" 2>&1 || true
+        "$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator" "$$EVIDENCE/emmy-tcompile" \
+          "$$EXPERIMENT/golden"
         ;;
       *)
         echo "unknown lane: $lane" >&2
@@ -133,15 +127,6 @@ matrices:
       - prefill_softcap
       - decode_softcap
       - prefill_windowed
-  - deploy.gpu: "NVIDIA A100 80GB"
-    deploy.gpu_count: 1
-    lane: tune
-    operator:
-      - prefill_global
-      - prefill_causal
-      - prefill_gqa
-      - decode_causal
-      - decode_gqa
   - deploy.gpu: "NVIDIA A100 80GB"
     deploy.gpu_count: 1
     lane: emmy

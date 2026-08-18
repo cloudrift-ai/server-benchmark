@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Comparison lane: bench one common attention operator's sequence sweep as
-# eager PyTorch / torch.compile / Emmy. Emmy replays the setup's committed working golden, so this
-# lane only measures — the search happened in the tune lane. The greedy row in each record remains
-# untuned Emmy; the golden's pinned rows carry the searched schedules, re-measured here at -O3.
+# eager PyTorch / torch.compile / Emmy. Emmy replays the setup's committed golden, so this lane only
+# measures — the search happens outside the recipe, through the tune-kernels skill. The greedy row in
+# each record remains untuned Emmy; the golden's pinned rows carry the searched schedules, re-measured
+# here at -O3.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then

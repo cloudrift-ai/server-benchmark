@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Shared host-lane operator definitions: the sequence sweep and the inline module
-# source for each common attention operator. Sourced by run_tune.sh and run_emmy.sh
-# so the traced golden and the benched program are the same program by construction.
+# The common attention operators: the sequence sweep and the inline module source for each one.
+# run_emmy.sh sources this file for the sweep, and the trace that produces a committed golden reads
+# its module source from here (`./operators.sh OPERATOR SEQUENCE_LENGTH`), so the tuned program and
+# the benched program are the same program by construction.
 
 SEQUENCE_LENGTHS=(256 512 1024 2048 4096 8192 16384 32768)
 
@@ -62,3 +63,13 @@ operator_code() {
     "v=torch.randn(1,$kv_heads,$sequence_length,128,dtype=torch.float16);" \
     "$attention"
 }
+
+# Executed rather than sourced: print one setup's module source, ready for `emmy trace --code`.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "$#" -ne 2 ]; then
+    echo "usage: $0 OPERATOR SEQUENCE_LENGTH" >&2
+    exit 2
+  fi
+  operator_code "$1" "$2" || exit
+  echo
+fi

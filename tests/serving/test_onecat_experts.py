@@ -176,7 +176,7 @@ def test_expert_first_use_checks_each_width_and_reuses_one_symbolic_program():
 
     def run(program, tensors, device):
         del program, device
-        tensors["output"].fill_(3.0)
+        tensors["output"].fill_(3.03)
 
     adapter = _Adapter(
         lambda *_args: None,
@@ -193,7 +193,7 @@ def test_expert_first_use_checks_each_width_and_reuses_one_symbolic_program():
     first = adapter.dispatch_experts(object(), layer, x, weights, ids, None, None, lambda *_args: None)
     hot = torch.full_like(x, 4.0)
     second = adapter.dispatch_experts(object(), layer, x, weights, ids, None, None, lambda *_args: hot)
-    assert torch.equal(first, torch.full_like(x, 3.0))
+    assert torch.equal(first, torch.full_like(x, 3.03))
     assert second is hot
     assert len(calls) == 1
 
@@ -202,7 +202,7 @@ def test_expert_first_use_checks_each_width_and_reuses_one_symbolic_program():
     wide_ids = torch.zeros((1024, 6), dtype=torch.int32)
     wide_first = adapter.dispatch_experts(object(), layer, wide, wide_weights, wide_ids, None, None, lambda *_args: None)
     assert len(calls) == 2
-    assert torch.equal(wide_first, torch.full_like(wide, 3.0))
+    assert torch.equal(wide_first, torch.full_like(wide, 3.03))
     assert adapter.experts[1].runtime is adapter.experts[1024].runtime
 
     odd = torch.zeros((17, 4096), dtype=torch.float16)
@@ -210,7 +210,7 @@ def test_expert_first_use_checks_each_width_and_reuses_one_symbolic_program():
     odd_ids = torch.zeros((17, 6), dtype=torch.int32)
     odd_first = adapter.dispatch_experts(object(), layer, odd, odd_weights, odd_ids, None, None, lambda *_args: None)
     assert len(calls) == 3
-    assert torch.equal(odd_first, torch.full_like(odd, 3.0))
+    assert torch.equal(odd_first, torch.full_like(odd, 3.03))
     assert adapter.experts[1].runtime is adapter.experts[17].runtime
 
 

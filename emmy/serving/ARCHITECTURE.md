@@ -32,15 +32,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   launch failure, unsupported call, capture-time cold or unverified call, or parity failure uses the original vLLM
   kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache state, routing, and
   MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
-- `onecat_deepseek.py`, `onecat_linear.py`, `onecat_mhc.py`, and `onecat_output.py` — the broader opt-in
+- `onecat_deepseek.py`, `onecat_linear.py`, `onecat_mhc.py`, `onecat_output.py`, `onecat_vocab.py`, and
+  `onecat_indexer.py` — the broader opt-in
   `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve 1Cat's scheduler, TP/PP collectives, and stateful paged
   sparse-attention/cache ownership. One bounded symbolic-capacity program covers every Q/KV RMSNorm and inverse-RoPE
   width from 1 through 4096 rows; first-use parity and CUDA-graph eligibility remain tracked per concrete width.
   Exact guarded compiler programs also cover the five unquantized projection profiles through 4096 token rows,
-  all five mHC boundaries, TP-local vocabulary embedding and full logits, and the shared-expert clamp-SwiGLU
-  activation. 1Cat retains vocabulary masking and
-  reduction, compact top-1 logits, packed-weight linear operations, and shared/routed output combination. Unsupported
-  widths and cold or unverified CUDA-graph calls retain the original 1Cat functions.
+  all five mHC boundaries, TP-local vocabulary embedding/mask/zero, full logits, compact local LM-head top-1 and
+  post-all-gather rank selection, the pure C4 indexer-Q RoPE/weight scaling transform, and the shared-expert
+  clamp-SwiGLU activation. 1Cat retains the TP embedding all-reduce and compact top-1 all-gather, the horizontally
+  fused Q/KV transform plus paged-cache insertion, packed-weight linear operations, and shared/routed output
+  combination. Unsupported widths and cold or unverified CUDA-graph calls retain the original 1Cat functions.
 - `mhc.py` — exact FP32 multi-stream residual algebra used by the DeepSeek V4 serving adapter traces. Its
   `fixed_sinkhorn` helper is a lazy torch custom-op boundary for static `[M,N,N]` matrices (`N <= 8`, at most 32
   iterations): eager execution retains the original stable softmax-plus-epsilon order, while Emmy lowers the boundary
@@ -62,8 +64,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   repeating graph passes and fork resolution. General callers retain compile-on-miss behavior; the 1Cat adapters use
   the strict loader, which never compiles and treats a missing or damaged pack as an unavailable Emmy program.
 - `onecat_prewarm.py` — the release-blocking offline realization entry point for the broad DeepSeek V4 adapters. Its
-  deterministic 96-profile manifest contains final RMSNorm, Q/KV RMSNorm, inverse RoPE, every static and symbolic
-  unquantized-linear and mHC profile, and the three symbolic output profiles. Run
+  deterministic 114-profile manifest contains final RMSNorm, Q/KV RMSNorm, inverse RoPE, every static and symbolic
+  unquantized-linear and mHC profile, the three symbolic output profiles, all eight rank-local
+  embedding and LM-head top-1 profiles, post-all-gather rank selection, and C4 indexer-Q. Run
   `python -m emmy.serving.onecat_prewarm` with `EMMY_PACK_DIR` and `EMMY_CUBIN_CACHE` pointing at the release caches on
   the target card before starting `vllm serve`; each profile must compile, persist, and strictly reload or the command
   fails. The pinned 1Cat image directly enters `vllm serve`, and vLLM's plugin registration is an import hook invoked

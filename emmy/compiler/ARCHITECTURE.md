@@ -165,6 +165,14 @@ SwiGLU activation) inlines or stays materialized is loop fusion's ordinary outco
 of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
+**Caller-owned physical storage.** `loader.physical.spell_physical_inputs` is the generic graph-birth equivalent for
+runtime-owned tensors whose retained layout is not a logical dense tensor. A `PhysicalInputStorage` declares typed
+carrier inputs, coordinate maps, and typed elementwise algebra that reproduce one logical input. The descriptor is
+dissolved immediately; downstream IR sees only ordinary inputs, index maps, and elementwise operations. The SM70
+FP8 descriptor in `loader.sm70_fp8` validates the exact HMMA884 carrier shapes and metadata exported by the runtime,
+including grouped and gate/up-interleaved layouts, without retaining a decoded or duplicate weight. This mechanism
+does not imply a serving dispatch: a runtime adapter still needs exact live parity and target-card performance proof.
+
 **MXFP4 input weights.** `loader.quant.spell_mxfp4_inputs` applies the same birth-time rule to packed E2M1 weights
 and UE8M0 block scales supplied as program inputs. It accepts static leading dimensions such as the expert axis,
 preserves low-nibble-first checkpoint order, and emits only unsigned integer extraction, bitcasts, index maps, and

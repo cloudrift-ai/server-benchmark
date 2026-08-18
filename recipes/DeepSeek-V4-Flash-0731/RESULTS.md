@@ -108,6 +108,20 @@ used a host ABI spelling that cppyy could not bind on Darwin. These fixes have f
 tests. The follow-up does not claim that stateful HCA/CSA cache mutation, sparse attention, expert routing, TP/PP
 collectives, or the complete model execute in Emmy.
 
+The final broad-adapter build gate realized and strictly replayed all 114 declared external programs on the supplied
+V100 host, producing 114 execution-plan packs and 215 cubins. The inventory adds rank-specific TP-local embedding and
+compact LM-head top-1 programs around the original collectives, plus the pure C4 indexer-Q RoPE and weight-scaling
+transform. A direct `M=17` V100 check loaded only the persisted packs and matched embedding/rank selection exactly;
+local logits and indexer-Q matched their FP32 accumulation references within their declared tolerances. Runtime
+compilation is not reachable from these adapters: a missing or damaged pack keeps the corresponding 1Cat operation.
+
+The retained TurboMind FP8 carrier layout was also reconstructed and checked byte-for-byte at graph birth. Emmy used
+the caller-owned `uint8` weight and FP16 scale carriers without a decoded weight or scratch buffer and matched the
+1Cat result, but measured 4–14× slower for the tested fused-QKV and shared gate/up shapes. The runtime hook and its 54
+candidate profiles were therefore removed. Routed-expert prototypes were likewise excluded after failing the
+whole-model latency budget. The maintained recipe still does not enable `EMMY_ONECAT_DEEPSEEK_V4`; the 114-profile
+result is component and offline-release evidence, not broad endpoint or full-model serving qualification.
+
 ## Reproduce
 
 ```bash

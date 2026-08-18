@@ -74,9 +74,11 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
     from emmy.serving import deepseek as deepseek_traces
     from emmy.serving import mhc as mhc_traces
     from emmy.serving import onecat
+    from emmy.serving import onecat_indexer as indexer
     from emmy.serving import onecat_linear as linear
     from emmy.serving import onecat_mhc as mhc
     from emmy.serving import onecat_output as output
+    from emmy.serving import onecat_vocab as vocab
 
     profiles = [
         _profile(
@@ -201,6 +203,56 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
                 symbolic_values={"num_tokens": _CAPACITY},
             )
         )
+
+    for rank in range(vocab._TP):
+        profiles.extend(
+            (
+                _profile(
+                    f"vocab.embedding.rank{rank}.symbolic.m4096",
+                    "vocab_embedding",
+                    _CAPACITY,
+                    True,
+                    vocab._EXPECTED_INPUTS["embedding"],
+                    1,
+                    partial(vocab._tp_embedding_graph, rank),
+                    symbolic_values={"num_tokens": _CAPACITY},
+                ),
+                _profile(
+                    f"vocab.local_top1.rank{rank}.symbolic.m4096",
+                    "local_top1",
+                    _CAPACITY,
+                    True,
+                    vocab._EXPECTED_INPUTS["local_top1"],
+                    1,
+                    partial(vocab._local_top1_graph, rank),
+                    symbolic_values={"num_tokens": _CAPACITY},
+                ),
+            )
+        )
+    profiles.append(
+        _profile(
+            "vocab.rank_top1.symbolic.m4096",
+            "rank_top1",
+            _CAPACITY,
+            True,
+            vocab._EXPECTED_INPUTS["rank_top1"],
+            1,
+            vocab._rank_top1_graph,
+            symbolic_values={"num_tokens": _CAPACITY},
+        )
+    )
+    profiles.append(
+        _profile(
+            "indexer.q_rope_weights.symbolic.m4096",
+            "indexer_q",
+            _CAPACITY,
+            True,
+            indexer._EXPECTED_INPUTS,
+            2,
+            indexer._indexer_q_graph,
+            symbolic_values={"num_tokens": _CAPACITY},
+        )
+    )
 
     ordered = tuple(sorted(profiles, key=lambda profile: profile.name))
     names = tuple(profile.name for profile in ordered)

@@ -26,7 +26,7 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
     manifest = deepseek_external_program_manifest()
     names = tuple(profile.name for profile in manifest)
 
-    assert len(manifest) == 96
+    assert len(manifest) == 114
     assert names == tuple(sorted(names))
     assert len(names) == len(set(names))
     assert Counter(profile.family for profile in manifest) == {
@@ -36,6 +36,10 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
         "linear": 45,
         "mhc": 45,
         "output": 3,
+        "vocab_embedding": 8,
+        "local_top1": 8,
+        "rank_top1": 1,
+        "indexer_q": 1,
     }
     assert "linear.n64.fp16.static.m1024" in names
 
@@ -51,6 +55,12 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
         (4096, False): 5,
         (4096, True): 5,
     }
+
+    for rank in range(8):
+        assert f"vocab.embedding.rank{rank}.symbolic.m4096" in names
+        assert f"vocab.local_top1.rank{rank}.symbolic.m4096" in names
+    assert "vocab.rank_top1.symbolic.m4096" in names
+    assert "indexer.q_rope_weights.symbolic.m4096" in names
 
     rms_norm = next(profile for profile in manifest if profile.family == "final_rms_norm")
     assert rms_norm.pins == (("REDUCE", "coop"), ("WORK", "t256"))

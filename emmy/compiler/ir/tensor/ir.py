@@ -136,8 +136,8 @@ class FixedSinkhornOp(Op):
         if len(shape) != 3:
             raise ValueError(f"FixedSinkhornOp requires rank-3 [M,N,N] input, got shape {shape}")
         dims = tuple(to_dim(dim) for dim in shape)
-        if any(not dim.is_static for dim in dims):
-            raise ValueError(f"FixedSinkhornOp requires a static shape, got {shape}")
+        if any(not dim.is_static for dim in dims[-2:]):
+            raise ValueError(f"FixedSinkhornOp requires static matrix dimensions, got {shape[-2:]}")
         rows, cols = (dim.as_static() for dim in dims[-2:])
         if rows != cols:
             raise ValueError(f"FixedSinkhornOp requires square matrices, got {rows}x{cols}")

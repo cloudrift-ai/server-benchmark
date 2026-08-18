@@ -10,6 +10,15 @@ from emmy.compiler.trace.torch import trace_module
 from emmy.serving.onecat import _RmsNormAdapter, _RmsNormModule
 
 
+def test_deepseek_v4_adapter_flag_is_live_and_off_by_default(monkeypatch):
+    from emmy import config
+
+    monkeypatch.delenv(config.ONECAT_DEEPSEEK_V4, raising=False)
+    assert not config.onecat_deepseek_v4()
+    monkeypatch.setenv(config.ONECAT_DEEPSEEK_V4, "1")
+    assert config.onecat_deepseek_v4()
+
+
 def test_rms_norm_program_matches_reference_and_lowers_tuned_sm70_schedule():
     x = torch.randn((1, 4096), dtype=torch.float16)
     weight = torch.randn((4096,), dtype=torch.float16)

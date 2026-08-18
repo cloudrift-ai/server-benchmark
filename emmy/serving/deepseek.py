@@ -63,7 +63,13 @@ class InverseRopeModule:
         return Module()
 
 
-def trace_fused_q_kv_rmsnorm(*, rows: int, q_size: int = 1024, kv_size: int = 512):
+def _dynamic_rows(*names: str):
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+
+    return build_torch_dynamic_shapes(parse_position_specs([f"num_tokens@{name}:0" for name in names]))
+
+
+def trace_fused_q_kv_rmsnorm(*, rows: int, q_size: int = 1024, kv_size: int = 512, dynamic: bool = False):
     import torch
 
     from emmy.compiler.trace.torch import trace_module
@@ -75,6 +81,7 @@ def trace_fused_q_kv_rmsnorm(*, rows: int, q_size: int = 1024, kv_size: int = 51
             torch.empty((q_size,), dtype=torch.float16, device="meta"),
             torch.empty((kv_size,), dtype=torch.float16, device="meta"),
         ),
+        dynamic_shapes=_dynamic_rows("fused_q_kv") if dynamic else None,
     )
 
 
@@ -85,6 +92,7 @@ def trace_inverse_rope(
     head_dim: int = 512,
     rope_dim: int = 64,
     context: int = 1_048_576,
+    dynamic: bool = False,
 ):
     import torch
 
@@ -97,4 +105,5 @@ def trace_inverse_rope(
             torch.empty((rows,), dtype=torch.int64, device="meta"),
             torch.empty((context, rope_dim), dtype=torch.float32, device="meta"),
         ),
+        dynamic_shapes=_dynamic_rows("x", "positions") if dynamic else None,
     )

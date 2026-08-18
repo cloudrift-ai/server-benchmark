@@ -211,13 +211,18 @@ class HcHeadModule:
         return Module()
 
 
-def _trace(module, examples):
+def _trace(module, examples, dynamic_inputs: tuple[str, ...] = ()):
     from emmy.compiler.trace.torch import trace_module
 
-    return trace_module(module, examples)
+    dynamic_shapes = None
+    if dynamic_inputs:
+        from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+
+        dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs([f"num_tokens@{name}:0" for name in dynamic_inputs]))
+    return trace_module(module, examples, dynamic_shapes=dynamic_shapes)
 
 
-def trace_mhc_fused(*, rows: int, hidden: int = 4096, streams: int = 4):
+def trace_mhc_fused(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: bool = False):
     """Trace the exact live post-to-pre transition with FP32 mixing parameters."""
     import torch
 
@@ -233,10 +238,11 @@ def trace_mhc_fused(*, rows: int, hidden: int = 4096, streams: int = 4):
             torch.empty((streams * (streams + 2),), dtype=torch.float32, device="meta"),
             torch.empty((hidden,), dtype=torch.float16, device="meta"),
         ),
+        ("x", "residual", "post", "comb") if dynamic else (),
     )
 
 
-def trace_mhc_pre(*, rows: int, hidden: int = 4096, streams: int = 4):
+def trace_mhc_pre(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: bool = False):
     """Trace the exact live pre mapping with FP32 mixing parameters."""
     import torch
 
@@ -249,10 +255,11 @@ def trace_mhc_pre(*, rows: int, hidden: int = 4096, streams: int = 4):
             torch.empty((streams * (streams + 2),), dtype=torch.float32, device="meta"),
             torch.empty((hidden,), dtype=torch.float16, device="meta"),
         ),
+        ("residual",) if dynamic else (),
     )
 
 
-def trace_mhc_broadcast(*, rows: int, hidden: int = 4096, streams: int = 4):
+def trace_mhc_broadcast(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: bool = False):
     """Trace the exact live first-stage broadcast and pre mapping."""
     import torch
 
@@ -265,10 +272,11 @@ def trace_mhc_broadcast(*, rows: int, hidden: int = 4096, streams: int = 4):
             torch.empty((streams * (streams + 2),), dtype=torch.float32, device="meta"),
             torch.empty((hidden,), dtype=torch.float16, device="meta"),
         ),
+        ("x",) if dynamic else (),
     )
 
 
-def trace_mhc_post(*, rows: int, hidden: int = 4096, streams: int = 4):
+def trace_mhc_post(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: bool = False):
     """Trace the exact live post mapping."""
     import torch
 
@@ -280,10 +288,11 @@ def trace_mhc_post(*, rows: int, hidden: int = 4096, streams: int = 4):
             torch.empty((rows, streams, 1), dtype=torch.float32, device="meta"),
             torch.empty((rows, streams, streams), dtype=torch.float32, device="meta"),
         ),
+        ("x", "residual", "post", "comb") if dynamic else (),
     )
 
 
-def trace_hc_head(*, rows: int, hidden: int = 4096, streams: int = 4):
+def trace_hc_head(*, rows: int, hidden: int = 4096, streams: int = 4, dynamic: bool = False):
     """Trace the final exact live multi-stream collapse."""
     import torch
 
@@ -295,4 +304,5 @@ def trace_hc_head(*, rows: int, hidden: int = 4096, streams: int = 4):
             torch.empty((1,), dtype=torch.float32, device="meta"),
             torch.empty((streams,), dtype=torch.float32, device="meta"),
         ),
+        ("residual",) if dynamic else (),
     )

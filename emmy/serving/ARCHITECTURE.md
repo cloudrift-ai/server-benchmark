@@ -31,11 +31,15 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   dispatch; a build failure, unsupported call, capture-time cold call, or failed first-use numerical comparison uses
   the original vLLM kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache
   state, routing, and MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
+- `onecat_deepseek.py` and `onecat_mhc.py` — the broader opt-in `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve
+  1Cat's scheduler, TP/PP collectives, and stateful paged sparse-attention/cache ownership. Exact guarded compiler
+  programs cover the qualified dense-attention widths and all five mHC boundaries; unsupported widths and cold or
+  unverified CUDA-graph calls retain the original 1Cat functions.
 - `mhc.py` — exact FP32 multi-stream residual algebra used by the DeepSeek V4 serving adapter traces. Its
   `fixed_sinkhorn` helper is a lazy torch custom-op boundary for static `[M,N,N]` matrices (`N <= 8`, at most 32
   iterations): eager execution retains the original stable softmax-plus-epsilon order, while Emmy lowers the boundary
-  to one register-resident straight-line kernel per leading matrix. The helper is shape/dtype generic and has no model
-  name gate; invalid or dynamic contracts fail at trace time.
+  to one register-resident straight-line kernel per leading matrix. The leading token dimension may be symbolic; the
+  square matrix dimensions remain statically bounded. The helper is shape/dtype generic and has no model name gate.
   Fused traces through 16 token rows preserve the FP32 post-update value for prenormalization while returning and
   collapsing the separately rounded FP16 residual. Larger prefill traces use the runtime's separate FP16 post/pre path.
 - `deepseek.py` — exact side-effect-free Q/KV RMSNorm and inverse-RoPE boundaries used for runtime compiler
@@ -44,7 +48,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 - `mxfp4.py` — compact routed and grouped expert-stage trace builders for compiler qualification. MXFP4 is dissolved
   at graph birth, leaving generic packed-byte, scale, gather, and contraction graphs.
 - `external.py` — builds programs whose complete input/output boundary is caller-owned. Capacity-sized private
-  copies are omitted, and the owner must supply every external pointer for each launch.
+  copies are omitted, and the owner must supply every external pointer for each launch. A symbolic capacity override
+  sizes only internal scratch at build time; the owner still binds exact runtime shapes before each launch.
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

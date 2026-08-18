@@ -30,7 +30,8 @@ or a view created before the write still fails closed; those forms need general 
 functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
 instead of becoming NaN through arithmetic selection.
 
-A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
+A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions; `select`
+requires only its selected-axis extent to be static, so unrelated symbolic axes survive. An exported
 `fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
 slice/select chain rooted at a local value can also reassemble that base with the filled rectangle. Multidimensional
 roll, dynamic or strided views, input/parameter mutation, used mutation returns, and aliases created before the write
@@ -39,10 +40,11 @@ fail closed.
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
 
-The compiler-owned `emmy::fixed_sinkhorn` custom-op schema is a deliberate stable trace boundary for bounded static
-FP32 `[M,N,N]` normalization. The walker matches the registered schema name—not an FX node name—and records a
-`FixedSinkhornOp` with its literal epsilon and iteration count. Unsupported dtype, rank, dynamic matrix extent, square
-shape, size, or iteration count fails during capture instead of expanding into a long chain of reductions.
+The compiler-owned `emmy::fixed_sinkhorn` custom-op schema is a deliberate stable trace boundary for bounded FP32
+`[M,N,N]` normalization. The walker matches the registered schema name—not an FX node name—and records a
+`FixedSinkhornOp` with its literal epsilon and iteration count. The leading `M` extent may be symbolic; unsupported
+dtype, rank, dynamic matrix extent, square shape, size, or iteration count fails during capture instead of expanding
+into a long chain of reductions.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.

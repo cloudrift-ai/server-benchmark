@@ -534,6 +534,28 @@ def test_trace_select_lowers_rank_reducing_view_and_matches_eager():
     np.testing.assert_array_equal(next(iter(result.outputs.values())), Select()(x).numpy())
 
 
+def test_trace_select_allows_symbolic_unselected_axis():
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+    from emmy.compiler.trace.torch import trace_module
+
+    class Select(nn.Module):
+        def forward(self, x):
+            return x[:, :, 1]
+
+    graph = trace_module(
+        Select(),
+        (torch.empty((8, 3, 4), dtype=torch.float32),),
+        dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(["num_tokens@x:0"])),
+    )
+    output = graph.nodes[graph.outputs[0]].output
+    assert not output.shape[0].is_static
+    assert output.shape[0].as_atom_name() == "num_tokens"
+    assert output.shape[1].as_static() == 3
+
+
 def test_trace_static_arange_uses_range_op_and_replays_as_a_constant_source():
     """Static arange is value construction, not elementwise np.arange over a broadcast stop."""
     import numpy as np

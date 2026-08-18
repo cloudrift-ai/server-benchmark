@@ -63,6 +63,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 ONECAT_RMS_NORM = "EMMY_ONECAT_RMS_NORM"
+ONECAT_DEEPSEEK_V4 = "EMMY_ONECAT_DEEPSEEK_V4"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
@@ -347,6 +348,13 @@ def onecat_rms_norm(default: bool = False) -> bool:
     dtypes, platforms, and failed first-use parity checks retain 1Cat's original
     kernel."""
     return _bool(ONECAT_RMS_NORM, default)
+
+
+def onecat_deepseek_v4(default: bool = False) -> bool:
+    """``EMMY_ONECAT_DEEPSEEK_V4`` — opt into the guarded DeepSeek V4 SM70
+    compiler adapters while 1Cat retains scheduling, TP/PP collectives, and
+    stateful paged attention/cache ownership."""
+    return _bool(ONECAT_DEEPSEEK_V4, default)
 
 
 def serving_batched(default: bool = False) -> bool:

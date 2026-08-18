@@ -1206,12 +1206,9 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     if op_name == "select":
         if not input_ids:
             raise ValueError("aten.select requires one resolved tensor input")
-        source = fx_node.args[0] if fx_node.args else None
-        source_shape = _static_fx_shape(source)
+        source_shape = tuple(g.nodes[input_ids[0]].output.shape)
         raw_dim = fx_node.args[1] if len(fx_node.args) > 1 else None
         raw_index = fx_node.args[2] if len(fx_node.args) > 2 else None
-        if source_shape is None:
-            raise NotImplementedError("aten.select requires a static input shape")
         if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
             raise NotImplementedError("aten.select requires a static integer dimension")
         if not isinstance(raw_index, int) or isinstance(raw_index, bool):
@@ -1219,9 +1216,13 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         dim = raw_dim if raw_dim >= 0 else len(source_shape) + raw_dim
         if not 0 <= dim < len(source_shape):
             raise ValueError(f"aten.select dimension {raw_dim} is out of range for rank {len(source_shape)}")
-        index = raw_index if raw_index >= 0 else source_shape[dim] + raw_index
-        if not 0 <= index < source_shape[dim]:
-            raise ValueError(f"aten.select index {raw_index} is out of range for extent {source_shape[dim]}")
+        selected_extent = source_shape[dim]
+        if not selected_extent.is_static:
+            raise NotImplementedError("aten.select requires a static selected-axis extent")
+        extent = selected_extent.as_static()
+        index = raw_index if raw_index >= 0 else extent + raw_index
+        if not 0 <= index < extent:
+            raise ValueError(f"aten.select index {raw_index} is out of range for extent {extent}")
         coord_map = tuple(
             Literal(index, "int") if axis == dim else placeholder(axis if axis < dim else axis - 1) for axis in range(len(source_shape))
         )

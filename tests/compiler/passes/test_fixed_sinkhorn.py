@@ -5,6 +5,7 @@ import pytest
 
 from emmy.compiler.backend.loop import LoopBackend
 from emmy.compiler.backend.numpy import NumpyBackend
+from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
@@ -38,3 +39,10 @@ def test_fixed_sinkhorn_lifting_preserves_numpy_semantics(size, iterations):
     actual, _ = backend.run(lowered, input_data={"logits": logits})
 
     np.testing.assert_allclose(actual.outputs["normalized"], expected.outputs["normalized"], rtol=2e-6, atol=2e-7)
+
+
+def test_fixed_sinkhorn_accepts_symbolic_batch_but_not_symbolic_matrix():
+    op = FixedSinkhornOp()
+    assert op.matrix_size((Dim("num_tokens", hint=8), 4, 4)) == 4
+    with pytest.raises(ValueError, match="static matrix dimensions"):
+        op.matrix_size((Dim("num_tokens", hint=8), Dim("rows", hint=4), 4))

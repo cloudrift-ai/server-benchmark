@@ -247,3 +247,18 @@ def test_live_mhc_traces_preserve_fp32_parameter_contracts():
     assert fused.buffer("post").dtype.name == "f32"
     assert post.buffer("comb").dtype.name == "f32"
     assert head.buffer("fn").dtype.name == "f32"
+
+
+def test_mhc_prefill_traces_share_symbolic_token_extent_across_live_state():
+    graphs = (
+        trace_mhc_broadcast(rows=128, hidden=16, dynamic=True),
+        trace_mhc_pre(rows=128, hidden=16, dynamic=True),
+        trace_mhc_fused(rows=128, hidden=16, dynamic=True),
+        trace_mhc_post(rows=128, hidden=16, dynamic=True),
+        trace_hc_head(rows=128, hidden=16, dynamic=True),
+    )
+    for graph in graphs:
+        for name in graph.outputs:
+            token_dim = graph.nodes[name].output.shape[0]
+            assert not token_dim.is_static
+            assert token_dim.as_atom_name() == "num_tokens"

@@ -66,3 +66,20 @@ def test_deepseek_dense_boundaries_lower_on_sm70_without_capacity_scratch():
     assert len(scratch) <= 1
     assert all(prod(dim.as_static() for dim in buffer.shape) * buffer.dtype.np.itemsize <= 2 * 8 * 512 for buffer in scratch)
     assert tuple(buffer.name for buffer in inverse_plan.buffers if buffer.role == "scratch") == ()
+
+
+def test_deepseek_dense_boundaries_share_symbolic_token_extent():
+    graphs = (
+        trace_fused_q_kv_rmsnorm(rows=8, q_size=16, kv_size=8, dynamic=True),
+        trace_inverse_rope(rows=8, heads=2, head_dim=12, rope_dim=4, context=8, dynamic=True),
+    )
+    for graph in graphs:
+        for name in graph.inputs:
+            tensor = graph.nodes[name].output
+            if name in {"fused_q_kv", "x", "positions"}:
+                assert not tensor.shape[0].is_static
+                assert tensor.shape[0].as_atom_name() == "num_tokens"
+        for name in graph.outputs:
+            token_dim = graph.nodes[name].output.shape[0]
+            assert not token_dim.is_static
+            assert token_dim.as_atom_name() == "num_tokens"

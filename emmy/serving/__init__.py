@@ -19,10 +19,17 @@ def register() -> None:
 
     from emmy import config
 
-    if config.onecat_rms_norm():
+    deepseek_v4 = config.onecat_deepseek_v4()
+    if config.onecat_rms_norm() or deepseek_v4:
         from emmy.serving.onecat import register_onecat_kernels
 
         register_onecat_kernels()
+    if deepseek_v4:
+        from emmy.serving.onecat_deepseek import register_onecat_deepseek_kernels
+        from emmy.serving.onecat_mhc import register_onecat_mhc_kernels
+
+        register_onecat_deepseek_kernels()
+        register_onecat_mhc_kernels()
 
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")

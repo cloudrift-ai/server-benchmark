@@ -138,7 +138,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
-| `FixedSinkhornOp`                    | Bounded static FP32 Sinkhorn normalization over `[M,N,N]`.     |
+| `FixedSinkhornOp`                    | Bounded FP32 Sinkhorn normalization over `[M,N,N]`.            |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
@@ -149,9 +149,9 @@ consumer is static reconstruction algebra, so `032_fold_constant_subgraphs` remo
 future runtime consumer may add ordinary lifting for the same semantics without changing checkpoint ingestion.
 
 `FixedSinkhornOp` is the explicit tensor boundary for a stable row softmax plus alternating column/row
-normalizations. Its matrix dimensions and iteration count are static and bounded; `loop/lifting` expands one matrix
-into a straight-line scalar SSA body inside the leading `M` loop. Every later stage sees an ordinary `LoopOp`, so
-tile scheduling and CUDA emission require no named operation path.
+normalizations. Its matrix dimensions and iteration count are static and bounded, while the leading `M` extent may
+be symbolic; `loop/lifting` expands one matrix into a straight-line scalar SSA body inside the leading loop. Every
+later stage sees an ordinary `LoopOp`, so tile scheduling and CUDA emission require no named operation path.
 
 Op metadata (arity / `commutative` / `associative` / `identity` /
 `has_identity` / `selecting` / `semiring_product`) lives on `ElementwiseImpl` in

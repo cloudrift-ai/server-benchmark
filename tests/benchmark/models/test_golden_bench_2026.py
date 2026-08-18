@@ -256,20 +256,117 @@ def test_mpk_megakernel_lane_is_pinned_and_paired(project_root) -> None:
     # Pinned external sources: the mirage mpk-branch revision and the Qwen3-8B checkpoint revision.
     assert "5c28cc68dc621cc9448c5c9882ef9e21fdc85884" in run
     assert "b968826d9c46dd6066d109eabc6255188de91218" in run
-    # The four arms: MPK's own baseline/megakernel demo pair and the stock/emmy vLLM pair.
+    # The MPK baseline/megakernel demo pair and stock vLLM are the only paths.
     assert "demo/qwen3/demo.py" in run
     assert "--use-mirage" in run
     assert "vllm==0.23.0" in run
-    assert "emmy serve" in run
+    assert "emmy serve" not in run
+    assert "EMMY_GEN_DECODE_BUCKET" not in run
     assert "for repeat in 0 1 2 3 4" in run
-    # Isolated Emmy evidence state: the arm is preregistered as a cold deploy.
-    assert "EMMY_TUNE_DB=$task_dir" in run
-    assert "EMMY_ONLINE_FILE=$task_dir" in run
-    assert "EMMY_CUBIN_CACHE=$task_dir" in run
     # The suite's deterministic serving controls on the single-stream decode point.
     assert "--ignore-eos --temperature 0 --seed 0" in run
     assert "--max-concurrency 1" in run
     assert "--no-enable-prefix-caching" in run
+
+
+def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
+    directory = _experiment(project_root, "compiler_neptune_emmy_pytorch_a100")
+    tasks = enumerate_tasks([directory])
+    assert len(tasks) == 1
+    task = tasks[0]
+    recipe = load_recipe(directory)
+    assert recipe.kind == "command"
+    assert task.recipe.deploy.gpu == "NVIDIA A100 80GB"
+    assert task.recipe.deploy.gpu_count == 1
+
+    run = recipe.command.run
+    assert "evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca" in run
+    assert "3aa55c12ac822337e630b809b0d9eabb11eee5d3" in run
+    assert "torch==2.13.0" in run
+    assert "EMMY_TUNE_DB=$task_dir/autotune.db" in run
+    assert "pip freeze --all" in run
+    assert "tar -C $task_dir" in run
+    assert recipe.command.stage == [
+        "emmy",
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py",
+    ]
+    assert recipe.command.strict is True
+    assert recipe.command.result_files == ["artifacts.tar.gz"]
+    assert "git apply" not in run
+
+    assert not (Path(directory) / "neptune-inductor.patch").exists()
+    assert not (Path(project_root) / EXP / "compiler_neptune_inductor_a100").exists()
+    assert not (Path(project_root) / EXP / "compiler_neptune_emmy_tcompile_a100").exists()
+
+    neptune_runner = (Path(directory) / "run.sh").read_text()
+    for operator in (
+        "prefill_global",
+        "prefill_causal",
+        "prefill_gqa",
+        "decode_causal",
+        "decode_gqa",
+        "prefill_alibi",
+        "decode_alibi",
+        "prefill_softcap",
+        "decode_softcap",
+        "prefill_windowed",
+    ):
+        assert operator in neptune_runner
+    assert "sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)" in neptune_runner
+    assert "--n-trials 128" in neptune_runner
+    assert 'nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary' in neptune_runner
+    assert 'profile "$operator" "1,$sequence_length" --repeat 15' in neptune_runner
+    assert "neptune-setup-status.tsv" in neptune_runner
+    assert "tune_status=ok:no-valid-schedule" in neptune_runner
+    assert 'profile_status="$profile_status:mismatch"' in neptune_runner
+    assert 'profile_status="$profile_status:runner-failure"' in neptune_runner
+    assert 'test "$successful_profiles" -gt 0' in neptune_runner
+    assert 'torch.__version__.split("+")[0]' in neptune_runner
+    assert '"2.6.0"' in neptune_runner
+    assert "git apply" not in neptune_runner
+
+    neptune_entry = (Path(directory) / "run_neptune.py").read_text()
+    assert "NVIDIA A100-SXM4-80GB" in neptune_entry
+    assert "NVIDIA A100-SXM4-40GB" in neptune_entry
+    assert "NeptuneGQARunner.e = ours.NeptuneGQARunner.create_flex_from_schedulers" in neptune_entry
+    assert 'runpy.run_module("scripts.neptune_bench", run_name="__main__")' in neptune_entry
+
+    emmy_runner_path = Path(directory) / "run_emmy.sh"
+    assert emmy_runner_path.stat().st_mode & 0o111
+    emmy_runner = emmy_runner_path.read_text()
+    for operator in (
+        "prefill_global",
+        "prefill_causal",
+        "prefill_gqa",
+        "decode_causal",
+        "decode_gqa",
+    ):
+        assert operator in emmy_runner
+    for excluded in ("prefill_alibi", "decode_alibi", "prefill_softcap", "decode_softcap", "prefill_windowed"):
+        assert excluded not in emmy_runner
+    assert "sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)" in emmy_runner
+    assert "--bench-backends eager,tcompile,emmy --warmup 1 --iters 15" in emmy_runner
+    assert "--bench --strict" in emmy_runner
+    assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
+    assert "setup-status.tsv" in emmy_runner
+    assert 'test "$successful_setups" -gt 0' in emmy_runner
+    assert "enable_gqa=True" in emmy_runner
+    assert "q_length=1" in emmy_runner
+    assert "q.reshape(1,8,8,1,128)" in emmy_runner
+    assert "is_causal=False).reshape(1,64,1,128)" in emmy_runner
+    assert "run_pytorch.py" in emmy_runner
+    assert 'status="pytorch-only:emmy-failed:$emmy_status"' in emmy_runner
+
+    pytorch_runner = (Path(directory) / "run_pytorch.py").read_text()
+    assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner
+    assert "torch.testing.assert_close" in pytorch_runner
+    assert '"captured_whole_forward"' in pytorch_runner
 
 
 def test_every_command_variant_renders(project_root) -> None:
@@ -290,7 +387,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 43
+    assert rendered == 44
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

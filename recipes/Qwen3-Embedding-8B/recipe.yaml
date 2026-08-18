@@ -8,8 +8,13 @@
 # The emmy variant compiles the whole model at engine start (~3 min first boot,
 # faster after — EMMY_CUBIN_CACHE persists compiled cubins on the model volume).
 # Stock vLLM ignores that env var, so it sits at the base level for both variants.
+tags:
+  - maintained
+
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
+  rationale: "Largest Qwen3 embedding and primary compiler-plugin comparison target across consumer GPU family."
+  heat: 65
   task: embed
 
 engine:

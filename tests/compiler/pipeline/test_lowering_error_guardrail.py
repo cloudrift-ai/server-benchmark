@@ -189,10 +189,12 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
 
 
 # ---------------------------------------------------------------------------
-# Option-0 fallback: a prior that over-extrapolates large (over-budget) tiles
-# onto a small shape must not abort the greedy compile. The retry blocklist
-# exhausts on the prior-ranked over-budget tiles, then the conservative
-# emission-order pick (option-0) recovers the in-budget tile. This is the
+# Emission-order fallback: a prior that over-extrapolates large (over-budget)
+# tiles onto a small shape must not abort the greedy compile. The retry
+# blocklist exhausts on the prior-ranked over-budget tiles, then a resolve with
+# the prior dropped recovers the in-budget tile (these fixture rules emit it
+# first — a property of the fixture, not a promise the enumeration makes; the
+# fallback is a VALIDITY mechanism and claims nothing about speed). This is the
 # tune-time golden-sweep crash: a prior trained on big square matmuls picked a
 # >smem-cap tile for the tiny ``qwen3_06b.q_proj`` projection and the assemble
 # raised instead of falling back.
@@ -264,14 +266,14 @@ def _two_pass_tile_pipeline(n_over_budget: int) -> Pipeline:
 def test_greedy_run_falls_back_to_option0_when_prior_overflows(monkeypatch):
     # The prior ranks 12 over-budget tiles above the lone in-budget tile, so
     # the blocklist retry can never reach it within its budget. Before the
-    # option-0 fallback this raised LoweringError; now ``Pipeline.run`` takes
-    # the conservative emission-order pick (option-0 = the in-budget tile).
+    # prior-less fallback this raised LoweringError; now ``Pipeline.run``
+    # re-resolves without the prior and this fixture's first leaf is in budget.
     import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
     terminal = _two_pass_tile_pipeline(n_over_budget=12).run(_graph_with_tile(), ctx=_small_smem_ctx())
     op = terminal.nodes["y"].op
-    assert isinstance(op, KernelOp), "the in-budget option-0 tile must lower (no LoweringError)"
+    assert isinstance(op, KernelOp), "the in-budget first-emitted tile must lower (no LoweringError)"
     assert op.knobs.get("BN") == 8, "the recovered tile is the budget-safe emission-order leaf"
 
 

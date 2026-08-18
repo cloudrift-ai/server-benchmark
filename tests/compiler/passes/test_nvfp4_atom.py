@@ -43,12 +43,14 @@ def test_the_atom_name_matches_the_wrapper_the_render_calls():
     assert ATOM_REGISTRY[ATOM].ab_dtype == "e2m1"
 
 
-def test_the_atom_accepts_only_materialized_operands():
-    """Conservative first scope: no staged slab drain exists for a packed-plus-scales operand, so
-    the atom takes gmem-direct materialized edges only."""
-    atom = ATOM_REGISTRY[ATOM]
-    assert atom.materialized_edges_only
-    assert not atom.sync_copy_staging
+def test_the_atom_declares_no_staged_drain():
+    """Conservative first scope: no staged slab drain exists for a packed-plus-scales operand.
+
+    This used to ride an ``AtomKind.materialized_edges_only`` flag. That flag is gone — a pass may
+    not refuse for profitability — and the refusal it stood for was never about profitability: there
+    is simply no code to emit. It now lives in the stage resolver, and the atom only declares that
+    it has no synchronous-copy staging either."""
+    assert not ATOM_REGISTRY[ATOM].sync_copy_staging
 
 
 @pytest.mark.parametrize(

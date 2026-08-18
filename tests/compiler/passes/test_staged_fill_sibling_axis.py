@@ -6,7 +6,7 @@ SYNTACTICALLY, through a flat-index reshape residue: a merged / reshaped project
 arrives as ``((m·1024 + n) / 128 % 8) · 128 + (m·1024 + n) % 128``, where the ``m`` contribution is a
 multiple of every modulus and folds away. After the tile split the kernel decodes only the ``m_b`` /
 ``m_u`` split vars, never the bare axis name, so a fill σ that substitutes only its OWN tile axis + K
-emitted the unsplit name — nvcc: ``identifier "a0" is undefined`` (the qwen3-8b v_proj ``d1/sync``
+emitted the unsplit name — nvcc: ``identifier "a0" is undefined`` (the qwen3-8b v_proj ``d1/smem``
 greedy pick on sm_80). The fill and TMA box-origin σ now bind the sibling to its block base
 (``m_b · tile_m`` — always in-bounds), under which a value-dead residue evaluates unchanged."""
 
@@ -73,7 +73,7 @@ def test_slab_operands_bind_the_sibling_axis_to_its_block_base():
 
 
 def test_sync_transport_async_b_binds_the_sibling_axis():
-    """The reproducer's exact path — the ``d1/sync`` transport's async (cp.async) B fill over a
+    """The reproducer's exact path — the ``d1/smem`` transport's async (cp.async) B fill over a
     weight whose row index carries the m residue."""
     mn = _mn()
     ka = Axis("k", Dim(2048))

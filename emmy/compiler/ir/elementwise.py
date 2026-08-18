@@ -35,8 +35,23 @@ def _erf(x):  # numpy lacks an erf ufunc; scipy ships one and is a torch dep.
     return erf(x)
 
 
+def _arange(x):
+    """Elementwise ``arange`` — each element's value is its own (row-major) index.
+
+    Persisted programs spell a folded ``aten.arange`` as this elementwise op over the stop
+    value broadcast to the output extent (the current tracer emits ``RangeOp`` instead, so
+    the spelling only arrives from stored wire payloads). ``np.arange`` itself is NOT
+    elementwise — a multi-element operand hits its scalar coercion (``bool``/``float``) and
+    raises — so the interpreter needs the vectorized equivalent: an index ramp in the
+    operand's shape and dtype.
+    """
+    x = np.asarray(x)
+    return np.arange(x.size, dtype=x.dtype).reshape(x.shape)
+
+
 _NAME_TO_FN: dict[str, object] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
     "relu": lambda x: np.maximum(0.0, x),
     "sigmoid": lambda x: 1.0 / (1.0 + np.exp(-x)),

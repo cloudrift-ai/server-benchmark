@@ -53,7 +53,7 @@ so allocation failure is reported synchronously instead of surfacing later as an
 
 ## Compiler qualification
 
-The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_laguna_s_2_1_fp8.yaml) contains 22
+The [canonical V100 golden](golden/v100_sm70.yaml) contains 22
 current compiler targets and 25 verified realizations with paired deployable O3 and reference timings. All 15
 full-program deploy offers matched stored realizations with zero gaps, drift, fall-through, or compile failures.
 Representative exact-layer traces and all checkpoint tensor OIDs established that the documentation-only model
@@ -68,8 +68,7 @@ existing Emmy CLI, discard its first two client warmups, and report repeats thre
 emmy bench experiments/Laguna-S-2.1-FP8/serving_v100_sxm3 --ssh riftuser@66.172.10.131
 ```
 
-The command writes ignored local output. Do not use `--commit-results`; `RESULTS.md` is the only retained benchmark
-artifact.
+Use `$run-experiment` to retain the latest raw results, system-only experiment records, and factual artifact index.
 
 ## Limits
 

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.sigma import Sigma
@@ -380,6 +380,10 @@ def select_to_ternary(s: Select) -> Expr:
     return result
 
 
+#: Largest value C ``int`` addressing can represent; past it a flat address wraps negative.
+_INT_MAX = 2**31 - 1
+
+
 def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
     """Row-major flatten ``buf[i0][i1]...`` to a single C/CUDA expression.
 
@@ -398,16 +402,55 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
         for i in indices[1:]:
             flat = BinaryExpr("+", flat, i)
         return flat.simplify(SimplifyCtx.empty()).render(ctx)
+    wide = _exceeds_int_range(shape)
     flat = None
+    parts: list[str] = []
     for d, idx in enumerate(indices):
         stride: Expr = Literal(1, "int")
         for k in range(d + 1, len(shape)):
             stride = BinaryExpr("*", stride, _to_expr(shape[k]))
         stride = stride.simplify(SimplifyCtx.empty())
+        if wide:
+            # Widen the TERM, not the finished sum: `(long long)(a*b + c*d)` computes the whole
+            # sum in `int` and widens an already-wrapped result. Casting the index makes each
+            # multiply 64-bit, and the accumulating `+` chain stays 64-bit by promotion.
+            i_src = idx.simplify(SimplifyCtx.empty()).render(ctx)
+            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({stride.render(ctx)})")
+            continue
         term: Expr = idx if _is_one(stride) else BinaryExpr("*", idx, stride)
         flat = term if flat is None else BinaryExpr("+", flat, term)
+    if wide:
+        return "(" + " + ".join(parts) + ")"
     assert flat is not None
     return flat.simplify(SimplifyCtx.empty()).render(ctx)
+
+
+def _exceeds_int_range(shape) -> bool:
+    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
+    arithmetic.
+
+    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
+    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
+    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
+    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
+
+    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
+    so the answer is an upper bound over every shape the program can legally be resolved at rather
+    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
+    a run may exceed it.) Buffers that stay inside the range keep their existing 32-bit
+    addressing byte for byte, which is most of them — 64-bit index math is not free."""
+    numel = 1
+    for dim in shape:
+        expr = getattr(dim, "expr", None)
+        if isinstance(dim, int):
+            numel *= dim
+        elif isinstance(expr, Literal) and isinstance(expr.value, int):
+            numel *= expr.value
+        else:
+            numel *= DYNAMIC_DIM_MAX
+        if numel > _INT_MAX:
+            return True
+    return False
 
 
 def _to_expr(d) -> Expr:

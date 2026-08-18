@@ -9,6 +9,19 @@ import sys
 from emmy.logging_setup import ensure_plugin_logging
 
 
+def test_cli_logging_keeps_routine_http_requests_out_of_machine_output():
+    code = (
+        "import logging\n"
+        "from emmy.logging_setup import setup_cli_logging\n"
+        "setup_cli_logging()\n"
+        "logging.getLogger('httpx').info('HTTP Request: POST https://api.test')\n"
+        "logging.getLogger('emmy.commands.recipe').info('{\\\"schema_version\\\": 1, \\\"rows\\\": []}')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == '{"schema_version": 1, "rows": []}'
+
+
 def test_attaches_handler_when_unconfigured():
     # A subprocess is the faithful simulation: in-process, pytest's own logging plugin
     # keeps a capture handler on root, so the "nothing configured" state never exists here.

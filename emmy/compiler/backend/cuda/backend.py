@@ -90,13 +90,15 @@ class CudaBackend(Backend):
         # When set, ``benchmark()`` runs in a subprocess so the parent
         # can SIGKILL a wedged worker. Defaults to ``None`` (in-process,
         # required when ``on_iter`` callbacks are supplied).
-        self.bench_wall_timeout_s = bench_wall_timeout_s
+        self._bench_wall_timeout_s = bench_wall_timeout_s
         # Per-stage bench budgets. Default 10 s suits the whole-graph
         # compile/run commands; the ``tune`` command overrides them *down*
         # (it benches isolated single kernels, where a fast-fail on a slow
         # variant matters more than headroom) — see ``commands/tune.py``.
-        self.bench_compile_timeout_s = bench_compile_timeout_s
-        self.bench_run_timeout_s = bench_run_timeout_s
+        # The public ``bench_*`` properties (``Backend``) read the paired
+        # ``EMMY_BENCH_*`` env vars live over these policy values.
+        self._bench_compile_timeout_s = bench_compile_timeout_s
+        self._bench_run_timeout_s = bench_run_timeout_s
         # Persistent autotune cache. ``None`` → no DB (test-isolation
         # default; tests construct ``CudaBackend()`` without args and
         # expect deterministic rule-defaults compiles). ``"auto"`` →

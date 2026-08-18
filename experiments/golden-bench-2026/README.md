@@ -1,8 +1,9 @@
 # Golden bench 2026
 
-This experiment suite supports the Emmy compiler submission. Raw measurements remain in benchmark run directories;
-the repository holds only recipes, frozen inputs, and the scientific protocol. A recipe is not evidence until its
-required artifacts exist and an intelligent reviewer accepts them against the checklist below.
+This experiment suite supports the Emmy compiler submission. Each executed experiment retains its latest raw-results
+archive, available per-row experiment records, and `RESULTS.md` beside the recipe and frozen protocol inputs. The
+ignored raw directory may be removed after the archive is verified. A recipe is not evidence until its required
+artifacts exist and an intelligent reviewer accepts them against the checklist below.
 
 ## Evidence sets
 
@@ -14,6 +15,7 @@ required artifacts exist and an intelligent reviewer accepts them against the ch
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
+| Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -50,16 +52,16 @@ exact full-layer trace and re-resolved in that fusion context; they are not stan
 that cannot retain a runnable eager/Inductor reference fails the task and makes the supplement incomplete.
 
 Each search has an isolated tuning database, online checkpoint, and cubin cache. The positional trace input and model
-provenance use the same full revision. `emmy bench` requires a clean staged source tree and records its Git revision,
-content-addressed file manifest, package freeze, GPU UUID/state, driver, CUDA compiler, command status, online
-checkpoint, and raw tuning artifacts. Every matrix row is a separate task, so a failed case preserves its partial
-evidence and does not prevent later rows from running.
+provenance use the same full revision. `emmy bench` requires a clean staged source tree. Its experiment record captures
+the Git revision, content-addressed source manifest, GPU UUID/state, driver, GPU compiler, command status, and
+raw-artifact paths; the command retains its package freeze, online checkpoint, and tuning evidence. Every matrix row
+is a separate task, so a failed case preserves its partial evidence and does not prevent later rows from running.
 
 The directly searched winner must match its measured knob map exactly. The recipe invokes
 `emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.
 Each ordinary invocation is an independent process; the CLI contains no repetition or child-process wrapper. It records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
-`mode="max-autotune"` with `fullgraph=True`.
+`mode="max-autotune-no-cudagraphs"` with `fullgraph=True`; the benchmark harness supplies the shared outer CUDA graph.
 Inductor must compile the full graph and match eager output on the same inputs before its latency is accepted. Any
 failed, ambiguous, unmatched, uncaptured, or non-whole-program winner fails after archiving diagnostics.
 
@@ -133,7 +135,7 @@ measure Emmy compiler speedup and are not inputs to the protocol-only kernel lan
 | 8x A100 | DeepSeek-V4-Flash-0731 EXL3 3.04 bpw, TP8 | New checkpoint on an older serving platform | Stretch compatibility/refusal study; requires an Emmy arm |
 | 8x H200 | GLM-5.2 FP8, TP8 | Primary datacenter serving system | Stock qualification until an Emmy arm and TP8 manifest exist |
 | 8x B200 | GLM-5.2 NVFP4, TP8 with expert parallelism | Same architecture on Blackwell | Optional stock qualification until matched evidence exists |
-| 1x A100 | Qwen3-8B BF16, TP1 | Four-arm megakernel (MPK) decode comparison | MPK pair + stock measured; Emmy arm awaits tuned baseline |
+| 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
 All serving points disable prefix caching and use seed 0, temperature 0, and ignored EOS. Each point expands to five
 tasks with `benchmark.repeats: 1`, so every observation receives a fresh deployed server instead of five clients
@@ -168,41 +170,105 @@ lower endpoint exceeds one. The equal-weight four-point summary is the geometric
 10,000-draw seed-0 bootstrap that resamples the five pairs within each point. "Faster across the matrix" requires
 all four points and the summary to meet the same lower-bound rule.
 
-For every serving task, intelligent review must confirm `successful_requests == num_prompts`, `failed_requests == 0`,
-the complete preregistered matrix, the intended backend from the raw logs, and plausible outputs and metrics. `emmy
-bench` records these facts but does not accept or reject them. No performance outlier is removed. A machine-readable
-deployment, client, or network failure before a complete metric may trigger one rerun of the entire stock/Emmy pair
-for that workload/repeat; retain and disclose both failed originals. A second failure makes the point incomplete. A
-semantic mismatch or post-metric performance anomaly is never a rerun reason; after a code/configuration fix, restart
-the entire 40-task matrix under a new source ID.
+For every serving task, intelligent review of the raw output must confirm `successful_requests == num_prompts`,
+`failed_requests == 0`, the complete preregistered matrix, the intended backend from the raw logs, and plausible
+outputs and metrics. `emmy bench` preserves the raw output but does not parse, accept, or reject measurements. No
+performance outlier is removed. A machine-readable deployment, client, or network failure before a complete metric
+may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
+originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
+never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source ID.
 
 ## Megakernel comparison lane
 
-`serving_mpk_qwen3_8b_a100` compares Emmy's kernel-per-launch serving structure with a megakernel system: MPK
-(Mirage Persistent Kernel, arXiv 2512.22219) compiles a tensor program into one persistent kernel whose in-kernel
-scheduler runs every operator inside a single launch, eliminating per-kernel launch and synchronization gaps. Four
-arms run on one A100 80GB with the same pinned Qwen/Qwen3-8B checkpoint and five fresh-process repeats each: MPK's
-own kernel-per-operator demo harness, the same harness with `--use-mirage` (the megakernel), stock vLLM, and the
-Emmy plugin, the two vLLM arms driven by one single-stream 128-in/512-out decode point with the suite's
-deterministic controls. The mirage source and model revisions are pinned in the recipe.
+`serving_mpk_qwen3_8b_a100` runs vLLM and MPK (Mirage Persistent Kernel, arXiv 2512.22219). MPK compiles a tensor
+program into one persistent kernel whose in-kernel scheduler runs every operator inside a single launch. Three paths
+run on one A100 80GB with the same pinned Qwen/Qwen3-8B checkpoint and five fresh-process repeats each: MPK's own
+kernel-per-operator demo harness, the same harness with `--use-mirage`, and stock vLLM driven by one single-stream
+128-in/512-out decode point with the suite's deterministic controls. The mirage source and model revisions are pinned
+in the recipe.
 
-Interpretation is bounded in three ways. First, ratios pair only within a harness — megakernel over MPK's baseline,
-Emmy over stock; across harnesses only per-output-token decode latency is comparable, and the vLLM arms carry
-serving-stack overhead the MPK demo does not. Second, the lane measures what whole-model launch fusion buys at
-single-stream decode, not per-kernel code quality; it is not an input to any kernel-corpus geometric mean. Third,
-the Emmy arm awaits a tuned A100 baseline so the comparison is not made against a cold deploy; the megakernel pair
-is unaffected. MPK targets Ampere/Hopper datacenter GPUs, so this lane cannot extend to the suite's older or
-consumer platforms.
+The MPK paths use MPK's demo harness while the vLLM path includes its serving stack, so the recipe preserves their raw
+outputs without interpreting or comparing them. The lane is not an input to any kernel-corpus geometric mean. MPK
+targets Ampere/Hopper datacenter GPUs, so this lane cannot extend to the suite's older or consumer platforms.
 
-Every arm is additionally positioned against a device-calibrated roofline, reusing the boot audit's calibrations
+Every path is additionally positioned against a device-calibrated roofline, reusing the boot audit's calibrations
 (`emmy/serving/roofline.py`: measured device-to-device copy bandwidth and measured f16 dense-matmul throughput —
 no specification-sheet peaks). The decode-step floor is the checkpoint's streamed weight bytes (all parameters
 except the embedding matrix, of which decode reads one row) over measured copy bandwidth; the compute floor is
 negligible at single-token decode. The same calibrations define the per-kernel headroom metric — measured kernel
 latency over max(weight-streaming floor, compute floor) for that kernel's weight bytes and token width — which
 decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
-The per-kernel table requires the tuned Emmy arm's kernel inventory and ships with it; until then the lane reports
-only whole-step roofline positions.
+This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
+
+## Neptune compiler comparison
+
+`compiler_neptune_emmy_pytorch_a100` owns both parts of the A100 comparison and produces one artifact archive for one
+eventual `RESULTS.md`. Its pinned container first runs Neptune's published A100 attention matrix on an A100 80GB:
+Global prefill; Causal, GQA, ALiBi, and SoftCap in both prefill and decode; and Window prefill. Every operator runs in
+FP16 at batch 1 and sequence lengths 256 through 32768 in powers of two, for 80 setups. Each eligible Neptune
+scheduler receives 128 tuning trials. The unmodified artifact then performs its one warmup and 15 profiled calls for
+every supported runner. The immutable Neptune image and its upstream source are pinned and checked before the first
+setup. Neptune published its A100 results on the 40GB model, so this is the same software and operator protocol on a
+different-memory A100 rather than an exact hardware reproduction.
+
+A failed tuning setup does not suppress its manual Neptune and registered-baseline profile, and a failed profile does
+not suppress later setups. `neptune-setup-status.tsv` records both outcomes. Missing or failed rows remain missing
+evidence; the results assembler must report them rather than treating the experiment's eventual archive as full
+coverage. The status also flags a zero-record tune, output mismatch, or runner exception that the pinned CLI otherwise
+logs only as a warning.
+
+The artifact recognizes only the product string `NVIDIA A100-SXM4-40GB`. The experiment's narrow launcher maps the
+80GB product string to that name only inside the Neptune CLI process so the artifact selects its existing `sm_80`
+A100 target; it does not modify Neptune's source. The surrounding evidence records the actual 80GB product name,
+memory, clocks, and driver. The pinned CLI also contains a truncated `NeptuneGQARunner.e(...)` call that prevents
+module import. The launcher supplies that missing name as an alias of the existing `create_flex_from_schedulers`
+factory, matching current upstream Neptune while leaving the checked source unchanged.
+
+Do not use an ALiBi speedup unless its outputs pass an independent oracle. In the pinned source, prefill FlexAttention
+constructs a causal mask but its override never installs that mask, while decode Neptune reuses a constructor that
+applies a causal mask to a one-token query. The first makes FlexAttention noncausal; the second makes Neptune attend
+only the first KV token. An A100 80GB smoke check against a dense FP32 PyTorch oracle confirmed the respective errors.
+The experiment keeps these published registrations for provenance and surfaces their mismatch; it does not patch them.
+
+The paper prose says 128 through 32768 while also specifying eight lengths and 320 total setups. The checked-in
+artifact sweep uses 256 through 32768, which is the eight-point range reproduced here; preserve this discrepancy in
+any report rather than silently adding a ninth setup.
+
+This lane deliberately applies no patch to Neptune. It retains every compiler and optimized-library baseline that the
+artifact registers, including FlexAttention's `torch.compile(flex_attention)` path. That is an Inductor comparison,
+but it uses the artifact's pinned PyTorch 2.6.0 rather than a recent PyTorch release. The direct PyTorch SDPA runners
+are library paths, not current-Inductor arms, and the artifact's dormant `UNFUSED_COMPILED` helper is not registered.
+After the container exits, the same recipe runs the current-PyTorch and Emmy subset in a separate host environment
+pinned to PyTorch 2.13.0. Do not present those results as part of the artifact-exact reproduction.
+
+Nsight Systems preserves the raw NVTX ranges and CUDA traces. Any comparison with a multi-kernel compiler invocation
+must use total CUDA device time within its measured range, not the fastest individual kernel. The artifact arm is not
+an Emmy result and is not part of the common-kernel geometric mean.
+
+The current-PyTorch and Emmy arm covers the five native-SDPA operators that Emmy can reconstruct without changing
+their mathematics: Global, Causal, and GQA prefill; and Causal and GQA decode. The same eight sequence lengths produce
+40 setups on the same A100 80GB. ALiBi, SoftCap, and windowed-SoftCap remain outside this starter denominator; do not
+treat their absence as support or silently replace their score modifications with plain SDPA.
+
+Each setup runs in a fresh `emmy run` process with FP16 inputs, batch 1, one warmup, and 15 measured iterations.
+`--strict` requires eager PyTorch, `torch.compile`, and Emmy to execute with captured timing and requires Emmy and
+`torch.compile` to match eager output. PyTorch is pinned to 2.13.0; Emmy invokes it with `fullgraph=True` and
+`mode="max-autotune-no-cudagraphs"`, then captures it in the same outer CUDA graph used for every backend. The compiled
+wrapper may select a fused SDPA library backend, so report this arm as current
+PyTorch `torch.compile`/SDPA rather than claiming that every timed kernel was generated by Inductor.
+
+A setup that fails strict correctness or exceeds ten minutes is recorded in `setup-status.tsv` and skipped so one hard
+Emmy case does not discard later PyTorch/Emmy rows. Such a row is unsupported evidence, not a performance result.
+
+Decode GQA spells its eight query heads per KV head as a broadcast batch dimension. This is mathematically equivalent
+to `enable_gqa=True`, avoids materializing repeated K/V tensors, and keeps decode noncausal after PyTorch export drops
+the explicit false causal flag while retaining the true GQA flag.
+
+The CLI records the minimum of its 15 captured measurement windows. A direct Neptune comparison must therefore
+extract the same statistic from Neptune's 15 raw NVTX calls, match rows by operator and sequence length, and keep the
+artifact's PyTorch 2.6.0 results separate from the current-PyTorch arm. The combined experiment remains planned
+evidence until its common archive exists and passes intelligent review; it is not part of the common-kernel geometric
+mean.
 
 ## Intelligent publication review
 

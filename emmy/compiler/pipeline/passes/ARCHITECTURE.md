@@ -6,8 +6,54 @@ Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`).
 specializations**: it dispatches on stored params of the fold (`axis is None` / `is_contraction` for the schedule
 walk; the derived `Fold.role` for the loop annotation the materializer reads), never on a named shape
 (matmul / pointwise / attention) —
-flash attention is the `TWISTED` fold on the streaming schedule (a twisted monoid is a monoid), selected
+SDPA is plain contractions plus the online-softmax `TWISTED` fold (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.
+
+## Performance is never a pass decision
+
+**Passes enumerate under legality. Ranking belongs to evidence and to the fitted prior — and to nothing else.**
+Every semantically legal alternative is exposed as a fork option, an enumerated row, or a knob value, and the
+choice among them is made in exactly two places, neither of which is a pass:
+
+- a **deployed model** answers every choice from measured evidence — the box-local reservoir / tune-DB rows a
+  local `emmy tune` produced, or a recorded golden row replayed exactly through its pins;
+- everything else answers through the deploy evidence hierarchy, whose last learned tier is the fitted prior — on
+  a fresh machine, the offline model. Unmeasured-deploy quality is the prior's responsibility, and the way to
+  improve it is to fit it better or to measure the shape.
+
+Legality is the ONLY thing a pass may narrow by. A candidate is dropped because this term cannot realize it — the
+dtype the atom binds, a K-step that must divide a static extent, an smem budget, an epilogue the emitter cannot
+express — and for no other reason. Everything a hardware profitability argument would say belongs on the evidence
+side of that line.
+
+Concretely:
+
+- An enumeration never drops, caps, or truncates legal rows because some were measured slow somewhere. A ladder in
+  `search/space.py` is a domain, not a preference history; a row set is a function of the term and its legality
+  alone, never of a hardware profitability fact.
+- **No hand-written ordering, default, or filter may exist to improve an unmeasured pick.** Enumeration produces a
+  SET, and the position a row lands in is an implementation detail of whatever loop built it — never a policy,
+  never an assertion, never a thing to preserve across a refactor. There is no "conservative option-0", no family
+  whose leading value is its safe default, and no leaf withheld because nothing could price it.
+- **A bad unmeasured pick is an accepted outcome.** With no golden, no measurement and no useful prior, a compile
+  takes whatever the walk emitted first; that kernel may be far off the best one the space contains. It is not a
+  regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
+  replays exactly, and a `tune` turns it into evidence the hierarchy can use.
+- A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
+  boundedness reason (the compile must terminate with a tractable option set — fusion's work-growth cap and the
+  scheduler's `MAX_ROWS` are the canonical instances; both are raise-don't-truncate). "Measured slower",
+  "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the tuner's and the
+  prior's vocabulary, and a fix for a slow configuration is new evidence — a re-tune and a refreshed golden file —
+  never a new compile-time condition.
+- A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
+  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default.
+- A misdeploy is debugged as an evidence problem: a missing or stale golden row, an unfitted prior, or a gap in the
+  feature/key vocabulary that makes two different candidates indistinguishable. Fix the evidence path; do not fence
+  the compiler.
+
+This boundary is a review judgment, not a scripted check: when a change wants to refuse, cap, reorder, or default
+for speed, move the decision to a fork plus evidence instead. The same rule governs the PROSE — a rationale for a
+deleted gate is a template for its return, so it is deleted with the code rather than left behind as history.
 
 ## Quantization is not a concept past the decomposition band
 
@@ -31,9 +77,9 @@ across every SITE of the term. The kernel's ONE worker inventory is chosen FIRST
 that fixed context:
 
 ```
-enumerate(term) = [ r for reading in readings(term)                  # collapse / mixed-A — the two tree rewrites
+enumerate(term) = [ r for view in views(term)                        # the derived views (collapse / monoid)
                       for work in inventories(term)                  # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
-                      for r in rows(root_site(reading), work) ]
+                      for r in rows(root_site(view), work) ]
 rows(site, work) = [ merge(v, *child_rows)                           # spelled through ops.Sched.key, site-local
                      for v in values(site, work)                     # the domain: search/space.py, RESOLVED vs work
                      for child_rows in product(rows(c, work) for c in children(site))
@@ -50,11 +96,12 @@ candidate is simply not in `values(site, work)`".
 **The enumeration is memoized per term** (`_schedule._Pool` in `ctx.session_cache`): the rows are a pure function of
 `(term, ctx, pins, hints)`, so N same-shape kernels in a graph — and every tune trajectory after the first, since the
 pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
-MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the readings re-bind per op,
+MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the views re-bind per op,
 so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
 identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
-cache's home: one `Context`, one fact set. Pool rows are read-only mappings and cached slices are asserted
-placement-free at build, so a shared pool cannot be corrupted by one consumer for another.
+cache's home: one `Context`, one fact set. Pool rows are read-only mappings; they carry no resolved slices and no
+view ownership, so a shared pool cannot be corrupted by one consumer for another — materialization re-resolves
+every slice from the row's own spellings.
 
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its
@@ -67,9 +114,11 @@ alone made a nested key a knob no kernel realized — a row spelling `REDUCE@j` 
 Two consequences fall out of "one kernel, one inventory": a row's cooperative claims must AGREE rather than be
 folded with a maximum (a `REDUCE` value spells no width — it lives once in `WORK` — so two sites wanting different
 bands name a kernel the wire format cannot tell apart, and admitting both produced byte-identical duplicate rows),
-and a candidate the enumeration offers must be one materialization can build: `splitk_materialized_b` is asked at
+and a candidate the enumeration offers must be one materialization can build: `splitk_computed_b_site` is asked at
 enumeration, not only inside `_splitk_option` where it is enforced with `pinned=True` and would turn an unpinned
-offered candidate into a raise.
+offered candidate into a raise. That predicate is also where the nested-key rule bites the other way — the split
+σ-reindexes both operand edges through `_sliced_edge`, and rewriting a COMPUTED cone replaces the nodes inside it, so
+a cone carrying a scheduling site of its own would lose the slice keyed by that node's identity.
 
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 
@@ -84,8 +133,8 @@ Three layers own three different questions, and keeping them apart is what stops
   inner stride); the categorical ones (operand dtype, transport, a fragment-unrealizable gather epilogue) are plain
   predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
   decline — a size, not a yes/no. These are also the recursion's downward filter.
-- **CHOICE** is the walk itself: which families a SITE offers, the conservative option-0 each leads with, and how a
-  row becomes a `TileOp`. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
+- **CHOICE** is the walk itself: which families a SITE offers and how a row becomes a `TileOp` — which values are
+  legal here, never which of them is better. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
   strip) and `is_contraction(node)` (tile × stage × reduce), else the reduce partition. **Not `AxisRole`**: the role
   never selected a fourth arm, `TWISTED` is derived by matching the combine's operation family (an operation match
   wearing an algebraic name), and `PLANAR` is the residue. The role stays a loop annotation and a materializer read.
@@ -98,77 +147,68 @@ Three properties this shape enforces:
   `ops.seal_workers` stamps it. The producer band `+p<np>` is part of the inventory and is CHOSEN with it.
 - **Uniform key sets per fork, `""` a DECIDED empty.** The evidence pick's prefix-consistency depends on it: an
   absent key reads as "free" and would let a gmem-direct leaf inherit a staged row's measurement.
-- **Enumeration produces a SET; ranking is the prior's job.** The only ordering obligation is that each family's
-  FIRST value is its conservative default (per-family, not global — the reduce tier deliberately leads with its
-  cooperative pick). The recursion decides the row set; `build_fork_tree` decides the evidence hierarchy, and the
-  two are deliberately not the same shape.
+- **Enumeration produces a SET; ranking is evidence's and the prior's job.** There is no ordering obligation at
+  all: the order rows come out in is whatever the recursion's loops produce, it means nothing, and no family may
+  arrange its values so a particular one is taken when nothing has been measured. The recursion decides the row
+  set; `build_fork_tree` decides the evidence hierarchy, and the two are deliberately not the same shape.
 
 A predicate has ONE home and ONE severity: each legality function returns its refusal, and the caller picks
 raise-vs-drop from whether the family is PINNED (an unpinned warp move with an indivisible K-step is dropped;
 the same defect in a pin raises). That is the bug class — "the pin says yes and the enumeration says no" — the
 single-home rule exists to prevent.
 
-**Term READINGS — the one mechanism ABOVE the product.** Four moves rewrite the term rather than decorating it, and
-the criterion that separates a reading from a value is whether the rewrite changes the SITE SET, because that is what
-a product cannot absorb. The register strip and split-K do not (`r` and `cta` are spelled TILE / REDUCE values,
-applied at materialization); three do, and they are mutually exclusive by shape, so a term has at most TWO readings
-(`_schedule._readings`):
+**Derived VIEWS — the one mechanism ABOVE the product.** The stored `TileOp` is the ONE canonical tree per kernel; a
+VIEW is a pure, deterministic derivation of it, and the criterion that separates a view from a value is whether the
+derivation changes the SITE SET, because that is what a product cannot absorb. The register strip and split-K do not
+(`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); two do, mutually exclusive by shape, so
+a term has at most TWO views (`_schedule._views`):
 
 - the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
   the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
-  contraction's K fold, so the map reading spells its statistic at `REDUCE@<axis>` too;
+  contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too. The statistic's CARRIER is not
+  part of the shape: a TWISTED `(m, d)` pair binds exactly like a `PLANAR` mean/rsqrt, which is what puts a fused
+  `softmax(S)·V` region on the contraction catalog (cone `exp(S − m)·(1/d)`, B the value matrix);
 - the COLLAPSE (`Fold.demoted`) — a computed `a` edge spliced back INLINE, REMOVING its site. With no edges the
   bilinear reading declines, so the fold derives `PLANAR` and takes the reduce tiers; this is what carries a stat-free
-  cone (`f(x) @ w`) and what a computed-A term with no legal warp row falls back to;
-- the mixed-A PROMOTION — a materialized **f32** `a` re-expressed as a one-`Load` cone, so it rides the converting
-  compute fill (a copy transport moves raw bytes; only the fill converts, on the slab store). It ADDS one site.
+  cone (`f(x) @ w`) on the per-cell tiers.
 
-The union carries three obligations: uniform key sets with `""` as a decided empty; NO cross-reading suppression (each
-gate is a local predicate on its own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against);
-and reading identity surviving into the prior's key space, which `_enumerate` enforces by keying the row → reading map
-on `canonical_row_key` and RAISING on a collision (the fix would be an `S_*` stamp, never a new knob key).
+(The old mixed-A promotion "reading" is gone: a materialized edge whose dtype the atom cannot bind directly takes the
+CONVERTING smem compute fill on the one tree — a stage resolution, not a derivation.)
+
+A row carries NO view ownership: the derived contraction view offers only warp tiles (a computed operand's scalar
+list is empty) and the per-cell view only scalar / per-cell ones, so the row's `WORK` tier decodes its view by
+construction — replay is a function of `(stored op, row)` and nothing else. The union carries two obligations:
+uniform key sets with `""` as a decided empty, and NO cross-view suppression (each gate is a local predicate on its
+own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against).
 
 **Coverage, as it stands.** The recursion carries the single-site terms — the pointwise cell plus the register-strip
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
 warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
-the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the resolved `sync`
+the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `smem`
 compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
-statistic site is a nested site under the same inventory. The compute fill is MANDATORY for a computed edge with ONE
-exception, the packed-pair (NVFP4) weight cone, which additionally offers the `cp.async` byte-slab rows as fork
-siblings — its bits copy verbatim and only its block scales are compute-filled. A `STAGE` pin picks between the two
-families by its transport. The **flash streaming pair** is carried too, and it is why
-the enumerator recurses: a `_site_values` entry plus legality predicates, with no emitter of its own. A term the
+statistic site is a nested site under the same inventory — the nested site is why the enumerator recurses. The compute fill is MANDATORY for a computed edge with ONE exception, the packed-pair (NVFP4)
+weight cone, which additionally offers the `smem-async` / `smem-tma` byte-slab rows as fork siblings — its bits
+copy verbatim and only its block scales are compute-filled. A `STAGE` pin picks between the two families by its
+transport. SDPA
+carries no family of its own: its two matmuls schedule as plain contractions and the online-softmax `TWISTED` fold
+takes the ordinary reduce partition. A term the
 enumeration cannot schedule yields NO rows and stays unmapped: the guardrail contract, not a failure, since kernels
 still compile on the materializer's per-cell path, so what is missing is schedule coverage, never a compile.
 
-**The streaming pair, site by site.** A fold whose DERIVED evaluation contracts (`_schedule._streams` — structural,
-never the `TWISTED` role) keeps its children as sites: the hoisted QK score edge and the synthesized P@V. Each
-enumerates its own half of `twisted_warp_moves`' free geometry — the key-atom / query-tile pair, since `warps_m` is
-the inventory and lives once in `WORK` — and the pair is reconciled at the STREAM (`_legality.twisted_sites_agree`:
-the P@V rows are the score's rows, its K-chunk is the streamed key block). That reconciliation is the whole reason
-the enumeration recurses: two sites that must agree cannot be a product over one node's families. The stream itself
-then decides what only it can see — the K/V transport, sized against the geometry its children chose
-(`_legality.resolve_twisted_stage`, including the `split` per-edge groups that also stage Q), and the cross-CTA
-split-KV `030_split_reduce` realizes as partial + LSE finalize. The **chain** is the same P@V site under the `""`
-inventory (the value axis leaves the grid for a per-thread register vector); the **per-cell / cooperative** forms are
-the ordinary reduce partition on the same term, with both children at their decided empty. A form whose derived
-evaluation is scheduled folds the stream ITSELF, so it composes with no partition tier but the split-KV — the
-alternatives are alternatives, not a product, and a `REDUCE` pin the form cannot honor drops those rows rather than
-being ignored (the reduce tiers, which do realize it, carry the term instead).
-
-Two nested sites answer with the decided empty and nothing else. A cone's statistic under a computed `a` edge,
-because the parent FORM realizes its partition itself — `_stage.sync_stat_fill` stripes the statistic one row per
-warp with the warp's lanes striding the fold, a single hardwired partition (`_schedule._fill_realized`). And the
-streaming pair's own `REDUCE` / `STAGE`: their K-step rides `TILE` and their operands ride the stream's `STAGE`, so
-those keys are not spelled at all (`_schedule._decided`). That is not an exception to the uniform-key rule — the rule
+A nested site answers with the decided empty and nothing else. A cone's statistic under a computed `a` edge decides
+nothing, because the parent FORM realizes its partition itself — `_stage.sync_stat_fill` stripes the statistic one
+row per
+warp with the warp's lanes striding the fold, a single hardwired partition (`_schedule._fill_realized`) — so an
+addressed `REDUCE` / `STAGE` key no row decides is not spelled at all (`_schedule._decided`). That is not an
+exception to the uniform-key rule — the rule
 is that every LEAF spells the same keys, not that every site gets one per family — and it is load-bearing rather than
 cosmetic: the featurizer reads one node GROUP per distinct `@<axis>` element and gives each group the reduce geometry
-whenever its slice carries a `REDUCE` key at all, so a decided-empty `REDUCE@dd` fabricates a partitioned reduce at a
-site that has none and sum-pools its occupancy into the row (measured: `D_threads` and `D_splitk` tripled,
-`D_log2_ctas` reading 18 instead of 6, which cost the chain and warp forms their cold deploy). `TILE` keys are never
-dropped — that family is what NAMES the node group and what a golden joins against. A value at either site would
+whenever its slice carries a `REDUCE` key at all, so a decided-empty addressed `REDUCE` fabricates a partitioned
+reduce at a
+site that has none and sum-pools its occupancy into the row. `TILE` keys are never
+dropped — that family is what NAMES the node group and what a golden joins against. A value at such a site would
 stamp a knob no kernel realizes.
 
 A row BUDGET (`_schedule.MAX_ROWS`) bounds one kernel's enumeration and fails LOUDLY when exceeded — never
@@ -182,17 +222,15 @@ byte-for-byte AND asserts the case's pins actually reached a kernel, so a role t
 scheduling cannot pass unnoticed.
 
 Three structural properties the enumeration rests on are asserted rather than trusted, all in
-`tests/compiler/passes/test_move_catalog.py`. **Option-0 is conservative PER FAMILY** — position still deploys a
-kernel on three prior-free paths, so the leading row must stamp each family's declared OFF, with the reduce tier the
-one encoded exception (it leads with its cooperative heuristic pick, and since step 7 that exception has two
-spellings, because the band's width moved into `WORK` — so the pair is checked together). **A row is its spelled
+`tests/compiler/passes/test_move_catalog.py`. **The all-OFF row is a member of every term's set** — the untiled /
+serial / gmem-direct schedule is legal wherever the walk can schedule at all, so it is always there to be picked by
+evidence or by a pin. (Membership is the property, NOT position: the tests assert what the set contains, never what
+leads it, because a leading row is not a policy any more.) **A row is its spelled
 knob dict**, so two candidate combinations spelling identically are one row, not two. And **the `WORK` pin's one
 non-narrowing branch is tracked**: a pin no candidate matches is offered beside the catalog's own inventories rather
 than replacing them. That is the PIN-BLEED rule — one env pin, several kernels in a graph, and this term is not the
 one it was written for — so emptying the fork would leave a term unmapped over a pin that was never about it (the
-strip site applies the same degrade to a warp `TILE` pin it cannot spell). The reading that used to share the branch,
-a coverage gap where narrowing would be right, is gone: the streaming site enumerates its own warp inventories, so a
-`w<M>x<N>` pin narrows there like anywhere else.
+strip site applies the same degrade to a warp `TILE` pin it cannot spell).
 
 ## No shape-specific pattern matching
 
@@ -224,26 +262,49 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
-Loop fusion first keeps a contraction producer materialized when it fans out into the statistic and value paths of a
-downstream normalization. The N-way splicer shares repeated equal-coordinate demands, but this fan-out would duplicate
-the whole contraction. Reductions that are not contractions remain fusible: softmax intentionally reuses QK inside
-max-shift-exp and then reuses the exponentials for normalization and P@V, and retaining either buffer would prevent
-flash recognition. The remaining profitability guard follows the same structural rule.
-`loop/fusion/010_merge_loop_ops` counts aggregate
-arithmetic and reads, and separately counts transcendental executions. The separate count prevents an expensive
-pointwise producer such as GELU's `tanh`, originally evaluated once per `(M,K)` element, from moving under a
-contraction's `N` loop merely because the contraction's much larger cheap-FMA count hides that duplication. Flash
-attention is the structural exception: a merged softmax-then-P@V offer deliberately streams `exp(score)` without
-materializing the probability matrix, so the tile recognizer owns that composite and the generic transcendental
-brake does not split it. The automatic brake is also limited to unary/single-source activation cones. A multi-source
-gated activation such as GeGLU/SwiGLU remains an evidence-controlled placement choice, preserving its GPU golden
-coverage until that entire cone has been measured.
+Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It never weighs shapes, hardware,
+downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
+deploy evidence hierarchy's decision (measured evidence or pins for a deployed model, the prior for a cold compile).
+Fusion's
+refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace,
+and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
+entangling a multi-statistic compound beyond its readable tails: the flat same-extent normalize sweep, or a free
+sweep of flat same-extent additive folds — the value folds of a fused softmax·V region, which read as one
+contraction over the pair; other shapes fall to the raw-loop
+escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
+boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
+nest that no schedule can run and recognition cannot certify.
 
-Fusion also lets a decomposed contraction's pointwise product reunite with its sole sum-reduction consumer before an
-upstream activation-bearing cone is spliced into the product. Otherwise pass order can materialize the full M×K×N
-product, whose work-growth then prevents the reduction merge; ordinary softmax/attention reduction order is unchanged.
+**Merge ORDER is a decision, and `loop/prefusion` makes it.** A merge is directional — it makes the SINK the
+region's output, so the sink's width must then be written. Splice a compute producer into a still-open
+contraction product and that outer product lands in gmem, and the fold that would have collapsed it can only
+arrive afterwards as a reduce nested in a reduce, which fusion refuses as an unreadable seam. Nothing
+downstream undoes it: the buffer is there at every tile. Which order the fixpoint reached was previously
+decided by whichever match the enumeration hit first, and one order costs a 1-layer Qwen3-0.6B trunk at seq
+512 a 6.006 GiB scratch slab against 0.026 GiB for the other.
+
+`loop/prefusion` runs the same splice through the same `_merge.merge_region` with the same refusals, and
+differs from `loop/fusion` in one predicate: it takes only merges whose sink is no wider than the producer.
+Those can only shrink what gets written, so draining them first means every contraction has CLOSED before
+anything is offered a chance to splice into its open product. It **refuses nothing** — a widening merge is
+DEFERRED, and `loop/fusion` offers every one of them afterwards, where the existing refusals decide. That is
+why this is an ordering and not a gate: no legal form leaves the enumeration, so the doctrine above is intact.
+
+It must be a PASS, not another rule inside `loop/fusion`. The cursor advances rule-by-rule within a pass and
+re-enumerates, so two rules' batches interleave — measured, the same predicate as a `009_` rule left the trunk
+at 6.006 GiB because the compute producer still reached the open product first. A pass is left only once it is
+quiescent.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
+
+Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading
+(`_fromloop.fold_from_loop` — a reduce `Loop` interpreted as a `Fold`, gated by byte-identity of the re-derived
+loop) and the ⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)`
+facts, shared by both contraction binders). The online-softmax pairing states its condition on λ-fold results;
+contraction CANDIDACY (`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates
+every operand shape (direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition
+binds its channels through the same lift reading. What stays case-by-case is the dispatch — which composition
+applies — never the parsing: no recognition step holds a private stmt-pattern reading of the algebra.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
@@ -277,16 +338,9 @@ failing several passes later:
   flattens it once, at the point of use. **Edge iff closed holds by construction**: operands bind POSITIONALLY to
   lift params, so an operand cannot see the fold's state or its siblings — the closure scan is demoted to the
   validation reading (1q) and lives with its one consumer, the cut (`_cut._captured_values`); closure is the precondition for lifting any subtree into its own kernel (a placement
-  cut). Flash's `P = exp(s − m)` is `combine`'s derived singleton-specialization internals — material BELOW the seam
-  lattice, never a cut target — and flash's QK score is a hoisted operand edge of the kv stream (step 7): closed by
-  construction, reading only the enclosing iteration var, never state. The derived PV contraction's A edge is
-  precisely where "no reference arm" becomes visible: `P` is already in a register, and since an edge is a `Load` or
-  an inline node and nothing else, pointing at it means wrapping it in the one-stmt node `{o}__p = copy(P)`
-  (`_derived_expect_fold`) — the copy IS the reference, and the rename off the accumulator name keeps it stable
-  against the twist program's positional temps. That node is the edge directly; there is no empty-body
-  `Fold.projection(body=(), operands=(…,))` cone wrapper around it, since with no per-cell work `cone_seam` bridges
-  no stats
-  either way and both spellings lower identically. The same edge vocabulary applies to **B**: a pure, closed B
+  cut). A twisted fold's streaming merge is `combine`'s derived singleton-specialization internals — material BELOW
+  the seam lattice, never a cut target: a value defined inside the merge captures the carrier's running state, so it
+  can never hoist to an edge. The same edge vocabulary applies to **B**: a pure, closed B
   producer can remain inline and fill the Tensor Core B slab directly. This is a generic producer-to-contraction
   fusion over ordinary tensor algebra; storage-format reconstruction must already have decomposed before this band.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
@@ -330,8 +384,8 @@ failing several passes later:
   budget is part of resolving: a tile whose single depth-1 slot already exceeds it declines to gmem-direct (the warp
   slab is codec-sized and cannot shrink; the scalar resolver steps `bk_elems` / depth down first), so every offered
   stage row materializes within budget — a resolved-but-unfittable row would only die at `validate(ctx)`, leaving an
-  un-lowered `TileOp` in the tune's terminal (issue #327). TMA's box rank follows the flash convention on the matmul
-  tiers too: the box's data plane is the operand's trailing 2 gmem dims, and extra LEADING dims ride as extent-1 box
+  un-lowered `TileOp` in the tune's terminal (issue #327). TMA's box rank on the matmul
+  tiers: the box's data plane is the operand's trailing 2 gmem dims, and extra LEADING dims ride as extent-1 box
   dims whose origin coordinates are the operand's own index exprs — eligible when those exprs don't move with the
   tile or the K loop (the TMA operand box-rank rule), so a model's `[1, seq, K]` unit-batch view stages exactly like the
   rank-2 snippet twin (the gemma in-model matmuls' TMA lockout). A **transposed B** (the serving `F.linear` layout —
@@ -339,7 +393,7 @@ failing several passes later:
   through an **N-major slab**:
   the B slot takes A's geometry (`tile_n × bk`, K the inner dim — stride-1 in gmem and smem alike, so cp.async chunks
   and the TMA box stay contiguous; `Operand.trans` stamps the layout) and the drain is the plain no-`.trans`
-  ldmatrix (`LdmatrixLoad(b_trans=True)` — the same staged path flash's K slab rides). Both operands' inner span is
+  ldmatrix (`LdmatrixLoad(b_trans=True)`). Both operands' inner span is
   then the K chunk, so the eligibility alignment gates on K alone (the warp cp.async / TMA staging gates) and
   the B swizzle mode derives from `bk_elems` like A's. Historically the transports declined transposed B and the
   serving `.lin` forks ran gmem-direct only — the 1.3–2.75× gap class to cuBLAS on the 5090 goldens. The scalar
@@ -362,7 +416,8 @@ failing several passes later:
   Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
   binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting zero-axis fold
-  over a per-row `PLANAR` statistic whose tail is one or more ⊗-folds of one shared A value nodifies to
+  over a per-row statistic — `PLANAR` (rms/mean) or `TWISTED` (the online-softmax `(m, d)` pair, which is what makes
+  a fused `softmax(S)·V` region this shape) — whose tail is one or more ⊗-folds of one shared A value nodifies to
   `Fold.projection(fn=projection, operands=(fold,))` — over ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each
   ⊗-channel's B against the one shared inline A cone edge (itself a node tree: the statistic is the cone's inner
   `Fold` operand, the per-cell normalize its own `lift`). Sharing is edge REUSE — the product semiring outputting N
@@ -372,7 +427,7 @@ failing several passes later:
   per step; the combine — SwiGLU — is projection, riding the wrapping zero-axis fold's `lift`. Channels whose B
   layouts disagree were never legally fusable, so they simply never product (a formation gate, not a node assert).
   It is offered as a fork SIBLING of the
-  cooperative reduce form (option-0 stays the coop row; the warp mma rows ride the mandatory `sync` compute-fill;
+  cooperative reduce form (the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side). This retired the pin-only
   `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
   `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
@@ -405,10 +460,11 @@ like)`). The lowering layer's one algebra reader is `passes/lowering/_reduction.
 `030_split_reduce`'s view: `combine_states` / `state_merge` / `identities`). The
 twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE generator's program, asserted at
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
-value name = expectation). The COMPOSED evaluations derive too (step 7): flash's kv stream λ-spells with its QK score
-contraction a HOISTED inline-node operand edge (reading the enclosing kv var, never state) and its PV
-contraction SYNTHESIZED — and memoized, one identity per stored fold — inside the derived blocked evaluation
-(`ir._twisted_derived_step`, byte-identical to the retired in-step spelling); split-K's outer reduce is the
+value name = expectation). The COMPOSED evaluations derive too (step 7): a twisted fold with a `Load`-bound
+expectation operand derives its blocked evaluation with the expectation contraction SYNTHESIZED — and memoized, one
+identity per stored fold — (`ir._twisted_derived_step`; no recognizer builds the operand-edge form today — the
+online-softmax pairing's `(m, d, o…)` expectation channels keep their value loads inline in the lift body); split-K's
+outer reduce is the
 IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
 verbatim — no outer `Accum`s; `Fold.composed` is the one read of the composition, shared by `Fold.role` and
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
@@ -483,50 +539,55 @@ The fragment idiom's re-entry semantics are the rule's own: `030` opts its halve
 that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
 is what lets such rules compose without knowing about each other.
 
-**Placement routing (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
+**Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
 through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
-TWO-LEVEL and RECURSIVE, decided BEFORE any schedule fork exists (`010_recognize` consults it right after the lift /
-prologue bind): a ROUTING golden entry — an ordinary kind entry whose knobs are `PLACE` keys ONLY (the cut set,
-never a schedule; the loader rejects a mixed entry, and the schedule golden tier skips routing entries, so the
-retired single-namespace hazards — a cut row tying its knob-identical fused twin — cannot return) — or an
-authoritative `PLACE` pin picks a cut seam; the realizer (`lowering/tile/_cut.py`) splits the tree there: the child
+decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
+bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
+STRUCTURAL fork — the fused form beside one cut fragment per legal seam, so tune discovers cuts and a compile
+prices them like any kernel-set choice. Nothing holds the fused side ahead of the cuts. A chosen
+cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, recording the decision as the exact pin that
+replays it; the realizer itself consults no deploy evidence. The
+realizer (`lowering/tile/_cut.py`) splits the tree there: the child
 subtree becomes a plain un-mapped `LoopOp` computing the seam value into a `…__cut_…` workspace over its DERIVED
 index space (the enclosing axes its lowered body reads, loop-invariantly nested; a fold child — one that FOLDS AN
 AXIS — bridges carrier state as **f32** per the split-reduce workspace rule, while a zero-axis projection child is
-the value seam and keeps its leaf operand dtype: in the one-kind IR every node is a `Fold`, so the axis is the
+the value seam and takes the seam VALUE's dtype — the converting statement's own where the cone converts, else the
+leaf operand it passes through; a coded-weight decode cone reads integer tables and yields f16, and the leaf dtype
+there would round every element to an integer: in the one-kind IR every node is a `Fold`, so the axis is the
 discriminator, not the class), and the parent
 consumes a plain workspace `Load` (every edge admits `Load` — the cut terminal). Both pieces re-recognize as fresh
-roots on the pass-scan restart and resolve their OWN `(kind, shape)` entries through the full deploy hierarchy —
-recursively: the cone piece re-recognizes as the rms_norm shape and its own entry (or a bare pin) cuts the statistic
-out, yielding the cascade statistic + scale + plain matmul, every piece joining an EXISTING golden kind's evidence.
-Computed-A routing uses the fused-key convention on both sides: the live tree supplies the computed-A fact before a
-schedule offer exists, while a persisted `PLACE@a` supplies it for a stat-free activation cone with no second reduce
-axis. Keeping one key prevents the routing entry from recursively matching its own materialized producer.
-**Fuse is the default by ABSENCE** — no routing entry and no pin leaves recognition byte-untouched (digest-verified),
-and cut is evidence/pin-only. Cut legality is structural: single-component CLOSED children only (`_captured_values`
-in its demoted validation role — flash's state-capturing `P` is simply not cuttable), and the pure-copy degenerate
+roots on the pass-scan restart —
+recursively: a deeper `PLACE` key can cut the cone piece again, yielding the cascade statistic + scale + plain
+matmul, every piece joining an EXISTING golden kind's evidence at its own schedule forks.
+A compile that cannot price the fork (nothing measured, no useful prior) decides nothing here and ranks the cut
+fragments beside the fused form like any other leaves — the fused form is not held back for it.
+Cut legality is structural: single-component CLOSED children only (`_captured_values`
+in its demoted validation role — combine-derived material that captures carrier state is simply not cuttable), and
+the pure-copy degenerate
 (cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
-non-terminating case) is refused. Loop fusion brakes on `__cut_` workspace producers — a decided placement is not
+non-terminating case) is refused. Loop fusion stops at `__cut_` workspace producers — a decided placement is not
 fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
 `025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
 routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the
 OLD piece shapes' keys and are re-seeded rather than joined).
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
-is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable so warp-flash can later
-reuse it on flash's nested QK^T / PV; flash's score IS a role=CONTRACTION **fold** on a hoisted operand edge of the
-kv stream (its PV twin synthesized in the derived blocked evaluation), so warp-flash is
-just that node gaining a warp `TilePlan` — no new path.
+is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable, so a nested
+contraction reached through a composed fold binds through the same path — a tier is a node gaining a `TilePlan`,
+never a new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those
-groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. It accepts only materialized A/B edges:
-SM70 has no `ldmatrix`, but materialized f16 A/B edges may use synchronous-copy staging: ordinary vector global loads
-and shared stores fill the existing slab ring, and the same cooperative m8n8k4 lane map gathers fragments from shared
-memory. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>` register-fragment pipelining;
-blocking copies make deeper shared rings correct but do not promise copy/compute overlap. Computed operand edges,
-C-to-A repacking, and flash still decline this atom. Target capability predicates select this family below SM80 and
+groups onto four output quadrants and carries 2/2/8 A/B/C registers per lane. SM70 has no `ldmatrix`, so the same
+cooperative m8n8k4 lane map gathers fragments from shared memory, and every staged operand — a copied one and the
+materialized peers of a compute fill alike — moves through the blocking vector copy (`sync_copy_staging`: ordinary
+vector global loads and shared stores fill the existing slab ring). The atom takes a COMPUTED edge like any other:
+the compute fill writes the plain row-major slab the cooperative gather already reads, so a fused producer cone —
+and a materialized `a` whose dtype the atom cannot bind, through the converting fill — reaches the tier here exactly
+as it does on the newer families. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>`
+register-fragment pipelining; blocking copies make deeper shared rings correct but do not promise copy/compute
+overlap. C-to-A repacking still declines this atom. Target capability predicates select this family below SM80 and
 the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
 lowering through instructions the target cannot execute.
 
@@ -536,19 +597,18 @@ spellings stay as parse aliases for the f32-accumulate atoms): on the consumer G
 f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
-final fold; flash promotes the P@V accumulator per streaming KV block, folded in at the `O·α` rescale point, while the
-score node ALWAYS stays f32-accumulate). Precision-gated enumeration, off by default —
+final fold). Precision-gated enumeration, off by default —
 the precise `EMMY_F16_MMA_F32_ACC` pin is authoritative on any target, else the `EMMY_FAST_MATH` umbrella offers it on
-the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom (or the flash golden's axis-keyed
-`TILE@<pv_k>` spelling) bypasses the gate — pins are authoritative. The realized fork is identified by the `TILE`
+the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom bypasses the gate — pins are authoritative.
+The realized fork is identified by the `TILE`
 codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync has no bf16-accumulate form).
 
 **The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
 `AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
-1024`) with per-cell `""` as the conservative option-0, crossed with the warp / reduce / stage move families
+1024`) with the per-cell `""` tile as one more member, crossed with the warp / reduce / stage move families
 for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
 contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
-The producer band is the fourth level (option-0 `""` = uniform SIMT — since step 7 a resolved band
+The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
 (an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
@@ -557,8 +617,8 @@ warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
 edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
-across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, cheap
-exactly on the small-free decode shapes the split-K CTA-count cap admits), the per-cell cone σ-reindexed to
+across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
+cheap on the small-free decode shapes and is left to evidence to price elsewhere), the per-cell cone σ-reindexed to
 absolute k and the wrapping zero-axis fold's projection folded into the deferred finalize (the split-K option's
 computed-A arm
 → `030_split_reduce`'s structural path). Multi-channel (gate/up) nodes split too: the synthesized fold loop
@@ -566,92 +626,19 @@ carries the true N-component identity-family carrier (one additive state per cha
 channel's raw C fragment to its `ws[comp, ksplit, *cell]` slice (the per-acc `RegStore` arm — no ⊗-combine in
 the partial), and the deferred finalize folds every component before applying the combine projection once.
 Still no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge is the anticipated
-`RoleKind` extension. The **flash-form fork**: a `TWISTED` streaming contraction pair (the flash tree) offers its
-structurally-different schedules as ONE prior-ranked fork — the warp (fragment-resident) rows over
-`twisted_warp_moves()`'s `(warps-per-CTA × key-atoms-per-block × query-tiles-per-warp)` geometry grid (option-0 = the
-conservative one-warp / `2·atom_n` block / one tile; the third dimension is the `TILE` codec's `f<FM>x<FN>` reg_m —
-each warp streams `fm` independent `(m, l, O)` chains against shared K/V fragments, FA-2's in-flight ILP; the Q@K /
-P@V mma `TilePlan`s are the two sites' own values, reconciled at the stream), the scalar
-register-vector CHAIN (the FA-2 shared-score form), then the cooperative / per-cell reduce-partition escapes — every
-leaf row spelling the same `TILE@dd` / `TILE@pj` key pair plus the BARE `REDUCE` / `STAGE` the stream is primary for,
-and its ONE `WORK` inventory (decided-empty where a form doesn't tile). The **flash split-KV** rows are fork siblings
-of the un-split warp rows on an under-occupied grid (the occupancy read is the warp row's OWN launch grid — the
-shrunk query axis, the value axis gone), and a cross-CTA `REDUCE=g<n>k` pin selects them: the plan stamps
-onto each row's `Fold` node and `030_split_reduce` realizes it as a fragment-resident partial (the kv stream windowed to
-the CTA's slice, its absolute base/bound on the sliced axis's `Axis.window`; raw `(m, l, O)` state to an f32
-`__partial` workspace) plus
-an LSE-combine finalize — kernel finalize only (the twisted `e^{Δm}` rescale can't be an atomic). A static kv must be
-block-divisible; a **symbolic kv splits too**: the slice width is the bn-aligned runtime `ceil(S/(cta·bn))·bn` (a
-composite `Dim`) and each slice stops/masks at its absolute end `min((s+1)·B, S)` (`Fold.bound` — a mid-tensor
-slice end reads VALID next-slice keys the extent-only tail masks would keep), an empty last slice contributing the
-exact carrier identities; the split partial guards every state write with the symbolic-M `m_guard` (the tail CTA's
-clamp-read overhanging query rows would otherwise write into the next head's workspace rows). It pays where the
-un-split grid starves the SMs (few heads / short query axis: the 2-head hd256 seq-512 shape runs 33.6 → 11.3 µs
-under `g8k`, parity with torch SDPA's internally-split flash; the symbolic hd512 dynM stream 135.2 → 116.7 µs
-under `g2k` on the 5090). Any
-other non-empty `REDUCE` pin drops the streaming rows and stays the reduce-tier escape, which is the tier that
-realizes a partition. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡
+`RoleKind` extension. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡
 `""` and `f64x1` ≡ `f64`: an explicit `TILE@<axis>` pin names one site and is authoritative there, while a BARE pin
 fans out to every eligible site and cannot say which it meant — so it narrows where it matches and leaves a site it
-names nothing at alone (`Knob.narrow`'s no-match-keeps-full-list). That is what lets `TILE=a:scalar` keep the
-per-cell tier, `TILE=a:scalar` + `TILE@<pv_k>=f<d>` pin the CHAIN row deterministically, and one bare pin spelling
-the f16-accumulate P@V plan (the masked-flash golden form) select that variant while the score keeps its own
-f32-accumulate catalog — the pair then reconciling at the stream. A bare pin that named nothing at a site decides
-nothing there, precision gates included. Each warp geometry row crosses with its **K/V operand-stage** candidates
-(the stream's bare `STAGE` — gmem-direct option-0, then the resolver-gated cp.async AND TMA ring depths — the
-batched K/V operands encode as rank-N TMA boxes with leading extent-1 dims, the load's own batch/head index exprs
-riding as origin coords; cp.async slabs take the +16 B row pad, TMA slabs stay dense under the hardware swizzle; the
-resolved `Stage` rides the `TileOp` and the streaming step becomes the `staged_kloop` drain, K/V slabs kept in each
-operand's own layout so staging stays bit-identical to gmem-direct). **Both transports also stage a symbolic
-(dynamic-`seq_len`) kv**: TMA rides the runtime globalDim and zero-fills the box overhang past the last key; cp.async
-(which has no OOB zero-fill) clamp-reads the tail chunk's key rows to the last valid key. Either way the streaming
-drain's tail masks (the same clamp the gmem-direct symbolic path makes) zero those keys' P columns exactly, so the
-masked-flash `.dynM` kernel stages at bit-identity to gmem-direct on any sm (the `staged_kloop` ring allocates the
-full depth and the last-chunk clamp / loop bound ride the symbolic `Dim`; a producer band over a symbolic kv is not
-built). A resolved TMA row additionally rides the `+p` producer band in `WORK` (the matmul tier's legality,
-`32·aux ≤ 32·um`; measured occupancy-negative at flash's CTA scale — offered, honest, not the default; the per-edge
-`split` groups arm one mbarrier each, so they take no band). The `split` transport granularity — one group per staged
-edge, K refilling under softmax + P·V and V under the next step's Q·K, with Q staged through smem too — is a
-`stage_moves` member gated by its STRUCTURAL predicate (`_legality.stage_split_groups`: ≥ 2 staged edges consumed at
-distinct positions of the derived evaluation, which a contraction's single multiply never is, so the matmul
-resolvers decline it). The chain / coop / serial escapes stamp the decided-empty `STAGE: ""`. Staging additionally
-requires the K/V (and,
-for `split`'s staged Q, the A) BUFFER dtypes to match the atom's operand dtypes — the slab fills byte-copy and cannot
-convert, so a wide traced intermediate feeding the stream would deposit garbage; gmem-direct fragment loads convert
+names nothing at alone (`Knob.narrow`'s no-match-keeps-full-list). A bare pin that named nothing at a site decides
+nothing there, precision gates included. Staging additionally
+requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot
+convert; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,
 traced dtype CASTS are first-class: a dtype-changing view splits into a source-shaped elementwise `copy` + a pure
-map at the frontend (`optimization/005_split_cast_from_indexmap`). When gate-free loop fusion inlines a closed V map
-cone, flash recognition factors it back into a canonical feeder workspace, so the stream still sees an atom-dtype
-operand it can stage (the gemma V-norm's f32 `mul` → f16 SDPA edge, the layer-0 findings' biggest lockout). That the
-cast is *usually free* — a fan-out-1 pointwise producer absorbing it and
-simply writing the narrow dtype — is not something loop fusion can be relied on to arrange: fusion may merge either
-way, and on gemma-4 it consistently spliced the cheap cast into its CONSUMERS instead, leaving the wide producer
-buffer alive. `optimization/007_sink_narrowing_cast` makes it deterministic, retyping the producer's OUTPUT and
-dropping the copy whenever the producer's SOLE consumer is the cast. It is a retype, not a numeric change (an
-elementwise op computes in its inputs' promoted precision and rounds on store), and it is what keeps a norm→matmul
-edge on the plain mma tier: a mixed-dtype A has no copy transport, so without it the mixed-dtype A demotion diverts the
-projection onto the `sync` compute-fill, which has no weight-prefetch ring — measured on gemma-4's gate/up as
-1.12 TB/s against the 1.61 TB/s a clean-f16-A `d2/tma` sibling reached on the same 118 MB
-weight. **A causal stream tile-skips**: when the score
-prologue carries the triangular `Select` (`kv ≤ m` — detected structurally off the predicate, never a kernel identity),
-the realizer bounds the stream at the CTA's last query row (`kv_end = min(seq, (grid_m + 1) · um·fm·atom_m)`, hoisted
-into the `StridedLoop`'s for-init `end` override; the staged prefetch clamp re-pins onto the last needed chunk). The
-bound is CTA-uniform (barriers stay legal) and every skipped step is the carrier's exact identity (`α = 1`,
-`P = expf(−1e30 − m_i) = 0`), so the early stop is bit-identical — it halves the streamed keys/mma work on average,
-paying wall-clock wherever the grid oversubscribes the SMs (1.67× on hd256 seq-2048) and re-opening the small-CTA flash
-forms that previously paid double K/V re-streaming. **A banded stream additionally starts late**: a trace-time
-`SdpaOp.sliding_window` stamp (the HF wrapper knows `config.sliding_window` + `layer_types`; the trace itself erases
-the window) decomposes to a second coordinate `Select` (`kv > m − W`) beside the causal one — unless the band is
-STATICALLY VACUOUS (static seq, `W ≥ S`), which the decomposition drops instead of emitting: a vacuous Select's
-predicate constant-folds, the +0 mask term hoists out of the reduce loops, and the mask-chain walk below can no
-longer resolve it — the fuse then silently degraded to cut and the softmax·P@V fell to the unstructured sequential
-lowering (the gemma-4 layer-0 `seq 512 < window 1024` trace deployed a grid-1 kernel). Flash classification
-reads the whole mask CHAIN off the rowmax feed (coord Selects and the explicit additive bias compose; the bias stays
-loaded, it may mask more, e.g. padding), re-synthesizes each canonically, and the realizer derives the stream START
-off the band predicate exactly as it derives the causal end (`kv_start = ⌊max(0, first_row − W + 1)/bn⌋·bn`, the
-kloops' `k_first`). The flash recognizer follows the complete mask chain across the gate-free fusion boundary; a mask
-spelling it cannot certify declines the fuse rather than being silently dropped. At seq ≫ W the sliding layers' stream is
-O(seq·W), not O(seq²) — 40 of gemma-4's 48 layers at real context lengths.
+map at the frontend (`optimization/005_split_cast_from_indexmap`). Which
+side of a cast a fused region lands on is fusion's ordinary outcome; a mixed-dtype A that misses a wanted tier is a
+schedule-domain coverage question, answered by extending the domain and re-tuning, never by a pass pre-deciding the
+fusion direction.
 Two catalog invariants hold: every recorded golden's `WORK`/`TILE`/`STAGE`/`REDUCE` stays a **member** of the
 enumerated grids (the permanence test in `tests/compiler/test_golden_configs.py`, site-aware since the step-7
 re-spell — membership means the replayed pin resolves to a slice the catalog hands out; a space edit can never

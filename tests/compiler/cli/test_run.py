@@ -28,18 +28,6 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
     return f"torch.randn({shape})"
 
 
-def _working_golden_for_live_gpu(name: str) -> Path:
-    from emmy import gpu
-    from emmy.compiler.pipeline.search import golden
-
-    live_name = gpu.live_name()
-    for path in sorted((Path(golden.__file__).parent / "goldens").glob("*.yaml")):
-        records = golden.load_golden_records(golden.load_golden_file(path))
-        if any(record.name == name and record.gpu_name == live_name for record in records):
-            return path
-    pytest.skip(f"no {name} working golden for {live_name}")
-
-
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
@@ -71,9 +59,9 @@ def test_pinned_knobs_sets_and_restores_env(monkeypatch):
 
     monkeypatch.delenv("EMMY_TILE", raising=False)
     monkeypatch.setenv("EMMY_STAGE", "preexisting")
-    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/cp", "WARP_SPECIALIZE": False}):
+    with pinned_knobs({"TILE": "f2x4", "WORK": "t32x8", "STAGE": "d2/smem-async", "WARP_SPECIALIZE": False}):
         assert os.environ["EMMY_TILE"] == "f2x4"
-        assert os.environ["EMMY_STAGE"] == "d2/cp"
+        assert os.environ["EMMY_STAGE"] == "d2/smem-async"
         assert os.environ["EMMY_WARP_SPECIALIZE"] == "False"
     assert "EMMY_TILE" not in os.environ  # was unset → removed
     assert os.environ["EMMY_STAGE"] == "preexisting"  # restored
@@ -216,24 +204,17 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
     from emmy.commands.run import _build_torch_fns
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
-    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    def wrong_compile(_module, *, fullgraph, mode):
+        assert fullgraph is True
+        assert mode == "max-autotune-no-cudagraphs"
+        return lambda: torch.tensor([2.0])
+
+    monkeypatch.setattr(torch, "compile", wrong_compile)
 
     fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
 
     assert "torch.compile" not in fns
-
-
-@requires_cuda
-def test_run_golden_bench_shows_benched_golden_row(run_cli):
-    """A selected working-golden target compiles and benches its recorded knobs,
-    then prints it as a ``golden NAME``-labeled row in the kernel table, plus the
-    ``greedy (isolated)`` twin — the greedy graph re-benched through the pinned-row path,
-    the baseline the golden rows compare against."""
-    path = _working_golden_for_live_gpu("matmul.square.512")
-    rc, stdout, stderr = run_cli("run", "--golden", str(path), "--target", "matmul.square.512", "--bench")
-    assert rc == 0, f"stderr: {stderr}"
-    assert "golden matmul.square.512" in stdout, stdout
-    assert "greedy (isolated)" in stdout, stdout
 
 
 def test_run_ab_requires_bench(run_cli):
@@ -268,9 +249,9 @@ def test_ab_samples_parse_label_and_shape():
     cue to nest by kernel ``S_*`` signature instead of a golden matmul shape)."""
     from emmy.commands.run import _ab_samples
 
-    (s,) = _ab_samples(["tile=f2x4, STAGE=d2/cp"])
-    assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/cp"}  # names uppercased, whitespace tolerated
-    assert s.name == "ab tile=f2x4, STAGE=d2/cp"
+    (s,) = _ab_samples(["tile=f2x4, STAGE=d2/smem-async"])
+    assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/smem-async"}  # names uppercased, whitespace tolerated
+    assert s.name == "ab tile=f2x4, STAGE=d2/smem-async"
     assert s.shape is None
     assert s.dynamic is None
     # A --dynamic run stamps its specs on the pseudo-sample so the A/B re-trace
@@ -425,7 +406,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     # sibling never pollutes the diagnostic...
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{"TILE": ""}, {"TILE@d": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
-    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/tma"}, [{"STAGE": ""}])
+    assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/smem-tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.
     assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
@@ -669,45 +650,6 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
 
 
-@requires_cuda
-def test_run_golden_bench_json_record(run_cli, tmp_path):
-    """A working-golden benchmark writes the machine-readable A/B record:
-    backends, the greedy kernel rows, and one pinned entry per recorded golden config with
-    its integrity ``flags`` field and recorded reference latencies."""
-    import json
-
-    out = tmp_path / "ab.json"
-    path = _working_golden_for_live_gpu("matmul.square.512")
-    rc, stdout, stderr = run_cli(
-        "run",
-        "--golden",
-        str(path),
-        "--target",
-        "matmul.square.512",
-        "--bench",
-        "--warmup",
-        "2",
-        "--iters",
-        "5",
-        "--json",
-        str(out),
-    )
-    assert rc == 0, f"stderr: {stderr}"
-    rec = json.loads(out.read_text())
-    assert rec["golden"] == "matmul.square.512"
-    assert rec["greedy"]["kernels"] and rec["greedy"]["total_us"] > 0
-    # The pinned-comparable greedy baseline: the same graph re-benched emmy-only.
-    assert rec["greedy"]["isolated"]["status"] == "ok" and rec["greedy"]["isolated"]["total_us"] > 0
-    assert rec["pinned"] and all(p["kind"] == "golden" for p in rec["pinned"])
-    assert rec["greedy"]["lane"] in ("fm", "std")
-    for p in rec["pinned"]:
-        assert "flags" in p and p["total_us"] > 0 and p["pinned_knobs"]
-        assert p["lane"] in ("fm", "std")
-        assert p["recorded_emmy_us"] > 0 and p["recorded_ref_us"] > 0
-    # Eager + emmy backend rows made it into the record.
-    assert any("Eager" in k for k in rec["backends"])
-
-
 _NCU_CSV = """"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"
 "0","k_matmul_abc123","gpu__time_duration.sum","nsecond","10,000"
 "0","k_matmul_abc123","sm__warps_active.avg.pct_of_peak_sustained_active","%","41.5"
@@ -904,12 +846,10 @@ def test_run_code_sdpa_k_chunked(run_cli):
 
 @requires_cuda
 def test_run_code_sdpa_tinyllama_per_head(run_cli):
-    """Per-head SDPA at TinyLlama-block-seq=512 dimensions, mirroring the
-    ``k_scaled_dot_product_attention_reduce_reduce.json`` kernel in
-    ``experiments/kernel_dataset/tinyllama_block_seq512`` (M=512, K=512,
-    N=64). The K=512 reduction does not fit a full smem slab once
-    register-tile + double-buffer apply, so this exercises the chunked
-    blockify + staging path on the per-head shape."""
+    """Per-head SDPA at TinyLlama-block-seq=512 dimensions (M=512, K=512,
+    N=64). The K=512 reduction does not fit a full smem slab once register-tile
+    + double-buffer apply, so this exercises the chunked blockify + staging
+    path on the per-head shape."""
     rc, _, stderr = run_cli(
         "run",
         "--code",

@@ -67,18 +67,21 @@ class Exl3CodedHead:
         for leaf, dtype in (("trellis", "i16"), ("suh", "f16"), ("svh", "f16")):
             path = f"lm_head.{leaf}"
             value = np.ascontiguousarray(source[path])
-            arrays[path] = value
+            # The node id is a C identifier (graph buffer names become kernel parameter names);
+            # the checkpoint pointer stays on ``source_path``.
+            nid = f"lm_head_{leaf}"
+            arrays[nid] = value
             graph.add_node(
-                ConstantOp(name=path, source_path=path, source_shape=value.shape, source_dtype=dtype),
+                ConstantOp(name=nid, source_path=path, source_shape=value.shape, source_dtype=dtype),
                 [],
-                Tensor(path, value.shape, dtype),
-                node_id=path,
+                Tensor(nid, value.shape, dtype),
+                node_id=nid,
             )
         logits = spell_factored_linear(
             graph,
-            "lm_head.trellis",
-            "lm_head.suh",
-            "lm_head.svh",
+            "lm_head_trellis",
+            "lm_head_suh",
+            "lm_head_svh",
             cb=spec.codebook,
             weight_shape=(spec.stored_vocab_size, spec.hidden_size),
             x="x",

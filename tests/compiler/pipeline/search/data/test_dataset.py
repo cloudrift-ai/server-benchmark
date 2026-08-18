@@ -1,28 +1,12 @@
-"""Tests for the harmonized data layer — :class:`ShapeKey` / :class:`Sample` /
-:class:`Dataset` over golden / DB / prior sources.
-
-The load-bearing acceptance gates are the two round-trips: a DB row and a golden
-config must produce the *same* feature vector through ``Sample`` as the inline
-code each consumer used before — otherwise the online prior's ranking degrades
-silently.
-"""
+"""Tests for the harmonized data layer over golden, DB, and prior sources."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data import Dataset, Sample, ShapeKey
 from emmy.compiler.pipeline.search.db import PerfSample, PerfStats, SearchDB
-
-_GOLDENS = Path(__file__).parents[5] / "emmy/compiler/pipeline/search/goldens"
-
-
-def _golden_records(filename: str):
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
-
-    return load_golden_records(load_golden_file(_GOLDENS / filename))
 
 
 def _stats(median: float) -> PerfStats:
@@ -81,20 +65,6 @@ def test_shapekey_dynamic_twin_mirrors_stamp() -> None:
     assert ShapeKey.from_s_features(stamped) == dyn
 
 
-def test_golden_dynamic_compile_s_feats_mirror() -> None:
-    """A program-backed dynamic golden derives the symbolic histogram and key."""
-    g = next(record for record in _golden_records("rtx4090_sm89.yaml") if record.name == "matmul.square.512.dynM")
-    s = Sample.from_golden(g, compile_s_feats=True)
-    assert s.shape is not None and s.shape.is_dyn is True
-    full = s.s_features()
-    assert full["S_ext_n_symbolic_axis"] == 1.0
-    assert full["S_ext_free_prod"] == 512.0  # N only — the symbolic M is excluded by the stamp
-    arith = s.shape.s_features_arith()
-    assert set(arith) <= set(full)
-    assert all(arith[k] == full[k] for k in arith)
-    assert ShapeKey.from_s_features(full) == s.shape
-
-
 # --- Sample round-trips (the acceptance gates) ------------------------------
 
 
@@ -133,44 +103,6 @@ def test_prior_row_round_trip_is_lossless() -> None:
     assert s.all_knobs() == raw
     assert s.features() == features.knob_features(raw)
     assert s.source == "prior"
-
-
-def test_golden_compile_s_feats_matches_inline() -> None:
-    """The high-risk gate: a golden's full-histogram feature vector via
-    ``Sample.from_golden(compile_s_feats=True)`` equals the old inline
-    compile-and-scrape (eval's ``_emit_golden_features``), and the cheap arithmetic
-    extents are a subset that agrees on the shared keys."""
-    from emmy.compiler.context import Context
-
-    g = next(c for c in _golden_records("rtx4090_sm89.yaml") if c.name == "matmul.square.2048")
-    s_feats = g.structural_features
-    # gpu_name pins the device-physical H_* features to the golden's own card's
-    # memorized specs (so a 4090 golden gets 128 SMs, not the live device's count) —
-    # Sample.from_golden does the same, so the two must still agree.
-    inline = features.knob_features({**Context.from_target(g.compute_cap, gpu_name=g.gpu_name).features(), **s_feats, **g.knobs})
-
-    assert Sample.from_golden(g, compile_s_feats=True).features() == inline
-
-    arith = g.shape_key.s_features_arith()
-    full = Sample.from_golden(g, compile_s_feats=True).s_features()
-    assert set(arith) <= set(full)
-    assert all(arith[k] == full[k] for k in arith)
-
-
-def test_golden_features_use_own_cards_sm_count() -> None:
-    """A golden featurizes with its OWN card's SM count (from the gpu registry via
-    gpu_name), not the live device's — the fix that makes same-compute_cap cards
-    (RTX 5090 = 170 vs RTX PRO 6000 = 188 SMs) distinguishable in the model."""
-    records = [
-        record
-        for filename in ("rtx4090_sm89.yaml", "rtx5090_sm120.yaml", "rtxpro6000_sm120.yaml")
-        for record in _golden_records(filename)
-        if record.name == "matmul.square.2048"
-    ]
-    by_gpu = {g.gpu_name: Sample.from_golden(g).context["H_sm_count"] for g in records}
-    assert by_gpu["NVIDIA GeForce RTX 4090"] == 128.0
-    assert by_gpu["NVIDIA GeForce RTX 5090"] == 170.0
-    assert by_gpu["NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"] == 188.0
 
 
 # --- Dataset adapters + grouping --------------------------------------------

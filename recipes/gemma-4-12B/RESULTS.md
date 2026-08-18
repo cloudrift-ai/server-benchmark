@@ -34,7 +34,7 @@ prompts, and no prefix caching. These five workloads match the published Gemma 4
 | 4,096 / 4,096 | 8 | 375.68 | 1,205.50 | 21.01 |
 | 8,192 / 256 | 4 | 103.02 | 3,117.18 | 26.67 |
 
-The retained experiment YAML preserves the per-lane decode and prefill buckets from the
+The raw experiment artifacts preserve the per-lane decode and prefill observations from the
 [published protocol](https://riftstack.ai/research/optimizing-gemma-4-12b-rtx). The final deployment recipe keeps the
 warmed interactive default, decode bucket 32.
 
@@ -52,7 +52,7 @@ the FAST_MATH configuration; 131,072 is the largest qualified power-of-two conte
 
 ## Compiler qualification
 
-The base-checkpoint [RTX 5090 Gemma 4 golden](../../emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4_base.yaml)
+The base-checkpoint [RTX 5090 Gemma 4 golden](golden/rtx5090_sm120.yaml)
 contains 25 exact Loop targets and 200 realizations. Standard and FAST_MATH full-model audits each reported 99
 matches, zero gaps, zero drift, and zero compile failures. The base and instruction-tuned checkpoints have identical
 execution geometry; their only configuration difference affecting generation is `eos_token_id`, so the baked
@@ -64,8 +64,9 @@ execution pack is shared while the base weights and model revision remain exact.
 emmy bench experiments/gemma-4-12B/serving_base_rtx5090 --ssh dikobraz@kenshin
 ```
 
-The command uses the retained experiment YAML and writes ignored local output; do not use `--commit-results`. The
-qualified local image must already exist on the target host because registry publication was intentionally omitted.
+The command replaces the experiment's `results/` directory. Use `$run-experiment` to retain the latest raw results,
+system-only experiment records, and factual artifact index. The qualified local image must already exist on the target
+host because registry publication was intentionally omitted.
 
 ## Published comparison
 

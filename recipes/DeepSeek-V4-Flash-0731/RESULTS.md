@@ -50,7 +50,7 @@ chat, separated reasoning, and structured tool-call probes. The tool parser retu
 
 ## Compiler qualification
 
-The [canonical V100 golden](../../emmy/compiler/pipeline/search/goldens/v100_sm70_deepseek_v4_flash_0731.yaml)
+The [canonical V100 golden](golden/v100_sm70.yaml)
 contains 279 exact Loop realizations across 13 programs. Every retained realization has positive deployable O3 and
 reference timings. The current schema passed all 279 stored-record and offer checks. The in-model audit traced four
 exact representative DeepSeek graphs with 945, 1,156, 1,087, and 1,156 Graph IR nodes, but `audit_card` returned no
@@ -64,6 +64,6 @@ compiler evidence does not establish an Emmy serving path for the checkpoint.
 emmy bench experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3 --ssh riftuser@185.165.50.61
 ```
 
-The experiment runs four client repeats. The first warms the complete unique prompt set after deployment; aggregate
-repeats two through four to reproduce the reported steady result. The command writes ignored local output; do not use
-`--commit-results`.
+The experiment runs four client repeats. The first warms the complete unique prompt set after deployment; use repeats
+two through four to reproduce the reported steady result. Use `$run-experiment` to retain the latest raw results,
+system-only experiment records, and factual artifact index.

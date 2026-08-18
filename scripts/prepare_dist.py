@@ -4,10 +4,11 @@
 Two independent steps, each behind its own flag, both run from the repo root:
 
 ``--recipes``
-    Copy every ``recipes/<model>/recipe.yaml`` into ``emmy/recipes/`` so the wheel
-    ships the recommended serving configs (``recipes/`` sits outside the ``emmy``
-    package, so setuptools cannot pick it up in place). Only the recipe files are
-    copied — local benchmark output and ``RESULTS.md`` are not.
+    Copy every runnable ``recipes/<model>/recipe.yaml`` and every
+    ``recipes/<model>/golden/*.yaml`` into ``emmy/recipes/`` so the wheel ships
+    the recommended serving configs and canonical model goldens (``recipes/``
+    sits outside the ``emmy`` package, so setuptools cannot pick them up in place).
+    Local benchmark output and ``RESULTS.md`` are not copied.
 
 ``--readme``
     Rewrite README.md's repo-relative links to absolute GitHub URLs, in place.
@@ -38,7 +39,7 @@ RELATIVE_LINK = re.compile(r"\]\((?!https?://|#)([^)]+)\)")
 
 
 def stage_recipes() -> int:
-    """Copy recipes/<model>/recipe.yaml into the package. Returns the count."""
+    """Copy runnable recipes and all recipe-local model goldens into the package."""
     if BUNDLED_RECIPES.exists():
         shutil.rmtree(BUNDLED_RECIPES)
 
@@ -51,9 +52,16 @@ def stage_recipes() -> int:
         shutil.copyfile(recipe, target)
         staged += 1
 
+    golden_count = 0
+    for golden in sorted((REPO_ROOT / "recipes").glob("*/golden/*.yaml")):
+        target = BUNDLED_RECIPES / golden.relative_to(REPO_ROOT / "recipes")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(golden, target)
+        golden_count += 1
+
     if not staged:
         sys.exit("No runnable recipes found under recipes/*/recipe.yaml — refusing to build a recipe-less package.")
-    print(f"staged {staged} recipes into {BUNDLED_RECIPES.relative_to(REPO_ROOT)}/")
+    print(f"staged {staged} recipes and {golden_count} model goldens into {BUNDLED_RECIPES.relative_to(REPO_ROOT)}/")
     return staged
 
 
@@ -79,7 +87,7 @@ def absolutize_readme() -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--recipes", action="store_true", help="Stage recipes/*/recipe.yaml into emmy/recipes/")
+    parser.add_argument("--recipes", action="store_true", help="Stage runnable recipe YAML and recipe-local goldens into emmy/recipes/")
     parser.add_argument("--readme", action="store_true", help="Rewrite README links to absolute GitHub URLs (mutates README.md)")
     args = parser.parse_args()
 

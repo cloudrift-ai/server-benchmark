@@ -9,7 +9,7 @@ escape."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, component_ops
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, component_ops
 from emmy.compiler.ir.stmt.algebra import M
 from emmy.compiler.ir.tile.ir import Fold, is_contraction
 from emmy.compiler.ir.tile.ops import head, reduce_loop
@@ -62,7 +62,11 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     expectation) — resolved by regenerating the streaming merge per candidate and BYTE-COMPARING
     it against the body's tail (``exp_merge`` is deterministic, so equality is proof). The pure
     prefix ahead of the merge becomes the ``lift`` body. Returns ``None`` when no candidate
-    matches — a composed step (flash's in-step folds) or a foreign merge spelling."""
+    matches — a composed step (flash's in-step folds) or a foreign merge spelling.
+
+    The prefix is the pure score cone, ``Select`` included: a coordinate-predicated value binding
+    (an attention mask's additive term) is an ordinary pure stmt of the score, and the merge over
+    it is unchanged."""
     from itertools import product as _product  # noqa: PLC0415
 
     from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
@@ -87,7 +91,7 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
         if len(body) < len(merge) or body[-len(merge) :] != merge:
             continue
         prefix = body[: -len(merge)]
-        if any(not isinstance(s, (Load, Assign)) for s in prefix):
+        if any(not isinstance(s, (Load, Assign, Select)) for s in prefix):
             return None  # a composed step keeps the raw-loop escape
         try:
             lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=(score, *combo))
@@ -120,7 +124,7 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
     if len(body) < len(merge) or body[-len(merge) :] != merge:
         return None
     prefix = body[: -len(merge)]
-    if any(not isinstance(s, (Load, Assign)) for s in prefix):
+    if any(not isinstance(s, (Load, Assign, Select)) for s in prefix):
         return None  # a composed step keeps the step spelling
     if not terms or not isinstance(terms[0], str):
         return None

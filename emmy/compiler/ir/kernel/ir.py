@@ -773,6 +773,11 @@ class TreeHalve(Stmt):
             slot, slot_s, root = f"{t} * {scale} + {iv}", f"({t} + s) * {scale} + {iv}", str(iv)
         else:
             slot, slot_s, root = t, f"{t} + s", "0"
+        # The carried names' dtypes as declared by the enclosing seed — a selecting fp16 carrier
+        # (``__half`` max) keeps its declaration while the tree folds float shadows of the same
+        # names. Captured before those shadows overwrite the flat ssa map, restored after the
+        # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
+        outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in self.state}
         out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
         # Shadow temps named after the carried state so ``combine_states`` (which
         # reassigns ``state``) folds ``buf[t+s]`` into ``buf[t]`` per component.
@@ -788,10 +793,12 @@ class TreeHalve(Stmt):
         out.append(sync_line)
         out.append(f"{pad}}}")
         # Broadcast the reduced state back into the carried SSA names (in place) — from the
-        # segment root (this lane's slot 0) when segment-indexed.
+        # segment root (this lane's slot 0) when segment-indexed. The assignment reuses the
+        # ENCLOSING declaration (implicitly narrowing for a selecting fp16 carrier), so the
+        # dtype record must say what that declaration says.
         for buf, st in zip(self.bufs, self.state, strict=True):
             out.append(f"{pad}{st} = {buf}[{root}];")
-            ctx.ssa_dtypes[st] = self.dtype.name
+            ctx.ssa_dtypes[st] = outer_dtypes[st] or self.dtype.name
         return out
 
 
@@ -2555,7 +2562,7 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
 
 @_rewrite.register
 def _(s: RegFragment, rename, sigma, axis_fn):
-    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count)
+    return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count, nregs=s.nregs)
 
 
 @_rewrite.register
@@ -2576,6 +2583,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         scale_buffer=s.scale_buffer,
         scale_index=tuple(sigma.apply(e) for e in s.scale_index),
         scale_ldm=s.scale_ldm,
+        fragment_layout=s.fragment_layout,
     )
 
 
@@ -2636,6 +2644,7 @@ def _(s: RegStore, rename, sigma, axis_fn):
         # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
         # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
         atomic=s.atomic,
+        fragment_layout=s.fragment_layout,
     )
 
 

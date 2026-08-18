@@ -1,6 +1,10 @@
+tags:
+  - best-effort
+
 model:
   huggingface: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
-
+  rationale: "INT4 27B fits one RTX 4090 providing the only dense quantized consumer entry at 27B class."
+  heat: 45
 engine:
   llm:
     tensor_parallel_size: 1

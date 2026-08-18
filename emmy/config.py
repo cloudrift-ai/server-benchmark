@@ -26,7 +26,6 @@ the parse primitives here but keeps its own descriptor logic.
 from __future__ import annotations
 
 import os
-import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -44,10 +43,15 @@ TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
 O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
+PRIOR_BLEND = "EMMY_PRIOR_BLEND"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
+KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
+BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
+BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
+BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
@@ -62,28 +66,6 @@ READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
-
-# The 2026-07 prior rename (analytic → offline, learned → online) respelled three
-# env vars. The old spellings keep working with a one-time DeprecationWarning —
-# they live in shell profiles and remote-run scripts, unlike the Python names.
-_LEGACY_VARS = {
-    ONLINE_FILE: "EMMY_PRIOR_FILE",
-    OFFLINE_FILE: "EMMY_ANALYTIC_FILE",
-    OFFLINE_TILT: "EMMY_ANALYTIC_TILT",
-}
-
-
-def _env_aliased(name: str) -> str | None:
-    """Live ``os.environ`` read that also honors the var's pre-rename legacy
-    spelling (the new name wins when both are set; a legacy hit warns)."""
-    raw = os.environ.get(name)
-    if raw is not None:
-        return raw
-    legacy = _LEGACY_VARS.get(name)
-    raw = os.environ.get(legacy) if legacy else None
-    if raw is not None:
-        warnings.warn(f"{legacy} is deprecated — use {name}", DeprecationWarning, stacklevel=3)
-    return raw
 
 
 def knob_var(name: str) -> str:
@@ -188,28 +170,32 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
+def golden_identity_cache_path() -> Path:
+    """The derived golden-identity store — ``~/.cache/emmy/golden_identity.json``. Purely a
+    memo of ``kernel_identity`` derivations (keyed by a compiler fingerprint + per-record
+    content digests); safe to delete at any time."""
+    return _CACHE_ROOT / "golden_identity.json"
+
+
 def online_path() -> Path:
-    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` (legacy
-    ``EMMY_PRIOR_FILE``) → ``~/.cache/emmy/online.json``. A single JSON file (not
+    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
+    ``~/.cache/emmy/online.json``. A single JSON file (not
     the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
-    ``run`` read it. A pre-rename ``prior.json`` already in the cache keeps being
-    used (and written) so existing checkpoints survive the rename."""
-    override = _env_aliased(ONLINE_FILE)
+    ``run`` read it."""
+    override = os.environ.get(ONLINE_FILE)
     if override:
         return Path(override)
-    path = _CACHE_ROOT / "online.json"
-    legacy = _CACHE_ROOT / "prior.json"
-    return legacy if legacy.exists() and not path.exists() else path
+    return _CACHE_ROOT / "online.json"
 
 
 @contextmanager
 def online_file_override(path: str | Path | None):
     """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
 
-    The golden drift audit uses this with a nonexistent path so a compile's
-    evidence hierarchy sees NO machine-local online prior / reservoir — the
-    golden tier plus the repo-shipped offline prior are the only inputs, making
-    MATCH/DRIFT verdicts machine-independent."""
+    The verified-tier drift audit (``search/audit.py``) uses this with a nonexistent path so a
+    compile's evidence hierarchy sees NO machine-local online prior / reservoir — the verified
+    goldens plus the repo-shipped offline prior are the only inputs, making the MATCH / DRIFT /
+    GAP verdicts machine-independent."""
     if path is None:
         yield
         return
@@ -225,15 +211,14 @@ def online_file_override(path: str | Path | None):
 
 
 def offline_path() -> Path | None:
-    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
-    ``EMMY_ANALYTIC_FILE``) → ``None``.
+    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
     ``None`` means the repo-checked default (``offline_weights.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a
     silent fallback."""
-    override = _env_aliased(OFFLINE_FILE)
+    override = os.environ.get(OFFLINE_FILE)
     return Path(override) if override else None
 
 
@@ -317,14 +302,24 @@ def o3_tol(default: float = 0.15) -> float:
     return float_env(O3_TOL, default)
 
 
+def prior_blend(default: str = "tilt") -> str:
+    """``EMMY_PRIOR_BLEND`` — how the online and offline priors interact:
+    ``tilt`` (default; online owns deploys, its PUCT policy tilted by the offline
+    one), ``gate`` (no interaction — whichever half is live answers), or the
+    single-half A/B arms ``online`` / ``offline``, which ignore the calibration
+    gate. See :mod:`emmy.compiler.pipeline.search.prior.blend`; an unknown name
+    raises there rather than silently defaulting, so a mislabelled A/B arm cannot
+    report the default's numbers."""
+    return os.environ.get(PRIOR_BLEND) or default
+
+
 def offline_tilt(default: float = 0.3) -> float:
-    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` of
-    the cold ``OfflinePrior`` multiplier in :meth:`FallbackPrior.score` (selection
-    only): the online µs are tilted by ``offline**W`` so the heuristic's ranking
-    nudges PUCT exploration toward configs it favors without overriding the online
-    scale (``W=0`` = pure online, large ``W`` = offline dominates). See the method
-    docstring."""
-    raw = _env_aliased(OFFLINE_TILT)
+    """``EMMY_OFFLINE_TILT`` — exponent ``W`` in the ``tilt`` blend's PUCT policy,
+    ``p_online · p_offline**W`` (selection only): the cold heuristic's ranking nudges
+    exploration toward configs it favors without overriding the online model's order
+    (``W=0`` = pure online, large ``W`` = offline dominates). See
+    :class:`~emmy.compiler.pipeline.search.prior.blend.TiltBlend`."""
+    raw = os.environ.get(OFFLINE_TILT)
     if not raw:
         return default
     try:
@@ -458,6 +453,43 @@ def pack_dir() -> Path | None:
 def nvcc_disabled() -> bool:
     """``EMMY_NO_NVCC`` — force the cupy/NVRTC path instead of offline nvcc."""
     return _bool(NO_NVCC)
+
+
+def kernel_timeout_ms() -> float:
+    """``EMMY_KERNEL_TIMEOUT_MS`` — the per-launch hung-kernel watchdog deadline (default 2000;
+    the deadline-cliff rationale lives at the backend call site)."""
+    raw = os.environ.get(KERNEL_TIMEOUT_MS)
+    return float(raw) if raw else 2000.0
+
+
+def bench_compile_timeout_s(default: float = 30.0) -> float:
+    """``EMMY_BENCH_COMPILE_TIMEOUT_S`` — wall-clock cap on the compile stage of one
+    ``benchmark()`` call. ``default`` is the caller's own budget (constructor policy —
+    e.g. ``tune`` shrinks it for fast-fail single-kernel sweeps); the env var, when set,
+    overrides every caller uniformly. Semantics live on ``Backend.bench_compile_timeout_s``."""
+    return float_env(BENCH_COMPILE_TIMEOUT_S, default)
+
+
+def bench_run_timeout_s(default: float = 10.0) -> float:
+    """``EMMY_BENCH_RUN_TIMEOUT_S`` — accumulated-GPU-time cap on a ``benchmark()`` call's
+    iter loop. Same override contract as :func:`bench_compile_timeout_s`; raise it to bench
+    a program whose per-launch latency times the iter count exceeds the default budget.
+    Semantics live on ``Backend.bench_run_timeout_s``."""
+    return float_env(BENCH_RUN_TIMEOUT_S, default)
+
+
+def bench_wall_timeout_s(default: float | None = None) -> float | None:
+    """``EMMY_BENCH_WALL_TIMEOUT_S`` — hard SIGKILL wall-clock cap on one isolated-worker
+    ``benchmark()`` call. Same override contract as :func:`bench_compile_timeout_s`;
+    ``None`` (unset, no caller value) keeps the in-process path. Semantics live on
+    ``Backend.bench_wall_timeout_s``."""
+    raw = os.environ.get(BENCH_WALL_TIMEOUT_S)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def gpu_lock_path() -> str | None:

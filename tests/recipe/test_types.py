@@ -3,7 +3,6 @@
 import pytest
 
 from emmy.recipe import (
-    AggregateConfig,
     CommandConfig,
     DeployConfig,
     LLMConfig,
@@ -181,7 +180,7 @@ def test_from_dict_minimal():
 
 def test_from_dict_full():
     d = {
-        "model": {"huggingface": "org/model", "rationale": "Useful current serving baseline."},
+        "model": {"huggingface": "org/model", "rationale": "Useful current serving baseline.", "heat": 72},
         "engine": {
             "llm": {
                 "tensor_parallel_size": 8,
@@ -210,6 +209,7 @@ def test_from_dict_full():
     }
     recipe = Recipe.from_dict(d)
     assert recipe.model.rationale == "Useful current serving baseline."
+    assert recipe.model.heat == 72
     assert recipe.engine.llm.tensor_parallel_size == 8
     assert recipe.engine.llm.data_parallel_size == 2
     assert recipe.engine.llm.gpu_memory_utilization == 0.95
@@ -309,20 +309,12 @@ def test_from_dict_without_docker_options():
     assert recipe.engine.llm.docker_options == {}
 
 
-# ── AggregateConfig ──────────────────────────────────────────────
+# ── Removed post-processing ──────────────────────
 
 
-def test_aggregate_config_defaults():
-    cfg = AggregateConfig()
-    assert cfg.run == ""
-    assert cfg.timeout == 300
-
-
-def test_from_dict_accepts_inline_postprocessing():
-    recipe = Recipe.from_dict({"aggregate": {"run": "printf '%s\\n' done > $run_dir/status.txt", "timeout": 60}})
-    assert recipe.aggregate is not None
-    assert recipe.aggregate.run.startswith("printf")
-    assert recipe.aggregate.timeout == 60
+def test_from_dict_rejects_inline_postprocessing():
+    with pytest.raises(ValueError, match="aggregate is not supported"):
+        Recipe.from_dict({"aggregate": {"run": "printf done", "timeout": 60}})
 
 
 def test_model_task_default_generate():

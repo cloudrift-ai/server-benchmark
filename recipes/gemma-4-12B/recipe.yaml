@@ -1,8 +1,13 @@
 # google/gemma-4-12B base-checkpoint text generation through the Emmy generative plugin on
 # one RTX 5090. Base checkpoints serve continuations through /v1/completions; this recipe
 # does not claim the instruction-tuned checkpoint's chat or multimodal contract.
+tags:
+  - best-effort
+
 model:
   huggingface: "google/gemma-4-12B"
+  rationale: "Base-checkpoint continuation workload on RTX 5090 with prebuilt fast-math image at 131K context."
+  heat: 38
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion
 

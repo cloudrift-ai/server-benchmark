@@ -12,21 +12,23 @@ validation.
   `SglangConfig`, `BenchmarkConfig`, `CommandConfig`
 - `lifecycle.py` — lifecycle tag validation and the runnable/disabled predicate
 - `catalog.py` — compact repository inventory, deployment extraction, and validated onboarding shell creation
+- `query.py` — constrained predicates, deployment-row expansion, ordering, and the versioned query result
 - `recipe.py` — `deep_merge()`, `load_recipe()`, `resolve_for_hardware()`, `validate_extra_args()`, `_load_raw_config()`, `_validate_and_build()`
 - `matrix.py` — `expand_matrix()`, `_expand_cross()`, `_expand_zip()`, `filter_combinations()`, `dot_to_nested()`, `build_override()`
 - `engines.py` — `VLLM_FLAG_MAP`, `SGLANG_FLAG_MAP`, `banned_extra_arg_flags()`, `build_engine_args()`
-- `bundled.py` — `bundled_names()`, `resolve_recipe_dir()` — the recipes shipped inside an installed wheel
+- `bundled.py` — automatic editable-checkout/wheel catalog selection and bare-name materialization
 
 ## Key Design Decisions
 
 ### Bundled Recipes Are Copied Out Before Use
 
-A wheel carries every runnable `recipes/<model>/recipe.yaml` under `emmy/recipes/`, staged at build time because
-`recipes/` sits outside the package (see `scripts/prepare_dist.py`). Those copies are read-only — they live in
-site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates run directories
-there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it copies the bundled recipe
-into the current directory and returns that path. An existing directory always takes precedence, so a name that
-matches both a local directory and a bundled recipe resolves to the local one and an edited copy is never clobbered.
+A wheel carries every runnable `recipes/<model>/recipe.yaml` and every recipe-local `golden/*.yaml` under
+`emmy/recipes/`, staged at build time because `recipes/` sits outside the package (see `scripts/prepare_dist.py`).
+Goldens ship even when their recipe is disabled because they remain compiler evidence. These copies are read-only —
+they live in site-packages, whereas `deploy` writes its compose file into the recipe directory and `bench` creates a
+timestamped run directory there. So `resolve_recipe_dir()` treats a bare name as a request for a **working copy**: it
+copies the recipe YAML selected from the live editable checkout or installed bundle into the current directory and
+returns that path. An existing directory always takes precedence, so a matching edited copy is never clobbered.
 
 ### Recipe Lifecycle Tags
 
@@ -42,21 +44,64 @@ optimization. `best-effort` is a useful runnable recipe outside that periodic se
 git while disabling deploy, benchmark, publish, and wheel staging; it is used only when an all-around better model for
 the same task is available at a comparable or lower practical VRAM footprint, or when a technical limitation means
 the recipe should no longer be used. Low demand or age alone is not enough. Discovery stores every lifecycle reason in
-`model.rationale`. A new discovery shell carries both `onboarding` and `untested`; it contains the model ID, task,
-rationale, and one to three proposed `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until
-onboarding replaces it with a qualified `best-effort` recipe. Untagged recipes remain runnable for backward
-compatibility and are classified by the next discovery lifecycle run.
+`model.rationale` and every current onboarding-priority score in `model.heat`. A new discovery shell carries both
+`onboarding` and `untested`; it contains the model ID, task, rationale, heat, and one to three proposed
+`deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until onboarding replaces it with a qualified
+`best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
+discovery lifecycle run.
 
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
-does not affect engine arguments, deployment, or benchmark behavior.
+does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0
+through 100 that discovery refreshes for every recipe. It records current community and serving interest for ordering
+onboarding work; it is not a benchmark score and does not affect serving behavior. Missing heat remains valid for
+legacy recipes and sorts as null until the next discovery run.
 
-`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. Its compact
-records contain only the identity, tags, task, rationale, and expanded deployment setups needed for lifecycle work.
+`recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
+versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
+state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
+heat.
+This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
+may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
+live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
+no catalog-selection arguments, so its consumers observe the same installation-aware behavior.
 `create_recipe_stub()` is likewise shared by `emmy recipe create` and discovery: it validates one to three canonical
 GPU/count setups and writes the minimal disabled shell without duplicating YAML rendering in workflow scripts.
+Manual creation starts at heat zero; discovery supplies and later refreshes the evidence-based value.
+
+`emmy recipe query` builds normalized rows from the same inventory. A query that references `deployment.*` implicitly
+expands each recipe into one row per unique matrix-expanded GPU/count setup; otherwise it produces one row per recipe.
+`--candidate MODEL GPU COUNT` instead supplies one exact external deployment. The query hydrates its
+model metadata from the catalog when present and represents a missing model as onboarding work. Every row carries its
+lifecycle-derived operation (`onboarding` or `verification`) and expected post-run lifecycle so automation does not
+reproduce those rules.
+
+The row fields are grouped by ownership:
+
+| Fields | Meaning |
+|---|---|
+| `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
+| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
+| `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
+| `results.path`, `results.last_run_at` | Sibling report path and its last committed change |
+| `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
+
+The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+`FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
+AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
+and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.
+
+Computed fields are resolved only when a predicate or sort references them. `deployment.availability.cloudrift`
+queries current CloudRift capacity and requires `CLOUDRIFT_API_KEY`; it uses the hardware table and requires the exact
+GPU count. `provider.cloudrift.team_access` validates `CLOUDRIFT_TEAM_ID` with the same key before capacity is queried.
+`results.last_run_at` reads the last committed change to the recipe's sibling `RESULTS.md`; a missing report is `null`,
+while requesting the field outside a Git checkout is an error. These annotations are read-only: the query never rents
+hardware, writes workflow outputs, or changes recipes. Computed values that the query does not reference remain
+`null` in its output.
 
 ### Matrix Expansion for Benchmark Sweeps
 
@@ -130,7 +175,8 @@ Variant naming is handled by `Variant` in `emmy.planner.variant`. Each matrix co
 - Non-deploy params: abbreviated via first-letter-of-each-word heuristic (`max_concurrency` → `mc`, `num_prompts` → `np`, `max_concurrent_requests` → `mcr`), sorted alphabetically, appended with `_`
 - All params appear in the label, not just the variable ones
 
-Examples: `rtx5090x1_mc8_mcr8_np80_vllm_benchmark.txt`, `rtx5090x1_vllm_benchmark.txt` (deploy-only params).
+The experiment record filename combines this readable label with a stable hash of the raw parameters, for example
+`rtx5090x1_mc8_mcr8_np80_<row-id>.experiment.yaml`. The hash prevents two compacted labels from colliding.
 
 ### Driver / CUDA Version Pinning
 
@@ -191,14 +237,14 @@ Use it when the serving engine performs request-time initialization after the de
 requests use the same controlled workload configuration and run before every measured repeat.
 
 `benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
-the model is deployed once, only the client run repeats. The text result then holds one stanza per repeat, and the
-JSON result's `metrics` becomes the per-field mean, with `metrics_stddev` (sample stddev) and `metrics_repeats` (the
-raw per-repeat metrics) added alongside (`benchmark/results.py`). Because the seed and prompts are identical across
-repeats, the spread measures run-to-run noise, not workload variation.
+the model is deployed once, only the client run repeats. Every client stanza remains in the raw benchmark artifact;
+the experiment record does not parse or aggregate those measurements. Because the seed and prompts are identical
+across repeats, a separate intelligent review may use their spread to assess run-to-run noise rather than workload
+variation.
 
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
-result validators. `emmy bench` preserves raw observations but does not interpret whether they support an experiment's
-claim; that decision belongs to review of the completed run directory.
+result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but
+do not interpret whether they support an experiment's claim.
 
 ### Extra Args Ban Enforcement
 
@@ -278,7 +324,7 @@ command:
     - "*.log"
   timeout: 60
   env: {FOO: bar}                  # optional, prepended as KEY=value to the command
-  strict: true                     # clean source, required artifacts and provenance
+  strict: true                     # clean Git state, required results and system provenance
 
 matrices:
   deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -290,40 +336,16 @@ The `run` template uses `string.Template` `$var` syntax. Substitution variables 
 
 Command recipes skip `validate_extra_args()` since they don't go through engine flag mapping.
 
-Without `strict`, artifact transfer is best effort and staged files may include local edits. With `strict`, the staged
-paths must be clean before execution, their exact file digests and Git revision are recorded, every `result_files`
-entry must be retrieved, and GPU/CUDA provenance must be available. A failed command still attempts to retrieve its
-declared artifacts so partial evidence is not lost.
+Without `strict`, result transfer is best effort and staged files may include local edits. With `strict`, the staged
+paths must be clean before execution, the Git revision and dirty flag are recorded, every `result_files` entry must be
+retrieved, and GPU, NVCC, and cuBLAS provenance must be available. A failed command still attempts to retrieve its
+declared results so partial evidence is not lost.
 
-### Inline Post-Processing
+### Result interpretation
 
-A recipe may declare an `aggregate` block for a short local command after its variants complete:
-
-```yaml
-aggregate:
-  run: |
-    rows="$run_dir/small_m_results.tsv"
-    printf 'gpu\tstrategy\tm\tn\tk\tbatch\tkernel_ms\tcublas_ms\n' > "$rows"
-    find "$run_dir" -maxdepth 1 -type f -name '*.json' -print |
-      sort |
-      while IFS= read -r result; do
-        jq -r '
-          . as $run
-          | ($run.results // [])[]
-          | select(.dimensions.M <= 128)
-          | [$run.system_info.gpu, $run.strategy, .dimensions.M, .dimensions.N,
-             .dimensions.K, .dimensions.batch, .kernel_time_ms, .cublas_time_ms]
-          | @tsv
-        ' "$result"
-      done >> "$rows"
-  timeout: 60
-```
-
-The template receives `$run_dir`. The example performs transparent structural processing: it selects the small-M
-rows from each SGEMM JSON and assembles one TSV table. Keep such commands self-contained and readable in the recipe;
-do not invoke an external result-analysis script. This hook may select fields, reshape rows, sort, join, or tabulate
-structured data, but it must not interpret the results or generate a human-readable report such as `RESULTS.md`.
-Agents inspect the raw run and write model-specific reports when richer analysis is required.
+Recipes do not contain post-processing or report-generation hooks. `emmy bench` writes the common YAML experiment
+record and raw evidence for each row. The repository `run-experiment` skill inspects those records and writes the
+claim-specific `RESULTS.md` after the complete run.
 
 ### Docker Options
 

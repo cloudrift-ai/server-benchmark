@@ -20,9 +20,16 @@ level, so the label for any node is the best (min) latency over its benched
 descendants (``1/best_reward``).
 The search hands :meth:`add_rows` ``(knobs, median_latency_µs)`` rows for leaves
 *and* branches — the prior regresses on latency, and the reward conversion lives
-in the MCTS selection loop. :meth:`score` / :meth:`mean_score` return ``0`` until
-the first fit, so a cold prior gives a uniform PUCT policy (exploration via the
-PUCT term).
+in the MCTS selection loop. :meth:`mean_score` returns ``0`` until the first fit,
+so a cold prior gives a uniform PUCT policy (exploration via the PUCT term).
+
+Two scoring surfaces, and only two: :meth:`mean_score` / :meth:`mean_scores` (a
+latency-like prediction, lower is better — the greedy argmin and the calibration)
+and :meth:`policy` (PUCT's ``P``, normalized within one fork's sibling set). The
+retired third one, ``score``, was a per-candidate selection signal from the
+Thompson-draw era; every model was deterministic, so it had collapsed into
+``mean_score`` everywhere except the composite prior, where it carried a magnitude
+blend that measurement showed to be inert (HISTORY.md: "The inert offline tilt").
 """
 
 from __future__ import annotations
@@ -62,6 +69,29 @@ _O3_OPT = 3.0
 CALIBRATION_MIN = 0.5
 # Minimum rows an op group needs to contribute to the calibration median (smaller groups are noise).
 _CALIBRATION_MIN_GROUP = 8
+
+
+def normalize_policy(scores: list[float]) -> list[float]:
+    """One sibling set's latency-like scores (lower = better) as PUCT weights (higher = better),
+    scaled so the BEST sibling is exactly ``1.0`` and a sibling the model prices 10× slower is
+    ``0.1``. A non-positive score — a cold model's ``0.0`` — weighs a uniform ``1.0``, so an
+    unmeasured sibling stays optimistic and the exploration term still drives breadth.
+
+    Normalizing by the best sibling rather than by the sum is deliberate. PUCT compares
+    ``c · P · √(N+1)/(1+n)`` against ``Q ∈ [0, 1]``, so ``P`` has to keep a scale comparable to
+    ``Q``; dividing by the sum would shrink every ``P`` by ``1/n_siblings`` and quietly collapse
+    exploration on wide forks, where breadth matters most. Dividing by the best also IS the
+    documented intent — "a confidently-bad sibling gets a small ``P`` → tiny exploration term →
+    deprioritized rather than force-visited".
+
+    For either offline model this is exactly a Boltzmann weight: ``min(s)/s_i =
+    exp(scale·(quality_i − quality_max))``, the softmax numerator over the sibling set — which is
+    also the form the tree model is trained under (CatBoost ``QuerySoftMax``)."""
+    positive = [s for s in scores if s > 0]
+    if not positive:
+        return [1.0] * len(scores)
+    best = min(positive)
+    return [best / s if s > 0 else 1.0 for s in scores]
 
 
 class Prior(ABC):
@@ -113,26 +143,47 @@ class Prior(ABC):
         the gate is a tripwire for measured failure, not a proof-of-quality demand."""
         return self.fitted and (self.calibration is None or self.calibration >= CALIBRATION_MIN)
 
+    @property
+    def masking_exact(self) -> bool:
+        """Whether deleting a key from a featurized row removes that feature's contribution
+        EXACTLY, which the ablation diagnostics need to know before quoting a Δ. False by
+        default — true only for the linear offline model, where a deleted key is exact term
+        removal. A tree re-routes the splits reading that column, and a model trained without
+        feature dropout has never seen a masked row at all."""
+        return False
+
     @abstractmethod
     def fit(self) -> None:
         """Refit the model on the current :attr:`_dataset`."""
 
     @abstractmethod
-    def score(self, knobs: dict) -> float:
-        """Prediction for ranking a candidate. ``0.0`` until the first fit (cold
-        prior → uniform PUCT policy)."""
-
-    @abstractmethod
     def mean_score(self, knobs: dict) -> float:
-        """Prediction for the greedy argmax + calibration (same as :meth:`score`
-        for a deterministic model)."""
+        """Prediction for ranking a candidate — the greedy argmin, the calibration, and the
+        input :meth:`policy` normalizes. ``0.0`` until the first fit (cold prior → uniform
+        PUCT policy)."""
 
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score` — the greedy driver flattens a kernel's whole
         candidate set into one scoring pass, so a model with a vectorized predict
-        (``OnlinePrior``) overrides this to score the lot in a single call. The
-        default maps element-wise (fine for the cheap offline prior)."""
+        (``OnlinePrior``, ``OfflinePrior`` on a tree model) overrides this to score
+        the lot in a single call. The default maps element-wise."""
         return [self.mean_score(k) for k in knobs_list]
+
+    # --- the PUCT policy ----------------------------------------------------
+
+    def policy(self, knobs_list: list[dict]) -> list[float]:
+        """PUCT's ``P`` over ONE fork's sibling set: how much this model prefers each sibling,
+        relative to the best of them.
+
+        Normalized WITHIN the set (:func:`normalize_policy`), which is what makes it composable:
+        the online model predicts calibrated µs and the offline one an ordinal proxy whose
+        magnitude spans ``e**±700``, and only after normalization are the two the same kind of
+        quantity. It also removes the failure the raw magnitudes caused — an offline proxy fed
+        to PUCT as though it were µs (HISTORY.md: "The inert offline tilt").
+
+        Batched by construction: a sibling set is scored in one call, so a vectorized model pays
+        its per-call overhead once per fork rather than once per candidate."""
+        return normalize_policy(self.mean_scores(knobs_list))
 
     # --- scoring already-featurized rows (attribution / ablation / offline fitting) ----------
 

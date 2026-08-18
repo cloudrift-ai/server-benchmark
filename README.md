@@ -36,10 +36,10 @@ emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/workin
 emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
 # Run every working-golden target (add --target NAME to select one)
 emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
-# Capture one symbolic serving inventory with every release realization, then audit it on the pinned GPU
+# Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
-emmy eval golden emmy/compiler/pipeline/search/goldens/rtx5090_sm120_gemma4.yaml \
+emmy eval golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
@@ -164,7 +164,13 @@ emmy bench experiments/gemma-4-12B/* --local                            # On thi
 emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
 ```
 
-External contributors: open a PR with an experiment under `experiments/{model}/{name}/`, then a maintainer triggers a cloud run by commenting `/run-experiment` on the PR.
+Each real run creates a timestamped raw-results directory and writes one system-only YAML experiment record per
+matrix row. Use `$run-experiment` to run or customize an experiment, replace the platform's LFS-backed
+`results_<gpu-short>x<gpu-count>.tar.gz`, verify its included records, update the shared `RESULTS.md` interpretation,
+and commit the durable platform snapshot. Records remain inside the archive rather than as top-level experiment files.
+Other platform snapshots remain unchanged. The runner and experiment code never interpret measurements; the skill
+reviews the raw evidence. The timestamped directory is ignored and may be deleted after its archive has been extracted
+or byte-checked against the raw files.
 
 ## Deploy
 
@@ -179,9 +185,10 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
 ```
 
-`--recipe` also takes the bare name of a recipe bundled with the installed package (`--recipe gemma-4-12B-it`),
-which copies it into the current directory first — `deploy` writes its compose file next to the recipe, and `bench`
-its run directories. A path that exists always wins, so an edited working copy is never overwritten.
+`--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
+checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
+first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
+exists always wins, so an edited working copy is never overwritten.
 
 ## Publish a serving image
 
@@ -214,13 +221,48 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Recipe
 
 ```bash
-# Inspect recipe metadata or count one lifecycle group in automation.
-emmy recipe list recipes --tag maintained --json
+# Automatically inspect live source recipes for an editable install, or the
+# runnable recipes bundled in an installed wheel.
+emmy recipe list --json
+
+# Count one lifecycle group in automation.
+emmy recipe query --filter 'tags contains "maintained"' --json
+
+# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
+# rows; CloudRift availability is resolved only because this query uses it.
+emmy recipe query \
+  --filter 'lifecycle == "onboarding"' \
+  --filter 'deployment.availability.cloudrift == true' \
+  --sort 'heat desc nulls-last' \
+  --sort 'model_id asc' \
+  --limit 1 --json
+
+# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+emmy recipe query \
+  --filter 'lifecycle == "maintained"' \
+  --filter 'deployment.availability.cloudrift == true' \
+  --sort 'results.last_run_at asc nulls-first' \
+  --limit 1 --json
+
+# Check one exact external candidate, including a model without a recipe yet.
+emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
+  --filter 'deployment.availability.cloudrift == true' --json
 
 # Create an untested onboarding shell with one to three proposed deployments.
 emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
+
+`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
+each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score, and
+matrix-expanded deployments with effective context lengths. Consumers must reject unknown schema versions. Fields
+may be added to a schema version, but existing fields are not removed or redefined. Emmy always detects its
+installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
+runnable recipe bundle.
+`recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its
+optional `--candidate MODEL GPU COUNT` source hydrates lifecycle metadata from an existing recipe or represents a new
+model as onboarding work. CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require
+`CLOUDRIFT_TEAM_ID`.
 
 ```yaml
 tags:
@@ -229,6 +271,7 @@ tags:
 model:
   huggingface: "org/model-name"
   rationale: "Why this model belongs at its current lifecycle level."
+  heat: 75
 
 engine:
   llm:
@@ -259,10 +302,15 @@ matrices:
       benchmark.max_concurrency: [128, 512]
 ```
 
-Discovery keeps ten tested recipes tagged `maintained` and records a rationale under every recipe's `model` block.
-Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become
-`obsolete`. New model shells use `onboarding` plus `untested` and propose up to three deployment matrix entries.
-Disabled recipes are not deployable or bundled.
+Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
+every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
+unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
+three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
+
+Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
+file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
+recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
+`emmy/compiler/pipeline/search/goldens/`.
 
 Generic workload (run any tool on the VM, pull back result files):
 
@@ -303,6 +351,7 @@ make test      # run pytest
 make lint      # ruff check + format check
 make format    # auto-fix
 make wheel     # build the wheel into dist/
+make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
 
 ### Release
@@ -312,12 +361,20 @@ there, and refuses to run if that version is already tagged. It lints, tests, bu
 publishing, and only then creates the tag and GitHub release, so a failed upload leaves nothing behind. Publishing
 a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
 
-`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies `recipes/*/recipe.yaml` into
-the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative links to absolute GitHub
-URLs, which the workflow runs because PyPI renders the README detached from the repo.
+Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
+dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
+
+`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
+recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
+links to absolute GitHub URLs, which the workflow runs because PyPI renders the README detached from the repo.
 
 ## Project Structure
 
+- [AGENTS.md](AGENTS.md) — shared coding-agent instructions; [CLAUDE.md](CLAUDE.md) imports the same guidance for
+  Claude Code
+- [.agents/skills/](.agents/skills/) — canonical repository skills; [.claude/skills/](.claude/skills/) exposes them
+  through compatibility symlinks
+- [prompts/](prompts/) — reusable agent prompts shared by repository skills and non-interactive workflows
 - [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
@@ -351,8 +408,8 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
     (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))
   - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
-- [recipes/](recipes/) — The recommended serving configuration, one per model — what `emmy deploy` runs
-  (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
+- [recipes/](recipes/) — The recommended serving configuration and per-GPU model goldens, one directory per model —
+  what `emmy deploy` runs (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)

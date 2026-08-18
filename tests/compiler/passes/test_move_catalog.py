@@ -3,9 +3,10 @@
 The scheduling emit (``010_recognize`` → ``_schedule``) enumerates the catalog into the tile fork; this
 file pins the catalog's **legal product** two ways:
 
-- the catalog function ``scalar_tile_moves()`` equals the hand-computed ``(par × reg)`` grid + per-cell,
-  option-0-first and legality-guarded (``par_n·par_m ≤ 1024``), read through the SITE spelling each
-  move stores as (its site ``TILE`` value + the ``WORK`` inventory it implies);
+- the catalog function ``scalar_tile_moves()`` equals the hand-computed ``(par × reg)`` grid plus the
+  per-cell tile, legality-guarded (``par_n·par_m ≤ 1024``), read through the SITE spelling each
+  move stores as (its site ``TILE`` value + the ``WORK`` inventory it implies). Membership is what
+  is pinned, never position — the catalogs rank nothing;
 - the **leaf set** the scheduler actually emits over a matmul fixture equals that product (keyed
   ``TILE@<k_axis>``) — so a missing / extra move is caught structurally, without lowering a kernel.
 """
@@ -25,7 +26,7 @@ from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
-# The hand-computed legal product as explicit literals — per-cell option-0, then the (par × reg) box
+# The hand-computed legal product as explicit literals — the per-cell tile and the (par × reg) box
 # as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
 # ``f1x1`` suppresses to empty and a unit ``reg_m`` drops the ``x`` half) and the ``WORK`` thread
 # inventory its parallel widths imply. The two ladders and the one bound are restated by hand here —
@@ -55,7 +56,7 @@ def _stored(plan: TilePlan) -> tuple[str, str]:
 def test_scalar_tile_moves_equals_hand_product():
     moves = scalar_tile_moves()
     assert [_stored(p) for p in moves] == _EXPECTED_MOVES
-    assert moves[0] == TilePlan()  # conservative per-cell option-0 leads (cold greedy stays stable)
+    assert TilePlan() in moves  # the untiled per-cell tile is a member; where it sits is not a rule
     assert len(set(moves)) == len(moves)  # no duplicate candidates
     # Every move round-trips its stored spelling and stays inside the thread budget.
     for plan in moves:
@@ -119,13 +120,14 @@ def test_schedule_leaf_set_equals_catalog():
         by_tile.setdefault(full_tile(r), []).append(r)
     percell = by_tile[TilePlan()]
     # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
-    # (the reduce spec's ``coop <= extent and reg <= extent`` gate) — so the wide ``b64``–``b512``
-    # folds drop out on this K=64 matmul, exactly as they would on any reduce narrower than the fold.
-    # Layout gates the bands too (WS5): this fixture's B is canonical ``B[k, n]``, so the plain
-    # coop moves (lanes interleaved along K — uncoalesced on k-major B) are refused and only the
-    # transposed band (lanes sweep N) plus the reg-only ILP moves survive.
-    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64 and (p.coop_transposed or p.coop == 1)}
-    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop}
+    # (the reduce spec's ``coop <= extent and reg <= extent`` structural fit) — so the wide
+    # ``b64``–``b512`` folds drop out on this K=64 matmul, exactly as they would on any reduce
+    # narrower than the fold. BOTH band orientations are enumerated regardless of B's layout, and
+    # every split-K width dividing K joins them: which row deploys is evidence's decision, and
+    # neither B's layout nor the grid size may narrow or reorder the offer.
+    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64}
+    legal_splitk = {p for p in splitk_moves() if 64 % p.cta == 0}
+    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop, *legal_splitk}
     assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
     # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
     # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
@@ -141,7 +143,7 @@ def test_schedule_leaf_set_equals_catalog():
         if plan.units_n * plan.reg_n > 64:
             assert stages == {""}, f"{where}: masked-N must decline staging: {stages}"
         else:
-            assert {"", "d1/cp"} <= stages, f"{where}: missing the base resolved stages: {stages}"
+            assert {"", "d1/smem-async"} <= stages, f"{where}: missing the base resolved stages: {stages}"
         splits = {full_reduce(r) for r in tiled if full_reduce(r).stages}
         assert splits == set(splitk_moves()), f"{where}: {splits}"
         split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r).stages}
@@ -228,7 +230,7 @@ def test_warp_staged_rows_fit_the_smem_budget():
 
 def _reduce_graph() -> Graph:
     """A bare full-row sum reduce (the ``reduce.2048x2048`` golden shape) — a lifted
-    :class:`Fold` with a 2048-cell free grid, well past the coop heuristic's free cap."""
+    :class:`Fold` over a 2048-cell free grid."""
     from emmy.compiler.ir.frontend.ir import MeanOp
 
     g = Graph()
@@ -239,18 +241,22 @@ def _reduce_graph() -> Graph:
 
 
 def test_bare_reduce_forks_the_coop_catalog():
-    """A bare reduce must fork the full legal ``coop_reduce_moves()`` catalog beside serial, even
-    when the free grid exceeds the conservative heuristic's cap — the heuristic previously
-    collapsed the fork to ONE serial spec (no options offered), so the tune benched a single
-    variant and greedy deployed 53× behind the pinned ``b16``/``b32`` reduce goldens (eighth
-    golden sweep, finding 3). Option-0 stays the heuristic's conservative pick (cold-greedy
-    deploys are unchanged); the catalog rows are what keep the reduce goldens reachable."""
+    """A bare reduce must fork the full legal ``coop_reduce_moves()`` catalog beside serial,
+    whatever the free grid measures. A grid-size rule once collapsed the fork to ONE serial spec
+    (no options offered), so the tune benched a single variant and greedy deployed 53× behind the
+    pinned ``b16``/``b32`` reduce goldens (eighth golden sweep, finding 3). The offer is a function
+    of legality alone now: the reduce extent has to be able to feed the band, and nothing else
+    narrows it."""
     from emmy.compiler.pipeline.search.space import coop_reduce_moves
 
     rows: list[dict] = []
 
     def decide(fp):
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
         leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         for leaf in leaves:
             rows.append(dict(getattr(leaf, "knobs", {}) or {}))
         return leaves[0]
@@ -261,7 +267,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     # (site value, WORK) pair — the 16- and 32-wide folds both spell "coop" but ride distinct
     # t16 / t32 inventories.
     offered = [(str(family_value(r, "REDUCE")), str(r.get("WORK", ""))) for r in rows]
-    assert offered[0] == ("", "")  # 2048 free cells over the free-grid cap: the conservative heuristic pick leads
+    assert ("", "") in offered  # the serial fold is a member of the set; its position is not a rule
 
     # This bare reduce meets the transposed band's structural gate (scalar tail, no
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
@@ -326,9 +332,8 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, keys, _idents, origin = sch._enumerate([term])
+    rows, keys = sch._enumerate([term])
     assert rows, "the two-site term enumerated nothing"
-    assert {reading for reading, _ in origin} == {0}, "a single-reading term has one owner"
 
     # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
     # the stored corpus uses.
@@ -400,16 +405,15 @@ def test_two_site_rows_are_distinct_and_materialize_both_sites():
 
     tile = _two_site_term()
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, idents, origin = sch._enumerate([term])
+    rows, _keys = sch._enumerate([term])
 
     seen = [canonical_row_key(r) for r in rows]
     assert len(seen) == len(set(seen)), f"{len(seen) - len(set(seen))} rows spell identically"
-    owner = {ident: (term, resolved) for ident, (_, resolved) in zip(idents, origin, strict=True)}
 
     decided = [r for r in rows if r.get("REDUCE@j")]
     assert decided, "the fixture must decide its nested site on some row"
     for row in decided:
-        op = sch._materialize(*owner[canonical_row_key(row)], row, "k", {})
+        op = sch._materialize(term, row, "k", {})
         assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
         assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])
 
@@ -463,61 +467,69 @@ def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatc
     assert widened == ["w4x1", *offered], widened
 
 
-# --- the ordering obligation: each family's FIRST value is its conservative default -------------- #
+# --- what the enumeration owes: membership, not position ----------------------------------------- #
 
 
-def _first_row(tile) -> dict:
-    """The row a prior-free path deploys: the enumeration's leading row for ``tile``."""
+def _rows_of(tile) -> list[dict]:
+    """Every row ``tile`` enumerates."""
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _idents, _origin = sch._enumerate([term])
+    rows, _keys = sch._enumerate([term])
     assert rows, "the term enumerated nothing"
-    return rows[0]
+    return rows
 
 
-def test_option_zero_is_conservative_per_family(monkeypatch):
-    """Enumeration produces a SET, so ranking is the prior's job — but POSITION still deploys a
-    kernel on three prior-free paths (no prior and no golden, every leaf blocklisted, and the
-    validate-retry budget exhausted). The obligation those paths rest on is that each family's
-    FIRST value is its conservative default, and it is PER-FAMILY rather than global: the reduce
-    tier deliberately leads with its cooperative heuristic pick, not a serial one, because that is
-    the historical cold deploy.
-
-    Mechanized here rather than trusted: every family of the leading row stamps its declared OFF
-    value, with ``REDUCE`` the one encoded exception — and since step 7 that exception has TWO
-    spellings, because the band's WIDTH moved into ``WORK``. So the pair is checked together: an
-    option-0 that leads with a cooperative band must spell exactly that band's inventory, never a
-    wider one and never a tile."""
+def _reduce_term():
+    """A bare 4096-wide row reduce over a 64-cell grid, as an unmapped ``TileOp``."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
     from emmy.compiler.ir.tile import Placement, TileOp
-    from emmy.compiler.pipeline.knob import is_off_value, stamp_schedule_families
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
-    monkeypatch.delenv("EMMY_WORK", raising=False)
-    reduce_fold = fold_from_loop(
+    fold = fold_from_loop(
         Loop(
             axis=Axis("k", 4096),
             body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), Accum(name="acc", value="x_e", op="add", axes=("k",)))),
             role=AxisRole.PLANAR,
         )
     )
-    terms = {
-        "bare reduce": TileOp(op=reduce_fold, place=Placement(free=(Axis("m", 64),))),
-        "two-site contraction": _two_site_term(),
-    }
-    for label, tile in terms.items():
-        row = _first_row(tile)
-        stamped = stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")})
-        work = Workers.parse(stamped.get("WORK") or None)
-        coop = max((ReducePlan.parse(v, work).coop for k, v in stamped.items() if family_of(k) == "REDUCE" and v), default=1)
-        for fam, value in stamped.items():
-            if family_of(fam) == "REDUCE":
-                continue  # the encoded exception — the reduce tier leads with its cooperative pick
-            if family_of(fam) == "WORK" and coop > 1:
-                # …and the inventory that carries its width is the SAME exception, not a second one.
-                assert value == f"t{coop}", f"{label}: option-0 leads with coop={coop} but spells WORK={value!r}"
+    return TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
+
+
+def test_the_all_off_row_is_always_offered(monkeypatch):
+    """The untiled / serial / gmem-direct schedule — every family at its declared OFF — is legal on
+    any term the walk can schedule, so it is always a MEMBER of the enumerated set.
+
+    This is the enumeration fact that replaced the old "option-0 is each family's conservative
+    default" obligation. Position is no longer anything: nothing may lead a list to steer a compile
+    with no evidence, and such a compile taking an arbitrary row is accepted. What must still hold
+    is that the all-OFF row exists to be picked, by evidence or by a pin — a term that could not
+    spell it would have a hole in its space, not a slow default."""
+    from emmy.compiler.pipeline.knob import is_off_value, stamp_schedule_families
+
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    for label, tile in {"bare reduce": _reduce_term(), "two-site contraction": _two_site_term()}.items():
+        stamped = [stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")}) for row in _rows_of(tile)]
+        assert any(all(is_off_value(family_of(fam), value) for fam, value in row.items()) for row in stamped), (
+            f"{label}: no row spells every family's OFF value"
+        )
+
+
+def test_a_cooperative_row_spells_its_own_inventory(monkeypatch):
+    """Since step 7 a cooperative band's WIDTH lives in ``WORK``, not in the ``REDUCE`` value — so a
+    row that partitions a fold cooperatively is only well-formed beside the thread inventory that
+    carries the width. Checked over the WHOLE set rather than one leading row: two rows spelling
+    one wire format while naming different kernels is the defect, and it has nothing to do with
+    which of them the walk emitted first."""
+    monkeypatch.delenv("EMMY_WORK", raising=False)
+    for label, tile in {"bare reduce": _reduce_term(), "two-site contraction": _two_site_term()}.items():
+        for row in _rows_of(tile):
+            work = str(row.get("WORK", ""))
+            coop = [v for k, v in row.items() if family_of(k) == "REDUCE" and isinstance(v, str) and "coop" in v]
+            if not coop:
                 continue
-            assert is_off_value(family_of(fam), value), f"{label}: option-0 stamps {fam}={value!r}, not the family's OFF"
+            parsed = Workers.parse(work or None)
+            assert parsed is not None and parsed.kind == "thread", f"{label}: {coop} rides WORK={work!r}, not a thread band"
+            assert ReducePlan.parse(coop[0], parsed).coop == parsed.units[0], f"{label}: {coop} disagrees with WORK={work!r}"

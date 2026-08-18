@@ -117,7 +117,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   operation or search key survives decomposition.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
-  prefill, M=1, warm shapes, symbolic fallbacks, and input pin regimes cannot drift across independent flags.
+  prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes, and the golden-consultation baseline
+  (`SERVE_CONSULT_BASELINE`) cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
@@ -298,16 +299,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.rope_parameters` into `_build_rotary`/`get_rope` unchanged — one nuance: stock vLLM builds the gpt-oss
   rope at fp32 while the plugin's rotary follows the model dtype (fp16); q/k re-cast to the trunk dtype either
   way, a known small numeric drift.
-  **Tuning what serving actually runs.** The deploy pick reads the golden tier, then box-local `perf`/reservoir
-  evidence — and only evidence recorded against the *serving graph* carries serving. An isolated golden snippet does
-  not: fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does
-  not). So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
+  **Tuning what serving actually runs.** The deploy pick reads the verified tier, then box-local `perf`/reservoir
+  evidence — and only evidence recorded against the *serving graph* carries serving. An isolated snippet does not:
+  fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not).
+  So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
   matrix. `emmy tune --golden-file` specializes and tunes each binding and precision regime. Capture a **global**
   (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
   Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths
-  weight-free, checks every realization, and reports MATCH / DRIFT / GAP before the serving image is warmed.
+  weight-free, checks every realization, reports MATCH / DRIFT / GAP per twin and precision lane, and ratchets the
+  per-twin consultation counts against `SERVE_CONSULT_BASELINE` — all before the serving image is warmed.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:
@@ -472,7 +474,7 @@ Recorded follow-ups, in impact order:
    the concurrency-32 gap is batching. Step (a) — batch-correct masked tiles + the symbolic-seq batched program — is
    **done** (`EMMY_SERVING_BATCHED`, see the batched-modes section above); remaining is (b) cu_seqlens varlen tiles so
    one launch handles mixed lengths with no padding at all (its own session — the ragged row→sequence mapping in the
-   flash schedule + the mask derivation from `cu_seqlens`).
+   attention schedule + the mask derivation from `cu_seqlens`).
 2. **dlpack zero-copy I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors, bridged to the cupy
    buffers via `cp.from_dlpack` / `torch.from_dlpack` on torch's stream — no GPU↔host round-trip (`upload_prefix_device`
    / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span boundaries.

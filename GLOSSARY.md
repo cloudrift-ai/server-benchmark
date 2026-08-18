@@ -145,11 +145,21 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **CLI (command-line interface)** — The commands and options used from a terminal, such as `emmy compile`.
 - **YAML** — A human-readable configuration format. Emmy recipes are written in YAML.
 - **Recipe** — A version-controlled plan describing what model or command to run, how to deploy it, which hardware
-  and benchmark settings to use, which variants to compare, and how to aggregate results. Commands such as
-  `emmy deploy` and `emmy bench` consume recipes; a recipe does not execute by itself.
+  and benchmark settings to use, and which variants to compare. Commands such as `emmy deploy` and `emmy bench`
+  consume recipes; a recipe does not execute by itself.
+- **Heat score** — A 0-100 model-discovery priority based on current community attention, Hugging Face momentum, and
+  supporting serving evidence. It orders onboarding work; it is not a measured model-quality or performance score.
 - **Variant** — One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
 - **Matrix** — A recipe section that describes several values to test. `cross` creates every combination; `zip`
   pairs values by position.
+- **Experiment row** — One executed variant of an experiment recipe.
+- **Experiment record** — The typed, versioned YAML record for one experiment row. It contains timestamps, status,
+  row identity and matrix parameters, Git revision and dirty flag, execution lifecycle, and generic system
+  information. It never contains interpreted or parsed experiment measurements.
+- **Raw experiment results** — Logs and declared measurement files preserved in an ignored timestamped local run
+  directory. Each exact GPU platform's last run is committed as an LFS-backed
+  `results_<gpu-short>x<gpu-count>.tar.gz`, including its system-only experiment records, not as a second structured
+  result format or top-level record copy.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is
@@ -175,18 +185,23 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   ordinary fork chooses settings within one kernel (tile size, staging, …); these are the forks the prior decides —
   it ranks the options directly whenever no measurement already answers the choice.
 - **Structural fork** — A fork whose alternatives change which kernels exist — for example, keeping operations fused
-  in one kernel versus splitting them apart. The prior is never asked to rank these options. Instead, the compiler
-  compares the total estimated cost of each resulting kernel set; the prior contributes only per-kernel cost
-  estimates inside that comparison. Only a trusted online prior — trained and passing calibration — may supply those
-  estimates; on the offline prior or a quarantined online prior, the default kernel set is kept.
+  in one kernel versus splitting them apart. Ranking these by the prior's per-candidate score would be meaningless,
+  because an alternative that becomes several kernels has no single schedule to score. So the compiler compares the
+  total estimated cost of each resulting kernel set instead; the prior contributes only per-kernel cost estimates
+  inside that comparison, with recorded measurements taking precedence wherever they exist. Any loaded prior may
+  supply the estimates — on a machine with nothing measured that is the offline prior, which therefore owns the
+  quality of those kernel-set choices. When some alternative cannot be costed at all, the comparison decides
+  nothing and all the alternatives go back into the ordinary ranking; none of them is withheld to keep the set of
+  kernels unchanged.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
-  variable (`EMMY_STAGE=d2/cp`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
+  variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
   forced configuration rather than the one the compiler would have chosen on its own.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
-  the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — flash
-  attention schedules two matrix multiplications — the name carries a suffix identifying the step, as in `TILE@dd` and
-  `TILE@pj`. The shortest name that is unambiguous is the one golden files, the tuning database and hand-set pins all
+  the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
+  fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
+  step, as in the statistic's `REDUCE@<axis>` beside the contraction's bare `REDUCE`. The shortest name that is
+  unambiguous is the one golden files, the tuning database and hand-set pins all
   use. (In the code, these names are produced by walking the structure recognized for the kernel, which is why the
   source calls the machinery the tree-path codec.)
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
@@ -206,23 +221,30 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   online prior learns from collected measurements.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
   to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
-  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy's offline-prior
-  trainer is `LinearTrainer`, and the model it produces is a `LinearModel`.
+  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy has two
+  offline-prior trainers, chosen by `emmy fit --trainer`: `LinearTrainer` produces a `LinearModel` (fixed weights
+  over the features), and `CatBoostTrainer` produces a `CatBoostModel` (a ranker built from decision trees).
+- **Blend** — How Emmy's two priors are combined into one answer: which of them decides a compile's schedule, and how
+  the two are weighed against each other when the tuner chooses what to try next. Emmy has several, selected by
+  `EMMY_PRIOR_BLEND`, including single-prior ones used to measure one prior on its own.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
   input knob pins, the selected schedule knobs, and (after verification) paired measurements.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
-- **Canonical golden file** — A reviewed per-GPU YAML under `compiler/pipeline/search/goldens/`. Every realization
-  contains verified deployable measurements; `emmy tune` refuses to mutate these files directly.
+- **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
+  `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
+  refuses to mutate these files directly.
 - **Evidence** — A compatible recorded measurement used to select between schedule candidates.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
-- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the reviewed
-  golden configurations for that GPU first, then measurements recorded on the machine, then the prior's prediction,
-  and last the rule's own first option. Each step in that order is called a tier.
+- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the
+  verified golden configurations for that GPU first (joined by exact structural identity and decoded by exact row
+  equality), then measurements recorded on the machine, then the prior's prediction, and last the rule's own first
+  option. Each step in that order is called a tier.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Quarantine** — The state in which an online model may continue learning but is not trusted to choose deployed

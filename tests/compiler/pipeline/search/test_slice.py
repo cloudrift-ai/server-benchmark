@@ -99,44 +99,6 @@ def test_sliced_kernel_lowers_to_same_cuda_keys() -> None:
     assert sorted(slice_keys) == full_keys
 
 
-def test_flash_slice_absorbs_score_producer() -> None:
-    """Fold-aware slicing: a flash fold offer site's slice CARRIES the score producer its fusion
-    consumes (``fused_producer_ids`` → ``absorb``) as a REAL ``LoopOp`` — a synthetic-input
-    boundary would make ``try_flash`` unfusable in-slice, degrading every tune trajectory to the
-    cut. The absorbed slice re-fuses: lowering it yields ONE fused flash kernel."""
-    import torch  # noqa: PLC0415
-
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
-    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
-
-    class _Sdpa(torch.nn.Module):
-        def forward(self, q, k, v):
-            return torch.nn.functional.scaled_dot_product_attention(q, k, v)
-
-    # Keep the outer graph on the two-LoopOp boundary this slice test exercises. The smaller
-    # (16, 8) cell now merges completely under gate-free fusion and is covered by recognizer
-    # tests; head_dim=32 crosses the aggregate-work cap while remaining a tiny CPU-only fixture.
-    q, k, v = (torch.randn(1, 2, 64, 32) for _ in range(3))
-    graph = trace_module(_Sdpa().cpu(), (q, k, v))
-    fused = Pipeline.build(LOOP_PASSES).run(graph, db=SearchDB())
-    loops = [(nid, n) for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp)]
-    assert len(loops) == 2, f"outer terminal should hold score + softmax-P@V LoopOps, got {len(loops)}"
-
-    absorbed = {pid: nid for nid, node in loops for pid in fused_producer_ids(fused, node)}
-    assert len(absorbed) == 1, f"exactly one score producer should be absorbed, got {absorbed}"
-    (producer, consumer) = next(iter(absorbed.items()))
-
-    sub = single_node_graph(fused, consumer, absorb=frozenset({producer}))
-    assert isinstance(sub.nodes[producer].op, LoopOp), "the absorbed producer must stay a real LoopOp"
-    lowered = Pipeline.build(LOWERING_PASSES).run(sub, db=SearchDB())
-    cuda = [n for n in lowered.nodes.values() if isinstance(n.op, CudaOp)]
-    assert len(cuda) == 1, f"the absorbed slice must re-fuse to one flash kernel, got {len(cuda)}"
-
-    # Without absorb the producer is a synthetic input and the fusion cannot fire — two kernels.
-    plain = single_node_graph(fused, consumer)
-    assert isinstance(plain.nodes[producer].op, InputOp), "un-absorbed producer is a synthetic input"
-
-
 def test_slice_makes_surviving_cast_a_synthetic_boundary() -> None:
     """Compact storage algebra can leave a value ``CastOp`` between two LoopOps.
 
@@ -157,7 +119,7 @@ def test_slice_makes_surviving_cast_a_synthetic_boundary() -> None:
     assert len(loops) == 2
     producer = next(nid for nid in loops if "centered" in fused.nodes[nid].buffer_names())
     consumer = next(nid for nid in loops if nid != producer)
-    sub = single_node_graph(fused, consumer, absorb=frozenset({producer}))
+    sub = single_node_graph(fused, consumer)
     sub.validate()
     assert producer not in sub.nodes
     assert isinstance(sub.nodes["values"].op, InputOp)

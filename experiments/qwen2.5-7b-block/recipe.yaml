@@ -7,7 +7,6 @@ command:
     - Makefile
   run: |
     export PATH=/usr/local/cuda/bin:$$PATH
-    export EMMY_GIT_REV="$git_rev"
     cd $repo_dir
     [ -d venv ] || make setup
     ./venv/bin/python -c "import torch, cupy" 2>/dev/null || ./venv/bin/pip install -e ".[compile]"
@@ -28,7 +27,6 @@ matrices:
     deploy.gpu_count: 1
     deploy.gpu:
       - "NVIDIA GeForce RTX 5090"
-    git_rev: "feature/transformer-compiler@local"
     hf_model: "Qwen/Qwen2.5-7B"
     dtype:
       - fp32        # Emmy currently generates FP32 only

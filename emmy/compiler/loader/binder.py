@@ -57,7 +57,7 @@ def apply_load_ops(source: np.ndarray, load_ops: tuple, dtype: str | None = None
 def assemble_source(op, sources: dict[str, np.ndarray]) -> np.ndarray | None:
     """Assemble a constant's raw pre-chain source array from ``sources``: the single
     ``source_path`` lookup, or the axis-0 concat of its ``source_parts`` (the
-    ``merge_sibling_linears`` weight concat). ``None`` when any source is missing.
+    a multi-source weight concat). ``None`` when any source is missing.
     Duck-typed over ``ConstantOp`` and ``backend.plan.WeightSpec`` alike.
     A plan ``WeightSpec.generated`` carries a deterministic source-free bind record already
     evaluated to ``(dtype, shape, bytes)``; reconstruct it without an external lookup.

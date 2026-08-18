@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: Qwen/Qwen3.8-27B
+  rationale: Breakout Qwen3.8 dense 27B with 10k likes beats Qwen3.6-27B on every benchmark; confirmed vLLM+SGLang.
+  heat: 92
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

@@ -126,18 +126,20 @@ def test_packed_b_resolves_the_cp_async_byte_slab(atom, a_dtype):
     exactly, so both resolve."""
     node, inputs, axes = _node(a_dtype=a_dtype)
     tile = _tile(atom, "f2x2/k2", "w1x4", axes)
-    for spec in ("d1/cp", "d2/cp", "d2/cp/p2"):
+    for spec in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2"):
         st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
         assert st is not None, spec
-        assert st.bk_elems == tile.bk * 16 and st.transport == "cp.async"
+        assert st.bk_elems == tile.bk * 16 and st.transport == "smem-async"
 
 
-def test_packed_b_declines_sync_and_the_transport_split():
-    """The compute fill has nothing to copy under, and ``split`` cuts a fold's edges into one
-    transport group each — a contraction consumes both in one multiply, so there is nothing to cut."""
+def test_packed_b_declines_the_compute_fill():
+    """The compute fill has nothing to copy under, so the byte slab declines it and the cone takes
+    the generic reading instead. (The transport ``split`` case that used to sit here went away with
+    ``Stage.split``, which existed only for the warp-flash stream.)"""
+
     node, inputs, axes = _node()
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    for spec in ("d1/sync", "d1/cp/split", "d1/tma/split"):
+    for spec in ("d1/smem",):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None, spec
 
 
@@ -149,12 +151,12 @@ def test_packed_b_resolves_tma_with_dense_byte_rows():
     bk_elems = tile.bk * 16
     dense = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2)
     scale = tile.n.tile * (bk_elems // 16) * 2
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/tma"), 100 * 1024, inputs)
-    assert st is not None and st.transport == "tma" and st.bk_elems == bk_elems
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/tma"), scale + 2 * dense, inputs).depth == 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/tma"), scale + 2 * dense - 1, inputs).depth == 1
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 100 * 1024, inputs)
+    assert st is not None and st.transport == "smem-tma" and st.bk_elems == bk_elems
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense, inputs).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense - 1, inputs).depth == 1
     # The cp.async sibling needs strictly more for the same depth — that is exactly the pad.
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), scale + 2 * dense, inputs).depth == 1
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * dense, inputs).depth == 1
 
 
 def test_packed_b_declines_tma_beyond_the_box_limit():
@@ -162,7 +164,7 @@ def test_packed_b_declines_tma_beyond_the_box_limit():
     node, inputs, axes = _node()
     wide = _tile(K16, "f2x8/k2", "w1x8", axes)  # tile_n = 8*8*8 = 512
     assert wide.n.tile > 256
-    assert resolve_warp_stage(node, wide, Stage.parse("d2/tma"), 400 * 1024, inputs) is None
+    assert resolve_warp_stage(node, wide, Stage.parse("d2/smem-tma"), 400 * 1024, inputs) is None
 
 
 def test_packed_b_budget_carries_the_row_pad_and_the_scale_slab():
@@ -173,19 +175,19 @@ def test_packed_b_budget_carries_the_row_pad_and_the_scale_slab():
     bk_elems = tile.bk * 16
     slot = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
     scale = tile.n.tile * (bk_elems // 16) * 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), scale + 2 * slot, inputs).depth == 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), scale + 2 * slot - 1, inputs).depth == 1
-    assert resolve_warp_stage(node, tile, Stage.parse("d1/cp"), scale + slot - 1, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot, inputs).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot - 1, inputs).depth == 1
+    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), scale + slot - 1, inputs) is None
     # Sizing the slot without the pad, or forgetting the scale slab, would each admit this budget.
     dense = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2)
-    assert resolve_warp_stage(node, tile, Stage.parse("d1/cp"), dense, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), dense, inputs) is None
 
 
 def test_packed_b_declines_a_k_strided_layout():
     """The drain reads N-major rows. A packed weight stored K-major has no fragment loader here."""
     node, inputs, axes = _node(k_last=False)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_a_block_the_drain_does_not_read():
@@ -193,34 +195,34 @@ def test_packed_b_declines_a_block_the_drain_does_not_read():
     node, inputs, axes = _node(block=32)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     assert match_packed_b_node(node, inputs).block == 32
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_a_non_16_bit_atom():
     """The value table and the scale multiply are 16-bit floats. The fp8 atoms are neither."""
     node, inputs, axes = _node()
-    assert resolve_warp_stage(node, _tile(K32, "f2x2/k2", "w1x4", axes), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K32, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_when_a_and_the_atom_disagree():
     """A is byte-copied into the atom's own slab; a bf16 A under an f16 atom would deposit the
     wrong bits, and the two dtypes are the same width so nothing else catches it."""
     node, inputs, axes = _node(a_dtype=BF16)
-    assert resolve_warp_stage(node, _tile(K16, "f2x2/k2", "w1x4", axes), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_a_mismatched_a():
     """A is byte-copied into the atom's own slab, so it must already carry the atom's dtype."""
     node, inputs, axes = _node(a_dtype=F32)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 def test_packed_b_declines_a_byte_row_under_sixteen():
     """A byte row of ``bk_elems / 2`` must stay 16-divisible: the fill copies 16 B chunks and a
     chunk never straddles a row. ``k1`` leaves 8 bytes."""
     node, inputs, axes = _node()
-    assert resolve_warp_stage(node, _tile(K16, "f2x2/k1", "w1x4", axes), Stage.parse("d2/cp"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f2x2/k1", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 # ===================================================================
@@ -248,7 +250,15 @@ def _rows(node, inputs, axes, pins=None):
     term = _schedule._Term(op, op.place.on_grid(), Context.from_target((8, 9)))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     with pinned_knobs(pins or {}):
-        return [st.spell() for st in _schedule._computed_values(term, node, tile)]
+        return [st.spell() for st in _schedule._fill_values(term, node, tile)]
+
+
+def _transport(row: str) -> str:
+    """The transport of a spelled row (``d2/smem-async/p2`` -> ``smem-async``).
+
+    Compared exactly, never by substring: ``smem`` is a prefix of ``smem-async``, so ``in`` would
+    call every byte-slab row a compute fill."""
+    return row.split("/")[1]
 
 
 def test_the_offer_puts_the_byte_slab_beside_the_compute_fill():
@@ -256,29 +266,32 @@ def test_the_offer_puts_the_byte_slab_beside_the_compute_fill():
     which every computed cone has), then the byte-slab transports."""
     node, inputs, axes = _node()
     rows = _rows(node, inputs, axes)
-    assert any("sync" in r for r in rows), rows
-    assert any("cp" in r for r in rows), rows
-    assert "sync" in rows[0], rows
+    assert any(_transport(r) == "smem" for r in rows), rows
+    assert any(_transport(r).startswith("smem-") for r in rows), rows
+    assert _transport(rows[0]) == "smem", rows
 
 
 def test_the_offer_adds_no_compute_fill_depth_the_fill_did_not_ask_for():
-    """A cp move the byte slab declines falls through to the compute fill at that move's depth, so
-    a packed node was picking up d3 and d4 fills nobody offers. The fill names its own depths."""
+    """A copy move the byte slab declines falls through to the compute fill at that move's depth, so
+    a packed node was picking up d3 and d4 fills nobody offers. The fill names its own depths.
+
+    The byte-slab rows themselves carry whatever depths fit the budget — enumerating those is the
+    schedule's job, and evidence picks between them."""
     node, inputs, axes = _node()
-    fills = {r for r in _rows(node, inputs, axes) if "sync" in r}
+    fills = {r for r in _rows(node, inputs, axes) if _transport(r) == "smem"}
     assert fills and all(r.startswith(("d1", "d2")) for r in fills), sorted(fills)
 
 
 def test_a_generic_cone_offers_only_the_compute_fill():
     """A cone the byte slab declines is unchanged: its rows are the compute-fill depths alone."""
     node, inputs, axes = _node(block=32)
-    assert all("cp" not in r for r in _rows(node, inputs, axes))
+    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes))
 
 
 def test_a_cp_pin_names_the_byte_slab_and_a_sync_pin_the_compute_fill():
     node, inputs, axes = _node()
-    assert _rows(node, inputs, axes, {"STAGE": "d2/cp"}) == ["d2/cp"]
-    assert all("cp" not in r for r in _rows(node, inputs, axes, {"STAGE": "d2/sync"}))
+    assert _rows(node, inputs, axes, {"STAGE": "d2/smem-async"}) == ["d2/smem-async"]
+    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes, {"STAGE": "d2/smem"}))
 
 
 # ===================================================================
@@ -327,7 +340,7 @@ def _nvfp4_matmul_graph(tmp_path, *, m, n, k, dtype="f16"):
     return g, (packed, scale_bits, s2)
 
 
-def _packed_pins(dtype="f16", stage="d2/cp"):
+def _packed_pins(dtype="f16", stage="d2/smem-async"):
     atom = K16 if dtype == "f16" else K16_BF16
     return {"TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": stage}
 
@@ -376,7 +389,7 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
     assert "0x3F80" in src
 
 
-@pytest.mark.parametrize(("stage", "packed"), [("d2/cp", True), ("d1/sync", False)])
+@pytest.mark.parametrize(("stage", "packed"), [("d2/smem-async", True), ("d1/smem", False)])
 def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, packed):
     """What tells the priors these two rows are not one kernel with a different transport: on the
     byte slab the weight reaches the slab 4 bits per element, on the compute fill 16. The packed
@@ -399,11 +412,11 @@ def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, pac
 @pytest.mark.parametrize(
     ("dtype", "m", "n", "k", "tol", "stage"),
     [
-        ("f16", 32, 128, 128, 1e-3, "d2/cp"),
-        ("f16", 4, 2048, 2048, 1e-3, "d2/cp"),
-        ("bf16", 32, 128, 128, 6e-3, "d2/cp"),
-        ("f16", 32, 128, 128, 1e-3, "d2/tma"),
-        ("bf16", 32, 128, 128, 6e-3, "d2/tma"),
+        ("f16", 32, 128, 128, 1e-3, "d2/smem-async"),
+        ("f16", 4, 2048, 2048, 1e-3, "d2/smem-async"),
+        ("bf16", 32, 128, 128, 6e-3, "d2/smem-async"),
+        ("f16", 32, 128, 128, 1e-3, "d2/smem-tma"),
+        ("bf16", 32, 128, 128, 6e-3, "d2/smem-tma"),
     ],
 )
 @pytest.mark.xdist_group("cuda")

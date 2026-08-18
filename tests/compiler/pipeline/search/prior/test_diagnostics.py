@@ -255,8 +255,8 @@ def test_sibling_regret_family_falls_back_without_parent_row():
     from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
 
     nodes = [
-        NodeRow("s1", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d2/cp"}, 1.0, 5),
-        NodeRow("s2", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d3/tma"}, 2.0, 5),
+        NodeRow("s1", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d2/smem-async"}, 1.0, 5),
+        NodeRow("s2", "GONE", "ctx", "mm", {"REDUCE@d": "coop", "WORK": "t64", "STAGE@d": "d3/smem-tma"}, 2.0, 5),
     ]
     recs = diagnostics.sibling_regret(_BMPrior(), nodes)
     assert len(recs) == 1
@@ -632,7 +632,7 @@ def test_anchor_prefix_matching_is_registry_canonical():
     golden TILE matches its canonically-stamped axis-keyed realization; a different
     geometry does not; a family the golden doesn't record is no constraint."""
     gold = {"TILE": "mma_m16n8k16_f16/f4x4/k2"}
-    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "mma_m16n8k16_f16_f32/f4x4/k2", "STAGE@a2": "d2/cp"}
+    stamped = {"S_ext_free_prod": 1.0, "TILE@a2": "mma_m16n8k16_f16_f32/f4x4/k2", "STAGE@a2": "d2/smem-async"}
     assert diagnostics._golden_prefix_consistent(stamped, gold)
     assert not diagnostics._golden_prefix_consistent({**stamped, "TILE@a2": "mma_m16n8k16_f16_f32/f1x1"}, gold)
 

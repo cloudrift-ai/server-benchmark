@@ -52,8 +52,8 @@ class _BenchConsoleFormatter(logging.Formatter):
 def setup_logging():
     """Setup logging with console output only.
 
-    Call add_file_handler() after the run directory is created to attach
-    a file handler that writes directly into the run directory.
+    Call add_file_handler() after the results directory is created to attach
+    a file handler that writes directly into that directory.
     """
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)

@@ -283,10 +283,12 @@ def test_attention_combine_accuracy(variant, monkeypatch):
     if variant == "serial":
         assert "__shfl_xor_sync" not in src, "attention/serial: unexpected cooperative combine"
     else:
-        # The flash carrier folds 3 state components (m, l, O) through the SAME butterfly.
+        # The multi-component twisted carrier folds EVERY state component through the SAME
+        # butterfly — the online-softmax carrier is (m, d), so at least two distinct
+        # components ride the shuffle.
         assert "__shfl_xor_sync" in src, "attention/coop_warp: expected the cooperative-KV warp butterfly"
-        assert all(f"__shfl_xor_sync(__activemask(), {c}" in src for c in ("m_i", "l_i", "O_i")), (
-            "attention/coop_warp: the flash combine must shuffle all 3 carrier components"
+        assert src.count("__shfl_xor_sync(__activemask(),") >= 2, (
+            "attention/coop_warp: the twisted combine must shuffle every carrier component"
         )
 
 
@@ -327,7 +329,12 @@ def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatc
         assert n_global == 1, f"atomic finalize is one kernel, got {n_global}"
     else:
         assert "atomicAdd" not in src, "the deferred kernel finalize must not emit atomicAdd"
-        assert n_global == 2, f"deferred finalize splices a second combine kernel, got {n_global}"
+        # The finalize adds exactly ONE combine kernel over a simple carrier's one-kernel
+        # lowering. SDPA lowers through the generic readable-seam split (Q·K^T | softmax pieces |
+        # P·V + cut glue) — its kernel count is the fusion pass's business, so only the split
+        # workspace contract is asserted there.
+        if carrier != "flash":
+            assert n_global == 2, f"deferred finalize splices one combine kernel over 1, got {n_global}"
         assert "__partial" in src, "the producer writes its partial state to a workspace"
 
 
@@ -502,6 +509,69 @@ def test_2d_segmented_coop_reduce_accuracy(monkeypatch):
     be = CudaBackend()
     out = be.run(be.compile(g), input_data={"x": x})[0].outputs["o"]
     np.testing.assert_allclose(out, x.sum(-1, keepdims=True), rtol=1e-4, atol=1e-4)
+
+
+# --------------------------------------------------------------------------- #
+# Transposed cooperative band (``coop-t``) — the k-major matvec sweep and its overhang.
+# --------------------------------------------------------------------------- #
+
+_COOPT_K = 256  # the contraction extent; kept apart from the swept extents below
+
+
+def _matvec_code(n_out: int) -> str:
+    """A k-major matvec (``F.linear`` — weights ``(N, K)``): the shape the transposed band sweeps."""
+    return f"torch.nn.functional.linear(torch.randn(1, {_COOPT_K}), torch.randn({n_out}, {_COOPT_K}))"
+
+
+@requires_cuda
+@pytest.mark.parametrize("n_out", [512, 500, 33])
+def test_transposed_coop_band_masks_an_overhanging_sweep(n_out, monkeypatch):
+    """The ``coop-t`` band's 32 lanes sweep the output axis over a ``ceil(N/32)`` grid, so a swept
+    extent 32 does not tile leaves the last block's upper lanes OVERHANGING. They clamp-read the
+    last valid column (a duplicate sweep, in-bounds) and their store is guarded off — the same
+    masked-overhang contract the tiled contraction states, and what makes the band reachable on a
+    non-32-divisible output at all. A tiling extent emits no guard (byte-identical to before)."""
+    import re  # noqa: PLC0415
+
+    got, xs, src = _compile_run(_matvec_code(n_out), {"EMMY_WORK": "t128", "EMMY_REDUCE": "coop-t"}, monkeypatch)
+    x = next(a for a in xs if a.shape == (1, _COOPT_K))
+    w = next(a for a in xs if a.shape == (n_out, _COOPT_K))
+    want = x @ w.T
+    diff = float(np.abs(got.reshape(want.shape) - want).max())
+    assert diff < 1e-3, f"N={n_out}: transposed coop band mismatch (max abs err {diff})"
+    guarded = re.search(r"\* 32 \+ \w+_ln < ", src) is not None
+    assert guarded is (n_out % 32 != 0), f"N={n_out}: overhang guard should be {n_out % 32 != 0}"
+
+
+@requires_cuda
+@pytest.mark.parametrize("rows", [64, 70, 33])
+def test_transposed_coop_band_sweeps_a_symbolic_axis(rows, monkeypatch):
+    """The swept axis may be SYMBOLIC too — ONE kernel run at sizes on and off the 32-lane block.
+    The guard bounds against the runtime extent, so the overhanging lanes' stores are discarded
+    whatever the size; the band used to need a static extent for want of that guard."""
+    got, xs, src = _compile_run(
+        "torch.randn(64, 256).sum(dim=1)", {"EMMY_WORK": "t128", "EMMY_REDUCE": "coop-t"}, monkeypatch, dynamic="rows@x:0", seq=rows
+    )
+    want = xs[0].sum(axis=1)
+    diff = float(np.abs(got.reshape(-1)[:rows] - want).max())
+    assert diff < 1e-3, f"rows={rows}: symbolic transposed sweep mismatch (max abs err {diff})"
+    assert "_ln < " in src, "a symbolic swept extent always overhangs, so the guard must be emitted"
+
+
+@pytest.mark.parametrize("n_out", [512, 500])
+def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeypatch):
+    """The band's rows (bare and the ``g<n>k/`` split composites) are OFFERED at a swept extent 32
+    does not divide — no GPU, enumeration only. The 32-divisibility rule used to drop every one of
+    them, so no golden could record the band on such a shape."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
+        monkeypatch.delenv(var, raising=False)
+    rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0)))
+    offered = {str(v) for r in rows for k, v in r.items() if k.startswith("REDUCE")}
+    assert any(s.endswith("coop-t") for s in offered), offered
 
 
 @requires_cuda

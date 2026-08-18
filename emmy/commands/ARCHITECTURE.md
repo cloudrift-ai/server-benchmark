@@ -10,6 +10,7 @@ commands/deploy ─► deploy (DeployParams, deploy/teardown)
 commands/deploy ─► provisioning (remote setup, cloud VMs)
 commands/vm ────► provisioning (create/delete instances)
 commands/recipe ─► recipe (catalog queries and onboarding shell creation)
+recipe/query ───► provisioning (read-only CloudRift availability and team access)
 commands/publish ─► publish (image naming, metadata, collision and digest gates)
 ```
 
@@ -22,8 +23,9 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   runner
 - `emmy/serving/release.py` — shell-free pinned serving-config parsing and the exact realization matrix shared by
   trace and eval
-- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), plus `ensure_plugin_logging()` — makes emmy
-  INFO logs visible when nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
+- `emmy/logging_setup.py` — CLI logging setup (`setup_cli_logging()`), which suppresses routine HTTP request INFO
+  records so versioned JSON remains parseable, plus `ensure_plugin_logging()` — makes emmy INFO logs visible when
+  nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
   (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
   …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence
@@ -32,7 +34,7 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   with `redact.py`; the dynamic `EMMY_<KNOB>` namespace stays with `compiler/pipeline/knob.py`, which borrows
   `config.knob_var` / `config.knob_raw`.)
 - `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
-- `emmy/benchmark/` — config, logging, workload, tasks, execution, structured JSON results
+- `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
 ## Layers
 
@@ -77,22 +79,21 @@ providers.
 
 Benchmark configuration (`load_config()` / `validate_config()`), per-run logging, task enumeration
 (`enumerate_tasks()`), execution (`run_execution_group()` — times provisioning per group + deploy/bench/teardown per
-task; task results are `(task, ok, timing)` triples), and structured results (`BenchmarkMetrics` / `SystemInfo`
-dataclasses, `parse_benchmark_metrics()`, `compose_json_result()` / `compose_result()` — both take an optional `timing`
-arg feeding the `"timing"` JSON key / `=== Timing ===` text section).
+task; task results are `(task, ok, timing)` triples), and the sole structured output (`experiment_record` — the typed
+experiment-record schema, lifecycle transitions, and atomic YAML serialization). Top-level `system_info` owns the
+shared typed host-information probe used by experiment records and fixed-host GPU detection.
 
-The benchmark library is an experiment-agnostic runner: it records complete client output, server logs, timing,
-system information, and partial observations after failure. It treats execution and evidence-collection failures as
-authoritative, but does not judge model output, metrics, backend selection, or scientific claims. A recipe may use a
-small self-contained post-processing command, but cannot delegate result interpretation or report generation to a
-script. Command recipes may opt into the single `command.strict` integrity contract for clean/content-addressed staged
-inputs, required declared artifacts, and source/GPU/CUDA provenance. The complete boundary lives in
+The benchmark library is an experiment-agnostic runner: it retains complete client output, server logs, timing,
+generic system information, and partial raw results after failure. It treats execution and result-collection
+failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
+backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
+may opt into the single `command.strict` integrity contract for a clean Git worktree, required declared results, and
+Git/GPU/NVCC/cuBLAS provenance. The complete boundary lives in
 `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
-`--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` (nothing is generated); the
-output's labels (request/token throughput, E2EL percentiles — no TTFT/TPOT/ITL) already parse via
-`parse_benchmark_metrics`' missing-field-tolerant label regexes.
+`--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` because nothing is generated.
+The client output remains an uninterpreted raw artifact.
 
 ### `planner/` — Planner Layer
 
@@ -125,8 +126,9 @@ keeps the existing Transformers path. `dit` delegates to the Diffusers block ada
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
 and Emmy always rebuild the same module and example inputs. Inductor compiles with
-`fullgraph=True, mode="max-autotune"`; its output must match eager on the same inputs at `rtol=atol=1e-3` before its
-latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+`fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
+has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
+before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
 Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
@@ -180,7 +182,8 @@ flags and never writes the trusted
 event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
-rejects any `--golden-file` inside the canonical repository `search/goldens/` tree, including symlink aliases.
+rejects any `--golden-file` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
+`search/goldens/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
@@ -214,8 +217,23 @@ and YAML, proves that every structural target has every config-derived realizati
 and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
 a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
-**Command modules:** `commands/bench/` (with `GitCommitter` for incremental result commits),
-`commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU via SSH, `deploy local` the local GPU
+Both audits read the verified tier through `compiler/pipeline/search/audit.py`, one verdict per consultation. The
+**offer audit** compiles each record's OWN persisted program and reports the entries no enumerated leaf equals
+(`UNREALIZED`, tolerable only while an offered sibling still floors the target) and the targets where none does
+(`FALL-THROUGH` — the deploy would fall past the tier entirely). The **serving-matrix audit** then compiles each
+precision lane's serving twins with only that lane's records as evidence: `DRIFT` means the identity still matches but
+the recording no longer equals any offered row, and `GAP` means no record carries a fork's identity at all.
+
+When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's verified-tier
+consultation count (per precision lane) against that checked-in baseline. This catches the regression the verdicts
+cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no consultation, so its
+recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
+the gate naming the twin; counts above baseline only log that the baseline is stale. `--update-consult-baseline`
+re-records the file from a passing audit (run it once to seed the baseline, and again whenever an intentional
+compiler change shifts the counts).
+
+**Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
+via SSH, `deploy local` the local GPU
 via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for
 matrix resolution), `commands/teardown.py`, and `commands/vm/` (a CLI handler per provider). Each exposes a `handle_*`
 and a `register_*` function.
@@ -229,10 +247,9 @@ Recipe dirs (positional args)
 enumerate_tasks() -> list[BenchmarkTask]
     |
     v
-Create per-recipe run directories:
-    +-- for each recipe_dir: create_run_dir(recipe_dir)
-    +-- assign task.run_dir per task
-    +-- write tasks.json per run_dir
+Prepare per-recipe run directories:
+    +-- create <recipe_dir>/<YYYY-MM-DD_HH-MM-SS> for a real run (dry runs only report it)
+    +-- initialize one atomic YAML experiment record per task
     |
     v
 GroupByModelAndGpuPlanner.plan() -> list[ExecutionGroup]
@@ -248,12 +265,11 @@ For each task in group:
     +-- set gpu_device_ids if task.gpu_count < group.gpu_count
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
-    +-- capture raw server log and save raw or partial results
-    +-- on_task_done callback (--commit-results: git add + commit + push)
+    +-- capture raw client/server logs and update the experiment record
     +-- teardown() (skipped with --no-teardown)
     |
     v
-delete_cloud_vm(conn.delete_info) (skipped with --no-teardown; writes instances.json)
+delete_cloud_vm(conn.delete_info) (skipped with --no-teardown; the active handle stays in each affected record)
 ```
 
 ## Timing metrics
@@ -273,16 +289,16 @@ time) / `engine_warmup` (profile + KV cache + warmup, derived from vLLM's `init 
 `cuda_graph_capture`. When the engine-init line isn't present (older vLLM / SGLang) the unattributed time collapses into
 a single `other` remainder. All of these are a breakdown of `model_load_and_warmup`, so they are **excluded from
 `total`** (which would otherwise double-count). Near-zero phases
-(`container_cleanup`, health poll, `system_info`) are intentionally not timed, so the phases don't fully sum to raw
-wall-clock.
+(`container_cleanup`, health poll, system-information retrieval) are intentionally not timed, so the phases don't
+fully sum to raw wall-clock.
 
 **Attribution:** provisioning runs once per `ExecutionGroup` (shared VM) but is seeded into each task's timer, so every
-task's result reflects what it cost to stand up its host. `vm_provision` is omitted for fixed/local hosts (no VM
-created). `timing["benchmark"]` is wall-clock (incl. the docker bench-client startup), distinct from
-`metrics.benchmark_duration_s` (the server-measured window).
+task's record reflects what it cost to stand up its host. `vm_provision` is omitted for fixed/local hosts (no VM
+created). `timing["benchmark"]` is the wall-clock client phase, including docker bench-client startup. Workload timing
+values stay only in raw experiment artifacts.
 
-**Output:** `bench` persists timing into each task's `.json` (`"timing"` key) and `.txt` (`=== Timing ===` section) and
-prints a per-task `TIMING` table in the end-of-run summary (`commands/bench/__init__.py::_format_timing_table`).
+**Output:** `bench` persists timing under `execution.timing_seconds` in each experiment record and prints a per-task
+`TIMING` table in the end-of-run summary (`commands/bench/__init__.py::_format_timing_table`).
 Standalone `deploy local/ssh/cloud` are display-only (no results dir) — they log the `PhaseTimer.format_table()`
 breakdown at the end.
 
@@ -290,8 +306,8 @@ breakdown at the end.
 
 When the user supplies pre-allocated hosts via `--local` and/or `--ssh user@host[:port]`,
 `bench` skips cloud provisioning entirely. `benchmark/fixed_hosts.py` resolves each host
-into an `AllocatedHost(conn, gpu_name, gpu_count)` (GPU detected via PCI sysfs through the
-existing `detect_local_gpus()` / `detect_remote_gpus()` helpers), then validates that every
+into an `AllocatedHost(conn, gpu_name, gpu_count)` (GPU detected through `detect_local_gpus()` /
+`detect_remote_gpus()` using the shared `system_info` PCI probe), then validates that every
 planned `ExecutionGroup` can run on at least one supplied host. The dispatcher
 `_run_groups_on_hosts()` routes each group to a compatible idle host (locking per-host so
 each runs at most one group at a time) and calls `run_execution_group(...,
@@ -314,6 +330,7 @@ emmy
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
+|   +-- query     -- filter and order normalized recipe or deployment rows
 |   +-- create    -- create a validated onboarding shell
 +-- vm
     +-- create
@@ -331,20 +348,33 @@ emmy
 with nothing installed).
 
 Everywhere a recipe directory is accepted — `deploy local` / `ssh` / `cloud` via `--recipe`, and `bench`'s
-positional arguments — a bare name with no path component instead selects one of the recipes bundled in the
-installed package, copying it into the current directory first. An existing path always wins over a bundled name.
+positional arguments — a bare name with no path component instead selects one of the recipes from the automatically
+detected editable checkout or installed bundle, copying it into the current directory first. An existing path wins.
 See [`emmy/recipe/ARCHITECTURE.md`](../recipe/ARCHITECTURE.md) for why the copy is mandatory.
 
 ### `emmy recipe`
 
 `recipe list` renders compact metadata without loading complete serving configurations into an automation prompt.
-Repeat `--tag` to require several tags; `--json` makes the result suitable for lifecycle counts and agent input.
+It detects the installation: editable checkouts use their live top-level `recipes/`, while wheels use their packaged
+runnable set.
+`--json` emits the versioned catalog object documented in the recipe architecture; each record includes the current
+heat score, matrix-expanded GPU/count/context metadata, and whether the recipe is runnable. Machine consumers reject
+unknown versions.
+`recipe query` applies repeatable constrained predicates and stable sort keys to normalized catalog rows. A
+`deployment.*` field expands recipes into deployment rows. CloudRift availability, Robots-team access, and committed
+results history are lazy computed fields, so ordinary catalog-only queries perform no provider or Git work.
+`--candidate MODEL GPU COUNT` supplies one exact external deployment; a matching recipe contributes its lifecycle
+metadata, while an absent model becomes onboarding work. `--root` exists on this automation-oriented interface so
+callers can run control code from one checkout against recipe data in another; without it, query and list use the same
+installation-aware catalog.
 `recipe create` writes a minimal disabled `onboarding`/`untested` shell, validates every GPU against the hardware
 table, accepts one to three native `deploy.gpu`/`deploy.gpu_count` setups, and never overwrites an existing model or
-directory.
+directory. A manually created shell starts with `model.heat: 0` until discovery refreshes it.
 
 ```bash
-emmy recipe list [ROOT] [--tag TAG]... [--json]
+emmy recipe list [--json]
+emmy recipe query [--filter EXPRESSION]... [--sort EXPRESSION]... [--limit N] \
+  [--candidate MODEL GPU COUNT] [--root ROOT] [--json]
 emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale TEXT \
   --deployment GPU COUNT [--deployment GPU COUNT]...
 ```
@@ -389,8 +419,11 @@ handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-l
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
 vLLM *and* reaches the emmy runner** — the plugin composes `<repo>@<revision>` and every checkpoint read inside emmy
 resolves that commit (see `serving/ARCHITECTURE.md`); without it a repo publishing several branches warns loudly and
-takes its default. `emmy pull` and `emmy compile` / `emmy run` accept the same `<repo>@<revision>` spelling directly,
-so a served rung can be reproduced off the CLI. Generative serving
+takes its default. `MODEL` itself also accepts the `<repo>@<revision>` spelling `emmy pull` / `compile` / `run` use:
+the handler splits it into the bare id plus `--revision` before building either command, because vLLM takes the two
+apart and, left joined, the id resolves nowhere — every local config probe then returns `None` and the checkpoint
+special cases those feed (the coded-checkpoint unquantized override, the MoE capture-size cap) silently no-op. An
+explicit `--revision` wins. So a served rung can be reproduced off the CLI. Generative serving
 defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
 laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
@@ -445,12 +478,14 @@ emmy bench recipes/*                                    # All recipes
 emmy bench experiments/.../optimal_mcr_rtx5090          # An experiment
 emmy bench recipes/* --filter "deploy.gpu=*5090*"       # Subset (fnmatch glob, AND across multiple --filter)
 emmy bench recipes/* --gpu-concurrency 4                # Split each (model, GPU) group across up to N VMs
-emmy bench recipes/* --no-teardown                      # Skip teardown; writes instances.json for later cleanup
+emmy bench recipes/* --no-teardown                      # Retain the VM handle in experiment records for later cleanup
 emmy bench recipes/* --local                            # Run on this machine via ssh to 127.0.0.1
 emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host pool (no provisioning, no teardown)
 ```
 
-Results are stored in `{recipe_dir}/{timestamp}_{hash}/` — each recipe directory holds its own run directories alongside `recipe.yaml`.
+Each actual run creates `{recipe_dir}/<YYYY-MM-DD_HH-MM-SS>/`. Every expanded row writes one `*.experiment.yaml` plus
+raw logs or declared command results; dry runs do not create a directory. The runner emits no JSON/TXT wrapper or
+report.
 
 ### `emmy publish`
 
@@ -480,10 +515,11 @@ emmy publish recipes/MyModel --source-image local/my-model:baked --yes
 
 ### `emmy teardown`
 
-Cleans up VMs left running by `bench --no-teardown`. Reads `instances.json` from the run directory.
+Cleans up VMs left running by `bench --no-teardown`. It finds active infrastructure handles in the experiment records,
+deduplicates shared VMs, and atomically updates their state after deletion.
 
 ```bash
-emmy teardown <run_dir> [--ssh-key ~/.ssh/id_ed25519]
+emmy teardown <experiment_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
 ### `emmy vm create / delete / audit`
@@ -568,20 +604,39 @@ GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY
 ### `emmy fit`
 
 Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
-{linear,catboost}` × `--data {golden,freeze:<path>}` — of which only `linear` × `golden` (the incumbent trainer on the
-golden dataset) exists today; other combinations exit with "not yet supported". `--samples N` (default 0:
-coordinate-descent-from-seed, the incumbent practice), `--l2 λ` (the raw-space L2 penalty strength in the fit loss —
-default the declared tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude
-identified, the D_pow2_threads 686 incident), `--seed`, `--folds {op_family,gpu,both,none}` (default `both`),
-`--features SPEC` (the feature view — comma-separated names, trailing `*` = prefix glob; default
-`D_*,MMA_tier,MMA_acc_bits`, recorded in the metrics header and artifact provenance so two fits are only compared
-under matching views; `fit/group.MATMUL_FEATURES` is a ready spec holding just the 52 features that can move a
-matmul ranking — the rest are either constant within every pool or affine copies of a kept feature, so excluding
-them is expressiveness-neutral), `--out DIR`
-(default `_tune/fits/<timestamp>-<trainer>-<data>/`). Writes `metrics.json` — the deterministic per-run record two fits
-are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and one `cv.<axis>`
-block per fold axis (pooled holdout / train tables, per-card gap, per-fold detail) — and `weights.json`, the full-train
-artifact in the shipped format; `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
+{linear,catboost}` × `--data {golden,freeze:<path>}` — of which both trainers work on `golden`; `freeze:` exits with
+"not yet supported". The two trainers write the same artifact shape, distinguished by its `kind` field, so either can
+be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the other.
+
+`linear` fits weights by random search + coordinate descent: `--samples N` (default 0: coordinate-descent-from-seed,
+the incumbent practice) and `--l2 λ` (the raw-space L2 penalty strength in the fit loss — default the declared
+tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude identified, the
+D_pow2_threads 686 incident). `catboost` fits a `QuerySoftMax` ranker, one group per candidate pool with the golden
+as its single positive: `--iterations N`, `--negatives K` (sampled negatives per pool per round — the full corpus is
+~38 M rows, so training samples while the rank metric still covers whole pools) and `--rounds R` (the first draws
+negatives uniformly, each further one mines hard negatives from what the current model ranks near the golden —
+**default 1, so mining is off**: the one measurement of it moved top-1 from 545 to 517 over the 1278-case golden
+dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is the expected direction when the negatives
+are unlabeled rather than known-bad). Its fits are not byte-reproducible — CatBoost's histogram build is threaded —
+so two fits are compared by their metrics files rather than by a checksum.
+
+Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
+feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
+the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
+the trainer's own**: `fit/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
+`fit/group.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an additive model
+cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*` interaction mirrors), each
+of which a tree re-derives by splitting on columns the view keeps. `fit/group.MATMUL_FEATURES` is a third ready spec,
+holding just the 52 features that can move a matmul ranking — the rest are either constant within every pool or
+affine copies of a kept feature, so excluding them is expressiveness-neutral. `--out DIR` defaults to
+`_tune/fits/<timestamp>-<trainer>-<data>/`.
+
+A run writes `metrics.json` — the per-run record two fits
+are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and the `cv.shape`
+block (pooled holdout / train tables, per-card gap, per-fold detail); folds group by shape, so goldens sharing a
+candidate pool are held out together rather than scored by a model trained on that pool — and `weights.json`, the
+full-train artifact in the shipped format (a `catboost` fit also writes the booster as a `weights.cbm` sidecar
+beside it, named after its own JSON so several artifacts can share a directory); `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
 `scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
 (`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
@@ -598,37 +653,32 @@ both seeding policies and the ranking loss the fit ran under; two fits are only 
 same way they must match on `--features`.
 
 ```bash
-emmy fit                                  # linear x golden, both fold axes, metrics under _tune/fits/
-emmy fit --folds gpu --out _tune/fits/ab  # leave-one-card-out only, fixed run dir for an A/B
+emmy fit                                  # linear x golden, 5 shape folds, metrics under _tune/fits/
+emmy fit --folds 0 --out _tune/fits/ab    # full-train only, fixed run dir for an A/B
 ```
 
 ## Experiments
 
-Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory contains a
-`recipe.yaml`; benchmark output is local and ignored by default:
+Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory keeps the recipe and
+one durable snapshot per exact GPU platform:
 
 ```
 experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090/
   recipe.yaml
+  <YYYY-MM-DD_HH-MM-SS>/  # ignored local raw output
+  results_rtx5090x1.tar.gz  # Git LFS archive of the platform's last run and row records
+  RESULTS.md                # one interpretation across retained platforms
 ```
 
 ```bash
 emmy bench experiments/Qwen3-Coder-30B-A3B-Instruct-AWQ/optimal_mcr_rtx5090
 ```
 
-## CI Benchmark Workflow
-
-External developers can submit experiment configurations via pull requests. A maintainer triggers benchmarks by
-commenting `/run-experiment` on the PR. That explicit command authorizes the workflow to commit its selected results
-back to the PR branch; ordinary local and onboarding runs do not commit experiment output.
-
-```
-/run-experiment                                                       # Auto-detect: all experiments changed in the PR
-/run-experiment experiments/MyModel/my_experiment                      # Explicit
-/run-experiment experiments/MyModel/my_experiment --gpu-concurrency 2  # Split groups across 2 VMs each
-```
-
-Only users with **write** or **admin** access can trigger benchmarks. For fork PRs, "Allow edits from maintainers" must be checked for results to be pushed back to the fork branch (otherwise results are downloadable as workflow artifacts).
+Use the repository `run-experiment` skill to select/customize the harness, execute Emmy, validate every row, replace
+the platform's named raw-results archive containing its system-only records, update its section in the shared
+`RESULTS.md`, and commit the complete platform snapshot without changing other platform results. The CLI and
+experiment code do not interpret measurements; the skill performs the intelligent review and the CLI itself performs
+no Git operation.
 
 ## Adding a New VM Provider
 

@@ -1098,6 +1098,16 @@ def render_kernelop(
     def _dtype_for(name: str) -> object:
         return tmap[name].dtype if name in tmap else F32
 
+    # Graph buffer names become kernel parameter names verbatim (binding is positional; the C
+    # spelling is the graph id). A non-identifier id — a checkpoint path used as a node id —
+    # would otherwise surface as nvcc syntax gibberish several stages later.
+    for n in (*kernel_op.inputs, *kernel_op.outputs):
+        if not n.isidentifier():
+            raise ValueError(
+                f"kernel {kernel_op.name!r}: buffer {n!r} is not a C identifier — graph node ids that reach "
+                "kernels are parameter names; keep checkpoint paths on ConstantOp.source_path, never the id"
+            )
+
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"

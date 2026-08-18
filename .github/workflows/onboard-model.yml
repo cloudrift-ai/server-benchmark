@@ -1,6 +1,8 @@
-name: Onboard model
+name: Verify or onboard model
 
 on:
+  schedule:
+    - cron: "47 9 * * *"
   workflow_dispatch:
     inputs:
       model_id:
@@ -27,38 +29,51 @@ on:
         required: true
         default: true
         type: boolean
-      pull_request:
-        description: Optional open onboarding PR number to update (otherwise the selected workflow branch is detected)
-        required: false
-        type: string
+
 concurrency:
-  group: onboard-${{ inputs.pull_request || inputs.model_id }}-${{ inputs.gpu }}-${{ inputs.gpu_count }}
+  group: model-lifecycle
   cancel-in-progress: false
 
 jobs:
   onboard:
-    runs-on: [self-hosted, agents]
-    timeout-minutes: 360
+    runs-on:
+      group: agent-runners
+      labels: agents
+    timeout-minutes: 1440
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      selected: ${{ steps.selection.outputs.selected }}
+      model_id: ${{ steps.selection.outputs.model_id }}
+      gpu: ${{ steps.selection.outputs.gpu }}
+      gpu_count: ${{ steps.selection.outputs.gpu_count }}
+      mode: ${{ steps.selection.outputs.mode }}
+      deployment_summary: ${{ steps.artifacts.outputs.deployment_summary }}
+      performance_summary: ${{ steps.artifacts.outputs.performance_summary }}
+      failure_kind: ${{ steps.notice.outputs.failure_kind }}
+      failure_summary: ${{ steps.notice.outputs.failure_summary }}
+      pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
     env:
       GH_REPO: ${{ github.repository }}
-      MODEL_ID: ${{ inputs.model_id }}
-      TARGET_GPU: ${{ inputs.gpu }}
-      TARGET_GPU_COUNT: ${{ inputs.gpu_count }}
-      MULTIMODAL_MODE: ${{ inputs.multimodal_mode }}
-      PUBLISH_IMAGE: ${{ inputs.publish_image }}
-      RUN_OWNER: ${{ github.run_id }}-${{ github.run_attempt }}
+      REQUESTED_MODEL_ID: ${{ inputs.model_id }}
+      REQUESTED_GPU: ${{ inputs.gpu }}
+      REQUESTED_GPU_COUNT: ${{ inputs.gpu_count }}
+      CLOUDRIFT_TEAM_ID: ${{ vars.CLOUDRIFT_TEAM_ID }}
+      MULTIMODAL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.multimodal_mode || 'auto' }}
+      PUBLISH_IMAGE: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_image) || (github.event_name == 'schedule' && vars.NIGHTLY_ONBOARD_PUBLISH_IMAGE == 'true') }}
+      RUN_OWNER: ${{ github.repository }}/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+      EMMY_RENTAL_TAGS: emmy,workflow:model-verification-onboarding,gh-job:${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       VM_LEASE: /tmp/emmy-onboard-${{ github.run_id }}-${{ github.run_attempt }}.json
       ONBOARD_SUMMARY: /tmp/emmy-onboard-summary-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
       AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
+      PROVIDER_CONFIG: /tmp/emmy-onboard-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+      PR_SUMMARY: /tmp/emmy-onboard-pr-${{ github.run_id }}-${{ github.run_attempt }}.md
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
-      GCP_KEY_FILE: /tmp/emmy-onboard-gcp-key-${{ github.run_id }}-${{ github.run_attempt }}.json
-      GCP_CONFIG_DIR: /tmp/emmy-onboard-gcloud-${{ github.run_id }}-${{ github.run_attempt }}
+      WORKFLOW_SOURCE: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
@@ -71,91 +86,90 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Resolve existing or new pull request branch
-        id: branch
+      - name: Find rolling model lifecycle pull request
+        id: rolling
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          MODEL_ID: ${{ env.MODEL_ID }}
-          REQUESTED_PR: ${{ inputs.pull_request }}
-          CURRENT_BRANCH: ${{ github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          pull=''
-          if [ -n "$REQUESTED_PR" ]; then
-            if ! [[ "$REQUESTED_PR" =~ ^[1-9][0-9]*$ ]]; then
-              echo "Invalid pull request number: $REQUESTED_PR" >&2
-              exit 1
-            fi
-            pull=$(gh pr view "$REQUESTED_PR" \
-              --json number,state,headRefName,isCrossRepository,labels,title,body)
-          elif [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
-            pull=$(gh pr list --state open --head "$CURRENT_BRANCH" --limit 100 \
-              --json number,state,headRefName,isCrossRepository,labels,title,body \
-              --jq '[.[] | select([.labels[].name] | index("model-onboarding"))][0] // empty')
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          matches=$(retry_gh gh pr list --state open --limit 100 \
+            --json number,headRefName,isCrossRepository,labels \
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or ([.labels[].name] | index("model-onboarding")) or (.headRefName | startswith("agents/model-discovery-"))))]')
+          count=$(jq length <<< "$matches")
+          if [ "$count" -gt 1 ]; then
+            echo "Expected at most one rolling model lifecycle PR, found $count" >&2
+            exit 1
           fi
 
-          if [ -n "$pull" ]; then
-            number=$(jq -r .number <<< "$pull")
-            if [ "$(jq -r .state <<< "$pull")" != "OPEN" ]; then
-              echo "Pull request #$number is not open" >&2
+          number=$(jq -r '.[0].number // empty' <<< "$matches")
+          branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
+          if [ -n "$number" ]; then
+            echo "Updating rolling model lifecycle PR #$number from $branch"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            orphan_output=$(retry_gh gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
+              --jq '.[].ref | sub("^refs/heads/"; "")')
+            mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
+            if [ "${#orphan_branches[@]}" -gt 1 ]; then
+              echo "Expected at most one unpaired model lifecycle branch, found ${#orphan_branches[@]}" >&2
               exit 1
             fi
-            if [ "$(jq -r .isCrossRepository <<< "$pull")" != "false" ]; then
-              echo "Onboarding cannot push artifacts to a fork pull request" >&2
-              exit 1
+            branch="${orphan_branches[0]:-}"
+            if [ -n "$branch" ]; then
+              echo "Adopting unpaired model lifecycle branch $branch"
             fi
-            if ! jq -e '[.labels[].name] | index("model-onboarding")' <<< "$pull" >/dev/null; then
-              echo "Pull request #$number is missing the model-onboarding label" >&2
-              exit 1
-            fi
-            if ! jq -e --arg model "$MODEL_ID" --arg marker "\`$MODEL_ID\`" \
-              '(.title | contains($model)) or ((.body // "") | contains($marker))' <<< "$pull" >/dev/null; then
-              echo "Pull request #$number does not describe $MODEL_ID" >&2
-              exit 1
-            fi
-            branch=$(jq -r .headRefName <<< "$pull")
-            echo "branch=$branch" >> "$GITHUB_OUTPUT"
-            echo "checkout_ref=$branch" >> "$GITHUB_OUTPUT"
-            echo "pr_number=$number" >> "$GITHUB_OUTPUT"
-            echo "existing=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-          slug=$(tr '[:upper:]' '[:lower:]' <<< "$MODEL_ID" | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')
-          echo "branch=agents/onboard-$slug-$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "checkout_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
-          echo "pr_number=" >> "$GITHUB_OUTPUT"
-          echo "existing=false" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout onboarding base
+      - name: Checkout model lifecycle branch
         uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ steps.branch.outputs.checkout_ref }}
+          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Create artifact branch
-        if: steps.branch.outputs.existing != 'true'
+      - name: Rebase existing branch on latest main
+        id: rebase
+        if: steps.rolling.outputs.branch != ''
         env:
-          ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
-        run: git switch -c "$ARTIFACT_BRANCH"
-
-      - name: Set onboarding deadline
-        run: echo "ONBOARD_DEADLINE=$(date -u -d '+5 hours 30 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-
-      - name: Validate request
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
         run: |
-          python3 - <<'PY'
-          import os
-          import re
-          import sys
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git fetch origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
+            "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
 
-          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ["MODEL_ID"]):
-              sys.exit("model_id must be an exact Hugging Face owner/repository ID")
-          if int(os.environ["TARGET_GPU_COUNT"]) < 1:
-              sys.exit("gpu_count must be positive")
-          PY
+          original_head="$(git rev-parse HEAD)"
+          remote_head="$(git rev-parse "origin/$EXISTING_BRANCH")"
+          if [ "$original_head" != "$remote_head" ]; then
+            echo "Model lifecycle branch changed after selection; refusing to overwrite $remote_head" >&2
+            exit 1
+          fi
+
+          git rebase "origin/$BASE_BRANCH"
+          rebased_head="$(git rev-parse HEAD)"
+          if [ "$rebased_head" != "$original_head" ]; then
+            git push \
+              --force-with-lease="refs/heads/$EXISTING_BRANCH:$original_head" \
+              origin "HEAD:refs/heads/$EXISTING_BRANCH"
+          fi
+          echo "expected_head=$rebased_head" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -165,51 +179,201 @@ jobs:
       - name: Install Emmy
         run: make setup-agent
 
-      - name: Generate ephemeral SSH key
-        run: ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
-
-      - name: Isolate optional GCP credentials
-        run: |
-          case "$GCP_CONFIG_DIR" in
-            /tmp/emmy-onboard-gcloud-*) ;;
-            *) echo "Refusing unsafe GCP config path: $GCP_CONFIG_DIR" >&2; exit 1 ;;
-          esac
-          rm -rf -- "$GCP_CONFIG_DIR"
-          install -d -m 700 "$GCP_CONFIG_DIR"
-          echo "CLOUDSDK_CONFIG=$GCP_CONFIG_DIR" >> "$GITHUB_ENV"
-
-      - name: Configure optional GCP credentials
+      - name: Load exact workflow source
         env:
-          GCP_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          GCP_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-        if: env.GCP_KEY != ''
+          WORKFLOW_SHA: ${{ github.sha }}
+          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
-          rm -f -- "$GCP_KEY_FILE"
-          printf '%s' "$GCP_KEY" > "$GCP_KEY_FILE"
-          chmod 600 "$GCP_KEY_FILE"
-          CLOUDSDK_CONFIG="$GCP_CONFIG_DIR" gcloud auth activate-service-account --key-file="$GCP_KEY_FILE"
-          CLOUDSDK_CONFIG="$GCP_CONFIG_DIR" gcloud config set project "$(jq -r .project_id "$GCP_KEY_FILE")"
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GCP_KEY_FILE" >> "$GITHUB_ENV"
-          echo "GCP_SERVICE_ACCOUNT=$GCP_ACCOUNT" >> "$GITHUB_ENV"
+          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
+            git fetch --depth=1 origin "$WORKFLOW_SHA"
+          fi
+          mkdir -p "$WORKFLOW_SOURCE"
+          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+          echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
+          echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
 
-      - name: Provision exact target VM
+      - name: Configure Git LFS
+        run: |
+          if ! git lfs version >/dev/null 2>&1; then
+            lfs_version=3.7.1
+            case "$(uname -m)" in
+              x86_64) lfs_arch=amd64; lfs_sha256=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;;
+              aarch64) lfs_arch=arm64; lfs_sha256=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;;
+              *) echo "Unsupported Git LFS architecture: $(uname -m)" >&2; exit 1 ;;
+            esac
+            lfs_dir="$RUNNER_TEMP/git-lfs-$lfs_version"
+            lfs_archive="$RUNNER_TEMP/git-lfs-$lfs_version-$lfs_arch.tar.gz"
+            curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+              --output "$lfs_archive" \
+              "https://github.com/git-lfs/git-lfs/releases/download/v$lfs_version/git-lfs-linux-$lfs_arch-v$lfs_version.tar.gz"
+            printf '%s  %s\n' "$lfs_sha256" "$lfs_archive" | sha256sum --check
+            mkdir -p "$lfs_dir"
+            tar -xzf "$lfs_archive" -C "$lfs_dir" --strip-components=1 "git-lfs-$lfs_version/git-lfs"
+            chmod +x "$lfs_dir/git-lfs"
+            echo "$lfs_dir" >> "$GITHUB_PATH"
+            export PATH="$lfs_dir:$PATH"
+          fi
+          git lfs install --local
+          mkdir -p .git/info
+          lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
+          grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
+            printf '%s\n' "$lfs_attribute" >> .git/info/attributes
+
+      - name: Select one available deployment
+        id: selection
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          query=(
+            recipe query
+            --root recipes
+            --filter 'provider.cloudrift.team_access == true'
+            --filter 'deployment.availability.cloudrift == true'
+            --limit 1
+            --json
+          )
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            query+=(
+              --candidate "$REQUESTED_MODEL_ID" "$REQUESTED_GPU" "$REQUESTED_GPU_COUNT"
+              --filter 'lifecycle != "obsolete"'
+            )
+            selection=$(./venv/bin/emmy "${query[@]}")
+          else
+            query+=(
+              --filter 'lifecycle == "onboarding"'
+              --sort 'heat desc nulls-last'
+              --sort 'model_id asc'
+              --sort 'deployment.index asc'
+            )
+            selection=$(./venv/bin/emmy "${query[@]}")
+            if [ "$(jq '.rows | length' <<< "$selection")" -eq 0 ]; then
+              query=(
+                recipe query
+                --root recipes
+                --filter 'provider.cloudrift.team_access == true'
+                --filter 'deployment.availability.cloudrift == true'
+                --filter 'lifecycle == "maintained"'
+                --sort 'results.last_run_at asc nulls-first'
+                --sort 'model_id asc'
+                --sort 'deployment.index asc'
+                --limit 1
+                --json
+              )
+              selection=$(./venv/bin/emmy "${query[@]}")
+            fi
+          fi
+
+          if [ "$(jq -r '.schema_version' <<< "$selection")" != "1" ]; then
+            echo "Unsupported emmy recipe query schema" >&2
+            exit 1
+          fi
+          row=$(jq -c '.rows[0] // empty' <<< "$selection")
+          if [ -z "$row" ]; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "Manual candidate is obsolete or has no available exact CloudRift VM." >&2
+              exit 1
+            fi
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            echo "No onboarding or maintained recipe has an available exact CloudRift VM." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          model_id=$(jq -r '.model_id' <<< "$row")
+          gpu=$(jq -r '.deployment.gpu' <<< "$row")
+          gpu_count=$(jq -r '.deployment.gpu_count' <<< "$row")
+          mode=$(jq -r '.operation' <<< "$row")
+          lifecycle=$(jq -r '.expected_lifecycle' <<< "$row")
+          heat=$(jq -r '.heat // empty' <<< "$row")
+          {
+            echo "selected=true"
+            echo "model_id=$model_id"
+            echo "gpu=$gpu"
+            echo "gpu_count=$gpu_count"
+            echo "mode=$mode"
+            echo "lifecycle=$lifecycle"
+            echo "heat=$heat"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "MODEL_ID=$model_id"
+            echo "TARGET_GPU=$gpu"
+            echo "TARGET_GPU_COUNT=$gpu_count"
+            echo "ONBOARD_MODE=$mode"
+            echo "EXPECTED_LIFECYCLE=$lifecycle"
+            echo "MODEL_HEAT=$heat"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare artifact branch
+        id: branch
+        if: steps.selection.outputs.selected == 'true'
+        env:
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          branch="$EXISTING_BRANCH"
+          if [ -z "$branch" ]; then
+            branch="agents/model-discovery-${GITHUB_RUN_ID}"
+            git switch -c "$branch"
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Set onboarding deadline
+        if: steps.selection.outputs.selected == 'true'
+        run: echo "ONBOARD_DEADLINE=$(date -u -d '+23 hours 30 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Generate ephemeral SSH key and isolated provider config
+        if: steps.selection.outputs.selected == 'true'
+        run: |
+          ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
+            "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
+          chmod 600 "$PROVIDER_CONFIG"
+
+      - name: Rent exact target VM
         id: vm
+        if: steps.selection.outputs.selected == 'true'
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
-          ./venv/bin/emmy vm create gpu \
-            --gpu "$TARGET_GPU" \
-            --gpu-count "$TARGET_GPU_COUNT" \
-            --exact-gpu-count \
-            --ssh-key "$SSH_KEY" \
-            --name "onboard-$RUN_OWNER" \
-            --lease "$VM_LEASE" \
-            --owner "$GITHUB_REPOSITORY/$RUN_OWNER" \
-            --json
+          cleanup_tags() {
+            ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
+          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          PY
+          }
+
+          billing=()
+          if [[ "$TARGET_GPU" == *V100* ]]; then
+            billing+=(--billing-exempt)
+          fi
+          for attempt in 1 2 3; do
+            rm -f -- "$VM_LEASE"
+            if ./venv/bin/emmy vm create gpu \
+              --gpu "$TARGET_GPU" \
+              --gpu-count "$TARGET_GPU_COUNT" \
+              --exact-gpu-count \
+              --provider cloudrift \
+              --config "$PROVIDER_CONFIG" \
+              --ssh-key "$SSH_KEY" \
+              --name "model-lifecycle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              --lease "$VM_LEASE" \
+              --owner "$RUN_OWNER" \
+              "${billing[@]}" \
+              --json; then
+              break
+            fi
+            cleanup_tags
+            if [ "$attempt" -eq 3 ]; then
+              echo "CloudRift rental failed after three attempts" >&2
+              exit 1
+            fi
+          done
           {
-            echo "provider=$(jq -r .vm.provider "$VM_LEASE")"
             echo "instance_id=$(jq -r .vm.instance_id "$VM_LEASE")"
-            echo "zone=$(jq -r '.vm.zone // ""' "$VM_LEASE")"
             echo "ssh_host=$(jq -r .vm.ssh_host "$VM_LEASE")"
             echo "ssh_port=$(jq -r .vm.ssh_port "$VM_LEASE")"
             echo "ssh_user=$(jq -r .vm.ssh_user "$VM_LEASE")"
@@ -217,153 +381,396 @@ jobs:
             echo "lease=$VM_LEASE"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Remove provider credentials before agent execution
+      - name: Prepare target GPU host
         if: steps.vm.outcome == 'success'
+        timeout-minutes: 30
+        env:
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
+          SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
-          python3 - <<'PY'
-          import os
-          import shutil
-          from pathlib import Path
+          ssh_args=(
+            ssh -i "$SSH_KEY" -p "$SSH_PORT"
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+          "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git make python3.12-venv rsync
 
-          key = Path(os.environ["GCP_KEY_FILE"])
-          if key.is_dir() and not key.is_symlink():
-              shutil.rmtree(key, ignore_errors=True)
-          else:
-              key.unlink(missing_ok=True)
-          config = Path(os.environ["GCP_CONFIG_DIR"])
-          if config.is_symlink() or config.is_file():
-              config.unlink(missing_ok=True)
-          else:
-              shutil.rmtree(config, ignore_errors=True)
-          PY
+          scratch_base="$HOME/.cache/emmy"
+          mkdir -p "$scratch_base"
+          filesystem_type=$(df -PT "$scratch_base" | awk 'NR == 2 {print $2}')
+          case "$filesystem_type" in
+            tmpfs|ramfs)
+              echo "Durable onboarding scratch resolved to $filesystem_type" >&2
+              exit 1
+              ;;
+          esac
+          free_kb=$(df -Pk "$scratch_base" | awk 'NR == 2 {print $4}')
+          if [ "$free_kb" -lt 8388608 ]; then
+            echo "Durable onboarding scratch requires at least 8 GiB free" >&2
+            exit 1
+          fi
+
+          bootstrap_venv=$(mktemp -d "$scratch_base/bootstrap.XXXXXX")
+          cleanup() {
+            case "$bootstrap_venv" in
+              "$scratch_base"/bootstrap.*) rm -rf -- "$bootstrap_venv" ;;
+              *) echo "Refusing to remove unexpected bootstrap path" >&2; exit 1 ;;
+            esac
+          }
+          trap cleanup EXIT
+          TMPDIR="$bootstrap_venv" python3.12 -m venv "$bootstrap_venv"
+          "$bootstrap_venv/bin/pip" --version >/dev/null
+          REMOTE
 
       - name: Run onboard-model agent
+        if: steps.vm.outcome == 'success'
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ inputs.publish_image && secrets.DOCKERHUB_TOKEN || '' }}
+          DOCKERHUB_TOKEN: ${{ env.PUBLISH_IMAGE == 'true' && secrets.DOCKERHUB_TOKEN || '' }}
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
           SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
-          EXISTING_PR: ${{ steps.branch.outputs.pr_number }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import os
           from pathlib import Path
 
-          existing = os.environ.get("EXISTING_PR")
-          plan = (
-              f"This is the execution of existing model-onboarding PR #{existing}. Read the matching onboarding "
-              "recipe shell. Replace the shell with the qualified recipe and replace its onboarding and untested "
-              "tags with best-effort after all artifacts are complete."
-              if existing
-              else "This is a new onboarding; create all required artifacts from the tracked skill."
-          )
+          mode = os.environ["ONBOARD_MODE"]
+          if mode == "onboarding":
+              task = (
+                  "Use the existing onboarding/untested recipe shell when present, or create the recipe for a direct "
+                  "manual request. Preserve model.heat and replace onboarding and untested with best-effort after "
+                  "qualification."
+              )
+          else:
+              task = (
+                  "Reverify the existing recipe from its current configuration, refresh its measured artifacts, and "
+                  f"preserve its {os.environ['EXPECTED_LIFECYCLE']} lifecycle tag and model.heat."
+              )
           prompt = f"""Use the onboard-model skill non-interactively.
 
+          The attached exact-workflow-SHA copies of the onboard-model, tune-kernels, and run-experiment skills are authoritative.
+          Follow them instead of any older skill copies in the artifact worktree.
+
+          Operation mode: {mode}
           Hugging Face model ID: {os.environ['MODEL_ID']}
           Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
           SSH target: {os.environ['SSH_TARGET']}
+          Raw SSH host: {os.environ['SSH_HOST']}
+          Raw SSH user: {os.environ['SSH_USER']}
           SSH port: {os.environ['SSH_PORT']}
           SSH private key: {os.environ['SSH_KEY']} (pass --ssh-key {os.environ['SSH_KEY']} to every Emmy remote command)
           Absolute deadline: {os.environ['ONBOARD_DEADLINE']}
           Multimodal mode: {os.environ['MULTIMODAL_MODE']}
-          Publication authorized by workflow dispatch: {os.environ['PUBLISH_IMAGE']}
+          Publication authorized: {os.environ['PUBLISH_IMAGE']}
           Atomic summary output: {os.environ['ONBOARD_SUMMARY']}
 
-          {plan}
-          Do not provision or delete the VM, commit, push, or open/update a pull request. Always write the required
-          atomic summary, including experiment_artifacts with retained experiment recipe.yaml files only. Put the
-          selected benchmark numbers in the final recipe's RESULTS.md; do not retain raw results, experiment reports,
-          dated run snapshots, or onboarding summaries. Also include artifacts listing every intended created,
-          modified, or deleted repository file and no exploratory output. Allowed areas are recipes/, experiments/,
-          docker/vllm-emmy-serve/models/, and canonical golden YAML files.
+          {task}
+          Do not select a model or GPU, provision or delete the VM, commit, push, or open/update a pull request.
+          For missing images or unfamiliar launch failures, investigate current official registries, release notes,
+          engine documentation, and upstream issues. Test an evidence-backed current repository/tag when the configured
+          image moved or disappeared, then pin the exact working tag or digest. You may implement a bounded,
+          model-agnostic compatibility fix with focused tests when it is necessary for this exact qualification.
+          You may delegate independent read-only research or failure diagnosis to the onboard-investigator subagent;
+          retain responsibility for all edits, measurements, and conclusions.
+          Always write the required atomic summary with mode set to {mode}, including experiment_artifacts with
+          the shared experiment recipe and RESULTS.md plus the exact results_<gpu-short>x<gpu-count>.tar.gz archive.
+          The archive must contain the platform's system-only experiment records; do not retain those records as
+          top-level files. Replace only this platform's archive and preserve every other platform archive and
+          RESULTS.md section. Do not retain the ignored dated run directory or onboarding summaries. Update the final
+          recipe's RESULTS.md for this platform while preserving still-valid measurements for its other platforms.
+          Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
+          filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
+          Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
+          output. Allowed areas are recipes/ (including the model's golden/ subdirectory), experiments/,
+          docker/vllm-emmy-serve/models/, and a bounded small fix under emmy/ with its focused tests and nearest
+          ARCHITECTURE.md updates.
+          Include one-line deployment_summary and performance_summary values drawn from the exact selected recipe lane.
+          On failure, set failure.regression=true only when a previously qualified behavior or performance lane
+          regressed and the bounded fix attempt could not restore it; include a concise, credential-free message for
+          the Discord notification.
           """
           Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
           PY
 
           set +e
-          env \
-            -u CLOUDSDK_CONFIG \
-            -u GOOGLE_APPLICATION_CREDENTIALS \
-            -u GCP_SERVICE_ACCOUNT \
-            opencode run \
-              "Complete the attached onboarding task exactly." \
-              --agent onboard-model \
-              --model cloudrift/agent \
-              --format json \
-              --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
+          opencode run \
+            "Complete the attached onboarding task exactly." \
+            --agent onboard-model \
+            --model cloudrift/agent \
+            --format json \
+            --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
+            --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
             "$AGENT_EVENTS" > "$AGENT_OUTPUT"
+          if [ -s "$AGENT_OUTPUT" ]; then
+            sed 's/^/onboard-model: /' "$AGENT_OUTPUT"
+          else
+            echo "::error::Onboarding agent produced no final text output"
+          fi
           exit "$agent_status"
 
-      - name: Delete workflow-owned VM
-        if: always()
-        env:
-          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
-          GCP_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          GCP_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - name: Collect onboarding failure notice
+        id: notice
+        if: always() && steps.vm.outcome == 'success'
         run: |
-          cleanup_provider_credentials() {
-            python3 - <<'PY'
+          python3 - <<'PY'
+          import json
           import os
-          import shutil
           from pathlib import Path
 
-          key = Path(os.environ["GCP_KEY_FILE"])
-          if key.is_dir() and not key.is_symlink():
-              shutil.rmtree(key, ignore_errors=True)
-          else:
-              key.unlink(missing_ok=True)
-          config = Path(os.environ["GCP_CONFIG_DIR"])
-          if config.is_symlink() or config.is_file():
-              config.unlink(missing_ok=True)
-          else:
-              shutil.rmtree(config, ignore_errors=True)
+          kind = ""
+          message = ""
+          summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          try:
+              summary = json.loads(summary_path.read_text())
+              failure = summary.get("failure") or {}
+              if summary.get("status") == "failed" and isinstance(failure, dict):
+                  kind = "regression" if failure.get("regression") is True else "failure"
+                  gate = failure.get("gate")
+                  detail = failure.get("message")
+                  parts = [value.strip() for value in (gate, detail) if isinstance(value, str) and value.strip()]
+                  message = ": ".join(parts)
+          except (OSError, ValueError, json.JSONDecodeError):
+              pass
+          message = " ".join(message.split())[:1000]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"failure_kind={kind}\n")
+              output.write(f"failure_summary={message}\n")
           PY
-          }
-          trap cleanup_provider_credentials EXIT
-          cleanup_provider_credentials
-          lease_provider=""
-          if [ -f "$VM_LEASE" ]; then
-            lease_provider=$(python3 -c 'import json, os; print(json.load(open(os.environ["VM_LEASE"]))["vm"]["provider"])')
-          fi
-          if [ "$lease_provider" = "gcp" ] && [ -n "$GCP_KEY" ]; then
-            install -d -m 700 "$GCP_CONFIG_DIR"
-            printf '%s' "$GCP_KEY" > "$GCP_KEY_FILE"
-            chmod 600 "$GCP_KEY_FILE"
-            export CLOUDSDK_CONFIG="$GCP_CONFIG_DIR"
-            export GOOGLE_APPLICATION_CREDENTIALS="$GCP_KEY_FILE"
-            export GCP_SERVICE_ACCOUNT="$GCP_ACCOUNT"
-            gcloud auth activate-service-account --key-file="$GCP_KEY_FILE"
-            gcloud config set project "$(jq -r .project_id "$GCP_KEY_FILE")"
-          fi
-          ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
-          ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$GITHUB_REPOSITORY/$RUN_OWNER"
 
-      - name: Validate and stage onboarding artifacts
+      - name: Remove archived task-local raw results
+        if: steps.vm.outcome == 'success'
+        run: |
+          ./venv/bin/python - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          from emmy.hardware import gpu_short_name
+
+          workspace = Path.cwd().resolve()
+          experiments_root = (workspace / "experiments").resolve()
+          summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          summary = json.loads(summary_path.read_text())
+          if summary.get("status") != "success":
+              raise SystemExit(f"Onboarding did not succeed: {summary.get('failure')}")
+          experiment_recipe = Path(summary.get("experiment") or "")
+          if experiment_recipe.is_absolute() or ".." in experiment_recipe.parts or experiment_recipe.name != "recipe.yaml":
+              raise SystemExit(f"Unsafe experiment recipe path: {experiment_recipe}")
+          experiment_dir = (workspace / experiment_recipe).parent.resolve()
+          if experiments_root not in experiment_dir.parents:
+              raise SystemExit(f"Experiment directory is outside experiments/: {experiment_dir}")
+
+          timestamp = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+          raw_directories = sorted(
+              path for path in experiment_dir.iterdir() if path.is_dir() and timestamp.fullmatch(path.name)
+          )
+          platform = f"{gpu_short_name(os.environ['TARGET_GPU'])}x{int(os.environ['TARGET_GPU_COUNT'])}"
+          archive_path = experiment_recipe.parent / f"results_{platform}.tar.gz"
+          archive = workspace / archive_path
+          legacy_archive = experiment_dir / "results.tar.gz"
+
+          def verify_archive(path):
+              member_paths = []
+              with tarfile.open(path, "r:gz") as source:
+                  for member in source.getmembers():
+                      member_path = PurePosixPath(member.name.removeprefix("./"))
+                      if member_path.is_absolute() or ".." in member_path.parts:
+                          raise SystemExit(f"Unsafe archive member: {member.name}")
+                      member_paths.append(member_path)
+                      if member.isfile():
+                          contents = source.extractfile(member)
+                          if contents is None:
+                              raise SystemExit(f"Could not read archived file: {member.name}")
+                          while contents.read(1024 * 1024):
+                              pass
+              roots = {member_path.parts[0] for member_path in member_paths if member_path.parts}
+              records = {
+                  member_path
+                  for member_path in member_paths
+                  if member_path.name == f"{platform}.experiment.yaml"
+                  or (
+                      member_path.name.startswith(f"{platform}_")
+                      and member_path.name.endswith(".experiment.yaml")
+                  )
+              }
+              if not records:
+                  raise SystemExit(f"Results archive contains no {platform} experiment records: {path}")
+              return roots
+
+          if raw_directories:
+              temporary_archive = archive.with_name(f".{archive.name}.{os.getpid()}.tmp")
+              try:
+                  with tarfile.open(temporary_archive, "w:gz") as output:
+                      for raw_directory in raw_directories:
+                          output.add(raw_directory, arcname=raw_directory.name)
+                  temporary_roots = verify_archive(temporary_archive)
+                  missing_roots = [path.name for path in raw_directories if path.name not in temporary_roots]
+                  if missing_roots:
+                      raise SystemExit(f"New results archive is missing raw directories: {missing_roots}")
+                  os.replace(temporary_archive, archive)
+              finally:
+                  temporary_archive.unlink(missing_ok=True)
+          elif not archive.is_file() and legacy_archive.is_file():
+              verify_archive(legacy_archive)
+              os.replace(legacy_archive, archive)
+
+          if not archive.is_file():
+              raise SystemExit(f"Current-platform results archive was not produced: {archive_path}")
+
+          member_roots = verify_archive(archive)
+
+          for raw_directory in raw_directories:
+              if raw_directory.name not in member_roots:
+                  raise SystemExit(f"Raw directory is not preserved by {archive_path}: {raw_directory.name}")
+              shutil.rmtree(raw_directory)
+
+          if legacy_archive != archive:
+              legacy_archive.unlink(missing_ok=True)
+
+          experiment_report = experiment_recipe.with_name("RESULTS.md")
+          platform_records = sorted(
+              path.relative_to(workspace)
+              for path in experiment_dir.glob("*.experiment.yaml")
+              if path.is_file()
+              and (path.name == f"{platform}.experiment.yaml" or path.name.startswith(f"{platform}_"))
+          )
+          durable_snapshot = [
+              experiment_recipe,
+              experiment_report,
+              archive_path,
+          ]
+          missing = [path for path in durable_snapshot if not (workspace / path).is_file()]
+          if missing:
+              raise SystemExit(f"Current-platform durable snapshot is incomplete: {missing}")
+
+          tracked_record_deletions = []
+          for record in platform_records:
+              tracked = subprocess.run(
+                  ["git", "ls-files", "--error-unmatch", "--", str(record)],
+                  cwd=workspace,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              ).returncode == 0
+              (workspace / record).unlink()
+              if tracked:
+                  tracked_record_deletions.append(record)
+
+          legacy_path = experiment_recipe.parent / "results.tar.gz"
+          for key in ("experiment_artifacts", "artifacts"):
+              existing = summary.get(key) or []
+              if not isinstance(existing, list):
+                  raise SystemExit(f"Summary {key} must be a list")
+              retained = [
+                  path
+                  for path in existing
+                  if Path(path) != legacy_path and Path(path) not in platform_records
+              ]
+              additions = durable_snapshot if key == "experiment_artifacts" else [*durable_snapshot, *tracked_record_deletions]
+              summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in additions)]))
+
+          temporary_summary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+          try:
+              temporary_summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+              os.replace(temporary_summary, summary_path)
+          finally:
+              temporary_summary.unlink(missing_ok=True)
+          PY
+
+      - name: Delete workflow-owned CloudRift VMs
+        if: always() && steps.selection.outputs.selected == 'true'
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          set +e
+          ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
+          asyncio.run(
+              terminate_instances_by_tags(
+                  os.environ["CLOUDRIFT_API_KEY"],
+                  tags,
+                  audit_attempts=18,
+                  audit_delay=5,
+              )
+          )
+          PY
+          tag_status=$?
+          lease_status=0
+          if [ -f "$VM_LEASE" ]; then
+            ./venv/bin/emmy vm delete lease "$VM_LEASE" \
+              --owner "$RUN_OWNER" \
+              --retries 1 \
+              --audit-attempts 3 \
+              --audit-delay 5 || lease_status=$?
+            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
+          fi
+          set -e
+          if [ "$lease_status" -ne 0 ] || [ "$tag_status" -ne 0 ]; then
+            echo "CloudRift cleanup or audit failed" >&2
+            exit 1
+          fi
+
+      - name: Validate and stage model artifacts
+        id: artifacts
+        if: steps.vm.outcome == 'success'
         env:
           SSH_TARGET: ${{ steps.vm.outputs.ssh_target }}
         run: |
-          git diff --exit-code -- .github .claude/skills/onboard-model
-          test -z "$(git ls-files --others --exclude-standard -- .github .claude/skills/onboard-model)"
-          ./venv/bin/python .github/scripts/onboarding_artifacts.py \
+          git diff --exit-code -- .github .agents/skills/onboard-model .claude/skills/onboard-model
+          test -z "$(git ls-files --others --exclude-standard -- \
+            .github .agents/skills/onboard-model .claude/skills/onboard-model)"
+          heat_args=()
+          if [ -n "$MODEL_HEAT" ]; then
+            heat_args=(--expected-heat "$MODEL_HEAT")
+          fi
+          ./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/onboarding_artifacts.py" \
             --summary "$ONBOARD_SUMMARY" \
             --model-id "$MODEL_ID" \
             --gpu "$TARGET_GPU" \
             --gpu-count "$TARGET_GPU_COUNT" \
             --ssh-target "$SSH_TARGET" \
+            --mode "$ONBOARD_MODE" \
+            --expected-tag "$EXPECTED_LIFECYCLE" \
+            "${heat_args[@]}" \
             --stage
+          {
+            echo "deployment_summary=$(jq -r .deployment_summary "$ONBOARD_SUMMARY")"
+            echo "performance_summary=$(jq -r .performance_summary "$ONBOARD_SUMMARY")"
+          } >> "$GITHUB_OUTPUT"
+          git lfs status
           git diff --cached --check
           if git diff --cached --quiet; then
-            echo "::error::Onboarding produced no repository artifacts"
+            echo "::error::Model qualification produced no repository artifacts"
             exit 1
           fi
 
       - name: Configure renewable GitHub App credentials
+        if: steps.vm.outcome == 'success'
         env:
           APP_PRIVATE_KEY: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           APP_ID: ${{ secrets.EXPERIMENT_APP_ID }}
@@ -377,14 +784,34 @@ jobs:
           git config --add credential.helper \
             "!APP_ID=$APP_ID APP_KEY_FILE=$APP_KEY_FILE $GITHUB_WORKSPACE/.github/scripts/git-credential-github-app.sh"
 
-      - name: Commit and push artifacts
+      - name: Commit, rebase, and push model artifacts
+        if: steps.vm.outcome == 'success'
         env:
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_HEAD: ${{ steps.rebase.outputs.expected_head }}
         run: |
-          git commit -m "onboard: add $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
-          git push origin "HEAD:$ARTIFACT_BRANCH"
+          git commit -m "recipes: $ONBOARD_MODE $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
+          git fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          if [ -n "$EXPECTED_HEAD" ]; then
+            git fetch origin "+refs/heads/$ARTIFACT_BRANCH:refs/remotes/origin/$ARTIFACT_BRANCH"
+            remote_head="$(git rev-parse "origin/$ARTIFACT_BRANCH")"
+            if [ "$remote_head" != "$EXPECTED_HEAD" ]; then
+              echo "Model lifecycle branch changed during qualification; refusing to overwrite $remote_head" >&2
+              exit 1
+            fi
+          fi
+          git rebase "origin/$BASE_BRANCH"
+          if [ -n "$EXPECTED_HEAD" ]; then
+            git push \
+              --force-with-lease="refs/heads/$ARTIFACT_BRANCH:$EXPECTED_HEAD" \
+              origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
+          else
+            git push origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
+          fi
 
       - name: Refresh GitHub App token
+        if: steps.vm.outcome == 'success'
         id: app-token-refresh
         uses: actions/create-github-app-token@v1
         with:
@@ -392,29 +819,53 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Create or update onboarding pull request
+      - name: Create or update rolling model lifecycle pull request
+        id: lifecycle-pr
+        if: steps.vm.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
-          EXISTING_PR: ${{ steps.branch.outputs.pr_number }}
+          PR_NUMBER: ${{ steps.rolling.outputs.number }}
         run: |
-          if [ -n "$EXISTING_PR" ]; then
-            gh pr ready "$EXISTING_PR" || true
-            gh pr comment "$EXISTING_PR" --body \
-              "Onboarding completed for \`$MODEL_ID\` on \`$TARGET_GPU x$TARGET_GPU_COUNT\`. Artifacts were measured, validated, and pushed by run $GITHUB_RUN_ID."
-          else
-            gh label create model-onboarding \
-              --description "Automated model discovery and onboarding" \
-              --color 1D76DB --force
-            gh pr create \
-              --head "$ARTIFACT_BRANCH" \
-              --base "${{ github.event.repository.default_branch }}" \
-              --title "Onboard $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT" \
-              --label model-onboarding \
-              --body "Automated model onboarding with measured recipe, experiment artifacts, and durable results report.\n\nWorkflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          cat > "$PR_SUMMARY" <<EOF
+          Automated $ONBOARD_MODE completed for \`$MODEL_ID\` on \`$TARGET_GPU x$TARGET_GPU_COUNT\`.
 
-      - name: Cleanup local credentials
+          Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          retry_gh gh label create model-discovery \
+            --description "Automated model recipe lifecycle" \
+            --color 5319E7 --force
+          retry_gh gh label create model-onboarding \
+            --description "Automated model discovery and onboarding" \
+            --color 1D76DB --force
+          if [ -n "$PR_NUMBER" ]; then
+            retry_gh gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              -f title="Refresh model lifecycle and onboarding" >/dev/null
+            retry_gh gh pr comment "$PR_NUMBER" --body-file "$PR_SUMMARY"
+          else
+            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f head="$ARTIFACT_BRANCH" \
+              -f base="${{ github.event.repository.default_branch }}" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$PR_SUMMARY" \
+              -F draft=true \
+              --jq .number)
+          fi
+          retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f 'labels[]=model-discovery' \
+            -f 'labels[]=model-onboarding' >/dev/null
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Cleanup local credentials and output
         if: always()
         run: |
           rm -f \
@@ -422,20 +873,47 @@ jobs:
             "$AGENT_EVENTS" \
             "$AGENT_PROMPT" \
             "$AGENT_OUTPUT" \
-            "$GCP_KEY_FILE" \
             "$ONBOARD_SUMMARY" \
+            "$PR_SUMMARY" \
+            "$PROVIDER_CONFIG" \
             "$VM_LEASE" \
             "$SSH_KEY" \
             "$SSH_KEY.pub"
+          case "$WORKFLOW_SOURCE" in
+            /tmp/emmy-onboard-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
+            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
+          esac
           git config --unset-all credential.helper || true
-          python3 - <<'PY'
-          import os
-          import shutil
-          from pathlib import Path
 
-          config = Path(os.environ["GCP_CONFIG_DIR"])
-          if config.is_symlink() or config.is_file():
-              config.unlink(missing_ok=True)
-          else:
-              shutil.rmtree(config, ignore_errors=True)
-          PY
+  notify:
+    name: Notify Discord
+    needs: onboard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+      WORKFLOW_KIND: onboard
+      WORKFLOW_RESULT: ${{ needs.onboard.result }}
+      SELECTED: ${{ needs.onboard.outputs.selected }}
+      MODEL_ID: ${{ needs.onboard.outputs.model_id || inputs.model_id }}
+      TARGET_GPU: ${{ needs.onboard.outputs.gpu || inputs.gpu }}
+      TARGET_GPU_COUNT: ${{ needs.onboard.outputs.gpu_count || inputs.gpu_count }}
+      ONBOARD_MODE: ${{ needs.onboard.outputs.mode }}
+      DEPLOYMENT_SUMMARY: ${{ needs.onboard.outputs.deployment_summary }}
+      PERFORMANCE_SUMMARY: ${{ needs.onboard.outputs.performance_summary }}
+      FAILURE_KIND: ${{ needs.onboard.outputs.failure_kind }}
+      FAILURE_SUMMARY: ${{ needs.onboard.outputs.failure_summary }}
+      PR_NUMBER: ${{ needs.onboard.outputs.pr_number }}
+    steps:
+      - name: Checkout exact workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Send onboarding summary
+        continue-on-error: true
+        run: python3 .github/scripts/discord_notification.py

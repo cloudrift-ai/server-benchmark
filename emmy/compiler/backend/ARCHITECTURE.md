@@ -110,7 +110,11 @@ with pure numpy). A kernel ref also records `arch_specific` — whether it must 
 target (`sm_120a`). Two unrelated instruction families need that suffix: TMA, which announces itself through
 the launch's descriptors, and the block-scaled fp4 mma, which a plan can only recognize by its wrapper name in
 the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
-only the name narrowed. `plan_from_graph` is the seam the whole runtime builds from: after it runs,
+only the name narrowed. A deterministic source-free bind record is the third binding kind: `plan_from_graph`
+evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
+`build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
+unsupplied constant buffer would otherwise allocate as ZEROS and run a silently weightless program.
+`plan_from_graph` is the seam the whole runtime builds from: after it runs,
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression

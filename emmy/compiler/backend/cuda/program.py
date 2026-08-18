@@ -26,12 +26,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
 from emmy.compiler.backend.cuda.dtype import cupy_dtype
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
-from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
 from emmy.compiler.graph import Graph
 
@@ -203,6 +204,27 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
         vals = (0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)).astype(np_dtype)
         return cp.asarray(vals.reshape(shape))
     return cp.zeros(shape, dtype=cp_dtype)
+
+
+def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
+
+    A deterministic source-free bind record is evaluated once while the graph is projected and
+    its bytes ride the plan (``PLAN_FORMAT_GENERATED``) — a coded linear's Hadamard factor and
+    its coordinate tables are exactly that. Nothing outside the plan can supply them, and an
+    unsupplied constant buffer materializes as ZEROS, so the runtime must read them here.
+    Caller-supplied arrays win: serving binds the same specs through ``assemble_source`` and
+    shares one device copy across its twins.
+    """
+    from emmy.compiler.loader.binder import assemble_source  # noqa: PLC0415
+
+    feed = dict(input_data)
+    for nid, w in plan.weights.items():
+        # ``load_ops is None`` marks a weight the plan cannot rebind at all (see ``WeightSpec``).
+        if w.generated is None or w.load_ops is None or nid in feed:
+            continue
+        feed[nid] = apply_weight_loads(assemble_source(w, {}), w.load_ops)
+    return feed
 
 
 @dataclass
@@ -552,8 +574,8 @@ def _prebuild_descriptors(
 # threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
 # unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
 # in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
-# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides.
-_KERNEL_TIMEOUT_MS = float(_os.environ.get("EMMY_KERNEL_TIMEOUT_MS", "2000"))
+# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides —
+# read live through ``config.kernel_timeout_ms()`` (the env owner), never cached at import.
 
 # First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
 # steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
@@ -753,7 +775,8 @@ class CompiledProgram:
         arena: BufferArena | None = None,
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
-        buffer, pre-build TMA descriptors. ``compile_timeout_s`` bounds the
+        buffer (the plan's generated constants fill themselves — see
+        :func:`_with_generated_constants`), pre-build TMA descriptors. ``compile_timeout_s`` bounds the
         setup phase at a C-call boundary: if compile + alloc + descriptor work
         overruns, raise ``RuntimeError`` before the caller proceeds to launches
         so no in-flight kernels are left queued. ``arena`` pools the
@@ -764,7 +787,8 @@ class CompiledProgram:
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
         compiled = _load_plan(plan)
-        sym_values = _resolve_symbolic(compiled, input_data or {})
+        input_data = _with_generated_constants(plan, input_data or {})
+        sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
@@ -1063,7 +1087,7 @@ class CompiledProgram:
             self._e2e_graph.launch()
         self._e2e_stop.record()
         n = max(1, len(self.compiled.launches))
-        _wait_for_event(self._e2e_stop, _KERNEL_TIMEOUT_MS * n * replays, "<whole-program e2e window>")
+        _wait_for_event(self._e2e_stop, config.kernel_timeout_ms() * n * replays, "<whole-program e2e window>")
         return cp.cuda.get_elapsed_time(self._e2e_start, self._e2e_stop) / replays
 
     def iter_once(
@@ -1125,7 +1149,7 @@ class CompiledProgram:
                     _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
             grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
-            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
+            _wait_for_event(stops[i], config.kernel_timeout_ms() * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the
@@ -1275,7 +1299,7 @@ def benchmark_program(
 
     Single loop covers warmup + measurement: the first ``warmup`` iters
     are discarded, the rest are counted toward the result. The
-    per-launch ``_KERNEL_TIMEOUT_MS`` watchdog (inside
+    per-launch ``config.kernel_timeout_ms()`` watchdog (inside
     :meth:`CompiledProgram.iter_once`) runs every iter — warmup or
     measured — so a single hung kernel raises cleanly instead of
     stalling the whole sweep.
@@ -1304,7 +1328,7 @@ def benchmark_program(
     ``run_timeout_s`` bounds the iter loop on **accumulated GPU time**
     (sum of per-launch CUDA-event measurements), not wall-clock — so
     Python/cupy framing overhead doesn't shrink the budget for tiny
-    ops. Catches the gap left by the per-launch ``_KERNEL_TIMEOUT_MS``
+    ops. Catches the gap left by the per-launch ``config.kernel_timeout_ms()``
     watchdog: a variant where every launch fits under the watchdog but
     summed across iters exceeds the budget (e.g. 999 ms × N iters).
     Checked between iters so no in-flight launch is mid-kernel when
@@ -1625,6 +1649,32 @@ class _AsyncBenchWorker:
                 await asyncio.wait_for(self._stderr_task, timeout=2.0)
             self._stderr_task = None
 
+    @staticmethod
+    async def _death_reason(proc) -> str:
+        """How the child died, for the EOF diagnostics.
+
+        A worker that raises returns the exception to the parent (the request loop catches
+        ``BaseException`` and answers with a traceback), so an EOF means the process went down
+        WITHOUT answering — a signal, or a silent ``return`` out of the request loop. Those write
+        nothing to stderr, which is why the tail is routinely empty and the exit status is the only
+        evidence there is. Reap briefly rather than reading ``returncode`` directly: at the moment
+        the pipe breaks the child is usually dead but not yet awaited, so the attribute is still
+        ``None``."""
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except (TimeoutError, ProcessLookupError):
+            return "child still unreaped"
+        if rc is None:
+            return "no exit status"
+        if rc < 0:
+            import signal as _signal  # noqa: PLC0415 — only needed on this failure path
+
+            try:
+                return f"killed by {_signal.Signals(-rc).name}"
+            except ValueError:
+                return f"killed by signal {-rc}"
+        return f"child exited rc={rc}"
+
     async def _stderr_snapshot(self) -> str:
         """The drained stderr tail, letting the drain task flush briefly first (after a
         kill it ends at EOF almost immediately)."""
@@ -1683,9 +1733,10 @@ class _AsyncBenchWorker:
                 ) from exc
             except asyncio.IncompleteReadError as exc:
                 stderr_tail = await self._stderr_snapshot()
+                death = await self._death_reason(proc)
                 await self.aclose()
                 if attempt == 1:
-                    raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
+                    raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
                 # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
                 # atexit deadlock, so a mid-job EOF usually means THIS config hangs — the retry
                 # will EOF again and fail loudly, costing one extra watchdog interval. But right
@@ -1695,7 +1746,7 @@ class _AsyncBenchWorker:
                 # sweeps kept hitting on the row right after a hang. One respawn + retry after a
                 # short drain grace tells the two apart (the same row replays clean once the
                 # zombie context is gone).
-                logger.info("[bench-worker] child EOF'd mid-job — draining the device and retrying once%s", self._tail_suffix())
+                logger.info("[bench-worker] child EOF'd mid-job (%s) — draining the device and retrying once%s", death, self._tail_suffix())
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 

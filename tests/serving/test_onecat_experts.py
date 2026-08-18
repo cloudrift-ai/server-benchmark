@@ -119,6 +119,25 @@ def test_route_accepts_arbitrary_width_and_reuses_one_symbolic_program():
     assert adapter.routes[(3, "learned")].symbolic
 
 
+def test_route_accepts_fast_math_payload_delta_when_ids_are_exact():
+    reference = torch.full((1, 6), 0.25, dtype=torch.float32)
+
+    def runner(_program, tensors, _device):
+        tensors["weights"].copy_(reference + 5e-7)
+        tensors["ids"].copy_(torch.arange(6, dtype=torch.int32).reshape(1, 6))
+
+    adapter, calls = _route_adapter(reference_weights=reference, runner=runner)
+    router, hidden, logits, input_ids = _route_inputs()
+    hot = (torch.ones((1, 6)), torch.zeros((1, 6), dtype=torch.int32))
+
+    first = adapter.dispatch_route(router, hidden, logits, None, input_ids, lambda *_args: hot)
+    second = adapter.dispatch_route(router, hidden, logits, None, input_ids, lambda *_args: hot)
+
+    torch.testing.assert_close(first[0], reference, rtol=0, atol=1e-6)
+    assert second is hot
+    assert len(calls) == 1
+
+
 class _Retained:
     def __init__(self, shape, dtype, device):
         self.shape = shape

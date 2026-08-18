@@ -30,8 +30,8 @@ class _RmsNormModule:
             def forward(self, x, weight):
                 x_fp32 = x.float()
                 variance = (x_fp32 * x_fp32).mean(dim=-1, keepdim=True)
-                normalized = (x_fp32 * torch.rsqrt(variance + 1e-6)).half()
-                return normalized * weight
+                normalized = x_fp32 * torch.rsqrt(variance + 1e-6)
+                return (normalized * weight.float()).half()
 
         return Module()
 

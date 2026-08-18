@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 PROFILE_ROWS = (1, 2, 4, 8, 16, 128, 1024, 4096)
 _CAPACITY = PROFILE_ROWS[-1]
-# GPU1 qualification across M=1..1024 measured a 2.38e-7 maximum hash
-# reduction delta while every selected expert ID remained exact.
-_ROUTE_ATOL = 3e-7
+# Route IDs remain exact. The released binary and Emmy use different fast
+# exp/log implementations, so payloads admit a one-ULP-class FP32 delta.
+_ROUTE_ATOL = 1e-6
 _EXPERT_TOL = 1e-2
 
 
@@ -290,10 +290,19 @@ class _Adapter:
                 return reference
             import torch
 
-            if not torch.equal(output[1], reference[1]) or not torch.allclose(output[0], reference[0], rtol=0.0, atol=_ROUTE_ATOL):
+            ids_equal = torch.equal(output[1], reference[1])
+            weights_close = torch.allclose(output[0], reference[0], rtol=0.0, atol=_ROUTE_ATOL)
+            if not ids_equal or not weights_close:
                 self.disabled_routes.add(key)
                 self.routes.pop(key, None)
-                logger.error("1Cat %s route M=%d: Emmy first-use parity failed; retaining 1Cat", kind, rows)
+                max_abs = float((output[0] - reference[0]).abs().max().item())
+                logger.error(
+                    "1Cat %s route M=%d: Emmy first-use parity failed (ids_equal=%s, weight_max_abs=%g); retaining 1Cat",
+                    kind,
+                    rows,
+                    ids_equal,
+                    max_abs,
+                )
                 return reference
             program.verified = True
             return output

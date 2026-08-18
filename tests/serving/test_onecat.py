@@ -26,7 +26,7 @@ def test_rms_norm_program_matches_reference_and_lowers_tuned_sm70_schedule():
     actual = _RmsNormModule()(x, weight)
 
     x_fp32 = x.float()
-    expected = (x_fp32 * torch.rsqrt((x_fp32 * x_fp32).mean(dim=-1, keepdim=True) + 1e-6)).half() * weight
+    expected = (x_fp32 * torch.rsqrt((x_fp32 * x_fp32).mean(dim=-1, keepdim=True) + 1e-6) * weight.float()).half()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     graph = trace_module(_RmsNormModule(), (x, weight))

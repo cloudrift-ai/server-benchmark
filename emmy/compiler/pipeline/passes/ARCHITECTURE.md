@@ -186,7 +186,9 @@ own term — a 16-bit atom, a resolvable fill, an inventory a value can spell ag
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
 warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
 the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `smem`
-compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
+compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2` — the fill's asynchrony is that depth, not a
+`smem-async` spelling, and a pin naming a byte transport is refused rather than read as its depth alone), its
+split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
 statistic site is a nested site under the same inventory — the nested site is why the enumerator recurses. SDPA
 carries no family of its own: its two matmuls schedule as plain contractions and the online-softmax `TWISTED` fold

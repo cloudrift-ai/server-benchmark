@@ -18,7 +18,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_STATIC_ROWS = frozenset({1, 2, 4, 8, 128})
+_MAX_PREFILL_ROWS = 4096
 _Q_SIZE = 1024
 _KV_SIZE = 512
 _FUSED_SIZE = _Q_SIZE + _KV_SIZE
@@ -29,9 +29,9 @@ _CONTEXT = 1_048_576
 _PARITY_TOL = 3e-3
 
 
-def _static_profile(rows: int) -> Hashable | None:
-    """Return one cache key per qualified static width."""
-    return rows if rows in _STATIC_ROWS else None
+def _symbolic_profile(rows: int) -> Hashable | None:
+    """Return one bounded-capacity cache key for every serving width."""
+    return _MAX_PREFILL_ROWS if 0 < rows <= _MAX_PREFILL_ROWS else None
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,7 @@ class _ExternalProgram:
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
     prepare_rows: Callable[[int], None] | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
 
 @dataclass
@@ -49,12 +50,7 @@ class _ProgramEntry:
 
 
 class _ProgramCache:
-    """Lazy program cache whose key policy can later represent a capacity build.
-
-    The initial profile returns the row count, hence one static program per
-    qualified width.  A later symbolic-capacity builder can return one shared
-    key and supply ``prepare_rows`` without changing either adapter.
-    """
+    """Lazy program cache whose key policy may share one capacity build."""
 
     def __init__(
         self,
@@ -100,28 +96,34 @@ class _ProgramCache:
             self.entries.pop(key, None)
 
 
-def _build_qkv_program(rows: int) -> _ExternalProgram:
+def _build_qkv_program(_rows: int) -> _ExternalProgram:
     from emmy.serving.deepseek import trace_fused_q_kv_rmsnorm
     from emmy.serving.external import build_external_program
 
-    runtime, plan = build_external_program(trace_fused_q_kv_rmsnorm(rows=rows))
+    runtime, plan = build_external_program(
+        trace_fused_q_kv_rmsnorm(rows=_MAX_PREFILL_ROWS, dynamic=True),
+        symbolic_values={"num_tokens": _MAX_PREFILL_ROWS},
+    )
     inputs = tuple(plan.inputs)
     outputs = tuple(plan.outputs)
     if inputs != ("fused_q_kv", "q_weight", "kv_weight") or len(outputs) != 2:
         raise RuntimeError(f"1Cat Q/KV RMSNorm expected three inputs and two outputs, got {inputs!r} -> {outputs!r}")
-    return _ExternalProgram(runtime, inputs, outputs)
+    return _ExternalProgram(runtime, inputs, outputs, lambda rows: runtime.set_sym_values({"num_tokens": rows}))
 
 
-def _build_inverse_rope_program(rows: int) -> _ExternalProgram:
+def _build_inverse_rope_program(_rows: int) -> _ExternalProgram:
     from emmy.serving.deepseek import trace_inverse_rope
     from emmy.serving.external import build_external_program
 
-    runtime, plan = build_external_program(trace_inverse_rope(rows=rows))
+    runtime, plan = build_external_program(
+        trace_inverse_rope(rows=_MAX_PREFILL_ROWS, dynamic=True),
+        symbolic_values={"num_tokens": _MAX_PREFILL_ROWS},
+    )
     inputs = tuple(plan.inputs)
     outputs = tuple(plan.outputs)
     if inputs != ("x", "positions", "cos_sin_cache") or len(outputs) != 1:
         raise RuntimeError(f"1Cat inverse RoPE expected three inputs and one output, got {inputs!r} -> {outputs!r}")
-    return _ExternalProgram(runtime, inputs, outputs)
+    return _ExternalProgram(runtime, inputs, outputs, lambda rows: runtime.set_sym_values({"num_tokens": rows}))
 
 
 def _run_external(program: _ExternalProgram, bindings: tuple[tuple[str, Any], ...], device: Any) -> None:
@@ -214,7 +216,7 @@ class _FusedQKvRmsNormAdapter:
         original: Callable[..., tuple[Any, Any]],
         *,
         program_builder: Callable[[int], _ExternalProgram] = _build_qkv_program,
-        profile: Callable[[int], Hashable | None] = _static_profile,
+        profile: Callable[[int], Hashable | None] = _symbolic_profile,
         runner: Callable[[_ExternalProgram, tuple[tuple[str, Any], ...], Any], None] = _run_external,
     ) -> None:
         self.original = original
@@ -236,19 +238,20 @@ class _FusedQKvRmsNormAdapter:
         kv_out = kv.new_empty(kv.shape)
         program = entry.program
         try:
-            if program.prepare_rows is not None:
-                program.prepare_rows(rows)
-            self.runner(
-                program,
-                (
-                    (program.inputs[0], fused),
-                    (program.inputs[1], q_weight),
-                    (program.inputs[2], kv_weight),
-                    (program.outputs[0], q_out),
-                    (program.outputs[1], kv_out),
-                ),
-                qr.device,
-            )
+            with program.lock:
+                if program.prepare_rows is not None:
+                    program.prepare_rows(rows)
+                self.runner(
+                    program,
+                    (
+                        (program.inputs[0], fused),
+                        (program.inputs[1], q_weight),
+                        (program.inputs[2], kv_weight),
+                        (program.outputs[0], q_out),
+                        (program.outputs[1], kv_out),
+                    ),
+                    qr.device,
+                )
         except Exception:  # noqa: BLE001 -- compatibility adapter permanently falls back
             self.cache.disable(rows)
             logger.exception("1Cat Q/KV RMSNorm: Emmy launch failed for M=%d; retaining the original kernel", rows)
@@ -271,7 +274,7 @@ class _InverseRopeAdapter:
         original: Callable[..., Any],
         *,
         program_builder: Callable[[int], _ExternalProgram] = _build_inverse_rope_program,
-        profile: Callable[[int], Hashable | None] = _static_profile,
+        profile: Callable[[int], Hashable | None] = _symbolic_profile,
         runner: Callable[[_ExternalProgram, tuple[tuple[str, Any], ...], Any], None] = _run_external,
     ) -> None:
         self.original = original
@@ -291,18 +294,19 @@ class _InverseRopeAdapter:
         output = x.new_empty(x.shape)
         program = entry.program
         try:
-            if program.prepare_rows is not None:
-                program.prepare_rows(rows)
-            self.runner(
-                program,
-                (
-                    (program.inputs[0], x),
-                    (program.inputs[1], positions),
-                    (program.inputs[2], cos_sin_cache),
-                    (program.outputs[0], output),
-                ),
-                x.device,
-            )
+            with program.lock:
+                if program.prepare_rows is not None:
+                    program.prepare_rows(rows)
+                self.runner(
+                    program,
+                    (
+                        (program.inputs[0], x),
+                        (program.inputs[1], positions),
+                        (program.inputs[2], cos_sin_cache),
+                        (program.outputs[0], output),
+                    ),
+                    x.device,
+                )
         except Exception:  # noqa: BLE001 -- compatibility adapter permanently falls back
             self.cache.disable(rows)
             logger.exception("1Cat inverse RoPE: Emmy launch failed for M=%d; retaining the original kernel", rows)
@@ -348,7 +352,7 @@ def register_onecat_deepseek_kernels(
     *,
     qkv_program_builder: Callable[[int], _ExternalProgram] = _build_qkv_program,
     inverse_program_builder: Callable[[int], _ExternalProgram] = _build_inverse_rope_program,
-    profile: Callable[[int], Hashable | None] = _static_profile,
+    profile: Callable[[int], Hashable | None] = _symbolic_profile,
     runner: Callable[[_ExternalProgram, tuple[tuple[str, Any], ...], Any], None] = _run_external,
 ) -> bool:
     """Install both exact pinned 1Cat adapters, returning true only for both.

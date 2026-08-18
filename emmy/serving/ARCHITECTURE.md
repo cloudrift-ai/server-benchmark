@@ -33,9 +33,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   state, routing, and MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
 - `onecat_deepseek.py`, `onecat_linear.py`, `onecat_mhc.py`, and `onecat_output.py` — the broader opt-in
   `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve 1Cat's scheduler, TP/PP collectives, and stateful paged
-  sparse-attention/cache ownership. Exact guarded compiler programs cover the qualified dense-attention widths, the
-  five unquantized projection profiles through 4096 token rows, all five mHC boundaries, TP-local vocabulary
-  embedding and full logits, and the shared-expert clamp-SwiGLU activation. 1Cat retains vocabulary masking and
+  sparse-attention/cache ownership. One bounded symbolic-capacity program covers every Q/KV RMSNorm and inverse-RoPE
+  width from 1 through 4096 rows; first-use parity and CUDA-graph eligibility remain tracked per concrete width.
+  Exact guarded compiler programs also cover the five unquantized projection profiles through 4096 token rows,
+  all five mHC boundaries, TP-local vocabulary embedding and full logits, and the shared-expert clamp-SwiGLU
+  activation. 1Cat retains vocabulary masking and
   reduction, compact top-1 logits, packed-weight linear operations, and shared/routed output combination. Unsupported
   widths and cold or unverified CUDA-graph calls retain the original 1Cat functions.
 - `mhc.py` — exact FP32 multi-stream residual algebra used by the DeepSeek V4 serving adapter traces. Its

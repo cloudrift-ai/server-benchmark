@@ -112,7 +112,9 @@ class KernelSpec:
 
     source: str | None = None
     binary_key: str | None = None
-    uses_tma: bool = False
+    # Whether this kernel must compile for the arch-SUFFIXED target (``sm_120a``). TMA needs it,
+    # and so does the block-scaled fp4 mma, which ptxas refuses on the plain target.
+    arch_specific: bool = False
 
 
 @dataclass
@@ -159,6 +161,20 @@ class ExecutionPlan:
 # ---------------------------------------------------------------------------
 
 
+#: The block-scaled fp4 mma wrapper's name. A kernel carrying it must compile for the
+#: arch-suffixed target, the same requirement TMA has for a different reason.
+_BLOCK_SCALED_F4_WRAPPER = "emmy_mma_m16n8k64_e2m1_f32"
+
+
+def _needs_arch_isa(op) -> bool:
+    """Whether this kernel must compile for ``sm_<cc>a``.
+
+    TMA announces itself structurally through the descriptors. The fp4 mma has no such marker at
+    this layer — a plan carries the kernel's rendered source, not its statement tree — so the
+    wrapper name in that source is what identifies it."""
+    return bool(op.tma_descriptors) or _BLOCK_SCALED_F4_WRAPPER in op.kernel_source
+
+
 def plan_from_graph(graph: Graph) -> ExecutionPlan:
     """Project a lowered ``Graph[CudaOp]`` into an :class:`ExecutionPlan`.
 
@@ -188,7 +204,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")
         spec = kernels.get(op.kernel_name)
         if spec is None:
-            kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, uses_tma=bool(op.tma_descriptors))
+            kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, arch_specific=_needs_arch_isa(op))
         elif spec.source != op.kernel_source:
             # Longstanding runtime semantics: launches resolve kernels by NAME and the first
             # source wins (repeated helper names like ``__partial`` ride the first-compiled
@@ -472,7 +488,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             name: {
                 **({"source": spec.source} if spec.source is not None else {}),
                 **({"binary_key": spec.binary_key} if spec.binary_key is not None else {}),
-                "uses_tma": spec.uses_tma,
+                "arch_specific": spec.arch_specific,
             }
             for name, spec in plan.kernels.items()
         },
@@ -546,7 +562,12 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
             for lc in d["launches"]
         ],
         kernels={
-            name: KernelSpec(source=spec.get("source"), binary_key=spec.get("binary_key"), uses_tma=bool(spec.get("uses_tma", False)))
+            name: KernelSpec(
+                source=spec.get("source"),
+                binary_key=spec.get("binary_key"),
+                # ``uses_tma`` is the key packs baked before the fp4 atom wrote; same meaning, narrower name.
+                arch_specific=bool(spec.get("arch_specific", spec.get("uses_tma", False))),
+            )
             for name, spec in d.get("kernels", {}).items()
         },
         weights={

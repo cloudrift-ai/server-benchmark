@@ -782,6 +782,69 @@ static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, cons
 
 """
 
+# Block-scaled fp4 mma (``m16n8k64``) — appended ONLY when the kernel carries one, so no other
+# kernel's source moves. Both multiplicands are packed e2m1 pairs and each 16-element K block
+# carries its own ue4m3 scale, which the instruction applies itself: the accumulator gets
+# ``SFA[m][kb] * SFB[n][kb] * sum(A·B over block kb)``. Everything below was measured on an
+# RTX 5080 Laptop (sm_120a) against a numpy reference built on ``dtype.decode_f4x2`` — random
+# operands AND random scales, agreeing bit-for-bit.
+#
+# ARCH: ptxas assembles this on sm_120a and REFUSES it on sm_100a, so the kernel needs the
+# arch-suffixed target (see ``backend/cuda/nvcc.py``).
+#
+# THREAD-ID RANGE: the PTX ISA documents the scale operands' thread-id selector as [0..3]. At
+# ``scale_vec::4X`` ptxas accepts only [0..1] — "Argument 5 of instruction 'mma': value '3' out of
+# range, expected to be in range [0..1]". A reader expecting the documented range will otherwise
+# widen these constants and hit an assembler error rather than a wrong answer.
+#
+# SCALE FRAGMENTS: one supplying lane holds a b32 covering its four K blocks, one per byte, and
+# byte-id is 0 because 4X consumes all four. Which lane supplies which row/column:
+#   SFA: lane L feeds m = (L>>2) + 8*((L&3) - 2*TID_A), when that difference is 0 or 1
+#   SFB: lane L feeds n = L>>2, when (L&3) == TID_B
+# Non-supplying lanes are ignored, so their register value does not matter. Both selector values
+# are legal and pick disjoint lane sets; SFA and SFB are separate operands, so overlap is fine.
+#
+# DATA FRAGMENTS: the k64 4-bit map is byte-for-byte the k32 8-bit one, so the ``_b8`` loaders
+# above serve unchanged — a packed row is K/2 bytes, which is exactly what they take as ``ldm``.
+# Those gather bytes per lane rather than issuing ``ldmatrix``, which is b16-only below sm_100a;
+# reusing them means this atom inherits that choice instead of needing a drain of its own.
+_MMA_F4_BLOCK_PRELUDE = """\
+#define EMMY_F4_SF_TID_A 0
+#define EMMY_F4_SF_TID_B 1
+
+static __device__ __forceinline__ unsigned emmy_mma_load_sfa_f4(const unsigned char* s, int ldm) {
+    int lane = threadIdx.x & 31, q = lane >> 2, r = (lane & 3) - 2 * EMMY_F4_SF_TID_A;
+    if (r < 0 || r > 1) return 0u;              // this lane supplies no row; the mma ignores it
+    int m = q + 8 * r;
+    unsigned packed;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = s[m * ldm + j];
+    return packed;
+}
+
+static __device__ __forceinline__ unsigned emmy_mma_load_sfb_f4(const unsigned char* s, int ldm) {
+    int lane = threadIdx.x & 31, q = lane >> 2;
+    if ((lane & 3) != EMMY_F4_SF_TID_B) return 0u;
+    unsigned packed;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = s[q * ldm + j];
+    return packed;
+}
+
+static __device__ __forceinline__ void emmy_mma_m16n8k64_e2m1_f32(
+        float* d, const unsigned* a, const unsigned* b, unsigned sfa, unsigned sfb) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X"
+        ".f32.e2m1.e2m1.f32.ue4m3 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, "
+        "{%10}, {%12, %13}, {%11}, {%12, %14};\\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "r"(sfa), "r"(sfb), "n"(0), "n"(EMMY_F4_SF_TID_A), "n"(EMMY_F4_SF_TID_B));
+}
+
+"""
+
 # Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``LdmatrixLoad``
 # (a staged 1-byte operand), so every other kernel's source stays byte-identical. ldmatrix is
 # b16-only below sm_100a, so a staged fp8 slab drains through a cooperative per-lane gather with
@@ -1106,6 +1169,12 @@ def render_kernelop(
     # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.
     if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
         mma_sync_prelude += _MMA_F8_PRELUDE
+    if any(isinstance(s, MmaSyncPtx) and s.block_scaled for s in mma_stmts):
+        # The block-scaled fp4 wrapper reuses the ``_b8`` data loaders, so it needs the fp8
+        # prelude beside it even when no fp8 mma is present.
+        if _MMA_F8_PRELUDE not in mma_sync_prelude:
+            mma_sync_prelude += _MMA_F8_PRELUDE
+        mma_sync_prelude += _MMA_F4_BLOCK_PRELUDE
     byte_drains = [s for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.byte_slab]
     if any(s.scale_buffer is None for s in byte_drains):
         mma_sync_prelude += _F8_STAGED_PRELUDE

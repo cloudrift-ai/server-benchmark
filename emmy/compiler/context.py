@@ -247,6 +247,15 @@ class Context:
         return self.compute_capability >= (8, 9)
 
     @property
+    def has_block_scaled_f4_mma(self) -> bool:
+        """Whether the target has the block-scaled FP4 ``mma.sync`` (``m16n8k64``, ``kind::mxf4nvf4``).
+
+        Consumer Blackwell (sm_120) only, and NOT every cc 12.x-and-up card: ptxas assembles it for
+        sm_120a and refuses it for sm_100a, so this asks for the 12.0 family rather than a lower
+        bound. The kernel also needs the arch-suffixed target to compile at all."""
+        return self.compute_capability[0] == 12
+
+    @property
     def has_tma(self) -> bool:
         """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
         Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to

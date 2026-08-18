@@ -189,8 +189,15 @@ bf16 fragments alike — every e2m1 value is exact in both — so a bf16 trace, 
 takes the same path. The W8A16 mul-hoist (the scale
 multiply moved out of the reduction loop onto the accumulator) still does not apply: an NVFP4 scale varies along the
 contraction axis, so it does not commute out of the fold. The packed stage's scope is the shape its loader is
-written for — cp.async, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that same 16;
-anything else declines to the general reading, which computes the same values.
+written for — either copy transport, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that
+same 16; anything else declines to the general reading, which computes the same values. A TMA box deposits its byte
+slab dense where cp.async pads each row, so the two forms differ in slab size and row stride, not in what they drain.
+
+Both readings still hand the tensor cores 16-bit fragments, because every mma before Blackwell multiplies 16-bit or
+8-bit operands. Consumer Blackwell adds one that multiplies the 4-bit codes THEMSELVES and applies each 16-value
+block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul would carry no decode at
+all. Nothing offers it yet: the instruction wants BOTH multiplicands packed, and an activation arrives as f16 or
+bf16, so quantizing one is the missing piece rather than the cell itself.
 
 **Mixed-scheme checkpoints.** A checkpoint may quantize different leaves differently, and the two
 recognizers answer independently rather than exclusively: each asks whether ANY declared weight group is

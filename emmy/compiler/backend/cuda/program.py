@@ -127,7 +127,7 @@ def _load_kernel(name: str, spec: KernelSpec):
         raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
     # ``nvcc.load_function`` returns a cupy ``Function`` — launch-callable and
     # smem-attr settable, compiled via offline nvcc into the content-addressed cache.
-    return nvcc.load_function(spec.source, name, _nvrtc_options(uses_tma=spec.uses_tma), uses_tma=spec.uses_tma)
+    return nvcc.load_function(spec.source, name, _nvrtc_options(arch_specific=spec.arch_specific), arch_specific=spec.arch_specific)
 
 
 def _load_plan(plan: ExecutionPlan) -> _Compiled:
@@ -147,12 +147,12 @@ def _load_plan(plan: ExecutionPlan) -> _Compiled:
     )
 
 
-def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
-    """NVRTC compile options. TMA-using kernels need ``sm_<major><minor>a``
-    (the ``a`` arch unlocks ``cp.async.bulk.tensor`` PTX). Non-TMA
-    kernels keep the cupy default (capability inferred at runtime)."""
+def _nvrtc_options(*, arch_specific: bool) -> tuple[str, ...]:
+    """NVRTC compile options. Kernels needing the arch-specific ISA need ``sm_<major><minor>a``
+    — the ``a`` arch is what unlocks ``cp.async.bulk.tensor`` and the block-scaled fp4 mma. The
+    rest keep the cupy default (capability inferred at runtime)."""
     base = ("--use_fast_math",)
-    if not uses_tma:
+    if not arch_specific:
         return base
     from emmy.compiler.target import compute_capability  # noqa: PLC0415
 

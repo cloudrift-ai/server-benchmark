@@ -1671,9 +1671,20 @@ class MmaSyncPtx(Stmt):
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
     c_dtype: str = "f32"
+    # The BLOCK-SCALED form's two extra register operands (one packed b32 of ue4m3 block scales
+    # per side), set together or not at all. Present only for the fp4 atom, whose instruction
+    # applies the per-16-element scales itself; every other mma leaves them ``None``.
+    sfa_frag: str | None = None
+    sfb_frag: str | None = None
+
+    @property
+    def block_scaled(self) -> bool:
+        """Whether this mma carries its own block scales — the fp4 atom's distinguishing trait."""
+        return self.sfa_frag is not None
 
     def deps(self) -> tuple[str, ...]:
-        return (self.c_frag, self.a_frag, self.b_frag)
+        scales = (self.sfa_frag, self.sfb_frag) if self.block_scaled else ()
+        return (self.c_frag, self.a_frag, self.b_frag, *scales)
 
     def defines(self) -> tuple[str, ...]:
         # Accumulates into c_frag in place — a definition, like MmaSyncPtx.
@@ -1682,13 +1693,19 @@ class MmaSyncPtx(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         acc = "" if self.c_dtype == "f32" else f" acc:{self.c_dtype}"
-        return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc})"]
+        scales = f" scales:{self.sfa_frag},{self.sfb_frag}" if self.block_scaled else ""
+        return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc}{scales})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         m, n, k = self.shape
         # Wrapper names follow the atom convention's <ab>_<acc> dtype pair (emmy_mma_m16n8k16_f16_f32).
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
         wrapper = f"emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}_{self.c_dtype}"
+        if self.block_scaled:
+            # The block-scaled wrapper accumulates in place, so it takes the scale registers
+            # where the others take ``c`` a second time.
+            args = f"{self.c_frag}, {self.a_frag}, {self.b_frag}, {self.sfa_frag}, {self.sfb_frag}"
+            return [f"{_pad(ctx.indent)}{wrapper}({args});"]
         return [f"{_pad(ctx.indent)}{wrapper}({self.c_frag}, {self.a_frag}, {self.b_frag}, {self.c_frag});"]
 
 

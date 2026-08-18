@@ -106,7 +106,11 @@ role via `graph.buffer_role`), scalar/runtime constants, the launch list (`Launc
 buffer a launch produces; the slab planner's first-write test reads it, falling back to `node_id` for plans
 stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
-with pure numpy). `plan_from_graph` is the seam the whole runtime builds from: after it runs,
+with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
+target (`sm_120a`). Two unrelated instruction families need that suffix: TMA, which announces itself through
+the launch's descriptors, and the block-scaled fp4 mma, which a plan can only recognize by its wrapper name in
+the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
+only the name narrowed. `plan_from_graph` is the seam the whole runtime builds from: after it runs,
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression

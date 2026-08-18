@@ -76,7 +76,7 @@ def test_plan_projection():
     assert plan.runtime_constants == {"div": Var("seq_len")}
     assert plan.weights == {"w": WeightSpec(source_path="model.w", load_ops=(("transpose", (1, 0)),))}
     assert set(plan.kernels) == {"k_test"}
-    assert plan.kernels["k_test"].uses_tma and plan.kernels["k_test"].source.startswith("__global__")
+    assert plan.kernels["k_test"].arch_specific and plan.kernels["k_test"].source.startswith("__global__")
     assert plan.symbolic_bindings == {"seq_len": ("x", 0)}
     (launch,) = plan.launches
     assert launch.kernel_name == "k_test" and launch.runtime_args == ("seq_len",)
@@ -86,6 +86,17 @@ def test_plan_json_round_trip():
     plan = plan_from_graph(_sample_graph())
     wire = json.loads(json.dumps(plan_to_dict(plan)))
     assert plan_from_dict(wire) == plan
+
+
+def test_a_plan_stored_under_the_old_tma_key_still_reads():
+    """``uses_tma`` became ``arch_specific`` when the block-scaled fp4 mma turned out to need the
+    same arch-suffixed target for its own reason. The meaning did not change, so a pack baked
+    before the rename must keep loading rather than silently dropping to the unsuffixed arch."""
+    wire = json.loads(json.dumps(plan_to_dict(plan_from_graph(_sample_graph()))))
+    spec = wire["kernels"]["k_test"]
+    assert spec.pop("arch_specific") is True
+    spec["uses_tma"] = True
+    assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
 
 
 def test_plan_round_trip_preserves_binary_key():

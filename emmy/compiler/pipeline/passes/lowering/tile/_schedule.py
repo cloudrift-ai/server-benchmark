@@ -764,7 +764,11 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
         return ()
     ab = _a_dtype(node, inputs)
     if ab is not None and ab.logical_elems != 1:
-        return ()  # a packed-pair storage dtype has no scalar byte semantics; no warp atom takes it
+        # A packed-pair storage dtype has no scalar byte semantics, so every atom that multiplies
+        # DECODED operands is out. The block-scaled fp4 cell multiplies the codes themselves, but
+        # it needs BOTH operands packed and an activation arrives 16-bit, so nothing reaches it
+        # through here yet — a packed A still declines to the decode-based readings.
+        return ()
     if ab is not None and ab.nbytes == 1:
         # The native fp8 tier (M3): offered only under the precision gate, on a MATERIALIZED f8
         # ``a`` whose channels all carry the SAME f8 dtype (the byte-gather loaders move raw

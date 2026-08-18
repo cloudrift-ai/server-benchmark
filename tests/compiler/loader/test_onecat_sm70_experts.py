@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from emmy.compiler.loader.onecat_sm70_experts import bind_experts
+from emmy.compiler.loader.onecat_sm70_experts import bind_experts, expert_method_class
 from emmy.serving.deepseek_experts import trace_deepseek_experts
 
 _CUDA0 = torch.device("cuda:0")
@@ -64,6 +64,16 @@ def test_bind_experts_rejects_shape_and_device_drift():
 
     layer = _layer(torch.device("cuda:1"))
     assert bind_experts(layer, *_inputs(3), lambda *_tensors: True) is None
+
+
+def test_expert_method_class_is_resolved_at_loader_birth():
+    from types import SimpleNamespace
+
+    class Expert:
+        pass
+
+    assert expert_method_class(SimpleNamespace(Mxfp4SM70MoEMethod=Expert)) is Expert
+    assert expert_method_class(SimpleNamespace()) is None
 
 
 def test_spelling_exposes_only_compact_carriers_at_the_external_abi():

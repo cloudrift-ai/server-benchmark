@@ -430,19 +430,18 @@ def _signature(function: Callable) -> tuple[str, ...] | None:
 
 def register_onecat_expert_kernels(
     router_module: ModuleType | None = None,
-    mxfp4_module: ModuleType | None = None,
+    expert_module: ModuleType | None = None,
 ) -> bool:
     """Atomically install the exact router and retained-expert adapters."""
     global _ACTIVE
 
     try:
         router_module = router_module or importlib.import_module("vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router")
-        mxfp4_module = mxfp4_module or importlib.import_module("vllm.model_executor.layers.quantization.mxfp4_sm70_moe")
+        expert_cls = expert_loader.expert_method_class(expert_module)
     except ImportError:
         logger.warning("1Cat routed experts requested, but compatible modules are unavailable")
         return False
     router_cls = getattr(router_module, "FusedTopKBiasRouter", None)
-    expert_cls = getattr(mxfp4_module, "Mxfp4SM70MoEMethod", None)
     if router_cls is None or expert_cls is None:
         return False
     with _INSTALL_LOCK:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any
 
 EXPERTS = 256
@@ -34,6 +36,13 @@ def spell_expert_inputs(graph) -> None:
             "w2": mxfp4_sm70_mma884_storage((EXPERTS, HIDDEN, INTERMEDIATE)),
         },
     )
+
+
+def expert_method_class(module: ModuleType | None = None) -> type | None:
+    """Return the exact 1Cat method class owned by this birth integration."""
+    if module is None:
+        module = importlib.import_module("vllm.model_executor.layers.quantization.mxfp4_sm70_moe")
+    return getattr(module, "Mxfp4SM70MoEMethod", None)
 
 
 def bind_experts(layer: Any, x: Any, weights: Any, ids: Any, platform_supported) -> ExpertBinding | None:
@@ -84,4 +93,4 @@ def bind_experts(layer: Any, x: Any, weights: Any, ids: Any, platform_supported)
     return ExpertBinding(rows, x, weights, ids, retained) if valid else None
 
 
-__all__ = ["ExpertBinding", "bind_experts", "spell_expert_inputs"]
+__all__ = ["ExpertBinding", "bind_experts", "expert_method_class", "spell_expert_inputs"]

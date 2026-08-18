@@ -1289,7 +1289,7 @@ def test_quantized_checkpoint_e2e_cuda(tmp_path):
 # else is the leak this gate exists to stop.
 _QUANT_CONCEPT_PATTERN = (
     r"QuantSpec|quantization_config|quant_method|weight_scale|modules_to_not_convert|dequant|"
-    r"\bmxfp4\b|w(?:13|2)_tm_(?:weight|scales)"
+    r"mxfp4|w(?:13|2)_tm_(?:weight|scales)"
 )
 
 _FRONTEND_BAND_ALLOWLIST = {
@@ -1300,6 +1300,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
+    "emmy/serving/mxfp4.py",  # serving graph-birth traces consumed by the loader speller
 }
 
 
@@ -1308,7 +1309,7 @@ def test_quantization_concepts_stay_in_the_frontend_band():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    pat = re.compile(_QUANT_CONCEPT_PATTERN)
+    pat = re.compile(_QUANT_CONCEPT_PATTERN, re.IGNORECASE)
     offenders = {str(p.relative_to(root)) for p in (root / "emmy").rglob("*.py") if pat.search(p.read_text())} - _FRONTEND_BAND_ALLOWLIST
     assert not offenders, (
         f"quantization concepts referenced outside the frontend/loader band: {sorted(offenders)}. "

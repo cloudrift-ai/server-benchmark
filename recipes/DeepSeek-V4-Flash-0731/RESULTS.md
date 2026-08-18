@@ -1,8 +1,9 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. A bounded live Emmy integration is also
-qualified for the final decode RMSNorm; full `EmmyGenModel` serving remains ineligible because the DeepSeek V4
-compressor, hyper-connection state, quantized checkpoint path, and TP trunk lack executable serving-twin coverage.
+Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. A local broad Emmy/1Cat image is also
+qualified for every pure compiler-eligible serving cone. 1Cat retains scheduling, collectives, and stateful paged
+sparse-attention/cache operations. The maintained published recipe remains on the stock image pending publication
+approval for the derived image.
 
 ## Qualified deployment
 
@@ -77,50 +78,79 @@ The maintained recipe remains on the published stock image because the derived i
 requires separate human approval. Raw evidence and the exact scope are in
 [`emmy_rmsnorm_v100_sxm3`](../../experiments/DeepSeek-V4-Flash-0731/emmy_rmsnorm_v100_sxm3/RESULTS.md).
 
-## Exact-boundary compiler follow-up
+## Broad live Emmy qualification
 
-After rebasing onto `650e196d`, the follow-up expanded the exact runtime-boundary compiler inventory instead of
-treating the fixed-S512 architecture golden as serving coverage. The new traces preserve the deployed FP32 mHC
-parameters, strided Q/KV views, interleaved inverse-RoPE indexing, and compact expert bytes. Every candidate passed its
-component numerical gate on a V100, but none beat the corresponding 1Cat hot path, so the maintained recipe does not
-enable them.
+The final local image was built from `434577de` over the pinned 1Cat base and enabled
+`EMMY_ONECAT_DEEPSEEK_V4=1`. Emmy owns the pure GPU compute after loader graph birth: normalization and RoPE,
+unquantized and retained-FP8 projections, all five mHC boundaries, local vocabulary/output work, indexer-Q, learned
+and hash routing, and the retained-MXFP4 expert projection/activation/weighted-combine path. The loader validates and
+exports the sole physical FP8 or MXFP4 carrier; no decoded copy crosses the runtime boundary.
 
-| Exact boundary | Emmy result | Matched 1Cat result | Decision |
+The release-blocking manifest contains 188 exact programs:
+
+| Family | Profiles |
+| --- | ---: |
+| Normalization and RoPE | 4 |
+| Unquantized projections | 45 |
+| Retained physical FP8 projections | 54 |
+| mHC boundaries | 45 |
+| Output leaves | 3 |
+| Local vocabulary and compact top-1 | 17 |
+| C4 indexer-Q | 1 |
+| Learned and hash routing | 18 |
+| Retained compact experts | 1 |
+
+All 188 programs were realized and strictly reloaded on a V100 before server startup. The baked image contains 301
+cubins. Fingerprint-identical compiler-denial wrappers observed zero external compiler invocations during strict
+replay and the complete TP8×PP2 run; the runtime cache stayed byte-identical to the image. Startup reached health in
+244 seconds with no adapter error. The vLLM monitor nevertheless reported nine first-use native Triton
+specializations during inference, so the image does not yet pass the stricter zero-JIT release gate. Missing or
+damaged packs, unsupported contracts, capture-cold calls, and pre-mutation parity failures retain the exact 1Cat
+operation. A failure after KV-cache mutation is surfaced rather than replayed.
+
+The final continuous-batching workload ran one priming repeat followed by two steady repeats. Each repeat used eight
+unique 1,024-token prompts at concurrency 8 and forced 64 tokens with temperature zero. All 24 requests completed.
+The priming repeat reached 7.689 output tokens/s and 386.253 ms TPOT because every concrete runtime width executes its
+first-use parity gate. The steady result was 20.714 ± 0.052 output tokens/s and 220.238 ± 0.026 ms TPOT. Compared with
+the published stock baseline, broad Emmy coverage reduced output throughput by 39.4% and increased TPOT by 12.4%.
+This is a coverage and correctness result, not a performance win.
+
+The steady benchmark exercised irregular continuous-batch widths, including the previously failing M=3077 expert
+case, with zero fallback and zero external compiler invocation. The exact arithmetic probe returned `323` twice with
+identical logprobs, and the structured parser returned `multiply(a=17, b=19)`. A 1,048,575-token prompt plus one
+decode token remained healthy at full GPU utilization with stable memory and no preemption, OOM, or adapter error for
+3,600 seconds, but did not finish before the client timeout. Broad Emmy full-context qualification therefore remains
+open; the successful 1,048,576-token evidence in the earlier section applies to the maintained stock recipe.
+
+Representative component results explain the endpoint regression:
+
+| Exact boundary | Emmy result | Matched 1Cat result | Outcome |
 | --- | ---: | ---: | --- |
-| Fused Q/KV RMSNorm, `M=1/2/4/8/128` | 6.82–7.62 µs | 1.65–3.07 µs | Retain compiler coverage; 2.46–4.48× slower |
-| Inverse RoPE, `M=1/2/4/8/128` | 1.67–4.35 µs | 1.50–3.43 µs | Retain compiler coverage; 9–27% slower |
-| C4 compressor projection, `N=2048`, measured `M=1/2/4` | 21.98–40.59 µs | 20.79–29.70 µs | Retain; 5–37% slower |
-| C128 compressor projection, `N=1024`, measured `M=1/4/8` | 12.51–29.27 µs | 11.93–19.61 µs | Retain; 5–49% slower |
-| Full fused mHC transition, `M=1`, mixed per-node schedules | 21.254 µs | 12.831 µs | Retain; 1.66× slower |
-| Routed compact MXFP4 W13/W2, six experts with 48 rows | 333.824 / 236.288 µs | 125.261 / 43.735 µs | Retain; 2.67× / 5.40× slower |
+| Final RMSNorm | 4.569 µs | bounded endpoint tie | 1.578× over Emmy greedy |
+| Fused Q/KV RMSNorm | 6.82–7.62 µs | 1.65–3.07 µs | 2.46–4.48× slower |
+| Inverse RoPE | 1.67–4.35 µs | 1.50–3.43 µs | 9–27% slower |
+| C4/C128 compressor projections | 12.51–40.59 µs | 11.93–29.70 µs | 5–49% slower |
+| Fused mHC transition, M=1 | 21.254 µs | 12.831 µs | 1.66× slower |
+| Retained FP8 projections | exact component parity | matched physical carriers | 4–14× slower in tested shapes |
+| Route plus compact experts, M=1/M=8 | exact IDs and FP16 parity | recipe-default stock | 1.34–1.60× faster |
 
-The mHC result uses eight launches. A generic bounded `FixedSinkhornOp` collapses the fixed 20-round 4×4 normalization
-from 39 launches to one, while per-node evidence selects serial work for the short reductions and `t512/coop` for the
-16K and 4K reductions. Applying one global `t512` pin instead takes 107.520 µs, which confirms that schedule evidence
-must remain node-specific. The compact MXFP4 loader spelling consumes the checkpoint's packed E2M1 bytes and UE8M0
-scales directly; format-specific behavior disappears into generic integer, bitcast, gather, and contraction algebra
-at graph birth. The exact checkpoint's 9.26 billion expert scale bytes are all codes 118–126, inside the validated
-FP16-exact 113–142 interval.
+The mHC result uses eight launches. A generic `FixedSinkhornOp` collapses the fixed 20-round 4×4 normalization from
+39 launches to one; node-specific evidence selects serial work for short reductions and `t512/coop` for the 16K and
+4K reductions. A single global `t512` pin takes 107.520 µs and is rejected. The exact checkpoint's 9.26 billion expert
+scale bytes are codes 118–126, inside the validated FP16-exact 113–142 interval.
 
-This work also fixed three model-agnostic compiler defects exposed by the live boundaries: non-unit Torch slice steps
-were previously dropped, scoped tile paths could not replay a literal axis named `a0`, and typed 64-bit Loop inputs
-used a host ABI spelling that cppyy could not bind on Darwin. These fixes have focused numerical and wire-compatibility
-tests. The follow-up does not claim that stateful HCA/CSA cache mutation, sparse attention, expert routing, TP/PP
-collectives, or the complete model execute in Emmy.
+This work also fixed model-agnostic compiler defects exposed by the live boundaries: non-unit Torch slice steps were
+dropped, scoped tile paths could not replay a literal axis named `a0`, compound symbolic shapes lost their source
+symbol, and typed 64-bit Loop inputs used a host ABI spelling cppyy could not bind on Darwin. The DeepSeek layer-0
+Loop pass now completes in 3.826 seconds instead of running beyond 22 minutes 59 seconds.
 
-The final broad-adapter build gate realized and strictly replayed all 114 declared external programs on the supplied
-V100 host, producing 114 execution-plan packs and 215 cubins. The inventory adds rank-specific TP-local embedding and
-compact LM-head top-1 programs around the original collectives, plus the pure C4 indexer-Q RoPE and weight-scaling
-transform. A direct `M=17` V100 check loaded only the persisted packs and matched embedding/rank selection exactly;
-local logits and indexer-Q matched their FP32 accumulation references within their declared tolerances. Runtime
-compilation is not reachable from these adapters: a missing or damaged pack keeps the corresponding 1Cat operation.
+1Cat intentionally retains scheduler and continuous-batching orchestration, CUDA-graph lifecycle, TP/PP and expert
+collectives, HCA/CSA and sparse/recurrent attention state, paged FP8 KV-cache allocation and mutation, checkpoint
+loading and tensor lifetime, and the API/sampling stack. This is full coverage of the eligible pure kernels, not an
+`EmmyGenModel` replacement for stateful distributed serving.
 
-The retained TurboMind FP8 carrier layout was also reconstructed and checked byte-for-byte at graph birth. Emmy used
-the caller-owned `uint8` weight and FP16 scale carriers without a decoded weight or scratch buffer and matched the
-1Cat result, but measured 4–14× slower for the tested fused-QKV and shared gate/up shapes. The runtime hook and its 54
-candidate profiles were therefore removed. Routed-expert prototypes were likewise excluded after failing the
-whole-model latency budget. The maintained recipe still does not enable `EMMY_ONECAT_DEEPSEEK_V4`; the 114-profile
-result is component and offline-release evidence, not broad endpoint or full-model serving qualification.
+The maintained recipe still points to the published stock image and does not enable the broad opt-in. The derived
+image is local and unpublished; registry publication requires separate human approval.
 
 ## Reproduce
 

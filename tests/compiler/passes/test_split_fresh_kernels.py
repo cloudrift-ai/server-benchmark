@@ -115,9 +115,9 @@ def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
 
 
 def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> None:
-    """A ``TileOp`` piece is stamped from the body it WOULD have had — its lowered per-cell nest
-    with the boundary stores put back, re-nested under its free axes (``_stamp.kernel_body``).
-    Both halves of that matter and both were once wrong to assume:
+    """A piece is minted as a loop-dialect kernel, so ``_piece`` has to BUILD the body: the term's
+    lowered per-cell nest with the boundary stores put back, re-nested under its free axes. Both
+    halves of that matter and both were once wrong to assume:
 
     - the STORES must come back, or a piece reports ``S_n_write = 0`` while every kernel that
       reached the stamp through the loop dialect reports its writes;

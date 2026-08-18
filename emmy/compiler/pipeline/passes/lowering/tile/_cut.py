@@ -45,7 +45,7 @@ from emmy.compiler.ir.tile.ir import (
 )
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
-from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
+from emmy.compiler.pipeline.knob import consume_kernel_row, family_of, parse_knob_spec
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
 logger = logging.getLogger(__name__)
@@ -323,10 +323,18 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
         node_id=out.name,
     )
     frag.outputs = [out.name]
-    # Both fragments leave here carrying nothing — the engine's splice strip guarantees it, and
-    # ``005_stamp_structural_features`` gives each its own identity on the pass-scan restart.
-    # The decision rides the parent piece's op knobs, spelled exactly as the pin that replays it —
-    # a tune-measured cut records as ``PLACE@<seam>: cut`` with no side channel.
+    # A cut CONSUMES the kernel it replaces: both pieces drop its schedule row and its structural
+    # identity, so each arrives at ``005_stamp_structural_features`` / ``020_schedule`` as a
+    # brand-new kernel stamped and scheduled from its OWN body. They are built fresh here, so this
+    # is the contract stated rather than work done — and it stays stated, because a rule that mints
+    # a kernel is the thing that has to say the kernel is new.
+    for nid in (ws, out.name):
+        op = frag.nodes[nid].op
+        op.knobs = consume_kernel_row(op.knobs)
+    # The decision is spelled onto the OPTION, exactly as the pin that replays it, so a recorded
+    # routing golden can match this fragment against the seam it names. The splice then CONSUMES it
+    # along with everything else the pieces came with (``candidate._strip_minted``): once the cut
+    # has happened the graph holds two kernels where it held one, and that is the record.
     parent = frag.nodes[out.name].op
     parent.knobs = {**(parent.knobs or {}), spelled: _CUT}
     return frag

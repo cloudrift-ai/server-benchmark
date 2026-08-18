@@ -211,7 +211,11 @@ def _shallowest_seam_key(graph) -> str:
 
 def test_routing_record_decides_the_placement_fork(monkeypatch):
     """A ROUTING record (PLACE-only knobs) picks the cut fragment whose parent piece stamps the
-    record's seam — the recorded-cut deploy, restored on strict identity."""
+    record's seam — the recorded-cut deploy, restored on strict identity.
+
+    The cut CONSUMES the kernel it replaces — the pieces drop its schedule row and its structural
+    identity — but the seam stamp is the rule's own DECISION, not something inherited, so it rides
+    the parent piece and replays as the exact pin."""
     graph = _norm_linear_graph()
     seam_key = _shallowest_seam_key(graph)
     routed = _document(graph, {seam_key: "cut"}, name="probe.cut", us=16.0)

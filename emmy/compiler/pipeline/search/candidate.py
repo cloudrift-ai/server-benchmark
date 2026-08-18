@@ -33,33 +33,6 @@ if TYPE_CHECKING:
     from emmy.compiler.pipeline.pipeline import Match, Run
 
 
-def _strip_minted(fragment: Graph, root_op) -> None:
-    """A rewrite that returns DIFFERENT NODES mints brand-new kernels — strip everything they came
-    with, so none of them can carry anything of the op they replace.
-
-    This is the engine's guarantee, not each rule's discipline. A rule cannot leak a decision or an
-    identity across a kernel boundary by forgetting to clear one, and no pass has to assert that it
-    didn't: a spliced node arrives with no schedule row and no structural features, exactly like a
-    kernel nothing has looked at yet. The stamp passes give it its identity and the schedule fork
-    gives it its row, both keyed on the node's own state.
-
-    The ONE thing kept is the option's decision delta — the knobs it stamped that the replaced op
-    did not carry (the ``PLACE@<seam>: cut`` idiom). That is not something inherited; it is the
-    record of what this fork chose, and :func:`_replay_structural_decision` reads it back off the
-    surviving ops to replay a decided site. Everything else goes, features included: a piece's
-    identity describes the body it actually has, so it is re-derived, never copied.
-
-    Contrast an OP rebind, which the engine leaves alone: that says "the same kernel, decided
-    further", so its knobs merge forward by design."""
-    from emmy.compiler.pipeline.pipeline import _option_decision  # noqa: PLC0415 — pipeline imports this module
-
-    decision = _option_decision(fragment, getattr(root_op, "knobs", None) or {}) or {}
-    for node in fragment.nodes.values():
-        knobs = getattr(node.op, "knobs", None)
-        if knobs:
-            node.op.knobs = {k: v for k, v in knobs.items() if decision.get(k, object()) == v}
-
-
 @dataclass
 class Candidate:
     """A concrete point in the search space — owns a real ``graph``.
@@ -232,7 +205,6 @@ class Candidate:
                     for frag_node in option.nodes.values():
                         if frag_node.op.source is None and frag_node.op.dialect == "loop":
                             frag_node.op.source = root_op
-            _strip_minted(option, self.graph.nodes[match.root_node_id].op)
             self.graph.splice(
                 option,
                 consumed=match.consumed,

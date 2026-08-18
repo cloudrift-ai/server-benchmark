@@ -682,24 +682,41 @@ def _strip_values(term: _Term, node) -> list[dict]:
 # --- the reduce partition ---
 
 
-def _splittable_axis(node) -> bool:
-    """Whether ``node``'s reduce axis may still be partitioned across CTAs — true unless it is
-    ALREADY a slice of a parent axis.
+def _splittable_axis(term: _Term, node) -> bool:
+    """Whether a cross-CTA partition may still be offered here — false once THIS KERNEL already
+    carries one.
 
-    A cross-CTA split is consumed by the rewrite that realizes it: the pieces are brand-new
-    kernels, so they reach this enumeration with no knobs of their own, and nothing but the axis
-    itself records that the partition already happened. Without that reading a pinned or picked
-    split re-applies to its own partial, halving the extent again on every sweep until it runs
-    out (found on a K=64 matmul: 64 → 32 → … → 1)."""
-    return node.axis is not None and node.axis.source_axis is None
+    A cross-CTA split is consumed by the rewrite that realizes it. The pieces are brand-new
+    kernels reaching this enumeration with no knobs of their own, so nothing but the IR records
+    that the partition happened — and what records it is a reduce axis that is already a slice of
+    a parent (``_factor_k`` / ``_slice_loop`` build it as a ``Window``). No provenance flag: the
+    axis's own shape is the receipt.
+
+    The scope is the KERNEL, not the axis, because that is the scope of the decision being
+    consumed. ``REDUCE`` is one pin and a bare one fans out to every eligible site
+    (``_Term.pin``), so reading the receipt per-axis lets the same pin fire again on a DIFFERENT
+    reduce axis of the piece: a fused cone's partial still holds the cone's per-row statistic
+    fold, never sliced, and ``g4k`` split that too — a third kernel from one pinned split. Reading
+    it per kernel is what makes ``g4k`` mean one split.
+
+    Per-axis alone also never terminates on its own axis: a pinned split re-applies to its own
+    partial, halving the extent every sweep until it runs out (found on a K=64 matmul:
+    64 → 32 → … → 1)."""
+    if node.axis is None:
+        return False
+    for site in sites(term.tile.op):
+        ax = getattr(site.node, "axis", None)
+        if ax is not None and ax.window is not None and ax.window.partition:
+            return False  # this kernel already realized a cross-CTA split
+    return True
 
 
-def _consumed_split(node, plan: ReducePlan) -> ReducePlan:
+def _consumed_split(term: _Term, node, plan: ReducePlan) -> ReducePlan:
     """``plan`` with its cross-CTA stage dropped when ``node``'s axis is already a slice — the pin
     half of :func:`_splittable_axis`. A pin is a statement about a kernel's schedule; the split it
     asked for was realized on the kernel that was split, so what reaches the pieces is the rest of
     the row (``g2k/coop`` on a sliced axis is ``coop``)."""
-    if not plan.needs_split or _splittable_axis(node):
+    if not plan.needs_split or _splittable_axis(term, node):
         return plan
     return ReducePlan(tuple(st for st in plan.stages if st.level is not _ReduceLevel.GRID))
 
@@ -718,7 +735,7 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     adding a rule."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
-        return [_consumed_split(node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
+        return [_consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
     extent = _hint_extent(node.axis)
     cands = [ReducePlan()]
     inner = _inner_free(term.place)
@@ -726,7 +743,7 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
     for p in coop_reduce_moves():
-        if p.needs_split and not _splittable_axis(node):
+        if p.needs_split and not _splittable_axis(term, node):
             continue  # the axis is already a slice — its cross-CTA partition was consumed
         if p.coop_transposed:
             # The band's own requirements: the geometry (shared with the contraction tier) plus
@@ -879,7 +896,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     epilogue."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
-        pinned = _consumed_split(node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        pinned = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
         if pinned.needs_split:
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
@@ -905,7 +922,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
             if not legal.enforce(legal.coop_band_geometry(p, k, inner), pinned=False):
                 continue
             out.append(p)
-    if splittable and _splittable_axis(node) and len(term.place.free) >= 2:
+    if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
         atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
@@ -1436,7 +1453,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
     # The slice carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes
     # it, and an axis that is already a window of a parent is one nothing may partition again.
-    kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis))
+    kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
     sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
     return ksplit, kslice, sigma
 

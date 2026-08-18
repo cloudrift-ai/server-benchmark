@@ -21,13 +21,17 @@ the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBR
     the add — ``mean``'s ``×1/N``; a non-distributive one like ``l2``'s ``sqrt`` is refused, use
     ``"kernel"``); the output is zero-init'd per launch. **1 node.** Additive carriers only.
 
-**Every piece is a BRAND-NEW kernel.** Each is minted UNMAPPED, carrying no knob, no placement
-and no schedule slice of the kernel it replaces, its structural features re-derived from its OWN
-body (:func:`_piece`). ``020_schedule`` picks each up on the pass-scan restart and offers it a
-fork, exactly as it does a freshly recognized term: no pass can tell a piece from a fresh kernel,
-and none tries. The pre-split row decided THAT the split happens; it decides nothing about how
-either piece runs, and the search is told nothing about why a slice has several kernels — a split
-node simply has no latency of its own and prices as the Σ over the kernels it produced.
+**Every piece is a BRAND-NEW kernel, minted in the LOOP dialect.** Each leaves here as a plain
+``LoopOp`` (:func:`_piece`) — the term lowered to per-cell stmts with its boundary stores put back,
+re-nested under its free axes — carrying nothing of the kernel it replaces, not even its name. It
+re-enters at the door a freshly fused kernel comes through: ``005_stamp_structural_features``
+stamps it, ``010_recognize`` lifts it, ``020_schedule`` offers it a fork. The same three rules in
+the same order that handle a placement cut's fragments. No pass can tell a piece from a fresh
+kernel, and none tries — the dialect is not a special case either.
+
+The pre-split row decided THAT the split happens; it decides nothing about how either piece runs,
+and the search is told nothing about why a slice has several kernels — a split node simply has no
+latency of its own and prices as the Σ over the kernels it produced.
 
 Even the one-kernel atomic arm splices a ``Graph`` (:func:`_one`). A 1:1 op rebind is how the
 engine says "the same kernel, decided further", so it merges the replaced op's knobs forward and
@@ -66,13 +70,13 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
     Fold,
-    Placement,
     ReducePlan,
     Store,
     TileOp,
@@ -81,6 +85,7 @@ from emmy.compiler.ir.tile import (
 from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import head, projection_tail, reduce_loop, reduce_plan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
 
@@ -112,7 +117,7 @@ def _slice_loop(rloop: Loop, b: int) -> Loop:
     new_body = tuple(_keep_axes(s, s.rewrite(ident, sigma)) for s in rloop.body)
     # The slice records its parentage — see ``_schedule._factor_k``: the partition is consumed
     # here, and an axis that is already a window of a parent cannot be partitioned again.
-    new_ax = replace(rax, extent=Dim(b), window=Window(parent=rax.source_axis or rax))
+    new_ax = replace(rax, extent=Dim(b), window=Window(parent=rax.source_axis or rax, partition=True))
     return Loop(axis=new_ax, body=Body(new_body), unroll=rloop.unroll, role=rloop.role)
 
 
@@ -147,7 +152,7 @@ def _frag(match: Match, root: Node) -> Graph:
     return frag
 
 
-def _one(frag: Graph, root: Node, piece: TileOp) -> Graph:
+def _one(frag: Graph, root: Node, piece: LoopOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
     further", so it merges the replaced op's knobs forward and does not restart the pass scan. The
@@ -174,18 +179,29 @@ def _residual(map_op: Fold, like: Fold) -> Fold:
     return op2
 
 
-def _piece(op, free, *, graph: Graph, name: str, stores: tuple = ()) -> TileOp:
-    """One split piece as a BRAND-NEW kernel: an UNMAPPED ``TileOp`` carrying no knob, no
-    placement and no schedule slice of the kernel it replaces, its structural features re-derived
-    from its OWN body. ``020_schedule`` picks it up on the pass-scan restart and offers it a fork,
-    exactly as it does a freshly recognized term — nothing downstream can tell the two apart.
+def _piece(op, free, *, stores: tuple = ()) -> LoopOp:
+    """One split piece as a BRAND-NEW kernel — and a **loop-dialect** one, so it re-enters the
+    pipeline at the door a freshly fused kernel comes through rather than beside it.
 
-    The pre-split kernel's row decided that the split happens; it decides nothing about how either
-    piece runs. Threading it onto the partial (as this rule once did, because the graph splice
-    drops knobs the way an op rebind does not) is what left the partial wearing 21 ``S_*`` features
-    describing a body it no longer had, and the finalize already-placed with no knobs at all — no
-    fork, no identity, untunable, and a whole-variant knob row that belonged to neither kernel."""
-    return TileOp(op=op, name=name, place=Placement(free=tuple(free)), stores=tuple(stores))
+    The term is lowered to its per-cell stmts with the boundary stores put back
+    (:func:`effect_tail`) and re-nested under the piece's free axes, which is exactly the body a
+    ``LoopOp`` holds. ``005_stamp_structural_features`` then stamps it, ``010_recognize`` lifts it
+    and ``020_schedule`` schedules it — the same three rules, in the same order, that handle a
+    placement cut's fragments and every kernel the fusion end produced. Nothing about this piece is
+    a special case, including its dialect.
+
+    It carries no name either: a kernel's name comes from its node id, the way ``_cut``'s pieces
+    get theirs. Handing it the pre-split kernel's name was one more thing inherited from a kernel
+    it is not."""
+    stmts = tuple(effect_tail(op.lower(), stores))
+    for axis in reversed(tuple(free)):
+        stmts = (Loop(axis=axis, body=Body(stmts)),)
+    piece = LoopOp(body=Body(stmts))
+    # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
+    # identity. Built fresh here, so this states the contract rather than doing work — and the rule
+    # that mints a kernel is where that has to be said.
+    piece.knobs = consume_kernel_row(piece.knobs)
+    return piece
 
 
 def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold, plan: ReducePlan, split: Axis, projection=()):
@@ -237,7 +253,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         p_body, p_stores = _boundary(atomic_epi)
-        return _one(frag, root, _piece(_partial(p_body), (split, *grid), name=tile.name, stores=p_stores, graph=frag))
+        return _one(frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -259,7 +275,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         return (*lead_ix, *cell)
 
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(_partial(()), (split, *grid), name=f"{tile.name or out.name}__partial", stores=ws_stores, graph=frag)
+    partial_tile = _piece(_partial(()), (split, *grid), stores=ws_stores)
 
     # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
     # 1-component additive fold, or the N-component per-channel sums), then the original
@@ -287,7 +303,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # Stamped AFTER the workspace is in the fragment: the finalize reads it, and its structural
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(fin_op, grid, name=tile.name or out.name, stores=fin_stores, graph=frag)
+    fin_tile = _piece(fin_op, grid, stores=fin_stores)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag
@@ -384,7 +400,7 @@ def rewrite(match: Match, root: Node) -> Graph:
         proj_body, proj_stores = _boundary(atomic_proj, plain_only=True)
         atomic_op = Fold.projection(body=Body((*before, sliced_loop, *proj_body)))
         frag = _frag(match, root)
-        piece = _piece(_residual(atomic_op, fold_node), (split, *grid), name=tile.name, stores=proj_stores, graph=frag)
+        piece = _piece(_residual(atomic_op, fold_node), (split, *grid), stores=proj_stores)
         return _one(frag, root, piece)
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
@@ -410,9 +426,7 @@ def rewrite(match: Match, root: Node) -> Graph:
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     partial_op = Fold.projection(body=Body((*before, sliced_loop)))
     frag = _frag(match, root)
-    partial_tile = _piece(
-        _residual(partial_op, fold_node), (split, *grid), name=f"{tile.name or out.name}__partial", stores=ws_stores, graph=frag
-    )
+    partial_tile = _piece(_residual(partial_op, fold_node), (split, *grid), stores=ws_stores)
 
     # --- finalize kernel: seed the carrier state, then fold each partition's state from the
     # workspace over the split axis via the fold's cross-partition combine (``Reduction.state_merge`` —
@@ -438,7 +452,7 @@ def rewrite(match: Match, root: Node) -> Graph:
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(fin_op, grid, name=tile.name or out.name, stores=fin_stores, graph=frag)
+    fin_tile = _piece(fin_op, grid, stores=fin_stores)
     frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

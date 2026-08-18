@@ -532,11 +532,16 @@ grammar it read).
   accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
 
 **Every piece is a BRAND-NEW kernel — and no rule has to remember that.** A rewrite that returns DIFFERENT NODES
-is a kernel-set change, so the ENGINE strips every knob and feature off the spliced nodes before they land
-(`candidate._strip_minted`). A rule cannot leak a decision or an identity across a kernel boundary by forgetting
-to clear one, and no pass has to assert that it didn't. The one thing kept is the option's decision delta — the
-knobs it stamped that the replaced op did not carry (`PLACE@<seam>: cut`), which records what the fork chose
-rather than anything inherited.
+is a kernel-set change, so the ENGINE clears the knobs of every KERNEL it splices before they land
+(`candidate._strip_minted`; `Op.cache_key` is the is-this-a-kernel test, so the pre-lowering ops a decomposition
+or the checkpoint loader splices keep the data they carry). A rule cannot leak a decision or an identity across a
+kernel boundary by forgetting to clear one, and no pass has to assert that it didn't.
+
+The DECISION is cleared along with everything else, because **a decision is consumed by the rewrite that realizes
+it** — the same rule the cross-CTA split follows. Once a cut has happened the graph holds two kernels where it
+held one, and that is the record; a surviving `PLACE@<seam>: cut` knob would be a second, weaker copy of what the
+node set already says. The stamp still goes on the OPTION, which is what a recorded routing golden matches
+(`greedy._verified_pick`) — it is consumed at the splice, not before.
 
 What happens next is the ordinary pass scan. `005_stamp_structural_features` gives each piece its own `S_*`
 because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,

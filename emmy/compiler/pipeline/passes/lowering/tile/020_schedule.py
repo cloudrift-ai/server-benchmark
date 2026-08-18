@@ -32,6 +32,7 @@ from emmy.compiler.pipeline.fork import Fork
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
 PATTERN = [Pattern("root", TileOp)]
@@ -42,6 +43,15 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
+    # This pass DECIDES, so it requires the kernel's identity. Every row it enumerates carries the
+    # ``S_*`` stamp forward, and that is what the prior ranks on, what a recorded golden matches by,
+    # and what the measurement is later filed under — decide without it and the fork's pick is made
+    # against an empty signature that matches every kernel and identifies none. ``005_stamp`` runs
+    # ahead of this rule for exactly that reason, so an unstamped kernel here is a pass-order
+    # break, not a case to handle.
+    assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
+        f"{tile.name!r}: scheduling a kernel with no structural identity — 005_stamp must run first"
+    )
     rows = schedule(tile, tile.name, tile.knobs, ctx)
     options = rows if isinstance(rows, list) else [rows]
     if not options:

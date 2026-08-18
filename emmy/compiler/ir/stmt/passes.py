@@ -171,6 +171,7 @@ def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         state=tuple(rn(n) for n in names),
         merge=tuple(rewrite(m, rn, sigma, axis_fn) for m in s.merge),
         state_b=tuple(rn(n) for n in s.state_b),
+        identities=s.identities,  # neutral elements travel with the states, only the names move
     )
 
 

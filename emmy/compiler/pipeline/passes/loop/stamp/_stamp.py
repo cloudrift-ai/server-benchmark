@@ -62,31 +62,6 @@ def structure_features(body: Body, graph: Graph | None = None) -> dict[str, floa
     return {**_skeleton(body, graph), **_extents(body)}
 
 
-def kernel_body(op) -> Body | None:
-    """The stmt body ``op`` featurizes as, or ``None`` when it has none (an ``InputOp`` /
-    ``ConstantOp``, or a ``TileOp`` holding no term).
-
-    Both dialects answer, and they must answer the SAME for the same kernel — one minted in Tile IR
-    has to join the same evidence as the identical kernel minted in Loop IR. A ``LoopOp`` gives its
-    own body. A ``TileOp`` gives the body it WOULD have had: its lowered per-cell nest (boundary
-    stores reconstituted) re-nested under its free axes, because recognition PEELS those axes onto
-    the placement — the bare lowered body reports no free axis at all and every ``S_ext_free_*``
-    extent (which the occupancy and wave features are built on) would read as 1."""
-    from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp, effect_tail  # noqa: PLC0415 — loop/stamp stays importable without tile IR
-
-    if isinstance(op, TileOp):
-        if op.op is None:
-            return None
-        stmts = tuple(effect_tail(op.op.lower(), op.stores))
-        for axis in reversed(op.place.grid or op.place.free):
-            stmts = (Loop(axis=axis, body=Body(stmts)),)
-        return Body(stmts)
-    body = getattr(op, "body", None)
-    return body if isinstance(body, Body) else None
-
-
 def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     """Extent-free histogram: stmt-type counts + pointwise/reduce op multisets
     + loop-nest roles/depth + operand dtype multiset."""

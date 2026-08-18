@@ -15,15 +15,13 @@ cut's fragments, which are freshly-built ``LoopOp``\\ s with no knobs at all. Th
 ``010_recognize`` and ``020_schedule`` carrying their own identity, like any kernel, and no rule
 had to be told they were fragments.
 
-**Why ``LoopOp`` and not every kernel-bearing op.** Matching ``TileOp`` too would also catch the
-fragments ``010_recognize`` splices as a ``Graph`` rather than rebinding — which have never carried
-a structural identity at all, reaching codegen with one ``S_*`` knob, invisible to the prior, the
-evidence store and golden matching. Giving them one is right and is owed. But it makes structural
-pricing reachable for them for the first time, and one of the placement cuts it then selects is
-numerically wrong: a whole-model accuracy test goes to ``max_diff`` 0.27 against a 0.005 gate, on a
-legal seam distinct from the one a bare ``PLACE=cut`` pin already raises on. That is a real defect
-and its own change. Widen this pattern once it is fixed, and ``030_split_reduce`` can drop its
-hand-stamp with it.
+**``LoopOp`` covers every kernel a rule mints**, because every rule mints in the loop dialect: a
+placement cut's fragments and a cross-CTA split's pieces are both plain ``LoopOp`` nodes, built that
+way precisely so they re-enter the pipeline where a freshly fused kernel does. Nothing needs a
+tile-dialect arm. The one thing this does NOT reach is a term ``010_recognize`` splices as a
+``Graph`` rather than rebinding (the online-softmax form), which has carried no structural identity
+since it was written — a separate hole, and not one this rule should paper over by growing a second
+way to read a body.
 """
 
 from __future__ import annotations
@@ -31,18 +29,16 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.loop.stamp._stamp import kernel_body, structure_features
+from emmy.compiler.pipeline.passes.loop.stamp._stamp import structure_features
 
-PATTERN = [Pattern("root", Op)]
+PATTERN = [Pattern("root", LoopOp)]
 
 
-def rewrite(match: Match, root: Node) -> Op | None:
+def rewrite(match: Match, root: Node) -> LoopOp | None:
     if any(k.startswith(STRUCT_PREFIX) for k in root.op.knobs):
-        raise RuleSkipped("already carries structural features")
-    body = kernel_body(root.op)
-    if body is None:
-        raise RuleSkipped("no kernel body to featurize")
-    return replace(root.op, knobs={**root.op.knobs, **structure_features(body, match.graph)})
+        raise RuleSkipped("LoopOp already carries structural features")
+    feats = structure_features(root.op.body, match.graph)
+    return replace(root.op, knobs={**root.op.knobs, **feats})

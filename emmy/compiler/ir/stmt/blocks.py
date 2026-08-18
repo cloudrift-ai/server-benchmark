@@ -16,7 +16,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Mma
+from emmy.compiler.ir.stmt.leaves import Accum, Mma, StateMerge
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
 # body holds one of these (the predicate `is_reduce` keys off, see below).
@@ -127,6 +127,21 @@ class Loop(Stmt):
                 if self.seed:
                     out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
                 ctx.ssa_dtypes[s.name] = (s.dtype or _F32).name
+            elif isinstance(s, StateMerge):
+                # Same seeding, for the other carrier. ``StateMerge`` folds two already-reduced
+                # states rather than streaming one, so unlike ``Accum`` it declares nothing itself
+                # — and a cross-CTA finalize's loop holds only a ``StateMerge``, leaving its state
+                # undeclared at its own ``+=``. The neutral elements ride on the stmt because a
+                # twisted carrier's cannot be read back off the combine program (see
+                # ``StateMerge.identities``). Already-declared states are left alone: a combine
+                # region that seeded its state upstream must not redeclare it in this scope.
+                for nm, identity in zip(s.state, s.identities, strict=False):
+                    if nm in seen or nm in ctx.ssa_dtypes:
+                        continue
+                    seen.add(nm)
+                    if self.seed:
+                        out.append(f"{pad}{ctx.type_name(_F32)} {nm} = {ctx.identity_literal(identity, _F32)};")
+                    ctx.ssa_dtypes[nm] = _F32.name
         var = self.axis.name
         extent = _extent_c(self.axis, ctx)
         if self.unroll:

@@ -231,8 +231,8 @@ def test_stored_b_width_separates_the_packed_byte_slab():
     traffic at the SAME atom, tile and transport spelling, so every other feature on the two rows
     ties. ``MMA_b_store_bits`` is the one that separates them."""
     pin = ("mma_m16n8k16_f16/f2x2", "w2x4")
-    packed = _warp_feats(pin, **{"STAGE@a1": "d2/cp", "S_dtype_f4e2m1x2": 1.0})
-    plain = _warp_feats(pin, **{"STAGE@a1": "d2/cp"})
+    packed = _warp_feats(pin, **{"STAGE@a1": "d2/smem-async", "S_dtype_f4e2m1x2": 1.0})
+    plain = _warp_feats(pin, **{"STAGE@a1": "d2/smem-async"})
     assert packed["MMA_b_store_bits"] == 4.0
     assert "MMA_b_store_bits" not in plain
     assert packed["MMA_a_bits"] == plain["MMA_a_bits"] == 16.0, "the fragment width is the same — that is the point"
@@ -244,8 +244,8 @@ def test_stored_b_width_needs_both_the_packed_weight_and_the_async_stage():
     """Neither fact alone is the packed byte slab: the packed dtype is a whole-kernel fact its
     compute-fill sibling rows share, and an async stage is what every 16-bit matmul spells too."""
     pin = ("mma_m16n8k16_f16/f2x2", "w2x4")
-    fill = _warp_feats(pin, **{"STAGE@a1": "d1/sync", "S_dtype_f4e2m1x2": 1.0})
-    ordinary = _warp_feats(pin, **{"STAGE@a1": "d2/cp"})
+    fill = _warp_feats(pin, **{"STAGE@a1": "d1/smem", "S_dtype_f4e2m1x2": 1.0})
+    ordinary = _warp_feats(pin, **{"STAGE@a1": "d2/smem-async"})
     assert "MMA_b_store_bits" not in fill
     assert "MMA_b_store_bits" not in ordinary
 

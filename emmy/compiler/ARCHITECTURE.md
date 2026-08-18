@@ -172,7 +172,10 @@ ordinary floating algebra. A routed `GatherOp` can therefore fuse into the consu
 selected expert's compact bytes directly, without materializing a decoded or gathered weight tensor. Callers may
 supply a previously validated UE8M0 code interval to remove unreachable exceptional-code branches; the default
 preserves the complete storage format, including code 255 as NaN. Block geometry and scale shapes are checked at
-graph birth.
+graph birth. An `Mxfp4InputStorage` may instead describe an external physical integer layout through coordinate maps,
+nibble selection, and scale-code semantics. The SM70 MMA 8x8x4 descriptor covers a retained packed B operand and its
+clamped exponent codes directly. The descriptor dissolves during spelling; downstream IR still contains only the
+same generic integer, layout, and floating-point algebra, and the physical buffers remain the program inputs.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.

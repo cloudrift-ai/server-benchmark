@@ -232,11 +232,11 @@ def _run_external(entry: _ProgramEntry, tensors: tuple[Any, ...], outputs: tuple
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
-    bindings = {
-        **{name: cp.from_dlpack(tensor) for name, tensor in zip(entry.inputs, tensors, strict=True)},
-        **{name: cp.from_dlpack(output) for name, output in zip(entry.outputs, outputs, strict=True)},
-    }
     with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        bindings = {
+            **{name: cp.from_dlpack(tensor) for name, tensor in zip(entry.inputs, tensors, strict=True)},
+            **{name: cp.from_dlpack(output) for name, output in zip(entry.outputs, outputs, strict=True)},
+        }
         if entry.profile.symbolic:
             entry.program.set_sym_values({"num_tokens": int(outputs[0].shape[0])})
         entry.program.run_once_external(bindings)

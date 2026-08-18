@@ -26,9 +26,11 @@ def register() -> None:
         register_onecat_kernels()
     if deepseek_v4:
         from emmy.serving.onecat_deepseek import register_onecat_deepseek_kernels
+        from emmy.serving.onecat_linear import register_onecat_linear_kernels
         from emmy.serving.onecat_mhc import register_onecat_mhc_kernels
 
         register_onecat_deepseek_kernels()
+        register_onecat_linear_kernels()
         register_onecat_mhc_kernels()
 
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():

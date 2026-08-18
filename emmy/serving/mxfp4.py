@@ -89,6 +89,7 @@ def trace_routed_mxfp4_stage(
     experts: int,
     out_features: int,
     in_features: int,
+    storage=None,
 ):
     """Trace and birth-spell one routed packed-weight stage.
 
@@ -108,15 +109,11 @@ def trace_routed_mxfp4_stage(
         torch.empty((rows,), dtype=torch.int32, device="meta"),
     )
     graph = trace_module(RoutedMxfp4StageModule(), examples)
-    spell_mxfp4_inputs(
-        graph,
-        {
-            "weight": (
-                (experts, out_features, in_features // 2),
-                (experts, out_features, in_features // 32),
-            )
-        },
+    storage = storage or (
+        (experts, out_features, in_features // 2),
+        (experts, out_features, in_features // 32),
     )
+    spell_mxfp4_inputs(graph, {"weight": storage})
     return graph
 
 
@@ -127,6 +124,7 @@ def trace_grouped_mxfp4_stage(
     experts: int,
     out_features: int,
     in_features: int,
+    storage=None,
 ):
     """Trace the contraction in a fixed grouped-row representation."""
     import torch
@@ -142,15 +140,11 @@ def trace_grouped_mxfp4_stage(
             torch.empty((groups,), dtype=torch.int32, device="meta"),
         ),
     )
-    spell_mxfp4_inputs(
-        graph,
-        {
-            "weight": (
-                (experts, out_features, in_features // 2),
-                (experts, out_features, in_features // 32),
-            )
-        },
+    storage = storage or (
+        (experts, out_features, in_features // 2),
+        (experts, out_features, in_features // 32),
     )
+    spell_mxfp4_inputs(graph, {"weight": storage})
     return graph
 
 

@@ -130,9 +130,9 @@ def _run_external(program: _ExternalProgram, bindings: tuple[tuple[str, Any], ..
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
-    arrays = {name: cp.from_dlpack(tensor) for name, tensor in bindings}
     stream = torch.cuda.current_stream(device)
-    with gpu_lock(), cp.cuda.Stream.from_external(stream.cuda_stream):
+    with gpu_lock(), cp.cuda.Stream.from_external(stream):
+        arrays = {name: cp.from_dlpack(tensor) for name, tensor in bindings}
         program.runtime.run_once_external(arrays)
 
 

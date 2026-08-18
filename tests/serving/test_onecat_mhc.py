@@ -1,4 +1,6 @@
-from types import ModuleType
+import sys
+from contextlib import nullcontext
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -9,6 +11,7 @@ from emmy.serving.onecat_mhc import (
     _MhcFamilyAdapter,
     _ProgramEntry,
     _ProgramProfile,
+    _run_external,
     register_onecat_mhc_kernels,
 )
 
@@ -146,6 +149,41 @@ def _adapter(*, build_program=None, run_program=None, is_capturing=None):
         is_capturing=is_capturing or (lambda: False),
     )
     return adapter, calls
+
+
+def test_external_launch_creates_dlpack_views_inside_the_torch_stream(monkeypatch):
+    stream = object()
+    seen = []
+    active = False
+
+    class ExternalStream:
+        def __enter__(self):
+            nonlocal active
+            active = True
+
+        def __exit__(self, *_args):
+            nonlocal active
+            active = False
+
+    def from_dlpack(tensor):
+        assert active
+        return tensor
+
+    fake_cupy = SimpleNamespace(
+        from_dlpack=from_dlpack,
+        cuda=SimpleNamespace(Stream=SimpleNamespace(from_external=lambda value: seen.append(value) or ExternalStream())),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+    import emmy.compiler.backend.gpu_lock as gpu_lock_module
+
+    monkeypatch.setattr(gpu_lock_module, "gpu_lock", nullcontext)
+    runtime = SimpleNamespace(run_once_external=lambda arrays: seen.append(arrays))
+    entry = _ProgramEntry(runtime, ("input",), ("output",), _ProgramProfile("post", 1))
+
+    _run_external(entry, ("x",), ("y",))
+
+    assert seen == [stream, {"input": "x", "output": "y"}]
 
 
 def test_register_patches_every_direct_alias_all_or_none_and_is_idempotent():

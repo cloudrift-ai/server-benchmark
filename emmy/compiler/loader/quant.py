@@ -48,6 +48,7 @@ import json
 import logging
 import re
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -68,10 +69,10 @@ F8_SAFETENSORS_DTYPES: dict[str, str] = {"F8_E4M3": "f8e4m3", "F8_E5M2": "f8e5m2
 # is NOT here — it is a plain tensor the twin/loader reads by its own key.
 _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
 
-# AutoAWQ GEMM stores eight output-channel nibbles in one i32 word using
-# ``[0, 2, 4, 6, 1, 3, 5, 7]`` as the pack order. Reading the shifts in this
-# inverse order emits logical output channels directly, without a gather.
-_AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
+# The shared packed-u4 converter stores eight logical nibbles in one i32 word
+# using ``[0, 2, 4, 6, 1, 3, 5, 7]`` as the physical order. Reading these
+# inverse shifts emits logical values directly, without a gather.
+_INTERLEAVED_U4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
 
 
 def decode_ue8m0(bits: np.ndarray) -> np.ndarray:
@@ -97,6 +98,62 @@ def decode_mxfp4(packed: np.ndarray) -> np.ndarray:
     normal = np.exp2(np.maximum(exponent.astype(np.int16) - 1, 0)) * (1.0 + 0.5 * mantissa)
     magnitude = np.where(exponent == 0, 0.5 * mantissa, normal)
     return np.where(codes & np.uint8(0x8), -magnitude, magnitude).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class Mxfp4InputStorage:
+    """Physical input storage dissolved into ordinary graph algebra at birth.
+
+    Coordinate maps are expressions over the logical weight's output-coordinate
+    placeholders. ``nibble_selector`` chooses one entry of ``nibble_shifts``
+    for each logical coordinate. Scale codes represent powers of two with
+    ``scale_exponent_bias``; code zero and one optional NaN code may carry
+    storage-specific IEEE-f32 bit patterns.
+    """
+
+    packed_shape: tuple[int, ...]
+    packed_dtype: str
+    packed_coord_map: tuple
+    nibble_shifts: tuple[int, ...]
+    nibble_selector: object
+    scale_shape: tuple[int, ...]
+    scale_coord_map: tuple
+    scale_exponent_bias: int = 127
+    scale_zero_bits: int = 0x00400000
+    scale_nan_code: int | None = 255
+    scale_code_range: tuple[int, int] = (0, 255)
+
+
+def mxfp4_sm70_mma884_storage(logical_shape: tuple[int, ...]) -> Mxfp4InputStorage:
+    """Describe the retained packed operand layout for an SM70 MMA 8x8x4 B operand."""
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+
+    logical_shape = tuple(int(dim) for dim in logical_shape)
+    if len(logical_shape) < 2:
+        raise ValueError("mxfp4_sm70_mma884_storage: logical shape must be (..., out, in)")
+    *lead, n, k = logical_shape
+    if n % 32 or k % 32:
+        raise ValueError("mxfp4_sm70_mma884_storage: output and input dimensions must be divisible by 32")
+
+    coords = tuple(placeholder(axis) for axis in range(len(logical_shape)))
+    *leading_coords, row, col = coords
+    eight = Literal(8, "int")
+    thirty_two = Literal(32, "int")
+    words_per_physical_row = Literal(n // 8, "int")
+    word = ((row / thirty_two) * Literal(k // 8, "int") + col / eight) * thirty_two + row % thirty_two
+    return Mxfp4InputStorage(
+        packed_shape=(*lead, k, n // 8),
+        packed_dtype="i32",
+        packed_coord_map=(*leading_coords, word / words_per_physical_row, word % words_per_physical_row),
+        nibble_shifts=_INTERLEAVED_U4_LOGICAL_SHIFTS,
+        nibble_selector=col % eight,
+        scale_shape=(*lead, k // 32, n),
+        scale_coord_map=(*leading_coords, col / thirty_two, row),
+        scale_exponent_bias=15,
+        scale_zero_bits=0,
+        scale_nan_code=None,
+        scale_code_range=(0, 30),
+    )
 
 
 def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) -> np.ndarray:
@@ -207,7 +264,7 @@ def unpack_awq4(packed: np.ndarray) -> np.ndarray:
     words = np.asarray(packed)
     if words.ndim != 2 or words.dtype not in (np.dtype(np.int32), np.dtype(np.uint32)):
         raise ValueError(f"AWQ packed tensor must be rank-2 i32/u32, got shape={words.shape}, dtype={words.dtype}")
-    shifts = np.asarray(_AWQ4_LOGICAL_SHIFTS, dtype=np.uint32)
+    shifts = np.asarray(_INTERLEAVED_U4_LOGICAL_SHIFTS, dtype=np.uint32)
     unpacked = (words.astype(np.uint32, copy=False)[..., None] >> shifts) & np.uint32(0xF)
     return unpacked.reshape(words.shape[0], words.shape[1] * 8).astype(np.int8)
 
@@ -1275,20 +1332,81 @@ def spell_quantized_inputs(
     return out_map
 
 
+def _contiguous_mxfp4_storage(
+    logical_shape: tuple[int, ...],
+    packed_shape: tuple[int, ...],
+    scale_shape: tuple[int, ...],
+    scale_code_range: tuple[int, int],
+) -> Mxfp4InputStorage:
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+
+    coords = tuple(placeholder(axis) for axis in range(len(logical_shape)))
+    *leading_coords, row, col = coords
+    return Mxfp4InputStorage(
+        packed_shape=packed_shape,
+        packed_dtype="u8",
+        packed_coord_map=(*leading_coords, row, col / Literal(2, "int")),
+        nibble_shifts=(0, 4),
+        nibble_selector=col % Literal(2, "int"),
+        scale_shape=scale_shape,
+        scale_coord_map=(*leading_coords, row, col / Literal(32, "int")),
+        scale_code_range=scale_code_range,
+    )
+
+
+def _validate_mxfp4_storage(name: str, logical_shape: tuple[int, ...], storage: Mxfp4InputStorage) -> None:
+    from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+
+    packed_shape = tuple(int(dim) for dim in storage.packed_shape)
+    scale_shape = tuple(int(dim) for dim in storage.scale_shape)
+    if any(dim <= 0 for dim in (*packed_shape, *scale_shape)):
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} physical shapes must be positive")
+    if len(storage.packed_coord_map) != len(packed_shape) or len(storage.scale_coord_map) != len(scale_shape):
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} coordinate-map ranks must match their physical shapes")
+
+    dtype = get_dtype(storage.packed_dtype)
+    if not dtype.name.startswith(("i", "u")) or dtype.nbytes not in (1, 2, 4):
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} packed dtype must be an 8-, 16-, or 32-bit integer")
+    expected_shifts = tuple(range(0, dtype.nbytes * 8, 4))
+    if tuple(sorted(storage.nibble_shifts)) != expected_shifts:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} nibble shifts must permute {expected_shifts}")
+
+    logical_elements = int(np.prod(logical_shape))
+    if int(np.prod(packed_shape)) * dtype.nbytes * 2 != logical_elements:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} packed storage does not contain one nibble per logical value")
+    if int(np.prod(scale_shape)) * 32 != logical_elements:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} scale storage does not contain one code per 32 logical values")
+
+    allowed_vars = {f"{PLACEHOLDER_PREFIX}{axis}" for axis in range(len(logical_shape))}
+    expressions = (*storage.packed_coord_map, storage.nibble_selector, *storage.scale_coord_map)
+    if any(not expr.free_vars() <= allowed_vars for expr in expressions):
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} coordinate maps may only use logical output placeholders")
+    if not 0 <= storage.scale_exponent_bias <= 127:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} scale exponent bias must be in [0, 127]")
+    if not 0 <= storage.scale_zero_bits <= 0xFFFFFFFF:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} scale zero bits must fit u32")
+    validated_min, validated_max = storage.scale_code_range
+    if not 0 <= validated_min <= validated_max <= 255:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} scale code range must satisfy 0 <= minimum <= maximum <= 255")
+    if storage.scale_nan_code is not None and not 0 <= storage.scale_nan_code <= 255:
+        raise ValueError(f"spell_mxfp4_inputs: {name!r} scale NaN code must fit u8")
+
+
 def spell_mxfp4_inputs(
     graph: Graph,
-    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]] | Mxfp4InputStorage],
     *,
     validated_ue8m0_range: tuple[int, int] | None = None,
 ) -> dict[str, str]:
     """Spell packed E2M1 weight inputs and unsigned E8M0 block scales.
 
-    ``specs`` maps a logical ``(..., out, in)`` weight input to its packed-byte
-    and scale shapes. Leading dimensions, such as an expert axis, are preserved.
-    Two nibbles occupy each checkpoint byte; one scale covers 32 contiguous
-    logical input channels. The emitted graph uses
-    only byte inputs, integer extraction, ordinary floating algebra, layouts,
-    and the original linear. No decoded weight is stored by the loader.
+    ``specs`` maps a logical ``(..., out, in)`` weight input either to its
+    contiguous packed-byte and scale shapes or to an :class:`Mxfp4InputStorage`
+    physical layout. Leading dimensions, such as an expert axis, are preserved.
+    One scale covers 32 logical values. The emitted graph uses only integer
+    extraction, ordinary floating algebra, layouts, and the original linear.
+    No decoded weight is stored by the loader.
 
     ``validated_ue8m0_range`` may describe a range that the caller has already
     checked across every external scale byte. Exceptional-code branches that
@@ -1300,7 +1418,7 @@ def spell_mxfp4_inputs(
     birth rather than silently changing the weight layout.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.expr import Literal  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp, IndexMapOp, IndexSource  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
@@ -1315,7 +1433,7 @@ def spell_mxfp4_inputs(
             raise ValueError("spell_mxfp4_inputs: validated_ue8m0_range must satisfy 0 <= minimum <= maximum <= 255")
 
     out_map: dict[str, str] = {}
-    for name, (packed_shape, scale_shape) in specs.items():
+    for name, spec in specs.items():
         node = graph.nodes.get(name)
         if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
             raise ValueError(f"spell_mxfp4_inputs: {name!r} is not a graph input")
@@ -1324,15 +1442,36 @@ def spell_mxfp4_inputs(
             raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be a static (..., out, in) weight")
         logical_shape = tuple(dim.as_static() for dim in logical.shape)
         lead, n, k = logical_shape[:-2], logical_shape[-2], logical_shape[-1]
-        packed_shape = tuple(int(dim) for dim in packed_shape)
-        scale_shape = tuple(int(dim) for dim in scale_shape)
-        if packed_shape != (*lead, n, k // 2) or k % 32 or scale_shape != (*lead, n, k // 32):
-            raise ValueError(f"spell_mxfp4_inputs: packed={packed_shape}, scale={scale_shape} does not reproduce logical {logical_shape}")
+        if isinstance(spec, Mxfp4InputStorage):
+            if validated_ue8m0_range is not None:
+                raise ValueError("spell_mxfp4_inputs: a physical storage descriptor owns its scale code range")
+            storage = spec
+        else:
+            packed_shape, scale_shape = (tuple(int(dim) for dim in shape) for shape in spec)
+            if packed_shape != (*lead, n, k // 2) or k % 32 or scale_shape != (*lead, n, k // 32):
+                raise ValueError(
+                    f"spell_mxfp4_inputs: packed={packed_shape}, scale={scale_shape} does not reproduce logical {logical_shape}"
+                )
+            storage = _contiguous_mxfp4_storage(
+                logical_shape,
+                packed_shape,
+                scale_shape,
+                (validated_min, validated_max),
+            )
+        _validate_mxfp4_storage(name, logical_shape, storage)
+        packed_shape = tuple(int(dim) for dim in storage.packed_shape)
+        scale_shape = tuple(int(dim) for dim in storage.scale_shape)
+        validated_min, validated_max = storage.scale_code_range
         # The packed byte keeps the logical input's identity and graph-input
         # slot. The decoded value later replaces the parked logical tensor.
         tmp = f"{name}__packed_src"
         graph.rename_node(name, tmp)
-        packed = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, packed_shape, "u8"), node_id=name)
+        packed = graph.add_node(
+            op=InputOp(),
+            inputs=[],
+            output=Tensor(name, packed_shape, storage.packed_dtype),
+            node_id=name,
+        )
         graph.inputs = [packed if item == tmp else item for item in graph.inputs]
         scale = graph.add_node(
             op=InputOp(),
@@ -1352,40 +1491,48 @@ def spell_mxfp4_inputs(
                 output=Tensor(f"{prefix}_{suffix}", shape, dtype),
             )
 
-        coords = tuple(placeholder(axis) for axis in range(len(logical_shape)))
-        *leading_coords, row, col = coords
         packed_full = _indexed(
             packed,
             logical_shape,
-            (*leading_coords, row, col / Literal(2, "int")),
-            "u8",
+            storage.packed_coord_map,
+            storage.packed_dtype,
             "packed4_full",
         )
-        packed_u32 = _ew("copy", [packed_full], logical_shape, "u32", "packed4_u32")
+        if storage.packed_dtype == "u32":
+            packed_u32 = packed_full
+        elif storage.packed_dtype == "i32":
+            packed_u32 = graph.add_node(
+                op=BitcastOp(dtype="u32"),
+                inputs=[packed_full],
+                output=Tensor(f"{name}_packed4_u32", logical_shape, "u32"),
+            )
+        else:
+            packed_u32 = _ew("copy", [packed_full], logical_shape, "u32", "packed4_u32")
 
-        low_shift = graph.add_node(
-            op=ConstantOp(name=f"{name}_low_nibble_shift", value=0),
-            inputs=[],
-            output=Tensor(f"{name}_low_nibble_shift", (1,), "u32"),
-        )
-        high_shift = graph.add_node(
-            op=ConstantOp(name=f"{name}_high_nibble_shift", value=4),
-            inputs=[],
-            output=Tensor(f"{name}_high_nibble_shift", (1,), "u32"),
-        )
+        shift_inputs: list[str] = []
+        shift_sources: list[IndexSource] = []
+        nibble_slot = storage.nibble_selector
+        for slot, shift in enumerate(storage.nibble_shifts):
+            shift_inputs.append(
+                graph.add_node(
+                    op=ConstantOp(name=f"{name}_nibble_shift_{slot}", value=shift),
+                    inputs=[],
+                    output=Tensor(f"{name}_nibble_shift_{slot}", (1,), "u32"),
+                )
+            )
+            shift_sources.append(
+                IndexSource(
+                    input_idx=slot,
+                    coord_map=(Literal(0, "int"),),
+                    select=nibble_slot.lt(Literal(slot + 1, "int")) if slot + 1 < len(storage.nibble_shifts) else None,
+                )
+            )
         nibble_shift = graph.add_node(
             op=IndexMapOp(
                 out_shape=logical_shape,
-                sources=(
-                    IndexSource(
-                        input_idx=0,
-                        coord_map=(Literal(0, "int"),),
-                        select=(col % Literal(2, "int")).lt(Literal(1, "int")),
-                    ),
-                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
-                ),
+                sources=tuple(shift_sources),
             ),
-            inputs=[low_shift, high_shift],
+            inputs=shift_inputs,
             output=Tensor(f"{name}_nibble_shift", logical_shape, "u32"),
         )
         one = const_bc(graph, name=f"{name}_one", value=1, target_shape=logical_shape, dtype="u32")
@@ -1428,6 +1575,17 @@ def spell_mxfp4_inputs(
             inputs=[scale],
             output=Tensor(f"{name}_scale_u32", scale_shape, "u32"),
         )
+        raw_scale_u32 = scale_u32
+        exponent_delta = 127 - storage.scale_exponent_bias
+        if exponent_delta:
+            scale_bias = const_bc(
+                graph,
+                name=f"{name}_scale_exponent_delta",
+                value=exponent_delta,
+                target_shape=scale_shape,
+                dtype="u32",
+            )
+            scale_u32 = _ew("add", [scale_u32, scale_bias], scale_shape, "u32", "scale_biased_u32")
         scale_shift = const_bc(graph, name=f"{name}_scale_shift", value=23, target_shape=scale_shape, dtype="u32")
         scale_bits = graph.add_node(
             op=ElementwiseOp(op="left_shift"),
@@ -1436,11 +1594,11 @@ def spell_mxfp4_inputs(
         )
         if validated_min == 0:
             scale_zero = const_bc(graph, name=f"{name}_scale_zero_code", value=0, target_shape=scale_shape, dtype="u32")
-            scale_is_zero = _ew("equal", [scale_u32, scale_zero], scale_shape, "u32", "scale_is_zero")
+            scale_is_zero = _ew("equal", [raw_scale_u32, scale_zero], scale_shape, "u32", "scale_is_zero")
             scale_subnormal = const_bc(
                 graph,
                 name=f"{name}_scale_subnormal_bits",
-                value=0x00400000,
+                value=storage.scale_zero_bits,
                 target_shape=scale_shape,
                 dtype="u32",
             )
@@ -1451,9 +1609,15 @@ def spell_mxfp4_inputs(
                 "u32",
                 "scale_zero_checked_bits",
             )
-        if validated_max == 255:
-            scale_nan_code = const_bc(graph, name=f"{name}_scale_nan_code", value=255, target_shape=scale_shape, dtype="u32")
-            scale_is_nan = _ew("equal", [scale_u32, scale_nan_code], scale_shape, "u32", "scale_is_nan")
+        if storage.scale_nan_code is not None and validated_min <= storage.scale_nan_code <= validated_max:
+            scale_nan_code = const_bc(
+                graph,
+                name=f"{name}_scale_nan_code",
+                value=storage.scale_nan_code,
+                target_shape=scale_shape,
+                dtype="u32",
+            )
+            scale_is_nan = _ew("equal", [raw_scale_u32, scale_nan_code], scale_shape, "u32", "scale_is_nan")
             scale_nan = const_bc(
                 graph,
                 name=f"{name}_scale_nan_bits",
@@ -1470,7 +1634,7 @@ def spell_mxfp4_inputs(
         scale_full = _indexed(
             scale_value,
             logical_shape,
-            (*leading_coords, row, col / Literal(32, "int")),
+            storage.scale_coord_map,
             "f32",
             "scale_full",
         )

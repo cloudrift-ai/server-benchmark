@@ -1,3 +1,5 @@
+import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import torch
@@ -7,6 +9,7 @@ from emmy.serving.onecat_deepseek import (
     _ExternalProgram,
     _FusedQKvRmsNormAdapter,
     _InverseRopeAdapter,
+    _run_external,
     register_onecat_deepseek_kernels,
 )
 
@@ -23,6 +26,41 @@ def _qkv_program(_rows):
         ("fused_q_kv", "q_weight", "kv_weight"),
         ("q_output", "kv_output"),
     )
+
+
+def test_external_launch_passes_the_torch_stream_object_to_cupy(monkeypatch):
+    stream = object()
+    seen = []
+    active = False
+
+    class ExternalStream:
+        def __enter__(self):
+            nonlocal active
+            active = True
+
+        def __exit__(self, *_args):
+            nonlocal active
+            active = False
+
+    def from_dlpack(tensor):
+        assert active
+        return tensor
+
+    fake_cupy = SimpleNamespace(
+        from_dlpack=from_dlpack,
+        cuda=SimpleNamespace(Stream=SimpleNamespace(from_external=lambda value: seen.append(value) or ExternalStream())),
+    )
+    monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: stream)
+    import emmy.compiler.backend.gpu_lock as gpu_lock_module
+
+    monkeypatch.setattr(gpu_lock_module, "gpu_lock", nullcontext)
+    runtime = SimpleNamespace(run_once_external=lambda arrays: seen.append(arrays))
+    program = _ExternalProgram(runtime, ("input",), ("output",))
+
+    _run_external(program, (("input", "x"), ("output", "y")), "cuda:0")
+
+    assert seen == [stream, {"input": "x", "output": "y"}]
 
 
 def test_register_patches_both_qkv_aliases_and_inverse_idempotently():

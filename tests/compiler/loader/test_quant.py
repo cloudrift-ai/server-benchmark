@@ -12,11 +12,13 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
+    Mxfp4InputStorage,
     decode_f8,
     decode_mxfp4,
     decode_ue8m0,
     dequantize,
     dequantize_awq4,
+    mxfp4_sm70_mma884_storage,
     spell_dynamic_fp8_activations,
     spell_mxfp4_inputs,
     spell_quantized_constants,
@@ -795,6 +797,73 @@ def test_spell_mxfp4_inputs_preserves_expert_axis_and_fuses_routed_gather():
     loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1
     assert tuple(dim.as_static() for dim in loops[0].output.shape) == (4, 16)
+
+
+def _pack_sm70_mma884_codes(codes):
+    """Independent CPU spelling of the retained SM70 MMA 8x8x4 word order."""
+    codes = np.asarray(codes, dtype=np.uint32)
+    *lead, n, k = codes.shape
+    words = []
+    physical_order = (0, 2, 4, 6, 1, 3, 5, 7)
+    for row_tile in range(0, n, 32):
+        for col_tile in range(0, k, 8):
+            for row in range(row_tile, row_tile + 32):
+                word = np.zeros(lead, dtype=np.uint32)
+                for physical_slot, logical_slot in enumerate(physical_order):
+                    word |= codes[..., row, col_tile + logical_slot] << np.uint32(4 * physical_slot)
+                words.append(word)
+    words = np.stack(words, axis=-1)
+    return words.reshape(*lead, k, n // 8).view(np.int32)
+
+
+def test_spell_mxfp4_inputs_decodes_external_sm70_mma884_storage_exactly():
+    graph = _mxfp4_routed_graph(rows=3, experts=2, n=32, k=32, dtype="f32")
+    storage = mxfp4_sm70_mma884_storage((2, 32, 32))
+    assert isinstance(storage, Mxfp4InputStorage)
+
+    codes = rng.integers(0, 16, (2, 32, 32), dtype=np.uint8)
+    packed_words = _pack_sm70_mma884_codes(codes)
+    checkpoint_scale_codes = np.array(
+        [
+            [[100, 112, 113, 126, 127, 128, 141, 142] * 4],
+            [[255, 143, 128, 127, 126, 113, 112, 111] * 4],
+        ],
+        dtype=np.uint8,
+    ).transpose(0, 2, 1)
+    retained_scale_codes = np.clip(checkpoint_scale_codes.astype(np.int16) + 15 - 127, 0, 30).astype(np.uint8)
+    retained_scale_codes = retained_scale_codes.transpose(0, 2, 1)
+    x = rng.standard_normal((3, 32)).astype(np.float32)
+    expert_ids = np.array([1, 0, 1], dtype=np.int64)
+
+    spell_mxfp4_inputs(graph, {"weight": storage})
+    graph.validate()
+    assert graph.inputs == ["x", "weight", "expert_ids", "weight_scale"]
+    assert graph.nodes["weight"].output.dtype.name == "i32"
+    assert tuple(dim.as_static() for dim in graph.nodes["weight"].output.shape) == (2, 32, 4)
+    assert tuple(dim.as_static() for dim in graph.nodes["weight_scale"].output.shape) == (2, 1, 32)
+
+    feed = {
+        "x": x,
+        "weight": packed_words,
+        "expert_ids": expert_ids,
+        "weight_scale": retained_scale_codes,
+    }
+    canonical_packed = codes[..., 0::2] | (codes[..., 1::2] << np.uint8(4))
+    values = decode_mxfp4(canonical_packed)
+    scales = np.where(
+        retained_scale_codes == 0,
+        0.0,
+        np.exp2(retained_scale_codes.astype(np.float32) - 15.0),
+    )
+    decoded = values * np.repeat(scales.transpose(0, 2, 1), 32, axis=-1)
+
+    original_outputs = graph.outputs
+    graph.outputs = ["weight_decoded"]
+    np.testing.assert_array_equal(_run_numpy(graph, feed), decoded)
+    graph.outputs = original_outputs
+    got = _run_numpy(graph, feed)
+    expected = np.einsum("rk,rnk->rn", x, decoded[expert_ids])
+    np.testing.assert_allclose(got, expected, rtol=3e-5, atol=1e-6)
 
 
 def test_spell_mxfp4_inputs_preserves_ue8m0_nan_code():

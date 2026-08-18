@@ -74,6 +74,10 @@ accepts only static FP32 `[M,N,N]` matrices within the operation's declared size
 matrix to straight-line Loop-IR SSA under the leading `M` loop. From that point on, recognition, scheduling, and
 materialization consume the same ordinary pointwise `LoopOp` path as every other scalar body.
 
+`RowRmsNormRopeOp` follows the same rule: lifting produces one ordinary `LoopOp` containing a row reduction and the
+dependent partial-RoPE output sweep. The pass exposes generic algebra only; deployment evidence selects the worker
+inventory and cooperative-reduction schedule through ordinary pins or measured rows.
+
 ## The tile scheduler: one inventory, then a product over sites
 
 Schedule **enumeration and composition** — the step that decides a `TileOp`'s `place` (free axes → grid) and its

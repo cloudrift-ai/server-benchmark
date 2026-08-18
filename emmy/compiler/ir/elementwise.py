@@ -51,6 +51,7 @@ def _arange(x):
 
 _NAME_TO_FN: dict[str, object] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    "log_fast": np.log,  # explicit fast intrinsic for source contracts that require __logf
     "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
     "relu": lambda x: np.maximum(0.0, x),
@@ -342,6 +343,7 @@ _OP_CLUSTERS: dict[str, str] = {
     "rsqrt": "exp",
     "exp": "exp",
     "log": "exp",
+    "log_fast": "exp",
     "log2": "exp",
     "log10": "exp",
     "sin": "exp",

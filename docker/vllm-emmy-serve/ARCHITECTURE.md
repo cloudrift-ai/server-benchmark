@@ -40,6 +40,27 @@ human approval, `--yes` may tag a `--source-image` and push; a different digest 
 failure, while the same digest is idempotent success. Direct `make serve-push` is disabled so naming and collision
 rules cannot drift between release paths.
 
+The 1Cat SM70 integration uses the same pack/cubin/Triton-cache separation without presenting itself as an
+`EmmyGenModel` image. `docker/1cat-vllm-sm70/Dockerfile.emmy` defaults to empty assets for the bounded development
+image. A qualified broad build passes a BuildKit context whose root contains `pack/`, `cubin/`, and `triton/`, selects
+it with `EMMY_ASSETS`, and enables `ONECAT_DEEPSEEK_V4=1`. These generated release inputs remain outside the
+repository. Broad adapters are strict pack consumers, so an absent or invalid plan retains the original 1Cat
+operation instead of compiling inside a serving worker.
+
+The broad image also installs one explicit KV-only Python shim into the pinned 1Cat SM70 package. The image build
+first checks the SHA-256 of 1Cat's fused Q/KV source at commit `d7612660`; drift fails the build. The shim invokes the
+KV branch inside that package and its existing FP8 paged-cache insertion, while Emmy replaces only pure query RMSNorm
+plus forward RoPE with one 128-thread cooperative compiler launch per token/head. That schedule is an exact
+deployment pin in the realized plan, not a decision in the lifting pass. Runtime registration validates both public
+signatures and otherwise leaves the complete original fused operation installed.
+
+The same broad opt-in delegates loader-born retained projections, learned and hash routing, and the complete routed
+expert projection/activation/weighted-combine path to strict Emmy plans. The loader is the only layer that knows the
+runtime's physical carrier layout; serving receives format-free named bindings and never retains a decoded duplicate.
+Static route plans preserve the measured decode and prefill schedules, while one bounded symbolic route fallback and
+one bounded symbolic expert plan cover all other continuous-batch widths through 4096. 1Cat continues to own only
+scheduler orchestration, TP/PP collectives, and stateful paged sparse-attention/cache operations at these boundaries.
+
 **The slug does not encode the checkpoint revision.** An HF id that publishes several variants under one repo — an
 EXL3 checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every
 one of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and

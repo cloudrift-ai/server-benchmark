@@ -1,15 +1,17 @@
-"""Opt-in Emmy adapters for two pure DeepSeek V4 leaves in pinned 1Cat.
+"""Opt-in Emmy adapters for pure DeepSeek V4 leaves in pinned 1Cat.
 
 The serving runtime keeps ownership of projections, attention, cache mutation,
-quantization, and output projection. This module only replaces the exact SM70
-tensor-returning Q/KV RMSNorm and inverse-RoPE functions when the broader
-DeepSeek V4 serving opt-in is enabled.
+quantization, and output projection. Besides tensor-returning Q/KV RMSNorm and
+inverse RoPE, this module splits the exact SM70 Q/cache leaf: Emmy owns pure Q
+RMSNorm plus forward RoPE while a pinned 1Cat shim retains KV RoPE and paged
+FP8 cache insertion.
 """
 
 from __future__ import annotations
 
 import functools
 import importlib
+import inspect
 import logging
 import threading
 from collections.abc import Callable, Hashable
@@ -19,6 +21,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _MAX_PREFILL_ROWS = 4096
+_QNORM_ROPE_PINS = {"WORK": "t128", "REDUCE": "coop"}
 _Q_SIZE = 1024
 _KV_SIZE = 512
 _FUSED_SIZE = _Q_SIZE + _KV_SIZE
@@ -27,6 +30,24 @@ _HEAD_DIM = 512
 _ROPE_DIM = 64
 _CONTEXT = 1_048_576
 _PARITY_TOL = 3e-3
+_Q_CACHE_SIGNATURE = (
+    "q",
+    "kv",
+    "swa_kv_cache",
+    "slot_mapping",
+    "positions",
+    "cos_sin_cache",
+    "eps",
+    "block_size",
+)
+_KV_CACHE_SIGNATURE = (
+    "kv",
+    "swa_kv_cache",
+    "slot_mapping",
+    "positions",
+    "cos_sin_cache",
+    "block_size",
+)
 
 
 def _symbolic_profile(rows: int) -> Hashable | None:
@@ -126,6 +147,24 @@ def _build_inverse_rope_program(_rows: int) -> _ExternalProgram:
     return _ExternalProgram(runtime, inputs, outputs, lambda rows: runtime.set_sym_values({"num_tokens": rows}))
 
 
+def _build_qnorm_rope_program(_rows: int) -> _ExternalProgram:
+    from emmy.serving.deepseek import trace_qnorm_rope
+    from emmy.serving.external import load_external_program
+
+    runtime, plan = load_external_program(
+        trace_qnorm_rope(rows=_MAX_PREFILL_ROWS, dynamic=True),
+        pins=_QNORM_ROPE_PINS,
+        symbolic_values={"num_tokens": _MAX_PREFILL_ROWS},
+    )
+    inputs = tuple(plan.inputs)
+    outputs = tuple(plan.outputs)
+    if inputs != ("q", "positions", "cos_sin_cache") or len(outputs) != 1:
+        raise RuntimeError(f"1Cat Q norm+RoPE expected three inputs and one output, got {inputs!r} -> {outputs!r}")
+    if len(plan.launches) != 1:
+        raise RuntimeError(f"1Cat Q norm+RoPE expected one launch, got {len(plan.launches)}")
+    return _ExternalProgram(runtime, inputs, outputs, lambda rows: runtime.set_sym_values({"num_tokens": rows}))
+
+
 def _run_external(program: _ExternalProgram, bindings: tuple[tuple[str, Any], ...], device: Any) -> None:
     import cupy as cp
     import torch
@@ -200,6 +239,79 @@ def _inverse_rope_supported(x: Any, positions: Any, cos_sin_cache: Any, rope_dim
         and cos_sin_cache.is_contiguous()
         and int(rope_dim) == _ROPE_DIM
     )
+
+
+def _qnorm_rope_supported(q: Any, positions: Any, cos_sin_cache: Any, eps: float) -> bool:
+    import torch
+
+    rows = q.shape[0] if q.ndim == 3 else -1
+    return bool(
+        _is_exact_sm70(q)
+        and 0 < rows <= _MAX_PREFILL_ROWS
+        and q.dtype == torch.float16
+        and positions.dtype == torch.int64
+        and cos_sin_cache.dtype == torch.float32
+        and tuple(q.shape) == (rows, _HEADS, _HEAD_DIM)
+        and tuple(positions.shape) == (rows,)
+        and tuple(cos_sin_cache.shape) == (_CONTEXT, _ROPE_DIM)
+        and q.device == positions.device == cos_sin_cache.device
+        and q.is_contiguous()
+        and positions.is_contiguous()
+        and cos_sin_cache.is_contiguous()
+        and float(eps) == 1e-6
+    )
+
+
+def _q_cache_supported(
+    q: Any,
+    kv: Any,
+    swa_kv_cache: Any,
+    slot_mapping: Any,
+    positions: Any,
+    cos_sin_cache: Any,
+    eps: float,
+    block_size: int,
+) -> bool:
+    """Validate the complete fused boundary before any paged-cache mutation."""
+    import torch
+
+    rows = q.shape[0] if q.ndim == 3 else -1
+    return bool(
+        _qnorm_rope_supported(q, positions, cos_sin_cache, eps)
+        and kv.dtype == torch.float16
+        and tuple(kv.shape) == (rows, _HEAD_DIM)
+        and kv.device == q.device
+        and kv.is_contiguous()
+        and swa_kv_cache.dtype == torch.uint8
+        and swa_kv_cache.ndim >= 2
+        and swa_kv_cache.shape[0] > 0
+        and swa_kv_cache.device == q.device
+        and swa_kv_cache.is_contiguous()
+        and slot_mapping.dtype == torch.int64
+        and slot_mapping.ndim == 1
+        and slot_mapping.shape[0] <= rows
+        and slot_mapping.device == q.device
+        and slot_mapping.is_contiguous()
+        and isinstance(block_size, int)
+        and block_size > 0
+    )
+
+
+def _qnorm_rope_reference(q: Any, positions: Any, cos_sin_cache: Any, eps: float) -> Any:
+    import torch
+
+    values = q.float()
+    rrms = torch.rsqrt((values * values).mean(dim=-1, keepdim=True) + float(eps))
+    normalized = values * rrms
+    rotary = cos_sin_cache[positions]
+    cos = rotary[:, : _ROPE_DIM // 2].float().unsqueeze(1)
+    sin = rotary[:, _ROPE_DIM // 2 :].float().unsqueeze(1)
+    nope = normalized[..., :-_ROPE_DIM]
+    pairs = normalized[..., -_ROPE_DIM:].reshape(q.shape[0], _HEADS, _ROPE_DIM // 2, 2)
+    even = pairs[..., 0]
+    odd = pairs[..., 1]
+    roped = torch.stack((even * cos - odd * sin, odd * cos + even * sin), dim=-1)
+    return torch.cat((nope, roped.flatten(-2)), dim=-1).half()
 
 
 def _outputs_close(actual: tuple[Any, ...], reference: tuple[Any, ...]) -> bool:
@@ -323,6 +435,63 @@ class _InverseRopeAdapter:
         return output
 
 
+class _QNormRopeAdapter:
+    """Guard one strict-pack Q program while the 1Cat shim mutates KV cache."""
+
+    def __init__(
+        self,
+        *,
+        program_builder: Callable[[int], _ExternalProgram] = _build_qnorm_rope_program,
+        profile: Callable[[int], Hashable | None] = _symbolic_profile,
+        runner: Callable[[_ExternalProgram, tuple[tuple[str, Any], ...], Any], None] = _run_external,
+        oracle: Callable[[Any, Any, Any, float], Any] = _qnorm_rope_reference,
+    ) -> None:
+        self.cache = _ProgramCache("Q norm+RoPE", program_builder, profile)
+        self.runner = runner
+        self.oracle = oracle
+
+    def dispatch(self, q: Any, positions: Any, cos_sin_cache: Any, eps: float) -> Any | None:
+        if not _qnorm_rope_supported(q, positions, cos_sin_cache, eps):
+            return None
+
+        rows = q.shape[0]
+        capturing = _is_capturing()
+        entry = self.cache.get(rows, capturing=capturing)
+        if entry is None or (capturing and rows not in entry.verified_rows):
+            return None
+
+        output = q.new_empty(q.shape)
+        program = entry.program
+        try:
+            with program.lock:
+                if program.prepare_rows is not None:
+                    program.prepare_rows(rows)
+                self.runner(
+                    program,
+                    (
+                        (program.inputs[0], q),
+                        (program.inputs[1], positions),
+                        (program.inputs[2], cos_sin_cache),
+                        (program.outputs[0], output),
+                    ),
+                    q.device,
+                )
+        except Exception:  # noqa: BLE001 -- compatibility adapter permanently falls back
+            self.cache.disable(rows)
+            logger.exception("1Cat Q norm+RoPE: Emmy launch failed for M=%d; retaining the original fused operation", rows)
+            return None
+
+        if rows not in entry.verified_rows:
+            reference = self.oracle(q, positions, cos_sin_cache, eps)
+            if not _outputs_close((output,), (reference,)):
+                self.cache.disable(rows)
+                logger.error("1Cat Q norm+RoPE: first-use parity failed for M=%d; retaining the original fused operation", rows)
+                return None
+            entry.verified_rows.add(rows)
+            logger.info("1Cat Q norm+RoPE: Emmy compiler kernel active for M=%d", rows)
+        return output
+
+
 def _qkv_wrapper(original: Callable[..., tuple[Any, Any]], adapter: _FusedQKvRmsNormAdapter) -> Callable[..., tuple[Any, Any]]:
     @functools.wraps(original)
     def fused_q_kv_rmsnorm_emmy(qr: Any, kv: Any, q_weight: Any, kv_weight: Any, eps: float) -> tuple[Any, Any]:
@@ -343,6 +512,68 @@ def _inverse_wrapper(original: Callable[..., Any], adapter: _InverseRopeAdapter)
     sm70_inverse_rope_emmy._emmy_original = original  # type: ignore[attr-defined]
     sm70_inverse_rope_emmy._emmy_adapter = adapter  # type: ignore[attr-defined]
     return sm70_inverse_rope_emmy
+
+
+def _signature_matches(function: Callable[..., Any], names: tuple[str, ...]) -> bool:
+    try:
+        parameters = tuple(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return len(parameters) == len(names) and all(
+        parameter.name == name
+        and parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        and parameter.default is inspect.Parameter.empty
+        for parameter, name in zip(parameters, names, strict=True)
+    )
+
+
+def register_onecat_q_cache_kernel(
+    fused_module: Any | None = None,
+    kv_module: Any | None = None,
+    *,
+    program_builder: Callable[[int], _ExternalProgram] = _build_qnorm_rope_program,
+    profile: Callable[[int], Hashable | None] = _symbolic_profile,
+    runner: Callable[[_ExternalProgram, tuple[tuple[str, Any], ...], Any], None] = _run_external,
+) -> bool:
+    """Split the exact pinned SM70 fused leaf at its pure-Q/cache boundary."""
+    try:
+        fused_module = fused_module or importlib.import_module("vllm.models.deepseek_v4.sm70.qnorm_rope_kv_fp8_insert")
+        kv_module = kv_module or importlib.import_module("vllm.models.deepseek_v4.sm70.kv_rope_fp8_insert")
+        original = fused_module.sm70_qnorm_rope_kv_fp8_insert
+        kv_insert = kv_module.sm70_kv_rope_fp8_insert
+    except (AttributeError, ImportError):
+        logger.warning("1Cat Q/cache split requested, but the compatible pinned shim is unavailable")
+        return False
+
+    if getattr(original, "_emmy_onecat_q_cache", False):
+        return True
+    if not _signature_matches(original, _Q_CACHE_SIGNATURE) or not _signature_matches(kv_insert, _KV_CACHE_SIGNATURE):
+        logger.error("1Cat Q/cache split: compatible pinned signatures are unavailable; no symbol changed")
+        return False
+
+    adapter = _QNormRopeAdapter(program_builder=program_builder, profile=profile, runner=runner)
+
+    @functools.wraps(original)
+    def replacement(q, kv, swa_kv_cache, slot_mapping, positions, cos_sin_cache, eps, block_size):
+        if not _q_cache_supported(q, kv, swa_kv_cache, slot_mapping, positions, cos_sin_cache, eps, block_size):
+            return original(q, kv, swa_kv_cache, slot_mapping, positions, cos_sin_cache, eps, block_size)
+        q_out = adapter.dispatch(q, positions, cos_sin_cache, eps)
+        if q_out is None:
+            return original(q, kv, swa_kv_cache, slot_mapping, positions, cos_sin_cache, eps, block_size)
+        try:
+            kv_insert(kv, swa_kv_cache, slot_mapping, positions, cos_sin_cache, block_size)
+        except Exception:  # noqa: BLE001 -- state may be mutated, so replaying the original is unsafe
+            adapter.cache.disable(q.shape[0])
+            raise RuntimeError("1Cat Q/cache split failed after cache mutation began") from None
+        return q_out
+
+    replacement._emmy_onecat_q_cache = True  # type: ignore[attr-defined]
+    replacement._emmy_onecat_q_cache_adapter = adapter  # type: ignore[attr-defined]
+    replacement._emmy_onecat_q_cache_original = original  # type: ignore[attr-defined]
+    replacement._emmy_onecat_q_cache_kv_insert = kv_insert  # type: ignore[attr-defined]
+    fused_module.sm70_qnorm_rope_kv_fp8_insert = replacement
+    logger.info("1Cat Q/cache split: installed guarded Emmy Q norm+RoPE and native KV-cache adapter")
+    return True
 
 
 def register_onecat_deepseek_kernels(

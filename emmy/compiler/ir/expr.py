@@ -340,6 +340,9 @@ class BinaryExpr(_ExprOps):
                 return right
             if _is_zero(right):
                 return left
+            restored = _restore_divmod(left, right)
+            if restored is not None:
+                return restored
         elif op == "-":
             if _is_zero(right):
                 return left
@@ -678,6 +681,40 @@ class SimplifyCtx:
 
 def _make_int_literal(v: int) -> Literal:
     return Literal(int(v), "int")
+
+
+def _restore_divmod(left: Expr, right: Expr) -> Expr | None:
+    """Fold ``(x / d) * d + x % d`` back to ``x`` for positive integer ``d``.
+
+    Row-major flattening applies this exact pair to coordinate maps that expose
+    a flat physical address as quotient and remainder coordinates. Restoring the
+    address removes redundant division/modulo from every generated memory access.
+    """
+
+    def quotient_product(expr: Expr) -> tuple[Expr, Literal] | None:
+        if not isinstance(expr, BinaryExpr) or expr.op != "*":
+            return None
+        for quotient, divisor in ((expr.left, expr.right), (expr.right, expr.left)):
+            if (
+                isinstance(quotient, BinaryExpr)
+                and quotient.op in ("/", "//")
+                and quotient.right == divisor
+                and isinstance(divisor, Literal)
+                and divisor.dtype == "int"
+                and isinstance(divisor.value, int)
+                and divisor.value > 0
+            ):
+                return quotient.left, divisor
+        return None
+
+    for product, remainder in ((left, right), (right, left)):
+        pair = quotient_product(product)
+        if pair is None or not isinstance(remainder, BinaryExpr) or remainder.op != "%":
+            continue
+        value, divisor = pair
+        if remainder.left == value and remainder.right == divisor:
+            return value
+    return None
 
 
 def _is_zero(e: object) -> bool:

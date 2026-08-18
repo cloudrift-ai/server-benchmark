@@ -27,6 +27,28 @@ def _evaluate(coords, row, col):
     return tuple(np.asarray(expr.eval(env), dtype=np.int64) for expr in coords)
 
 
+def _projection_graph(m, n, k, interleaved, group):
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (m, k), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("weight", (n, k), "f16"), node_id="weight")
+    graph.add_node(LinearOp(), ["x", "weight"], Tensor("output", (m, n), "f16"), node_id="output")
+    graph.inputs = ["x", "weight"]
+    graph.outputs = ["output"]
+    weight_shape = (k, n) if group is None else (group + 1, k, n)
+    scale_shape = (k // 128, n) if group is None else (group + 1, k // 128, n)
+    storage = retained_sm70_fp8_storage(
+        (n, k),
+        weight_shape=weight_shape,
+        scale_shape=scale_shape,
+        metadata=expected_sm70_fp8_metadata((n, k)),
+        interleave_halves=interleaved,
+        group_index=group,
+    )
+    spell_physical_inputs(graph, {"weight": storage})
+    graph.validate()
+    return graph
+
+
 @pytest.mark.parametrize(("n", "k", "interleaved", "group"), _PROFILES)
 def test_all_live_profiles_validate_exported_carrier_shapes_and_metadata(n, k, interleaved, group):
     weight_shape = (k, n) if group is None else (1, k, n)
@@ -44,6 +66,37 @@ def test_all_live_profiles_validate_exported_carrier_shapes_and_metadata(n, k, i
     assert storage.carriers[0].shape == weight_shape
     assert storage.carriers[1].shape == scale_shape
     assert storage.output == "scaled"
+
+
+@pytest.mark.parametrize(("n", "k", "interleaved", "group"), _PROFILES)
+def test_all_live_profiles_lower_to_one_volta_mma_kernel_without_a_decoded_weight(monkeypatch, n, k, interleaved, group):
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+
+    for name, value in {
+        "WORK": "w1x1",
+        "TILE": "mma_m8n8k4_f16_f32/f4x4/k8",
+        "REDUCE": "",
+        "STAGE": "d1/smem",
+        "LOOPIFY": "0",
+        "RASTER": "",
+    }.items():
+        monkeypatch.setenv(f"EMMY_{name}", value)
+
+    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(
+        _projection_graph(8, n, k, interleaved, group),
+        ctx=Context.from_target((7, 0)),
+    )
+    sources = [node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp)]
+
+    assert len(sources) == 1
+    source = sources[0]
+    assert "mma.sync.aligned.m8n8k4" in source
+    assert "uint2 _v_" not in source
+    assert source.count("weight[") == 8
+    assert source.count("weight_scale[") == (8 if interleaved else 1)
+    assert source.count("emmy_mma884_load_b_smem_trans(") == 1
 
 
 def test_hmma884_weight_map_uses_fixed_256_byte_tiles_not_scale_leading_dimension():

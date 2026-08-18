@@ -59,6 +59,7 @@ _INTRINSIC_F32: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
     "log": "logf",
+    "log_fast": "__logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",
@@ -221,4 +222,13 @@ class CudaRenderTarget:
             if n == 8:
                 return ("uint4", "__half")
             return None
+        if dtype in (*_F8_DTYPES, "u8"):
+            # Byte-valued storage uses ordinary CUDA integer vector carriers;
+            # array-style unpacking restores the source scalar type lane by lane.
+            if n == 4:
+                return ("unsigned int", _TYPE_NAME[dtype])
+            if n == 8:
+                return ("uint2", _TYPE_NAME[dtype])
+            if n == 16:
+                return ("uint4", _TYPE_NAME[dtype])
         return None

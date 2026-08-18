@@ -192,13 +192,20 @@ the warp tier through a COMPUTED edge: recognition stores the producer tree inli
 (`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `smem` `Stage` (there is no gmem-direct sibling —
 a byte transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
 ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
-canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
+canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Generic address analysis
+recognizes an aligned contiguous physical run even when its logical cells use a fixed lane permutation or
+quotient/remainder coordinates, and the vector load binds its result names in logical order. It does not inspect a
+checkpoint, model, or storage-format identity. Materialized peer operands use the
 same vectorized `cp.async` path as ordinary staged matmul, so a generic compact-storage B producer can be evaluated
 directly into Tensor Core fragments without first constructing its expanded dense matrix. This facility is defined
 entirely in generic tensor/loop IR; checkpoint formats are already dissolved before it is selected.
 
 The compute fill assigns each thread a contiguous run of slab cells (the row/col derivation hoists out of the
-per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialized canonical B uses the K-major
+per-cell code and the cone replicates with a `__c<j>` SSA suffix). Statements invariant over the run are hoisted;
+one aligned source run becomes a single vector load, and non-contiguous gathers remain scalar. Row-major flattening
+also restores an exact `(flat / width) * width + flat % width` coordinate pair to `flat`, so an external physical
+descriptor does not leave redundant division and modulo in generated memory addresses. A materialized canonical B
+uses the K-major
 `(bk × tile_n)` slab; a transposed B (the serving `F.linear` layout) uses the N-major `(tile_n × bk)` slab in its own
 gmem orientation (`Operand.trans`). When a two-slot ring also fits the smem budget, the stage resolves at `depth=2`
 and copied peer chunks can stay in flight across the current chunk's drain. A

@@ -8,8 +8,10 @@ from emmy.compiler.target import set_target
 from emmy.serving.deepseek import (
     FusedQKvRmsNormModule,
     InverseRopeModule,
+    QNormRopeModule,
     trace_fused_q_kv_rmsnorm,
     trace_inverse_rope,
+    trace_qnorm_rope,
 )
 
 
@@ -46,10 +48,28 @@ def test_inverse_rope_matches_exact_interleaved_reference():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+def test_qnorm_rope_matches_exact_per_head_reference():
+    torch.manual_seed(731)
+    q = torch.randn((3, 2, 12), dtype=torch.float16)
+    positions = torch.tensor([1, 4, 7], dtype=torch.int64)
+    cache = torch.randn((8, 4), dtype=torch.float32)
+    actual = QNormRopeModule(4).module()(q, positions, cache)
+
+    values = q.float()
+    expected = values * torch.rsqrt((values * values).mean(-1, keepdim=True) + 1e-6)
+    pairs = expected[..., -4:].reshape(3, 2, 2, 2)
+    even, odd = pairs[..., 0].clone(), pairs[..., 1].clone()
+    cos, sin = cache[positions, :2, None], cache[positions, 2:, None]
+    expected[..., -4::2] = even * cos.transpose(1, 2) - odd * sin.transpose(1, 2)
+    expected[..., -3::2] = odd * cos.transpose(1, 2) + even * sin.transpose(1, 2)
+    torch.testing.assert_close(actual, expected.half(), rtol=0, atol=0)
+
+
 def test_deepseek_dense_boundaries_lower_on_sm70_without_capacity_scratch():
     graphs = (
         trace_fused_q_kv_rmsnorm(rows=2, q_size=16, kv_size=8),
         trace_inverse_rope(rows=2, heads=2, head_dim=12, rope_dim=4, context=8),
+        trace_qnorm_rope(rows=2, heads=2, head_dim=12, rope_dim=4, context=8),
     )
     try:
         set_target((7, 0))
@@ -57,8 +77,9 @@ def test_deepseek_dense_boundaries_lower_on_sm70_without_capacity_scratch():
     finally:
         set_target(None)
 
-    q_kv_plan, inverse_plan = plans
+    q_kv_plan, inverse_plan, qnorm_rope_plan = plans
     assert q_kv_plan.launches and inverse_plan.launches
+    assert len(qnorm_rope_plan.launches) == 1
     assert len(q_kv_plan.outputs) == 2
     # The current multi-stat lowering may materialize one smaller half between
     # launches; it must never reproduce the full fused projection input.
@@ -66,17 +87,19 @@ def test_deepseek_dense_boundaries_lower_on_sm70_without_capacity_scratch():
     assert len(scratch) <= 1
     assert all(prod(dim.as_static() for dim in buffer.shape) * buffer.dtype.np.itemsize <= 2 * 8 * 512 for buffer in scratch)
     assert tuple(buffer.name for buffer in inverse_plan.buffers if buffer.role == "scratch") == ()
+    assert tuple(buffer.name for buffer in qnorm_rope_plan.buffers if buffer.role == "scratch") == ()
 
 
 def test_deepseek_dense_boundaries_share_symbolic_token_extent():
     graphs = (
         trace_fused_q_kv_rmsnorm(rows=8, q_size=16, kv_size=8, dynamic=True),
         trace_inverse_rope(rows=8, heads=2, head_dim=12, rope_dim=4, context=8, dynamic=True),
+        trace_qnorm_rope(rows=8, heads=2, head_dim=12, rope_dim=4, context=8, dynamic=True),
     )
     for graph in graphs:
         for name in graph.inputs:
             tensor = graph.nodes[name].output
-            if name in {"fused_q_kv", "x", "positions"}:
+            if name in {"fused_q_kv", "x", "q", "positions"}:
                 assert not tensor.shape[0].is_static
                 assert tensor.shape[0].as_atom_name() == "num_tokens"
         for name in graph.outputs:

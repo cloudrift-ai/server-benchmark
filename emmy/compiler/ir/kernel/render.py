@@ -850,6 +850,7 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
+    "log_fast": "__logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",

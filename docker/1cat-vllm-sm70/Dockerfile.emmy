@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # Add the Emmy compiler plugin to an exact prebuilt 1Cat image without changing
-# 1Cat's model loader, scheduler, TP/PP, attention/cache, routing, or MXFP4 paths.
+# 1Cat's model loader, scheduler, TP/PP collectives, or stateful sparse-attention/cache paths.
 # Build from the repository root after `make wheel`:
 #
 #   docker build -f docker/1cat-vllm-sm70/Dockerfile.emmy \
@@ -9,14 +9,47 @@
 #     -t emmy/1cat-vllm-deepseek-v4-flash-0731:local .
 
 ARG BASE_IMAGE
+ARG EMMY_ASSETS=empty-emmy-assets
+
+# The ordinary bounded-leaf image has no prebuilt external-program assets. A full
+# DeepSeek image supplies a BuildKit named context instead:
+#
+#   --build-context external-emmy-assets=/path/to/assets \
+#   --build-arg EMMY_ASSETS=external-emmy-assets
+#
+# The context has pack/, cubin/, and triton/ at its root. Keeping it outside the
+# repository avoids committing generated execution plans and binary caches.
+FROM ${BASE_IMAGE} AS empty-emmy-assets
+RUN mkdir -p /pack /cubin /triton
+
+FROM ${EMMY_ASSETS} AS selected-emmy-assets
+
 FROM ${BASE_IMAGE}
 
 COPY dist/emmy_ml-*.whl /tmp/emmy-wheel/
+COPY docker/1cat-vllm-sm70/shims/kv_rope_fp8_insert.py /tmp/onecat-shims/kv_rope_fp8_insert.py
 RUN pip install --no-cache-dir --no-deps /tmp/emmy-wheel/emmy_ml-*.whl \
     && pip install --no-cache-dir cupy-cuda12x==14.1.1 \
-    && rm -rf /tmp/emmy-wheel
+    && emmy_onecat_sm70_dir="$(python3 -c \
+        'import pathlib, vllm.models.deepseek_v4.sm70 as sm70; print(pathlib.Path(sm70.__file__).parent)')" \
+    && test "$(sha256sum "$emmy_onecat_sm70_dir/qnorm_rope_kv_fp8_insert.py" \
+        | cut -d ' ' -f 1)" = "4c4031ff88c227cda4fa7e2a6b4e5c95585ba5ade2194aa26584b3aa0b49c853" \
+    && cp /tmp/onecat-shims/kv_rope_fp8_insert.py \
+        "$emmy_onecat_sm70_dir/kv_rope_fp8_insert.py" \
+    && rm -rf /tmp/emmy-wheel /tmp/onecat-shims
 
-ENV EMMY_CUBIN_CACHE=/root/.cache/huggingface/emmy-cubins
+COPY --from=selected-emmy-assets /pack /opt/emmy/pack
+COPY --from=selected-emmy-assets /cubin /opt/emmy/cubin
+COPY --from=selected-emmy-assets /triton /opt/emmy/triton
 
-LABEL ai.emmy.compiler.integration="onecat-leaf" \
-      ai.emmy.compiler.kernel="sm70-rms-norm-fp16"
+ARG ONECAT_DEEPSEEK_V4=0
+ARG COMPILER_INTEGRATION=onecat-leaf
+ARG COMPILER_KERNEL=sm70-rms-norm-fp16
+ENV EMMY_CUBIN_CACHE=/opt/emmy/cubin \
+    EMMY_PACK_DIR=/opt/emmy/pack \
+    TRITON_CACHE_DIR=/opt/emmy/triton \
+    EMMY_ONECAT_DEEPSEEK_V4=${ONECAT_DEEPSEEK_V4}
+
+LABEL ai.emmy.compiler.integration="${COMPILER_INTEGRATION}" \
+      ai.emmy.compiler.kernel="${COMPILER_KERNEL}" \
+      ai.emmy.onecat.q-cache-shim="d76126608"

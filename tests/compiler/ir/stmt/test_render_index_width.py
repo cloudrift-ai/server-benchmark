@@ -9,7 +9,7 @@ later CUDA test sharing that xdist worker.
 """
 
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.base import RenderCtx, render_index
 
 _SMALL = (Dim(4), Dim(512), Dim(1024))  # 2_097_152 elements
@@ -19,6 +19,13 @@ _BIG = (Dim(4), Dim(512), Dim(2048), Dim(1024))  # 2^32 elements — the buffer 
 def _render(shape):
     ctx = RenderCtx(shapes={"buf": shape})
     return render_index("buf", tuple(Var(f"a{i}") for i in range(len(shape))), ctx)
+
+
+def test_render_index_restores_a_flat_quotient_remainder_coordinate() -> None:
+    flat = Var("flat")
+    ctx = RenderCtx(shapes={"buf": (256, 128)})
+
+    assert render_index("buf", (flat / Literal(128, "int"), flat % Literal(128, "int")), ctx) == "flat"
 
 
 def test_small_buffer_keeps_32_bit_addressing():

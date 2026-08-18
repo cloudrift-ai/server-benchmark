@@ -30,6 +30,10 @@ or a view created before the write still fails closed; those forms need general 
 functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
 instead of becoming NaN through arithmetic selection.
 
+Dynamic FX metadata may carry compound SymInt extents such as `6 * num_tokens` after a flatten or reshape. Trace
+converts SymPy addition and multiplication into `Dim` expression trees and renames every leaf symbol, so derived
+buffer sizes and launch geometry resolve from the same caller-owned input binding as the original dynamic axis.
+
 A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions; `select`
 requires only its selected-axis extent to be static, so unrelated symbolic axes survive. An exported
 `fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
@@ -45,6 +49,11 @@ The compiler-owned `emmy::fixed_sinkhorn` custom-op schema is a deliberate stabl
 `FixedSinkhornOp` with its literal epsilon and iteration count. The leading `M` extent may be symbolic; unsupported
 dtype, rank, dynamic matrix extent, square shape, size, or iteration count fails during capture instead of expanding
 into a long chain of reductions.
+
+The compiler-owned `emmy::row_rms_norm_rope` schema similarly preserves a generic row normalization followed by
+partial interleaved forward RoPE as one tensor operation. Only the leading row extent may vary; the head and rotary
+widths remain static. The walker records the literal rotary width and epsilon so Loop lifting can keep the dependent
+normalization and output sweep in one kernel without introducing a model or runtime operation into later dialects.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.

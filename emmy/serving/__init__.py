@@ -25,7 +25,9 @@ def register() -> None:
 
         register_onecat_kernels()
     if deepseek_v4:
-        from emmy.serving.onecat_deepseek import register_onecat_deepseek_kernels
+        from emmy.serving.onecat_deepseek import register_onecat_deepseek_kernels, register_onecat_q_cache_kernel
+        from emmy.serving.onecat_experts import register_onecat_expert_kernels
+        from emmy.serving.onecat_fp8_linear import register_onecat_fp8_linear_kernels
         from emmy.serving.onecat_indexer import register_onecat_indexer_kernels
         from emmy.serving.onecat_linear import register_onecat_linear_kernels
         from emmy.serving.onecat_mhc import register_onecat_mhc_kernels
@@ -33,6 +35,9 @@ def register() -> None:
         from emmy.serving.onecat_vocab import register_onecat_vocab_kernels
 
         register_onecat_deepseek_kernels()
+        register_onecat_q_cache_kernel()
+        register_onecat_expert_kernels()
+        register_onecat_fp8_linear_kernels()
         register_onecat_linear_kernels()
         register_onecat_mhc_kernels()
         register_onecat_output_kernels()

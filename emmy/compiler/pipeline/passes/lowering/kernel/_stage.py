@@ -44,7 +44,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Interval, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCommit,
     CpAsyncCopy,
@@ -60,6 +60,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
 )
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.passes import simplify as simplify_stmt
 from emmy.compiler.ir.tile.ir import deep_defines
 
 
@@ -480,72 +481,122 @@ class SyncTransport:
         return list(self.prologue_stmts)
 
     @staticmethod
-    def _affine_step(a: Expr, b: Expr, ctx: SimplifyCtx) -> int | None:
-        """The literal difference ``b - a`` when both are affine over the same free vars with
-        equal coefficients (``affine_form`` — the vectorizer's decomposition; a plain
-        ``simplify`` cannot fold ``(k0 + 1) - k0``), else ``None``."""
-        free = a.free_vars() | b.free_vars()
-        fa, fb = affine_form(a, free), affine_form(b, free)
-        if fa is None or fb is None or fa[1] != fb[1]:
-            return None
-        d = BinaryExpr("-", fb[0], fa[0]).simplify(ctx)
-        return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
+    def _additive_offset(expr: Expr) -> tuple[Expr, int]:
+        """Split an integer expression into a structural anchor and literal offset.
+
+        Physical coordinate maps commonly leave opaque div/mod terms around the
+        tile coordinates. Those terms may be non-affine while still being identical
+        across a short lane run. Pulling only additive integer literals lets the
+        run proof compare those opaque anchors without weakening it to evaluation.
+        """
+        if isinstance(expr, Literal) and expr.dtype == "int" and isinstance(expr.value, int):
+            return Literal(0, "int"), expr.value
+        if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
+            la, lo = SyncTransport._additive_offset(expr.left)
+            ra, ro = SyncTransport._additive_offset(expr.right)
+            anchor = BinaryExpr(expr.op, la, ra).simplify(SimplifyCtx.empty())
+            return anchor, lo + ro if expr.op == "+" else lo - ro
+        return expr, 0
 
     @staticmethod
-    def _run_plans(op: SyncOperand, v: int) -> list[str]:
-        """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
-        ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
-        (col 0 vs col 1; the probe stmts are planning-only, never emitted):
+    def _multiple_of(expr: Expr, divisor: int) -> bool:
+        """Whether ``expr`` is structurally proven divisible by ``divisor``."""
+        if divisor == 1:
+            return True
+        if isinstance(expr, Literal) and expr.dtype == "int" and isinstance(expr.value, int):
+            return expr.value % divisor == 0
+        if isinstance(expr, BinaryExpr):
+            if expr.op in ("+", "-"):
+                return SyncTransport._multiple_of(expr.left, divisor) and SyncTransport._multiple_of(expr.right, divisor)
+            if expr.op == "*":
+                return SyncTransport._multiple_of(expr.left, divisor) or SyncTransport._multiple_of(expr.right, divisor)
+        return False
+
+    @staticmethod
+    def _linear_address(load: Load) -> tuple[tuple[Expr, ...], Expr, int | None]:
+        """Return invariant leading coordinates plus the innermost linear address.
+
+        A graph-birth storage descriptor can spell a flat carrier coordinate as
+        ``(flat / width, flat % width)``. Recognizing that exact quotient/remainder
+        pair here preserves the generic coordinate contract while exposing the
+        contiguous address the CUDA vector load consumes.
+        """
+        if len(load.index) >= 2:
+            q, r = load.index[-2:]
+            if (
+                isinstance(q, BinaryExpr)
+                and q.op in ("/", "//")
+                and isinstance(r, BinaryExpr)
+                and r.op == "%"
+                and q.left == r.left
+                and q.right == r.right
+                and isinstance(q.right, Literal)
+                and q.right.dtype == "int"
+                and isinstance(q.right.value, int)
+                and q.right.value > 0
+            ):
+                return load.index[:-2], SyncTransport._simplify_nonnegative(q.left), q.right.value
+        return load.index[:-1], SyncTransport._simplify_nonnegative(load.index[-1]), None
+
+    @staticmethod
+    def _simplify_nonnegative(expr: Expr) -> Expr:
+        """Simplify coordinate algebra with every loop/grid variable non-negative."""
+        ctx = SimplifyCtx({name: Interval(0, 2**30) for name in expr.free_vars()})
+        return expr.simplify(ctx)
+
+    @staticmethod
+    def _vector_run(loads: list[Load], v: int) -> tuple[tuple[int, ...], Expr] | None:
+        """Physical-lane permutation and base for one vectorizable run."""
+        if len(loads) != v or any(not ld.is_scalar or ld.input != loads[0].input or len(ld.index) != len(loads[0].index) for ld in loads):
+            return None
+        linear = [SyncTransport._linear_address(ld) for ld in loads]
+        if any(lead != linear[0][0] or width != linear[0][2] for lead, _addr, width in linear[1:]):
+            return None
+        collapsed_width = linear[0][2]
+        if collapsed_width is not None and collapsed_width % v != 0:
+            return None
+        parts = [SyncTransport._additive_offset(addr) for _lead, addr, _width in linear]
+        if any(anchor != parts[0][0] for anchor, _ in parts[1:]):
+            return None
+        offsets = [offset for _, offset in parts]
+        low = min(offsets)
+        if sorted(offset - low for offset in offsets) != list(range(v)):
+            return None
+        base = BinaryExpr("+", parts[0][0], Literal(low, "int")).simplify(SimplifyCtx.empty())
+        if not SyncTransport._multiple_of(base, v):
+            return None
+        by_lane = {offset - low: logical for logical, offset in enumerate(offsets)}
+        return tuple(by_lane[lane] for lane in range(v)), base
+
+    @staticmethod
+    def _run_plans(op: SyncOperand, v: int) -> list[tuple[str, tuple[int, ...]]]:
+        """Per-position emission plan for one operand's ``V``-cell fill run.
+
+        Classified by probing the value closure over the whole run (the probe
+        statements are planning-only, never emitted):
 
         - identical at both cols ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
           row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
           per-cell defs (a dep on a replicated name demotes it back to per-cell);
-        - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
-          col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
-          cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
-          ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
+        - scalar ``Load`` addresses that are one aligned contiguous run, in any
+          fixed lane order, merge into one vector ``Load`` whose result names
+          restore the logical order;
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
           the slab col — e.g. a col-strided gather)."""
-        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
-        s0, _ = op.value(probe_k0, probe_row, zero)
-        s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
-        sz, _ = op.value(zero, probe_row, zero)
+        probe_row, zero = Var("__srow"), Literal(0, "int")
         ctx = SimplifyCtx.empty()
-
-        def aligned(expr: Expr) -> bool:
-            form = affine_form(expr, expr.free_vars())
-            if form is None:
-                return False
-            anchor, coeffs = form
-            anchor = anchor.simplify(ctx)
-            return (
-                isinstance(anchor, Literal)
-                and isinstance(anchor.value, int)
-                and anchor.value % v == 0
-                and all(coeff % v == 0 for coeff in coeffs.values())
-            )
-
-        plans: list[str] = []
+        raw_probes = [op.value(zero, probe_row, Literal(j, "int"))[0] for j in range(v)]
+        probes = [[simplify_stmt(stmt, ctx) for stmt in stmts] for stmts in raw_probes]
+        plans: list[tuple[str, tuple[int, ...]]] = []
         cell_defs: set[str] = set()
-        for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            if "\n".join(a.pretty()) == "\n".join(b.pretty()) and not (set(a.deps()) & cell_defs):
-                plans.append("hoist")
+        for p, a in enumerate(probes[0]):
+            run = [stmts[p] for stmts in probes]
+            if all("\n".join(a.pretty()) == "\n".join(b.pretty()) for b in run[1:]) and not (set(a.deps()) & cell_defs):
+                plans.append(("hoist", ()))
                 continue
-            step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
-            if (
-                isinstance(a, Load)
-                and a.is_scalar
-                and b.is_scalar
-                and a.input == b.input
-                and len(a.index) == len(b.index)
-                and all(x.pretty() == y.pretty() for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
-                and step == 1
-                and isinstance(sz[p], Load)
-                and aligned(sz[p].index[-1])
-            ):
-                plans.append("vector")
-            else:
-                plans.append("cell")
+            raw_run = [stmts[p] for stmts in raw_probes]
+            vector = SyncTransport._vector_run(raw_run, v) if all(isinstance(stmt, Load) for stmt in raw_run) else None
+            plans.append(("vector", vector[0]) if vector is not None else ("cell", ()))
             cell_defs |= deep_defines(a)
         return plans
 
@@ -590,7 +641,7 @@ class SyncTransport:
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(val)
-            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in deep_defines(stmt)}
+            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p][0] == "hoist" for nm in deep_defines(stmt)}
             vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
             # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
@@ -600,14 +651,23 @@ class SyncTransport:
             # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
             # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
             # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in deep_defines(st)}
+            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p][0] != "hoist" for nm in deep_defines(st)}
             for p in range(len(cell_stmts[0])):
-                if plans[p] == "hoist":
+                kind, lanes = plans[p]
+                if kind == "hoist":
                     body.append(cell_stmts[0][p])
                     continue
-                if plans[p] == "vector":
-                    ld = cell_stmts[0][p]
-                    body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
+                if kind == "vector":
+                    logical_loads = [cell_stmts[j][p] for j in range(v)]
+                    first = logical_loads[lanes[0]]
+                    body.append(
+                        Load(
+                            names=tuple(f"{logical_loads[j].names[0]}__c{j}" for j in lanes),
+                            input=first.input,
+                            index=first.index,
+                            dtype=first.dtype,
+                        )
+                    )
                     continue
                 for j in range(v):
                     sfx = f"__c{j}"

@@ -57,6 +57,29 @@ def _symbolic_reduce_graph() -> Graph:
     return g
 
 
+def test_trace_renames_symbols_inside_compound_symint_extents():
+    import json
+
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Flatten(torch.nn.Module):
+        def forward(self, x):
+            return x.reshape(-1)
+
+    graph = trace_module(
+        Flatten(),
+        (torch.empty((128, 6), device="meta"),),
+        dynamic_shapes={"x": {0: torch.export.Dim("num_tokens", min=1, max=4096)}},
+    )
+    (extent,) = graph.nodes[graph.outputs[0]].output.shape
+    assert extent.expr.free_vars() == {"num_tokens"}
+    assert extent.expr.eval({"num_tokens": 7}) == 42
+    json.dumps(graph.to_dict())
+    Pipeline.build(["frontend/decomposition"]).run(graph)
+
+
 def test_lift_elementwise_preserves_symbolic_free_axes():
     graph = _symbolic_elementwise_graph()
     lifted = Pipeline.build(["loop/lifting"]).run(graph)

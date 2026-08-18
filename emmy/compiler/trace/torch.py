@@ -32,7 +32,16 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, FixedSinkhornOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import (
+    ElementwiseOp,
+    FixedSinkhornOp,
+    GatherOp,
+    IndexMapOp,
+    IndexSource,
+    RangeOp,
+    ReduceOp,
+    RowRmsNormRopeOp,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -538,6 +547,37 @@ def _symint_name(value) -> str | None:
     return str(expr)
 
 
+def _symint_dim(value, sym_rename: dict[str, str]):
+    """Convert one SymInt expression to a ``Dim`` without losing its symbols."""
+    from emmy.compiler.dim import Dim
+
+    node = getattr(value, "node", None)
+    expr = getattr(node, "expr", None) if node is not None else None
+    if expr is None:
+        return Dim(str(value))
+
+    def convert(term):
+        if getattr(term, "is_Integer", False):
+            return Dim(int(term))
+        if getattr(term, "is_Symbol", False):
+            name = str(term)
+            return Dim(sym_rename.get(name, name))
+        args = tuple(getattr(term, "args", ()))
+        if type(term).__name__ == "Mul" and args:
+            result = Dim(1)
+            for arg in args:
+                result *= convert(arg)
+            return result
+        if type(term).__name__ == "Add" and args:
+            result = Dim(0)
+            for arg in args:
+                result += convert(arg)
+            return result
+        return Dim(str(term))
+
+    return convert(expr)
+
+
 def _wrap_shape(raw_shape, sym_rename: dict[str, str] | None = None):
     """Convert a torch ``Size`` (possibly containing ``SymInt``) to the
     tuple form our IR expects.
@@ -565,7 +605,7 @@ def _wrap_shape(raw_shape, sym_rename: dict[str, str] | None = None):
                 # Compound expression we can't represent — fall back to a stringified placeholder.
                 out.append(Dim(str(d)))
             else:
-                out.append(Dim(sym_rename.get(sym_name, sym_name)))
+                out.append(_symint_dim(d, sym_rename))
     return tuple(out)
 
 
@@ -611,13 +651,22 @@ def _op_shape(raw_shape, sym_rename: dict[str, str] | None = None):
 
 def _dim_tuple_to_op_shape(shape):
     """Convert a ``tuple[Dim | int, ...]`` (from ``_wrap_shape`` output) back
-    to the ``tuple[int | str, ...]`` form ``ReshapeOp.shape`` /
-    ``SliceOp.shape`` carry. Atomic ``Dim`` wrappers unwrap via ``.value``
-    (Literal → int, Var → name); composite Dims aren't emitted by the
-    tracer here so the int|str form is sufficient."""
+    to the ``tuple[int | str | Dim, ...]`` form ``ReshapeOp.shape`` /
+    ``SliceOp.shape`` carry. Static and atomic wrappers keep the legacy int /
+    name spelling; compound SymInt extents retain their expression tree."""
     from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal, Var
 
-    return tuple(d.value if isinstance(d, Dim) else d for d in shape)
+    def unwrap(d):
+        if not isinstance(d, Dim):
+            return d
+        if isinstance(d.expr, Literal):
+            return d.expr.value
+        if isinstance(d.expr, Var):
+            return d.expr.name
+        return d
+
+    return tuple(unwrap(d) for d in shape)
 
 
 def _get_dtype(fx_node: Any) -> str:
@@ -1058,6 +1107,31 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         node_map[fx_node.name] = g.add_node(
             op=op,
             inputs=[source_ref],
+            output=Tensor(fx_node.name, shape, dtype),
+            node_id=fx_node.name,
+        )
+        return
+
+    if getattr(schema, "name", None) == "emmy::row_rms_norm_rope":
+        tensor_refs = [node_map.get(getattr(arg, "name", None)) for arg in fx_node.args[:3]]
+        if len(tensor_refs) != 3 or not all(isinstance(ref, str) for ref in tensor_refs):
+            raise ValueError("emmy::row_rms_norm_rope inputs did not resolve to tensors")
+        raw_rope_dim = fx_node.args[3] if len(fx_node.args) > 3 else fx_node.kwargs.get("rope_dim")
+        raw_eps = fx_node.args[4] if len(fx_node.args) > 4 else fx_node.kwargs.get("eps")
+        if not isinstance(raw_rope_dim, int) or isinstance(raw_rope_dim, bool):
+            raise NotImplementedError("emmy::row_rms_norm_rope requires a static integer rope_dim")
+        if not isinstance(raw_eps, float):
+            raise NotImplementedError("emmy::row_rms_norm_rope requires a static float eps")
+        shape = _get_shape(fx_node, sym_rename)
+        dtype = _get_dtype(fx_node)
+        if dtype != "float16":
+            raise TypeError(f"emmy::row_rms_norm_rope requires float16 output, got {dtype}")
+        op = RowRmsNormRopeOp(rope_dim=raw_rope_dim, eps=raw_eps)
+        input_shapes = [tuple(g.nodes[ref].output.shape) for ref in tensor_refs]
+        op.infer_output_shape(input_shapes)
+        node_map[fx_node.name] = g.add_node(
+            op=op,
+            inputs=tensor_refs,
             output=Tensor(fx_node.name, shape, dtype),
             node_id=fx_node.name,
         )

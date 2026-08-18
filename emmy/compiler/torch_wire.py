@@ -35,12 +35,15 @@ from emmy.compiler.ir.tensor.ir import (
     ElementwiseOp,
     FixedSinkhornOp,
     GatherOp,
+    IndexedTopKOp,
     IndexMapOp,
     IndexSource,
     RangeOp,
     ReduceOp,
+    RowRmsNormRopeOp,
     ScanOp,
     ScatterOp,
+    StableTopKOp,
 )
 from emmy.compiler.tensor import Tensor
 
@@ -79,6 +82,9 @@ _OP_SPECS: dict[str, tuple[type[Op], tuple[str, ...]]] = {
     "tensor.bitcast": (BitcastOp, ("dtype",)),
     "tensor.elementwise": (ElementwiseOp, ("op",)),
     "tensor.fixed_sinkhorn": (FixedSinkhornOp, ("eps", "iterations")),
+    "tensor.row_rms_norm_rope": (RowRmsNormRopeOp, ("rope_dim", "eps")),
+    "tensor.stable_topk": (StableTopKOp, ("k", "scale", "normalize")),
+    "tensor.indexed_topk": (IndexedTopKOp, ("k", "scale", "normalize", "reduction_lanes", "lane_chunk")),
     "tensor.reduce": (ReduceOp, ("op", "axis")),
     "tensor.scan": (ScanOp, ("op", "axis")),
     "tensor.gather": (GatherOp, ("axis",)),

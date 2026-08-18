@@ -198,7 +198,10 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        return v.value
+        try:
+            return v.value
+        except TypeError:
+            return {"__dim__": repr(v)}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -242,6 +245,8 @@ def _deserialize_field(k, v):
         return tuple(_eval_stmt(e) for e in v)
     if isinstance(v, dict) and "__graph__" in v:
         return Graph.from_dict(v["__graph__"])
+    if isinstance(v, dict) and "__dim__" in v:
+        return _eval_stmt(v["__dim__"])
     if isinstance(v, dict) and "__op__" in v:
         op_cls = _lookup_op_class(v["__op__"])
         if op_cls is None:
@@ -254,7 +259,10 @@ def _deserialize_field(k, v):
         # Constructor-repr string *elements* rehydrate under the same known-class guard —
         # e.g. ``CudaOp.tma_descriptors``'s ``TmaDescMeta(...)`` reprs (stringified by the
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
-        return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
+        return tuple(
+            _maybe_eval_ctor(e) if isinstance(e, str) else _deserialize_field(k, e) if isinstance(e, dict) and "__dim__" in e else e
+            for e in v
+        )
     if isinstance(v, dict):
         # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
         # their VALUES as constructor reprs under the same known-class guard.
@@ -1000,7 +1008,10 @@ class Graph:
             tuples). Keeps digests stable across the static-int → ``Dim``
             migration; symbolic dims hash by name, not by current binding."""
             if isinstance(v, Dim):
-                return v.value
+                try:
+                    return v.value
+                except TypeError:
+                    return v.expr
             if isinstance(v, tuple):
                 return tuple(_unwrap_dims(x) for x in v)
             return v

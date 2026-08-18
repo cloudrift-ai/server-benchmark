@@ -71,9 +71,13 @@ def _profile(
 
 def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
     """Return every exact external-program profile reachable by the broad adapter opt-in."""
+    from emmy.compiler.loader import onecat_sm70 as physical_loader
     from emmy.serving import deepseek as deepseek_traces
+    from emmy.serving import deepseek_experts as expert_traces
     from emmy.serving import mhc as mhc_traces
     from emmy.serving import onecat
+    from emmy.serving import onecat_deepseek as deepseek_adapter
+    from emmy.serving import onecat_experts as experts
     from emmy.serving import onecat_indexer as indexer
     from emmy.serving import onecat_linear as linear
     from emmy.serving import onecat_mhc as mhc
@@ -113,6 +117,18 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
             partial(deepseek_traces.trace_inverse_rope, rows=_CAPACITY, dynamic=True),
             symbolic_values={"num_tokens": _CAPACITY},
         ),
+        _profile(
+            "qnorm_rope.symbolic.m4096",
+            "qnorm_rope",
+            _CAPACITY,
+            True,
+            ("q", "positions", "cos_sin_cache"),
+            1,
+            partial(deepseek_traces.trace_qnorm_rope, rows=_CAPACITY, dynamic=True),
+            pins=deepseek_adapter._QNORM_ROPE_PINS,
+            symbolic_values={"num_tokens": _CAPACITY},
+            launch_count=1,
+        ),
     ]
 
     linear_contracts = (
@@ -148,6 +164,38 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
                 1,
                 partial(linear._linear_graph, program_profile),
                 symbolic_values={"num_tokens": _CAPACITY},
+            )
+        )
+
+    for spec in physical_loader.PROJECTION_SPECS:
+        for rows in physical_loader.PROFILE_ROWS:
+            program_profile = physical_loader.ProjectionProfile(spec, rows)
+            profiles.append(
+                _profile(
+                    f"retained_fp8.{spec.name}.static.m{rows}",
+                    "retained_fp8",
+                    rows,
+                    False,
+                    physical_loader.expected_inputs(),
+                    1,
+                    partial(physical_loader.projection_graph, program_profile),
+                    pins=physical_loader.PROFILE_PINS,
+                    launch_count=1,
+                )
+            )
+        program_profile = physical_loader.ProjectionProfile(spec, _CAPACITY, symbolic=True)
+        profiles.append(
+            _profile(
+                f"retained_fp8.{spec.name}.symbolic.m4096",
+                "retained_fp8",
+                _CAPACITY,
+                True,
+                physical_loader.expected_inputs(),
+                1,
+                partial(physical_loader.projection_graph, program_profile),
+                pins=physical_loader.PROFILE_PINS,
+                symbolic_values={"num_tokens": _CAPACITY},
+                launch_count=1,
             )
         )
 
@@ -239,6 +287,48 @@ def deepseek_external_program_manifest() -> tuple[ExternalProgramProfile, ...]:
             1,
             vocab._rank_top1_graph,
             symbolic_values={"num_tokens": _CAPACITY},
+        )
+    )
+
+    for kind, launches in (("learned", 3), ("hash", 2)):
+        for rows in experts.PROFILE_ROWS:
+            profiles.append(
+                _profile(
+                    f"route.{kind}.static.m{rows}",
+                    f"route_{kind}",
+                    rows,
+                    False,
+                    ("router_logits", "bias") if kind == "learned" else ("router_logits", "table", "input_ids"),
+                    2,
+                    partial(expert_traces.trace_deepseek_route, rows=rows, kind=kind),
+                    launch_count=launches,
+                )
+            )
+        profiles.append(
+            _profile(
+                f"route.{kind}.symbolic.m4096",
+                f"route_{kind}",
+                _CAPACITY,
+                True,
+                ("router_logits", "bias") if kind == "learned" else ("router_logits", "table", "input_ids"),
+                2,
+                partial(expert_traces.trace_deepseek_route, rows=128, kind=kind, symbolic=True),
+                symbolic_values={"num_tokens": _CAPACITY},
+                launch_count=launches,
+            )
+        )
+
+    profiles.append(
+        _profile(
+            "experts.direct.symbolic.m4096",
+            "routed_experts",
+            _CAPACITY,
+            True,
+            ("x", "route_weights", "route_ids", "w13", "w2", "w13_scale", "w2_scale"),
+            1,
+            partial(expert_traces.trace_deepseek_experts, rows=128, symbolic=True),
+            symbolic_values={"num_tokens": _CAPACITY},
+            launch_count=4,
         )
     )
     profiles.append(

@@ -9,6 +9,8 @@ remain in the graph:
 - ``CastOp`` / ``BitcastOp`` — numeric conversion / same-width bit reinterpretation.
 - ``RangeOp`` — a static one-dimensional integer sequence.
 - ``FixedSinkhornOp`` — bounded static FP32 Sinkhorn normalization.
+- ``RowRmsNormRopeOp`` — one row RMSNorm followed by partial interleaved RoPE.
+- ``StableTopKOp`` / ``IndexedTopKOp`` — deterministic fixed-width selection.
 - ``ReduceOp`` — collapse one axis via an associative binary op.
 - ``ScanOp`` — cumulative variant of ``ReduceOp``.
 - ``GatherOp`` / ``ScatterOp`` — data-dependent reads/writes along an axis.
@@ -163,6 +165,183 @@ class FixedSinkhornOp(Op):
             values = values / (np.sum(values, axis=-1, keepdims=True) + eps)
             values = values / (np.sum(values, axis=-2, keepdims=True) + eps)
         return values
+
+
+@dataclass
+class RowRmsNormRopeOp(Op):
+    """Per-row RMSNorm followed by GPT-J interleaved RoPE on a suffix."""
+
+    rope_dim: int = 64
+    eps: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if self.rope_dim <= 0 or self.rope_dim % 2:
+            raise ValueError(f"RowRmsNormRopeOp rope_dim must be positive and even, got {self.rope_dim}")
+        if not math.isfinite(self.eps) or self.eps <= 0:
+            raise ValueError(f"RowRmsNormRopeOp eps must be finite and positive, got {self.eps}")
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        if len(input_shapes) != 3:
+            raise ValueError(f"RowRmsNormRopeOp requires Q, positions, and cache inputs, got {len(input_shapes)}")
+        q_shape, positions_shape, cache_shape = (tuple(shape) for shape in input_shapes)
+        if len(q_shape) != 3:
+            raise ValueError(f"RowRmsNormRopeOp requires rank-3 Q, got {q_shape}")
+        head_dim = to_dim(q_shape[-1])
+        if not head_dim.is_static or self.rope_dim >= head_dim.as_static():
+            raise ValueError(f"RowRmsNormRopeOp requires static head_dim > rope_dim, got {q_shape[-1]} and {self.rope_dim}")
+        if positions_shape != (q_shape[0],):
+            raise ValueError(f"RowRmsNormRopeOp positions must match Q rows, got {positions_shape} and {q_shape}")
+        if len(cache_shape) != 2 or to_dim(cache_shape[-1]) != to_dim(self.rope_dim):
+            raise ValueError(f"RowRmsNormRopeOp cache must end in rope_dim={self.rope_dim}, got {cache_shape}")
+        return q_shape
+
+    def forward(self, *inputs):
+        q, positions, cache = inputs
+        q = np.asarray(q)
+        shape = self.infer_output_shape([q.shape, np.asarray(positions).shape, np.asarray(cache).shape])
+        values = q.astype(np.float32)
+        rrms = np.float32(1.0) / np.sqrt(np.mean(values * values, axis=-1, keepdims=True) + np.float32(self.eps))
+        normalized = values * rrms
+        rotary = np.asarray(cache)[np.asarray(positions, dtype=np.int64)]
+        cos, sin = np.split(rotary.astype(np.float32), 2, axis=-1)
+        cos = cos[:, None, :]
+        sin = sin[:, None, :]
+        pairs = normalized[..., -self.rope_dim :].reshape(*shape[:-1], self.rope_dim // 2, 2)
+        even, odd = pairs[..., 0], pairs[..., 1]
+        rotated = np.stack((even * cos - odd * sin, odd * cos + even * sin), axis=-1)
+        output = np.concatenate((normalized[..., : -self.rope_dim], rotated.reshape(*shape[:-1], self.rope_dim)), axis=-1)
+        return output.astype(q.dtype)
+
+
+@dataclass
+class StableTopKOp(Op):
+    """Select the highest ``k`` row values with stable lower-index ties.
+
+    The first input ranks candidates and the second supplies returned values.
+    This separation preserves graph-level correction arithmetic exactly.
+    """
+
+    k: int = 1
+    scale: float = 1.0
+    normalize: bool = True
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise ValueError(f"StableTopKOp k must be positive, got {self.k}")
+        if not math.isfinite(self.scale):
+            raise ValueError(f"StableTopKOp scale must be finite, got {self.scale}")
+
+    def _shape(self, input_shapes: list[tuple]) -> tuple:
+        if len(input_shapes) != 2 or tuple(input_shapes[0]) != tuple(input_shapes[1]):
+            raise ValueError(f"StableTopKOp requires equal rank/payload matrices, got {input_shapes}")
+        shape = tuple(input_shapes[0])
+        if len(shape) != 2:
+            raise ValueError(f"StableTopKOp requires rank-2 [rows,candidates] inputs, got {shape}")
+        candidates = to_dim(shape[1])
+        if not candidates.is_static or self.k > candidates.as_static():
+            raise ValueError(f"StableTopKOp requires static candidates >= k, got {shape[1]} and k={self.k}")
+        return (shape[0], self.k)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return self._shape(input_shapes)
+
+    def forward(self, *inputs):
+        ranking = np.asarray(inputs[0], dtype=np.float32)
+        payload = np.asarray(inputs[1], dtype=np.float32)
+        out_shape = self._shape([ranking.shape, payload.shape])
+        weights = np.empty(out_shape, dtype=np.float32)
+        indices = np.empty(out_shape, dtype=np.int32)
+        scale = np.float32(self.scale)
+        for row in range(ranking.shape[0]):
+            selected: list[int] = []
+            total = np.float32(0.0)
+            for slot in range(self.k):
+                best_index = -1
+                best_value = np.float32(-np.inf)
+                for candidate in range(ranking.shape[1]):
+                    if candidate in selected:
+                        continue
+                    value = ranking[row, candidate]
+                    if best_index < 0 or value > best_value:
+                        best_value = value
+                        best_index = candidate
+                selected.append(best_index)
+                indices[row, slot] = best_index
+                weights[row, slot] = payload[row, best_index]
+                total = np.float32(total + weights[row, slot])
+            denominator = total if self.normalize and total > 0 else np.float32(1.0)
+            factor = np.float32(scale / denominator) if self.normalize else scale
+            for slot in range(self.k):
+                weights[row, slot] = np.float32(weights[row, slot] * factor)
+        return weights, indices
+
+
+@dataclass
+class IndexedTopKOp(Op):
+    """Gather fixed row candidates and normalize with an explicit FP32 order.
+
+    ``reduction_lanes`` and ``lane_chunk`` define observable addition order:
+    contiguous candidate chunks accumulate per lane, then an XOR tree reduces
+    lanes. They are numerical semantics, not performance-selection knobs.
+    """
+
+    k: int = 1
+    scale: float = 1.0
+    normalize: bool = True
+    reduction_lanes: int = 1
+    lane_chunk: int = 1
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise ValueError(f"IndexedTopKOp k must be positive, got {self.k}")
+        if not math.isfinite(self.scale):
+            raise ValueError(f"IndexedTopKOp scale must be finite, got {self.scale}")
+        if self.reduction_lanes not in {1, 2, 4, 8, 16, 32} or self.lane_chunk < 1:
+            raise ValueError("IndexedTopKOp reduction_lanes must be a power of two <=32 and lane_chunk must be positive")
+
+    def _shape(self, input_shapes: list[tuple]) -> tuple:
+        if len(input_shapes) != 3:
+            raise ValueError(f"IndexedTopKOp requires payload, table, and row indices, got {input_shapes}")
+        payload, table, row_indices = (tuple(shape) for shape in input_shapes)
+        if len(payload) != 2 or len(table) != 2 or len(row_indices) != 1 or payload[0] != row_indices[0]:
+            raise ValueError(f"IndexedTopKOp requires [M,E], [V,K], [M], got {input_shapes}")
+        table_width = to_dim(table[1])
+        if not table_width.is_static or table_width.as_static() != self.k:
+            raise ValueError(f"IndexedTopKOp table width must equal k={self.k}, got {table[1]}")
+        return (payload[0], self.k)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        return self._shape(input_shapes)
+
+    def forward(self, *inputs):
+        payload = np.asarray(inputs[0], dtype=np.float32)
+        table = np.asarray(inputs[1])
+        row_indices = np.asarray(inputs[2])
+        out_shape = self._shape([payload.shape, table.shape, row_indices.shape])
+        weights = np.empty(out_shape, dtype=np.float32)
+        selected = np.empty(out_shape, dtype=np.int32)
+        scale = np.float32(self.scale)
+        period = self.reduction_lanes * self.lane_chunk
+        for row in range(payload.shape[0]):
+            lane_totals = np.zeros((self.reduction_lanes,), dtype=np.float32)
+            for slot in range(self.k):
+                candidate = int(table[int(row_indices[row]), slot])
+                selected[row, slot] = candidate
+                weights[row, slot] = payload[row, candidate]
+                lane = (candidate % period) // self.lane_chunk
+                lane_totals[lane] = np.float32(lane_totals[lane] + weights[row, slot])
+            mask = self.reduction_lanes // 2
+            while mask:
+                prior = lane_totals.copy()
+                for lane in range(self.reduction_lanes):
+                    lane_totals[lane] = np.float32(prior[lane] + prior[lane ^ mask])
+                mask //= 2
+            total = lane_totals[0]
+            denominator = total if self.normalize and total > 0 else np.float32(1.0)
+            factor = np.float32(scale / denominator) if self.normalize else scale
+            for slot in range(self.k):
+                weights[row, slot] = np.float32(weights[row, slot] * factor)
+        return weights, selected
 
 
 @dataclass

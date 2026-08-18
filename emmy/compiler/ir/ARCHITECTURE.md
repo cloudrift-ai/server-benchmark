@@ -139,6 +139,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `FixedSinkhornOp`                    | Bounded FP32 Sinkhorn normalization over `[M,N,N]`.            |
+| `RowRmsNormRopeOp`                   | FP32 row RMSNorm plus partial interleaved forward RoPE.        |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
@@ -152,6 +153,10 @@ future runtime consumer may add ordinary lifting for the same semantics without 
 normalizations. Its matrix dimensions and iteration count are static and bounded, while the leading `M` extent may
 be symbolic; `loop/lifting` expands one matrix into a straight-line scalar SSA body inside the leading loop. Every
 later stage sees an ordinary `LoopOp`, so tile scheduling and CUDA emission require no named operation path.
+
+`RowRmsNormRopeOp` keeps row normalization and the dependent partial RoPE behind one traced tensor boundary. Its
+generic Loop lifting emits one reduction and output sweep in the same `LoopOp`; schedule pins remain deployment
+evidence rather than operation-specific decisions in the pass.
 
 Op metadata (arity / `commutative` / `associative` / `identity` /
 `has_identity` / `selecting` / `semiring_product`) lives on `ElementwiseImpl` in

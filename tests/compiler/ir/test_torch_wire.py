@@ -31,12 +31,15 @@ from emmy.compiler.ir.tensor.ir import (
     ElementwiseOp,
     FixedSinkhornOp,
     GatherOp,
+    IndexedTopKOp,
     IndexMapOp,
     IndexSource,
     RangeOp,
     ReduceOp,
+    RowRmsNormRopeOp,
     ScanOp,
     ScatterOp,
+    StableTopKOp,
 )
 from emmy.compiler.tensor import Tensor
 from emmy.compiler.torch_wire import (
@@ -100,6 +103,9 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
         BitcastOp("u16"),
         ElementwiseOp("silu"),
         FixedSinkhornOp(eps=2e-6, iterations=4),
+        RowRmsNormRopeOp(rope_dim=64, eps=2e-6),
+        StableTopKOp(k=6, scale=1.5),
+        IndexedTopKOp(k=6, scale=1.5, reduction_lanes=32, lane_chunk=4),
         ReduceOp("sum", -1),
         ScanOp("sum", 0),
         GatherOp(axis=1),

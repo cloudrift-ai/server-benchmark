@@ -218,6 +218,7 @@ def _bilinear_reads(body: list, is_b) -> list[tuple[Accum, Assign, Load | None, 
         return None
     defs = {st.name: st for st in body if isinstance(st, Assign)}
     loads = {st.names[0]: st for st in body if isinstance(st, Load)}
+    local_defs = {name for st in body for name in st.defines()}
     out: list[tuple[Accum, Assign, Load | None, str]] = []
     for acc in accums:
         lift = defs.get(acc.value)
@@ -227,7 +228,14 @@ def _bilinear_reads(body: list, is_b) -> list[tuple[Accum, Assign, Load | None, 
         a_arg = next((a for a in lift.args if a != b_name), None)
         if a_arg is None:
             return None
-        out.append((acc, lift, loads.get(b_name) if b_name is not None else None, a_arg))
+        b_load = loads.get(b_name) if b_name is not None else None
+        # A data-dependent gather is not a direct storage edge: its index reads a
+        # locally defined SSA value that has to travel with the load.  Treat the
+        # complete gather cone as a computed B operand so atom materialization
+        # cannot drop the index producer and emit an undefined CUDA identifier.
+        if b_load is not None and set(b_load.deps()) & local_defs:
+            b_load = None
+        out.append((acc, lift, b_load, a_arg))
     return out
 
 
@@ -306,7 +314,9 @@ def bind_contraction(loop: Loop, m_name: str, n_name: str, epilogue: Body) -> tu
         # just as for A. The operand EDGE carries the whole producer tree; later scheduling may
         # compute-fill it into the B slab, or the scalar reading may evaluate it per cell. This
         # is role-generic computed-operand fusion: no storage-format fact survives recognition.
-        hoist = _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
+        body_defs = {name for st in body for name in st.defines()}
+        data_dependent_b = b_leaf is not None and b_leaf.names[0] in lift.args and bool(set(b_leaf.deps()) & body_defs)
+        hoist = None if data_dependent_b else _hoist_k_invariant_factors(body, lift, a_leaf, b_leaf, k_name, acc, epilogue)
         if hoist is not None:
             return hoist
         if a_leaf is not None and a_leaf.names[0] in lift.args:

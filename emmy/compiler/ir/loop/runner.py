@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _INTRINSICS_CPP: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "expf",  # host reference stays libm-accurate; only the CUDA render takes __expf
+    "log_fast": "logf",  # host reference stays libm-accurate; only the CUDA render takes __logf
     "rsqrt": "rsqrtf_",  # libm has no rsqrtf; PRELUDE provides one
     "sin": "sinf",
     "cos": "cosf",

@@ -1287,11 +1287,16 @@ def test_quantized_checkpoint_e2e_cuda(tmp_path):
 # sanctioned everywhere and deliberately NOT in the pattern. A new match must be
 # frontend/loader-band code and must join the allowlist with that justification — anything
 # else is the leak this gate exists to stop.
-_QUANT_CONCEPT_PATTERN = r"QuantSpec|quantization_config|quant_method|weight_scale|modules_to_not_convert|dequant"
+_QUANT_CONCEPT_PATTERN = (
+    r"QuantSpec|quantization_config|quant_method|weight_scale|modules_to_not_convert|dequant|"
+    r"\bmxfp4\b|w(?:13|2)_tm_(?:weight|scales)"
+)
 
 _FRONTEND_BAND_ALLOWLIST = {
     "emmy/commands/compile.py",  # the post-trace spelling call site (twin trace + speller)
     "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
+    "emmy/compiler/loader/onecat_sm70.py",  # 1Cat physical-carrier validation and graph-birth spelling
+    "emmy/compiler/loader/onecat_sm70_experts.py",  # 1Cat expert-carrier validation and graph-birth spelling
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection

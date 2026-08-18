@@ -26,13 +26,18 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
     manifest = deepseek_external_program_manifest()
     names = tuple(profile.name for profile in manifest)
 
-    assert len(manifest) == 114
+    assert len(manifest) == 188
     assert names == tuple(sorted(names))
     assert len(names) == len(set(names))
     assert Counter(profile.family for profile in manifest) == {
         "final_rms_norm": 1,
         "qkv_rms_norm": 1,
         "inverse_rope": 1,
+        "qnorm_rope": 1,
+        "retained_fp8": 54,
+        "route_learned": 9,
+        "route_hash": 9,
+        "routed_experts": 1,
         "linear": 45,
         "mhc": 45,
         "output": 3,
@@ -42,6 +47,26 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
         "indexer_q": 1,
     }
     assert "linear.n64.fp16.static.m1024" in names
+    for kind in ("learned", "hash"):
+        routes = [profile for profile in manifest if profile.family == f"route_{kind}"]
+        assert Counter((profile.rows, profile.symbolic) for profile in routes) == {
+            (1, False): 1,
+            (2, False): 1,
+            (4, False): 1,
+            (8, False): 1,
+            (16, False): 1,
+            (128, False): 1,
+            (1024, False): 1,
+            (4096, False): 1,
+            (4096, True): 1,
+        }
+        route = next(profile for profile in routes if profile.symbolic)
+        assert route.name == f"route.{kind}.symbolic.m4096"
+        assert route.symbolic_values == (("num_tokens", 4096),)
+    expert = next(profile for profile in manifest if profile.family == "routed_experts")
+    assert expert.name == "experts.direct.symbolic.m4096"
+    assert expert.symbolic_values == (("num_tokens", 4096),)
+    assert expert.launch_count == 4
 
     linear = [profile for profile in manifest if profile.family == "linear"]
     assert Counter((profile.rows, profile.symbolic) for profile in linear) == {
@@ -61,10 +86,28 @@ def test_deepseek_external_manifest_is_complete_deterministic_and_names_the_fail
         assert f"vocab.local_top1.rank{rank}.symbolic.m4096" in names
     assert "vocab.rank_top1.symbolic.m4096" in names
     assert "indexer.q_rope_weights.symbolic.m4096" in names
+    for profile in (
+        "fused_wqa_wkv",
+        "attention_wq_b_wo_b",
+        "grouped_wo_a",
+        "indexer_wq_b",
+        "shared_gate_up",
+        "shared_down",
+    ):
+        assert f"retained_fp8.{profile}.static.m1" in names
+        assert f"retained_fp8.{profile}.static.m4096" in names
+        assert f"retained_fp8.{profile}.symbolic.m4096" in names
+
+    retained = [profile for profile in manifest if profile.family == "retained_fp8"]
+    assert all(profile.expected_inputs == ("x", "weight", "weight_scale") for profile in retained)
+    assert all(profile.launch_count == 1 for profile in retained)
 
     rms_norm = next(profile for profile in manifest if profile.family == "final_rms_norm")
     assert rms_norm.pins == (("REDUCE", "coop"), ("WORK", "t256"))
     assert rms_norm.symbolic_values == (("num_tokens", 4096),)
+    qnorm_rope = next(profile for profile in manifest if profile.family == "qnorm_rope")
+    assert qnorm_rope.pins == (("REDUCE", "coop"), ("WORK", "t128"))
+    assert qnorm_rope.launch_count == 1
 
 
 def test_prewarm_realizes_every_profile_in_order_and_checks_its_abi():

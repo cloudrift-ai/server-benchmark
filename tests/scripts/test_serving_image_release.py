@@ -454,6 +454,19 @@ def test_release_bakes_and_verifies_the_request_time_triton_cache():
     assert "jit_before" in verify and "jit_after" in verify
 
 
+def test_onecat_emmy_image_accepts_strict_external_program_assets():
+    dockerfile = (PROJECT_ROOT / "docker" / "1cat-vllm-sm70" / "Dockerfile.emmy").read_text()
+
+    assert "ARG EMMY_ASSETS=empty-emmy-assets" in dockerfile
+    assert "FROM ${EMMY_ASSETS} AS selected-emmy-assets" in dockerfile
+    for cache in ("pack", "cubin", "triton"):
+        assert f"COPY --from=selected-emmy-assets /{cache} /opt/emmy/{cache}" in dockerfile
+    assert "EMMY_PACK_DIR=/opt/emmy/pack" in dockerfile
+    assert "EMMY_CUBIN_CACHE=/opt/emmy/cubin" in dockerfile
+    assert "TRITON_CACHE_DIR=/opt/emmy/triton" in dockerfile
+    assert "EMMY_ONECAT_DEEPSEEK_V4=${ONECAT_DEEPSEEK_V4}" in dockerfile
+
+
 def test_serving_images_carry_canonical_publication_labels():
     make = (PROJECT_ROOT / "Makefile").read_text()
     emmy_dockerfile = (SERVE_DIR / "Dockerfile").read_text()

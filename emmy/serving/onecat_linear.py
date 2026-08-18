@@ -80,10 +80,10 @@ def _linear_graph(profile: _LinearProfile):
 
 
 def _build_program(profile: _LinearProfile) -> _ProgramEntry:
-    from emmy.serving.external import build_external_program
+    from emmy.serving.external import load_external_program
 
     symbolic_values = {"num_tokens": _MAX_PREFILL_ROWS} if profile.symbolic else None
-    runtime, plan = build_external_program(_linear_graph(profile), symbolic_values=symbolic_values)
+    runtime, plan = load_external_program(_linear_graph(profile), symbolic_values=symbolic_values)
     inputs = tuple(plan.inputs)
     outputs = tuple(plan.outputs)
     if inputs != ("x", "weight") or len(outputs) != 1:

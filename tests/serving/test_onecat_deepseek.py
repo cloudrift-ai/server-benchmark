@@ -201,7 +201,7 @@ def test_symbolic_builders_trace_one_capacity_graph_and_rebind_runtime_rows(monk
 
     monkeypatch.setattr(deepseek, "trace_fused_q_kv_rmsnorm", trace_qkv)
     monkeypatch.setattr(deepseek, "trace_inverse_rope", trace_inverse)
-    monkeypatch.setattr(external, "build_external_program", build)
+    monkeypatch.setattr(external, "load_external_program", build)
 
     qkv = _build_qkv_program(1)
     inverse = _build_inverse_rope_program(128)

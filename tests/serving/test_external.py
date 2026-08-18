@@ -2,9 +2,18 @@ import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.compiler.backend.plan import ExecutionPlan
 from emmy.serving import external
-from emmy.serving.external import _external_pack_key, _override_symbolic_hints, _resolve_external_plan
+from emmy.serving.external import (
+    ExternalProgramNotRealized,
+    _external_pack_key,
+    _load_external_plan,
+    _override_symbolic_hints,
+    _resolve_external_plan,
+    realize_external_plan,
+)
 from emmy.serving.onecat_linear import _linear_graph, _LinearProfile
 
 
@@ -104,3 +113,55 @@ def test_external_plan_pack_miss_rechecks_under_lock_then_saves_once(monkeypatch
     assert saves[1][0] == tmp_path / "external"
     assert saves[1][1] == {"external": compiled}
     assert saves[1][3] == {"kind": "external-program"}
+
+
+def test_strict_external_plan_load_requires_a_pack_and_never_compiles(monkeypatch):
+    graph = SimpleNamespace(to_dict=lambda: {"nodes": {}})
+
+    from emmy import config
+
+    monkeypatch.setattr(config, "pack_dir", lambda: None)
+
+    with pytest.raises(ExternalProgramNotRealized, match="requires EMMY_PACK_DIR"):
+        _load_external_plan(graph, None, "auto", None)
+
+
+def test_strict_external_plan_load_returns_only_the_exact_pack_hit(monkeypatch, tmp_path):
+    graph = SimpleNamespace(to_dict=lambda: {"nodes": {"x": {}}})
+    packed = object()
+    loads = []
+
+    from emmy import config
+    from emmy.compiler.backend import pack
+
+    monkeypatch.setattr(config, "pack_dir", lambda: tmp_path)
+    monkeypatch.setattr(pack, "pack_path", lambda _root, _key: tmp_path / "external")
+    monkeypatch.setattr(pack, "load_pack", lambda path, *, key: loads.append((path, key)) or {"external": packed})
+
+    assert _load_external_plan(graph, None, "auto", None) is packed
+    assert len(loads) == 1
+
+
+def test_external_realization_is_release_blocking_until_the_saved_pack_strictly_reloads(monkeypatch, tmp_path):
+    graph = SimpleNamespace(to_dict=lambda: {"nodes": {}})
+    compiled = object()
+    calls = []
+
+    from emmy import config
+
+    monkeypatch.setattr(config, "pack_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        external,
+        "_resolve_external_plan",
+        lambda *args: calls.append(("realize", args[:-1])) or compiled,
+    )
+    monkeypatch.setattr(
+        external,
+        "_load_external_plan",
+        lambda *args: calls.append(("strict-load", args)) or (_ for _ in ()).throw(ExternalProgramNotRealized("missing")),
+    )
+
+    with pytest.raises(ExternalProgramNotRealized, match="missing"):
+        realize_external_plan(graph, symbolic_values={"num_tokens": 4096})
+
+    assert [kind for kind, _args in calls] == ["realize", "strict-load"]

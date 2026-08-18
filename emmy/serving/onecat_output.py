@@ -108,14 +108,14 @@ def _clamp_swiglu_graph():
 
 
 def _build_program(kind: str) -> _ProgramEntry:
-    from emmy.serving.external import build_external_program
+    from emmy.serving.external import load_external_program
 
     graphs = {
         "embedding": _embedding_graph,
         "lm_head": _lm_head_graph,
         "clamp_swiglu": _clamp_swiglu_graph,
     }
-    runtime, plan = build_external_program(graphs[kind](), symbolic_values={"num_tokens": _CAPACITY})
+    runtime, plan = load_external_program(graphs[kind](), symbolic_values={"num_tokens": _CAPACITY})
     inputs = tuple(plan.inputs)
     outputs = tuple(plan.outputs)
     if inputs != _EXPECTED_INPUTS[kind] or len(outputs) != 1:

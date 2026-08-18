@@ -98,9 +98,9 @@ class _ProgramCache:
 
 def _build_qkv_program(_rows: int) -> _ExternalProgram:
     from emmy.serving.deepseek import trace_fused_q_kv_rmsnorm
-    from emmy.serving.external import build_external_program
+    from emmy.serving.external import load_external_program
 
-    runtime, plan = build_external_program(
+    runtime, plan = load_external_program(
         trace_fused_q_kv_rmsnorm(rows=_MAX_PREFILL_ROWS, dynamic=True),
         symbolic_values={"num_tokens": _MAX_PREFILL_ROWS},
     )
@@ -113,9 +113,9 @@ def _build_qkv_program(_rows: int) -> _ExternalProgram:
 
 def _build_inverse_rope_program(_rows: int) -> _ExternalProgram:
     from emmy.serving.deepseek import trace_inverse_rope
-    from emmy.serving.external import build_external_program
+    from emmy.serving.external import load_external_program
 
-    runtime, plan = build_external_program(
+    runtime, plan = load_external_program(
         trace_inverse_rope(rows=_MAX_PREFILL_ROWS, dynamic=True),
         symbolic_values={"num_tokens": _MAX_PREFILL_ROWS},
     )

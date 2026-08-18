@@ -194,7 +194,7 @@ def _trace_symbolic_prefill(kind: str):
 
 
 def _build_program(profile: _ProgramProfile) -> _ProgramEntry:
-    from emmy.serving.external import build_external_program
+    from emmy.serving.external import load_external_program
     from emmy.serving.mhc import trace_hc_head, trace_mhc_broadcast, trace_mhc_fused, trace_mhc_post, trace_mhc_pre
 
     if profile.symbolic:
@@ -209,7 +209,7 @@ def _build_program(profile: _ProgramProfile) -> _ProgramEntry:
         }
         graph = builders[profile.kind](rows=profile.rows)
     symbolic_values = {"num_tokens": _MAX_PREFILL_ROWS} if profile.symbolic else None
-    program, plan = build_external_program(graph, symbolic_values=symbolic_values)
+    program, plan = load_external_program(graph, symbolic_values=symbolic_values)
     inputs = tuple(plan.inputs)
     outputs = tuple(plan.outputs)
     if inputs != _PLAN_INPUTS[profile.kind]:

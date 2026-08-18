@@ -25,12 +25,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   nothing handles emmy's INFO records, which would silence the runners' boot/pack lines in `docker logs` — the
   gemma4 image's verify gate greps the "pack hit" line there (no-op when logging is already configured, e.g. the
   `emmy` CLI).
-- `onecat.py` — guarded 1Cat leaf-kernel adapter. With `EMMY_ONECAT_RMS_NORM=1`, the compatible SM70 DeepSeek decode
-  RMSNorm leaf is traced and compiled by Emmy on first use, then launched directly over 1Cat-owned device
-  buffers through `CompiledProgram.run_once_external`. The exact live shape/dtype/platform contract is checked before
-  dispatch; a build failure, unsupported call, capture-time cold call, or failed first-use numerical comparison uses
-  the original vLLM kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache
-  state, routing, and MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
+- `onecat.py` — guarded 1Cat final-RMSNorm adapter. With `EMMY_ONECAT_RMS_NORM=1`, one bounded symbolic-capacity
+  SM70 program covers every DeepSeek serving width from 1 through 4096 rows and launches directly over 1Cat-owned
+  device buffers through `CompiledProgram.run_once_external`. First-use bitwise parity and CUDA-graph eligibility are
+  tracked per concrete width. The exact live shape/dtype/platform contract is checked before dispatch; a build or
+  launch failure, unsupported call, capture-time cold or unverified call, or parity failure uses the original vLLM
+  kernel. 1Cat remains responsible for TP/PP, checkpoint conversion, compressed attention/cache state, routing, and
+  MXFP4 execution, so this is bounded hybrid coverage rather than `EmmyGenModel` eligibility.
 - `onecat_deepseek.py`, `onecat_linear.py`, `onecat_mhc.py`, and `onecat_output.py` — the broader opt-in
   `EMMY_ONECAT_DEEPSEEK_V4=1` adapters. They preserve 1Cat's scheduler, TP/PP collectives, and stateful paged
   sparse-attention/cache ownership. One bounded symbolic-capacity program covers every Q/KV RMSNorm and inverse-RoPE
@@ -58,7 +59,16 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   sizes only internal scratch at build time; the owner still binds exact runtime shapes before each launch. When
   `EMMY_PACK_DIR` is set, the exact graph, pins, tune source, and symbolic capacity key an execution-plan pack. A file
   lock serializes a first build across TP/PP worker processes; waiters recheck and load the completed pack instead of
-  repeating graph passes and fork resolution. Pack damage or a save failure retains the ordinary compile path.
+  repeating graph passes and fork resolution. General callers retain compile-on-miss behavior; the 1Cat adapters use
+  the strict loader, which never compiles and treats a missing or damaged pack as an unavailable Emmy program.
+- `onecat_prewarm.py` — the release-blocking offline realization entry point for the broad DeepSeek V4 adapters. Its
+  deterministic 96-profile manifest contains final RMSNorm, Q/KV RMSNorm, inverse RoPE, every static and symbolic
+  unquantized-linear and mHC profile, and the three symbolic output profiles. Run
+  `python -m emmy.serving.onecat_prewarm` with `EMMY_PACK_DIR` and `EMMY_CUBIN_CACHE` pointing at the release caches on
+  the target card before starting `vllm serve`; each profile must compile, persist, and strictly reload or the command
+  fails. The pinned 1Cat image directly enters `vllm serve`, and vLLM's plugin registration is an import hook invoked
+  in API, engine, and worker processes before rank-local CUDA initialization rather than a once-per-release pre-worker
+  callback. Release orchestration must therefore run this separate cache-sharing phase before worker RPCs begin.
 - `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),

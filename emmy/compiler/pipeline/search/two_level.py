@@ -18,12 +18,10 @@ So we split the search in two, drawing the boundary on the fork's *effect*
 spawn site), not on a fixed
 pass index:
 
-- **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes —
-  ``frontend`` + ``loop`` plus the pre-partition head of ``lowering/tile``
-  (:func:`outer_pipeline`), where any structural fork emitters live. A terminal is the state where
-  the cursor reaches ``partition_loops`` with every structural fork resolved —
-  every op post-fusion and structurally final, split producers/consumers
-  included as real ``LoopOp`` nodes. Each terminal is a candidate fused graph;
+- **Outer** (:func:`run_two_level_tune`) drives the graph-changing passes — ``frontend`` + ``loop``
+  (:func:`outer_pipeline`), where the graph's fusion is settled. A terminal is the state where the
+  cursor reaches the tile lowering with every op post-fusion and structurally final. Each terminal
+  is a candidate fused graph;
   its reward is ``1 / Σ best-per-op time`` from the inner search,
   backpropagated by the reused :class:`TuningSearch` — so keep-vs-split is an
   outer-terminal comparison, the natural cost model for a kernel-set decision.
@@ -72,10 +70,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The structural / op-variant boundary is the ``split`` phase: the keep-vs-cut
-# ``CUT`` offer is the only kernel-set-changing decision, so the outer search owns
-# ``frontend`` + ``loop`` + ``split`` and the inner tunes everything from
-# ``enumeration`` (tiling) on — see :func:`outer_pipeline`.
+# The structural / op-variant boundary is the loop dialect's end: the outer search owns
+# ``frontend`` + ``loop`` and the inner tunes each finalized kernel from ``lowering/tile`` on —
+# see :func:`outer_pipeline`.
 
 # Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner
 # per-op search runs these on a single-node slice so the finalized LoopOp body
@@ -90,23 +87,18 @@ LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 
 def outer_pipeline() -> Pipeline:
-    """The graph-changing passes the outer search drives: ``frontend`` + ``loop``
-    (any fusion forks) **plus the ``split`` phase** — where a structural fork, the
-    only move that changes *which kernels exist*, would be offered.
-    An outer terminal is a graph whose kernel set is final:
-    the keep(SMEM) side is one fused ``TileGraphOp`` (``seed_fused``), the cut side
-    its producer + consumer; :func:`_inner_reward_async` picks each up as its own
-    slice (own patience, own progress leaf, deduped by ``Op.cache_key``) and tunes
-    its tiling via :data:`LOWERING_PASSES`.
+    """The graph-changing passes the outer search drives: ``frontend`` + ``loop`` (the fusion
+    forks). An outer terminal is a post-fusion graph of finalized ``LoopOp``\\ s;
+    :func:`_inner_reward_async` picks each up as its own slice (own patience, own progress leaf,
+    deduped by ``Op.cache_key``) and tunes it via :data:`LOWERING_PASSES`.
 
-    Tiling (``enumeration``/partition) is **inner**, deliberately NOT driven here:
-    a tile-knob fork (``MMA`` / ``BN`` / …) does not change the kernel set, so
-    branching the OUTER tree on it would explode the tree (every tile combination ×
-    every structural choice) with no kernel-set distinction. The split boundary is
-    exactly where the kernel set is fixed but tiling is not — the right outer/inner
-    seam. Sub-partition splices
-    (``150_cross_cta_finalize``'s combine) likewise stay inner — their trigger knob
-    (``SPLITK``) doesn't exist until partition runs."""
+    Tiling is **inner**, deliberately NOT driven here: a schedule-row fork does not change the
+    kernel set, so branching the OUTER tree on it would explode the tree (every row × every fusion
+    choice) with no kernel-set distinction. The tile dialect's STRUCTURAL forks (a ``PLACE`` cut, a
+    cross-CTA split — the picks that DO change the kernel set) stay inner as well, because they are
+    a property of a recognized term rather than of the fused graph: the inner search explores them
+    inside the kernel's own slice, and a slice whose kernel set changed simply benches as the Σ over
+    the kernels it minted."""
     passes = [Pass.load(name, i) for i, name in enumerate(LOOP_PASSES)]
     return Pipeline(passes=passes)
 
@@ -196,11 +188,8 @@ def _mint_run_id() -> str:
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
 
-    An outer terminal sits at the ``split`` boundary (:func:`outer_pipeline`): the
-    keep(SMEM) side is a fused ``TileGraphOp`` (``seed_fused``), the cut side its
-    producer + consumer ``LoopOp``s (un-built — the inner tiles them). Count both
-    ``LoopOp`` and ``TileGraphOp`` so every kernel of either side gets its own inner
-    slice."""
+    An outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so every kernel is a
+    finalized ``LoopOp`` and each gets its own inner slice."""
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
 
     return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
@@ -449,9 +438,7 @@ async def run_two_level_tune(
 
     The outer drives a :class:`Run` directly (manual ``observe``)
     because its terminal reward comes from the inner tuning, not
-    ``_bench_terminal_async``. The outer pipeline (:func:`outer_pipeline`) runs
-    through the pre-partition tile rules, so each structural fork
-    branches the outer tree —
+    ``_bench_terminal_async``. Each fusion fork branches the outer tree —
     one terminal per kernel-set, compared by Σ-per-op cost. A graph with no
     structural offers yields a single terminal and this reduces to "tune each
     op once, sum, assemble". Identical offer sites within one trajectory
@@ -475,10 +462,9 @@ async def run_two_level_tune(
 
         prior = load_prior(seed=prior_seed)
     outer = TuningSearch(patience=patience, ucb_c=ucb_c, prior_model=prior, base_knobs=ctx.features())
-    # The outer drives only the graph-changing passes (through the
-    # pre-partition tile head) — no dump on this Run; the winning config's
-    # full stage artifacts and in-memory frontend provenance slices come
-    # from the final assembled CUDA_PASSES run below.
+    # The outer drives only the graph-changing (fusion) passes — no dump on this Run; the winning
+    # config's full stage artifacts and in-memory frontend provenance slices come from the final
+    # assembled CUDA_PASSES run below.
     outer_run = Run(pipeline=outer_pipeline(), ctx=ctx, search=outer, db=db)
 
     best_fused: Graph | None = None

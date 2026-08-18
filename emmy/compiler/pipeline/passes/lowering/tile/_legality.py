@@ -92,14 +92,17 @@ def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
     return None
 
 
-def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
+def producer_transport(stage: Stage | None) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
     mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
-    async load half) on a kernel that is not split across CTAs."""
+    async load half).
+
+    It used to also refuse a cross-CTA split as "not co-representable", and took the row's
+    ``ReducePlan`` for that alone. A split now mints brand-new kernels that schedule themselves, so
+    a split row's band never reaches a kernel at all, and a partial that wants one asks for it at
+    its own fork like any other kernel."""
     if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
-    if reduce.needs_split:
-        return "a producer band and a cross-CTA split-K are not co-representable"
     return None
 
 
@@ -211,21 +214,6 @@ def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
         f"warp TILE K-step {step} (atom_k={plan.atom.atom_k}*bk={plan.bk}) does not divide the static "
         f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
         f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
-    )
-
-
-def splitk_slice_k_step(node: Fold, plan: TilePlan, width: int) -> str | None:
-    """After a cross-CTA split the inner contraction sees ``K/width``, which must still be a
-    multiple of the mma K-step."""
-    if not plan.is_warp:
-        return None
-    step = plan.atom.atom_k * plan.bk
-    ks = node.axis.extent.as_static() // width
-    if ks % step == 0:
-        return None
-    return (
-        f"split-K slice K={ks} (K/{width}) is not a multiple of the mma K-step {step} "
-        f"(atom_k={plan.atom.atom_k}*bk={plan.bk}); pick a split width whose slice is divisible."
     )
 
 
@@ -608,7 +596,6 @@ __all__ = [
     "resolve_warp_stage",
     "scalar_block_threads",
     "splitk_computed_b_site",
-    "splitk_slice_k_step",
     "splitk_width",
     "stage_target",
     "strip_width",

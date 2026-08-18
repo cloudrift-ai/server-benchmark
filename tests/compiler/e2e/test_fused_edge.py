@@ -220,6 +220,7 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     monkeypatch.setenv("EMMY_TILE", tile)
     monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
+    monkeypatch.setenv("EMMY_PLACE", "fuse")  # …and its cone kept whole, not routed to a cut by the host's prior
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
     S, H, inter = 64, 1024, 3072

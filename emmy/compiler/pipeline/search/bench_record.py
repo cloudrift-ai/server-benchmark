@@ -27,7 +27,7 @@ offer op's ``S_*`` stamps, NOT the terminal kernel's (descent stamps further ``S
 deltas, so the two differ for most ops). :func:`bench_leaves` recovers the offer site
 from each compiled kernel via ``source_chain`` (the ``two_level`` decomposition idiom:
 deepest loop-dialect ancestor carrying ``S_*`` knobs, tile-dialect fallback for the mma
-path) and groups a variant's kernels (e.g. a split-K main + combine pair) under one
+path) and groups a variant's kernels under one
 site — an auxiliary kernel with no provenance at all attributes to its nearest sited
 producer through the graph edges — one leaf per (variant, op), valued at the group's
 summed per-launch time, exactly the tune's whole-variant leaf semantics.
@@ -113,10 +113,11 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     """Extract one :class:`BenchLeaf` per (variant, op) from a benched compiled graph.
 
     Kernels are paired with ``bench.per_launch`` by topological order (the launch
-    order) and grouped by their offer site: a multi-kernel variant (split-K main +
-    combine) contributes ONE leaf valued at the group's summed launch time — the
-    tune's whole-variant leaf semantics; a fragment kernel's own tiny latency never
-    becomes a row (the pre-#330 poison class). Bench stats (variance / n_samples)
+    order) and grouped by their offer site: kernels sharing one site contribute ONE
+    leaf valued at the group's summed launch time, so a fragment kernel's own tiny
+    latency never becomes that site's row (the pre-#330 poison class). Kernels a
+    structural fork minted are NOT such a group — each is a brand-new kernel carrying its own
+    structural stamp, re-derived from its own body, so each records its own row against its own site. Bench stats (variance / n_samples)
     carry only for single-kernel groups — per-launch windows replay each kernel
     back-to-back, so cross-kernel samples don't align iter-wise and a summed variance
     would be fiction. ``status="bench_fail"`` (with ``bench=None``) emits sentinel
@@ -138,13 +139,11 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
         entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))
 
     def attributed(nid: str, hops: int = 4) -> str | None:
-        """The site group of an orphan kernel's nearest sited PRODUCER. An auxiliary
-        kernel synthesized at materialize (a split-K combine) carries no ``S_*``
-        provenance anywhere in its chain, but it consumes its main kernel's output —
-        the graph edge is the attribution the source chain lost. Without this the
-        combine was silently dropped and a split-K variant recorded a partial-only
-        value: systematically fast-biased against the tune's whole-slice leaves in
-        the same pool (found by the 2026-07-16 4090 verification)."""
+        """The site group of an orphan kernel's nearest sited PRODUCER — the graph edge
+        standing in for an attribution the source chain lost. A kernel with no ``S_*``
+        anywhere in its chain would otherwise be dropped silently, and its group's value
+        would then be a partial one: systematically fast-biased against the tune's
+        whole-slice leaves in the same pool (found by the 2026-07-16 4090 verification)."""
         frontier = [nid]
         for _ in range(hops):
             nxt: list[str] = []
@@ -178,8 +177,8 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
         )
     leaves = []
     for sig, g in groups.items():
-        # The main kernel carries the variant's descent stamps; auxiliaries (a split-K
-        # combine) carry a subset — the most-tunables op is the variant's knob identity.
+        # The main kernel carries the group's descent stamps; an auxiliary carries a subset — the
+        # most-tunables op is the group's knob identity.
         main = max(g["ops"], key=lambda o: sum(1 for k in (o.knobs or {}) if not k.startswith(("S_", "H_"))))
         knobs = dict(main.knobs or {})
         if status != "ok":

@@ -49,6 +49,8 @@ def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_REDUCE", "")
+    # The subject is ONE fused kernel's transport; an unpinned placement fork is prior-dependent.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
 
 
 def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:

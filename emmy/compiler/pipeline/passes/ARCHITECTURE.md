@@ -528,13 +528,60 @@ grammar it read).
 `lowering/tile` carries one one-kernel→graph-fragment rule:
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
-  computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
-  chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
-  `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+  computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
+  accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
 
-The fragment idiom's re-entry semantics are the rule's own: `030` opts its halves OUT of recognition, while a rule
-that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
-is what lets such rules compose without knowing about each other.
+**Every piece is a BRAND-NEW kernel — and no rule has to remember that.** A rewrite that returns DIFFERENT NODES
+is a kernel-set change, so the ENGINE strips every knob and feature off the spliced nodes before they land
+(`candidate._strip_minted`). A rule cannot leak a decision or an identity across a kernel boundary by forgetting
+to clear one, and no pass has to assert that it didn't. The one thing kept is the option's decision delta — the
+knobs it stamped that the replaced op did not carry (`PLACE@<seam>: cut`), which records what the fork chose
+rather than anything inherited.
+
+What happens next is the ordinary pass scan. `005_stamp_structural_features` gives each piece its own `S_*`
+because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
+neither is called, and neither is told what a piece is. **No pass can tell a split piece from a fresh kernel**,
+and no pass tries. The invariant holds in both directions: nothing downstream reads split provenance, and nothing
+upstream is told what the pieces are for.
+
+Contrast an OP rebind, which the engine leaves alone: that says *the same kernel, decided further*, so its knobs
+merge forward by design. Which is why even the one-kernel atomic arm splices a `Graph` (`_one`) — a rebind would
+hand the piece the row it was minted to shed, and would not restart the pass scan.
+
+Three consequences follow, and all three are the point:
+
+- Each piece **chooses its own schedule**. The partial contracts a K-slice; the finalize folds a workspace. They
+  are differently shaped kernels and there is no reason for them to agree, so nothing makes them.
+- Each piece is **separately identifiable to the evidence store**. Its structural stamp describes the body it
+  actually has, so its measurements and the prior's estimates are its own. (The partial used to arrive wearing the
+  pre-split kernel's whole row — 21 `S_*` features describing a body it no longer had — and the finalize arrived
+  already-placed with no knobs at all: no fork, no identity, untunable.)
+- The split node has **no latency of its own** — it does not run. Its estimate is the Σ over the kernels the
+  resolution ends with (`greedy._resolved_price`), which is what makes the split row comparable against the rows
+  that keep one kernel.
+
+**One split per axis — the split is CONSUMED by the kernel that realizes it.** A pin is *ambient*: `EMMY_REDUCE=g2k`
+is a statement about how kernels run, and the pieces are kernels, so it reaches them too. Nothing may re-partition
+an axis that is already a slice, and the slice records that structurally: `_slice_loop` / `_factor_k` build it as a
+`Window` of its parent, and `_schedule._splittable_axis` refuses to offer (and `_consumed_split` drops from a parsed
+pin) a cross-CTA stage on an axis whose `source_axis` is set. No provenance flag, no "this came from a split" bit —
+the axis's own shape is the record. Without that reading a K=512 partial re-splits its own slice on every sweep:
+512 → 256 → … → 1, ending in a raise.
+
+The atomic arm produces ONE kernel and still splices a `Graph`. That is not a formality: a 1:1 op rebind is how the
+engine says *the same kernel, decided further*, so it merges the replaced op's knobs forward and does not restart the
+pass scan — the piece would inherit the very row it was minted to shed and would never reach its own fork (`_one`).
+
+The fragment idiom's re-entry semantics are shared, not per-rule: every rule hands its fragment back to the pass
+scan, and `005_stamp_structural_features` / `010_recognize` / `020_schedule` pick up whatever is un-stamped,
+un-recognized or unmapped. The shared fixpoint is what lets such rules compose without knowing about each other.
+
+`005_stamp_structural_features` duplicates `loop/stamp/020_stamp_structural_features` rather than replacing it,
+because a kernel is stamped in the pass where it is BORN. The loop-dialect pass owns the kernels the fusion end
+produces; it cannot reach one minted later, since `Cursor.advance` only restarts a scan WITHIN the current pass and
+never returns to an earlier one. Moving it is not an option either: the OUTER search's terminals are finalized
+`LoopOp`s, handed over before tile lowering runs, so `two_level`'s `op_sig` would digest an empty set for every
+kernel in every model. Two registrations of one work function, each idempotent, is the whole design.
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
@@ -641,7 +688,7 @@ enumerated grids (the permanence test in `tests/compiler/test_golden_configs.py`
 re-spell — membership means the replayed pin resolves to a slice the catalog hands out; a space edit can never
 silently orphan a golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid
 carries the golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA
-split deploy
-(`030_split_reduce`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
-rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
-schedule identity (the A/B table then couldn't say what greedy deployed).
+split deploy records a schedule identity per **piece**: each is a new kernel that reached its own fork, so each
+carries the row it chose. (The engine merges knobs forward on 1:1 rebinds only. The split's earlier fix was to
+stamp the pre-split row onto the partial by hand, which made the A/B table readable at the cost of attributing one
+kernel's decision to another; minting the pieces unmapped removes both the stamp and the misattribution.)

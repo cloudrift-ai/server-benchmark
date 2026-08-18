@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy import config
+from emmy.compiler.pipeline.knob import context_view, decision_view
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.policy.base import Search
@@ -210,7 +211,9 @@ class TuningSearch(Search):
         if measured:
             self.measurements += 1
 
-    def observe(self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None) -> None:
+    def observe(
+        self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
+    ) -> None:
         self.last_stats = stats
         self.last_status = status
         assert isinstance(token, SearchNode), f"TuningSearch.observe needs the terminal's pop token, got {type(token).__name__}"
@@ -250,10 +253,19 @@ class TuningSearch(Search):
                 self._o3_done.add(sig)
                 self.last_o3_worthy = True
         if self.prior_model is not None:
-            # Record the leaf for the end-of-run stats. The model itself is fixed
-            # during a run — it refits in batches between ops (see ``Prior``), not
-            # per bench — so there is nothing to refit here.
-            self.prior_model.record_bench(token.realized_knobs, stats.median, status)
+            # Train on the rows that actually earned a latency: the terminal's own when it lowered
+            # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
+            # this run's host regime). The Σ is the tree's reward; it is not any single row's
+            # label, and a terminal a structural fork made several kernels of has no row of its
+            # own to give the prior.
+            # The model itself is fixed during a run — it refits in batches between ops (see
+            # ``Prior``), not per bench — so there is nothing to refit here.
+            if token.realized_knobs is not None:
+                self.prior_model.record_bench(token.realized_knobs, stats.median, status)
+            else:
+                regime = context_view(self._base_knobs)
+                for knobs, median, st in kernels or ():
+                    self.prior_model.record_bench({**regime, **knobs}, median, st)
 
     def observe_o3(self, token: object | None, o3_us: float) -> None:
         """Record an extra training row for an -O1 winner re-benched at -O3: the
@@ -281,19 +293,34 @@ class TuningSearch(Search):
             return ()
         return tuple(sorted((k, str(v)) for k, v in knobs.items() if k != "H_opt"))
 
-    def _realized_knobs(self, candidate: object) -> dict:
-        """The terminal's complete knob set: the kernel's ``base_knobs`` (``S_*``
-        identity + ``H_*`` regime) merged with the realized op ``knobs`` off the
-        resolved graph (every tunable knob, including deterministically-stamped
-        ones that ``_node_knobs`` can't see). Unions all op knob dicts — a
-        single-kernel slice has one kernel-bearing op, constants carry none."""
-        merged: dict = dict(self._base_knobs)
+    def _realized_knobs(self, candidate: object) -> dict | None:
+        """The terminal's ONE knob row — the kernel's ``base_knobs`` (``S_*`` identity + ``H_*``
+        regime) merged with the realized op ``knobs`` off the resolved graph (every tunable knob,
+        including deterministically-stamped ones that ``_node_knobs`` can't see), or ``None`` when
+        the terminal has no single row.
+
+        A terminal is a Σ over the kernels it lowered to. When it lowered to ONE, that kernel's row
+        earned the whole measurement and the merge is exact. When a structural fork made it
+        several — a cut, a cross-CTA split — the kernels carry DIFFERENT decisions for the same
+        families, and merging them fabricates a row no kernel realized (last write wins: the
+        finalize's OFF ``WORK`` used to overwrite the partial's real one in the row that fed the
+        online prior, the node table and the tune winner). There is no such row, so this answers
+        ``None`` and the per-KERNEL rows — which the bench hands over intact — carry the training
+        signal instead."""
         graph = getattr(candidate, "graph", None)
-        if graph is not None:
-            for node in graph.nodes.values():
-                knobs = getattr(node.op, "knobs", None)
-                if knobs:
-                    merged.update(knobs)
+        if graph is None:
+            return dict(self._base_knobs)
+        merged: dict = dict(self._base_knobs)
+        decided: dict = {}
+        for node in graph.nodes.values():
+            knobs = getattr(node.op, "knobs", None)
+            if not knobs:
+                continue
+            for k, v in decision_view(knobs).items():
+                if k in decided and decided[k] != v:
+                    return None  # two kernels, two decisions — no single row to attribute the Σ to
+                decided[k] = v
+            merged.update(knobs)
         return merged
 
     @staticmethod
@@ -403,7 +430,7 @@ class TuningSearch(Search):
         ``global_best``: a fork is a choice among its own children, ``global_best``
         is a moving target set elsewhere in the tree, and the offline prior's scores
         are not µs at all — pushing their raw magnitude through ``1/û`` is what left
-        the cold policy meaningless (HISTORY.md: "The inert offline tilt").
+        the cold policy meaningless.
 
         ``c_ucb`` is ``--ucb-c``. With ``explore_eps > 0`` (tune, opt-in) a fraction
         of steps instead descend a uniformly random live child (ε-greedy); off by
@@ -458,13 +485,19 @@ class TuningSearch(Search):
 
         A directly-benched leaf uses its ``realized_knobs`` (the FULL config);
         a branch (no realized knobs of its own) uses its partial fork-prefix
-        (``_node_knobs``) — the value-of-position label still rides on it."""
+        (``_node_knobs``) — the value-of-position label still rides on it. A leaf that was benched
+        but has NO single row (a structural fork made it several kernels with different decisions)
+        contributes nothing here: its measurement was already attributed per kernel at
+        :meth:`observe`, and its fork-prefix would merge the pieces' rows into one that no kernel
+        realized — the fabrication this whole path exists to avoid."""
         rows: list[tuple[dict, float]] = []
         stack = list(self.tree.root.children)
         while stack:
             node = stack.pop()
             stack.extend(node.children)
             if node.candidate is None or node.visits == 0 or node.best_reward <= 0:
+                continue
+            if node.bench_stats is not None and node.realized_knobs is None:
                 continue
             knobs = node.realized_knobs if node.realized_knobs is not None else self._node_knobs(node)
             rows.append((knobs, 1.0 / node.best_reward))
@@ -558,9 +591,12 @@ class TuningSearch(Search):
         def visit(node: SearchNode, parent_key: str | None, parent_value: float | None, depth: int) -> None:
             nk = parent_key
             if node.candidate is not None:
-                is_leaf = node.realized_knobs is not None
+                is_leaf = node.bench_stats is not None
                 stats = node.bench_stats if is_leaf else None
-                if node.visits > 0 and node.best_reward > 0:
+                # A benched leaf with no single row (several kernels with different
+                # decisions) has nothing to key a node record on — see :meth:`_collect_rows`.
+                skip = is_leaf and node.realized_knobs is None
+                if node.visits > 0 and node.best_reward > 0 and not skip:
                     feats = node.realized_knobs if is_leaf else self._node_knobs(node)
                     value_us = 1.0 / node.best_reward
                     assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"

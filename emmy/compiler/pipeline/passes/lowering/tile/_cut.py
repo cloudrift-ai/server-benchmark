@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
+
 from emmy import config
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -44,7 +46,6 @@ from emmy.compiler.ir.tile.ir import (
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import family_of, parse_knob_spec
-from emmy.compiler.pipeline.passes.loop.stamp._stamp import restamp_structural_features
 from emmy.compiler.pipeline.pipeline import RuleSkipped
 
 logger = logging.getLogger(__name__)
@@ -241,10 +242,17 @@ def _ws_dtype(child, inputs: dict):
     seam = Body(tuple(lowered)).definitions.get(operand_name(child))
     if (converted := getattr(seam, "dtype", None)) is not None:
         return converted
-    for s in lowered:
-        for ld in Body(tuple([s])).loads:
+    # An INTEGER leaf never types the seam. Types are stamped later (``030_stamp_types`` runs
+    # ``dtype_promote`` over the body), so all this can see is what the cone READS — and a decode
+    # cone reads nothing but codes, shifts and masks while computing a real value from them. Taking
+    # the first leaf typed the reconstruction seam ``i32``, and the producer's ``__half`` was then
+    # stored through an ``int*`` workspace: every decoded weight rounded to an integer, a
+    # whole-model ``max_diff`` of 0.27 against a 0.005 gate. Only an explicit declared dtype (the
+    # branch above) may make a seam integer.
+    for st in lowered:
+        for ld in Body((st,)).loads:
             t = (inputs or {}).get(ld.input)
-            if t is not None:
+            if t is not None and np.issubdtype(t.dtype.np, np.floating):
                 return t.dtype
     return F32
 
@@ -315,8 +323,8 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
         node_id=out.name,
     )
     frag.outputs = [out.name]
-    for nid in (ws, out.name):
-        restamp_structural_features(frag.nodes[nid].op, frag)
+    # Both fragments leave here carrying nothing — the engine's splice strip guarantees it, and
+    # ``005_stamp_structural_features`` gives each its own identity on the pass-scan restart.
     # The decision rides the parent piece's op knobs, spelled exactly as the pin that replays it —
     # a tune-measured cut records as ``PLACE@<seam>: cut`` with no side channel.
     parent = frag.nodes[out.name].op

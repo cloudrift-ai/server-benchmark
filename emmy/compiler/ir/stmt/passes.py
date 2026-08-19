@@ -29,7 +29,6 @@ from emmy.compiler.ir.stmt.leaves import (
     Pack,
     Select,
     SelectBranch,
-    StateMerge,
     Unpack,
     Write,
 )
@@ -150,31 +149,6 @@ def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     )
 
 
-@rewrite.register
-def _(s: StateMerge, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    # The renderable cross-partition combine: rename the state / state_b (in the rename map)
-    # PLUS the merge-internal temps NOT surfaced via ``defines()`` — so a register-tile
-    # replicator that renames the state per cell leaves the temps shared, colliding across
-    # replicas. Uniquify the temps with a suffix derived from the renamed first state name
-    # whenever the state actually moves (identity rename / pure σ-split leaves them untouched).
-    names = s.state
-    new_state0 = rename(names[0]) if names else None
-    carried = set(names) | set(s.state_b)
-    temps = {a.name for a in s.merge} - carried
-    overlay = {t: f"{t}__{new_state0}" for t in temps} if new_state0 is not None and new_state0 != names[0] else {}
-
-    def rn(name: str) -> str:
-        r = rename(name)
-        return r if r != name else overlay.get(name, name)
-
-    return StateMerge(
-        state=tuple(rn(n) for n in names),
-        merge=tuple(rewrite(m, rn, sigma, axis_fn) for m in s.merge),
-        state_b=tuple(rn(n) for n in s.state_b),
-        identities=s.identities,  # neutral elements travel with the states, only the names move
-    )
-
-
 def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
     """Apply ``sigma`` to an axis name and return the resulting axis
     name(s). Handles three cases:
@@ -195,7 +169,7 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
 @rewrite.register
 def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
-    # the fold's ``Accum`` / ``StateMerge.state`` (registered above) so the seed stays paired.
+    # the fold's ``Accum`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
 
 
@@ -262,7 +236,7 @@ def _(s: Cond, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @singledispatch
 def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
-    # Default: no Expr fields to simplify (Assign / Accum / Init / StateMerge).
+    # Default: no Expr fields to simplify (Assign / Accum / Init).
     return stmt
 
 

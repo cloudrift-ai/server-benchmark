@@ -22,10 +22,11 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Lambda, Load, Loop, M, Write
-from emmy.compiler.ir.stmt.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
-from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
-from emmy.compiler.ir.tile.ir import Fold
+from emmy.compiler.ir.pure import Lambda, M
+from emmy.compiler.ir.pure.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
+from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 # --- the mini loop-IR interpreter (the agreement test's right-hand side) ------------------------- #
@@ -152,7 +153,7 @@ def test_monoid_of_is_degenerate_with_identity_seeds() -> None:
 
 def test_fold_arity_mismatch_rejected() -> None:
     from emmy.compiler.ir.axis import Axis as _Axis
-    from emmy.compiler.ir.tile.ir import Fold as _Fold
+    from emmy.compiler.ir.pure.fold import Fold as _Fold
 
     lam = Lambda(params=("a", "b"), body=Body((Assign(name="c", op="add", args=("a", "b")),)), results=("c",))
     lift = Lambda(params=("k",), body=Body(()), results=(1.0, 1.0))

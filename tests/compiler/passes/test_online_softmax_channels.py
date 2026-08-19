@@ -22,8 +22,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.stmt import Body, Loop
-from emmy.compiler.ir.stmt.carrier import exp_merge
 from emmy.compiler.ir.stmt.leaves import ElementwiseImpl
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -206,7 +206,7 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     contraction over the FULL reduce axis whose cone is ``exp(score − m)·(1/d)`` and whose cone
     SOURCE is the pair — the same binding the norm→linear edge uses, so the contraction schedule
     catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
-    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 

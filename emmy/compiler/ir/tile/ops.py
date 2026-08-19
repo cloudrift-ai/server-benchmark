@@ -1,7 +1,7 @@
 r"""The geometry-free compute layer — node lowering and the structural reads.
 
-A kernel's compute is a stored :class:`~emmy.compiler.ir.tile.ir.Fold` (a bare reduce), a
-:class:`~emmy.compiler.ir.tile.ir.Fold` (a pure pointwise cell, or the projection wrapper over its
+A kernel's compute is a stored :class:`~emmy.compiler.ir.pure.fold.Fold` (a bare reduce), a
+:class:`~emmy.compiler.ir.pure.fold.Fold` (a pure pointwise cell, or the projection wrapper over its
 source node). :func:`head` is the ONE accessor reaching that node through the projection (zero-axis) fold,
 and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
 operand edges — is a STORED param on it (a fold's role is derived from those params, never
@@ -19,10 +19,11 @@ ahead of a lowering walk."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import AxisRole
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, splice_operands, stmt_axis_names
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import Fold, deep_defines, deep_reads, edge_refs_axis, effect_tail, splice_operands, stmt_axis_names
+from emmy.compiler.ir.tile.ir import effect_tail
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -241,7 +242,7 @@ def seal_workers(tile) -> None:
 
 
 def head(op):
-    """The kernel's compute NODE — a :class:`~emmy.compiler.ir.tile.ir.Fold` at any role, bare or
+    """The kernel's compute NODE — a :class:`~emmy.compiler.ir.pure.fold.Fold` at any role, bare or
     under its projection (zero-axis) fold — or
     ``None`` for a pure pointwise cell / the raw-loop-IR escape (a zero-axis fold with no operands).
 
@@ -257,7 +258,7 @@ def head(op):
 def reduce_loop(op):
     """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
     or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.tile.ir.Fold` with an axis synthesizes its loop
+    :class:`~emmy.compiler.ir.pure.fold.Fold` with an axis synthesizes its loop
     directly (a multi-channel contraction derives the ONE fused product loop — see
     :attr:`Fold.loop`); a zero-axis ``Fold``
     is read off the top-level body — the annotated reduce loop is a top-level stmt (a
@@ -279,7 +280,7 @@ def reduce_loop(op):
 
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
-    ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.tile.ir.Fold` — when ``tile.op``
+    ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
     is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
     per-cell zero-axis ``Fold`` has no partition). An unstamped fold reads the empty plan (the scalar serial
     fold), matching the node field's default. The single accessor the materializer /

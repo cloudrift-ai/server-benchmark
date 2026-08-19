@@ -290,8 +290,8 @@ def _loop_ir_lambda(params=(), body=(), results=()):
     """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
     arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
     ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
+    from emmy.compiler.ir.pure.fold import _loop_ir_fn  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import _loop_ir_fn  # noqa: PLC0415
 
     return _loop_ir_fn(params, Body.coerce(body), results)
 
@@ -329,7 +329,6 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        StateMerge,
         StridedLoop,
         Unpack,
         Write,
@@ -362,7 +361,6 @@ def _stmt_eval_scope() -> dict:
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,
-        "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,
@@ -383,7 +381,7 @@ def _stmt_eval_scope() -> dict:
         "Lambda": _loop_ir_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Fold`` node) and the
+    # The stored term (the ``Fold`` node, in ``ir/pure/fold``) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -395,10 +393,11 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
+    import emmy.compiler.ir.pure.fold as _fold_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

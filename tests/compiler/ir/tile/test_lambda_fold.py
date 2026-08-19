@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import component_ops, degenerate
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, component_ops, degenerate
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -70,7 +71,7 @@ def _view(arity: int = 2) -> Fold:
 def _softmax_loop() -> Loop:
     """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
     exp-family state, exactly as ``_softmax.try_online_softmax`` builds it."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge
+    from emmy.compiler.ir.pure.carrier import exp_merge
 
     body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))
     return Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED)

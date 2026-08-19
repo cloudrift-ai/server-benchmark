@@ -32,17 +32,11 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, operand_name
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.tile.ir import (
-    Fold,
-    _operand_result_names,
-    deep_defines,
-    deep_reads,
-    effect_tail,
-    operand_name,
-)
+from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline.knob import consume_kernel_row, family_of, parse_knob_spec

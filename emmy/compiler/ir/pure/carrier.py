@@ -162,10 +162,12 @@ def _gen_outputs(state: tuple[str, ...], b0: _T, b_rest: list[_T]) -> list[_T]:
 # --------------------------------------------------------------------------------------------
 
 
-def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, merge: bool) -> tuple[Stmt, ...]:
-    """Emit the combine program. ``merge`` mode retags each channel's final write into a
-    seed-riding ``base``-``Accum`` (streaming fold); else plain ``Assign`` reassignment
-    (state⊕state). Temps are namespaced on ``key`` so distinct folds never collide."""
+def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, accum: bool) -> tuple[Stmt, ...]:
+    """Emit the combine program in one of the two FORMS the same algebra takes. ``accum`` retags
+    each channel's final write into a seed-riding ``base``-``Accum`` — the STATEMENT form, whose
+    seed the identity placement derives from ``op.identity``; else a plain ``Assign``
+    reassignment — the PURE form a stored ``combine`` :class:`Lambda` holds. Temps are namespaced
+    on ``key`` so distinct folds never collide."""
     memo: dict[_T, str] = {}
     body: list[Stmt] = []
     n = [0]
@@ -193,7 +195,7 @@ def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, merge: bool) -> t
     for sname, out in list(zip(state[1:], outs[1:], strict=True)):
         assert out.op == "add", f"accumulator channel must reduce to a sum, got {out.op}"
         p, q = out.a
-        if not merge:
+        if not accum:
             writes.append(Assign(sname, "add", (realize(p), realize(q))))
             continue
         base_t, val_t = (p, q) if _reads(p, sname) else (q, p)
@@ -203,7 +205,7 @@ def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, merge: bool) -> t
     # Pivot (channel 0).
     pivot = outs[0]
     assert pivot.op == "maximum"
-    if not merge:
+    if not accum:
         writes.append(Assign(state[0], "copy", (realize(pivot),)))
     else:
         realize(pivot)  # the max temp the rescales read
@@ -252,14 +254,18 @@ def _certify(prog: tuple[Stmt, ...]) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def exp_combine_states(state: tuple[str, ...], state_b: tuple[str, ...], *, key: str | None = None) -> tuple[Assign, ...]:
+def exp_combine_states(
+    state: tuple[str, ...], state_b: tuple[str, ...], *, key: str | None = None, accum: bool = False
+) -> tuple[Stmt, ...]:
     """The cross-partition state⊕state combine for an exp-family carrier of arity ``len(state)``.
     Temps namespaced on ``key`` (defaults to ``state_b[0]`` so distinct REG-tier folds — which
-    rename ``state_b`` — never collide)."""
+    rename ``state_b`` — never collide). ``accum`` selects the STATEMENT form (final writes as
+    ``base``-``Accum``, so the identity placement seeds them) over the pure ``Assign`` form a
+    stored ``combine`` holds — one algebra, two spellings."""
     outs = _gen_outputs(state, _leaf(state_b[0]), [_leaf(n) for n in state_b[1:]])
-    prog = _emit(outs, state, key or state_b[0], merge=False)
+    prog = _emit(outs, state, key or state_b[0], accum=accum)
     _certify(prog)
-    return prog  # type: ignore[return-value]
+    return prog
 
 
 def exp_merge(state: tuple[str, ...], terms: tuple, *, key: str | None = None) -> tuple[Stmt, ...]:
@@ -269,6 +275,6 @@ def exp_merge(state: tuple[str, ...], terms: tuple, *, key: str | None = None) -
     score = terms[0]
     assert isinstance(score, str), "pivot term (the score) must be an SSA name"
     outs = _gen_outputs(state, _leaf(score), [_term(t) for t in terms[1:]])
-    prog = _emit(outs, state, key or state[0], merge=True)
+    prog = _emit(outs, state, key or state[0], accum=True)
     _certify(prog)
     return prog

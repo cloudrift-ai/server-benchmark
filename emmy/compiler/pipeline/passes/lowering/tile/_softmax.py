@@ -52,9 +52,10 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure import component_ops
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, component_ops
-from emmy.compiler.ir.stmt.carrier import exp_merge
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 

@@ -40,7 +40,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from emmy.compiler.ir.tile.ir import Fold, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
 
 #: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
 #: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
@@ -190,7 +190,7 @@ def _is_escape(node) -> bool:
 
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
-    CONTRACTION folds (:func:`~emmy.compiler.ir.tile.ir.is_contraction` — the same question
+    CONTRACTION folds (:func:`~emmy.compiler.ir.pure.fold.is_contraction` — the same question
     :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
     the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
     zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR

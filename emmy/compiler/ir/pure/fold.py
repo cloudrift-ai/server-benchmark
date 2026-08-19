@@ -1,0 +1,840 @@
+"""``Fold`` — the ONE reduce term: ``reduce(⊕) ∘ map(f)`` in the λ-foldMap spelling.
+
+The whole stored vocabulary of Tile IR, and a PURE term throughout: an optional iteration
+``axis``, a pure ``lift`` :class:`~emmy.compiler.ir.pure.lam.Lambda`, the monoid's flat
+``(init, combine)`` pair, and a tuple of ``operands`` — the closed inputs, each an edge bound
+positionally to a lift param. Every reading (``Map`` at zero axes, the bilinear ``Contraction``,
+the ``AxisRole``, the serial step) is DERIVED from those params; nothing else is stored.
+
+Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
+ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
+POSITION in the emitted step stream is produced by the derivation (:func:`_twisted_derived_step`
+heads the inline-node edges; :func:`splice_operands` places each edge's body before the first read
+of its bound name), not by sitting in a statement list. The term becomes statements in exactly one
+place, :meth:`Fold.lower` / :attr:`Fold.loop`. See ``ir/ARCHITECTURE.md``, "Pure terms vs
+statements".
+
+The schedule is deliberately absent: the ``tile`` / ``reduce`` / ``stage`` slices live in
+``TileOp.schedule`` (``ir/tile/ir.py``), keyed by the tree-path codec, so the term is IMMUTABLE
+across the whole schedule search and kernel identity (:meth:`Fold.structural_key`) is the algebra
+alone.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from functools import cached_property
+
+from emmy.compiler.dim import Dim
+from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.pure.algebra import M, component_ops, rename_combine
+from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
+
+
+def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
+    """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
+    that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
+    TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
+    into the flat loop body — deterministic, so the derived loop (and with it ``Op.cache_key``)
+    depends only on the stored params."""
+    if not operands:
+        return stmts
+    at: dict[int, list] = {}
+    for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
+        name = operand_name(edge)
+        idx = next((i for i, st in enumerate(stmts) if name in deep_reads([st])), len(stmts))
+        at.setdefault(idx, []).append(edge)
+    out: list[Stmt] = []
+    for i, st in enumerate((*stmts, None)):
+        for edge in at.get(i, ()):
+            out.extend(operand_body(edge))
+        if st is not None:
+            out.append(st)
+    return tuple(out)
+
+
+def _flatten_nodes(steps: tuple) -> tuple[Stmt, ...]:
+    """Flatten any nested **structural node** — any :class:`Fold`, at any role — that sits in the
+    derived step sequence to its own lowered loop nest; plain stmts pass through. ``steps`` is a
+    TUPLE, not a ``Body``: a composed step is a TERM in a term-level sequence, never a statement
+    in a statement list. That is what lets flash's ``Σ_dd Q·K`` score and its
+    ``Σ_j P·V``, split-K's sliced contraction, and the fused sibling group (a zero-axis ``Fold``)
+    inside a split reduce's partial. This is the single
+    **node-walk** the ``.loop`` splice and the kernel materializer's recursion share, and it yields
+    the same loop nest whether a node was pre-flattened or reached structurally.
+
+    A composed step's POSITION in the body is semantic, not incidental: flash's PV reads the softmax
+    weight the merge stmts of that same loop step produce, so the step cannot be hoisted ahead of
+    them. That is why composition rides the sequence rather than a hoisted operand tuple."""
+    out: list[Stmt] = []
+    for s in steps:
+        if isinstance(s, Fold):
+            out.extend(s.lower())
+        else:
+            out.append(s)
+    return tuple(out)
+
+
+def _derived_expect_fold(o: str, p_name: str, v_edge: Load) -> Fold:
+    """The synthesized expectation contraction of a twisted fold's DERIVED blocked evaluation —
+    flash's ``Oblk = Σ_j P·V``, a contraction. A is the
+    register-resident softmax weight ``P`` — a one-stmt cone node whose one legal capture is the
+    running max the same derived merge updates — and B is the fold's own expectation operand edge
+    (the value ``Load``).
+
+    A's ``copy`` is the REFERENCE, not a no-op: an operand edge's two inhabitants are a gmem
+    ``Load`` and an inline node, with no let table and no name-reference arm, so pointing at an
+    already-computed register value means wrapping it in the smallest node that yields one. The
+    rename is load-bearing too — ``p_name`` is a positional temp of the generated twist program,
+    while ``{o}__p`` is derived from the accumulator name and is stable.
+
+    There is no wrapping ``Fold.projection(body=(), operands=(<this>,))`` cone shape around it: an empty cell
+    carries no information (``cone_seam`` bridges no stats either way, both spellings lower to
+    this one stmt, and the lowered CUDA is byte-identical), so the edge IS the one-stmt node."""
+    cone = Fold.projection(body=Body((Assign(name=f"{o}__p", op="copy", args=(p_name,)),)))
+    k = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
+    return Fold.contraction(k_axis=k, a=cone, channels=(Channel(b=v_edge, acc=f"{o}__pv"),))
+
+
+def _split_expect(merge: list[Stmt], o: str, v: str, v_edge: Load) -> list[Stmt]:
+    """Split the generated streaming ``merge`` around the synthesized expectation contraction:
+    the fused ``v·P`` product becomes :func:`_derived_expect_fold`'s output, and the state fold consumes it
+    (``O = O·α + Oblk``; the ``O·α`` base is untouched)."""
+    o_accum = next(s for s in merge if isinstance(s, Accum) and s.name == o)
+    defs = {s.name: s for s in merge if isinstance(s, Assign)}
+    prod = defs[o_accum.value]  # the fused ``v·P`` (multiply(v, P))
+    p_name = next(a for a in prod.args if a != v)  # the softmax weight P (register-resident)
+    pv = _derived_expect_fold(o, p_name, v_edge)
+    out: list[Stmt] = []
+    for s in merge:
+        if s is prod:
+            continue  # the inline v·P is dropped — the synthesized contraction computes it
+        if s is o_accum:
+            out.append(pv)
+            out.append(replace(o_accum, value=f"{o}__pv"))
+            continue
+        out.append(s)
+    return out
+
+
+def _composes_state(inner, names: tuple[str, ...], ops) -> bool:
+    """``inner`` carries EXACTLY the outer fold's accumulator state — the identity-lift
+    reassociation's precondition (split-K): a contraction whose (additive by
+    construction) channel accumulators are the names and whose outer ⊕ is componentwise
+    ``add``."""
+    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+
+    return is_contraction(inner) and tuple(inner.defines()) == names and ops == (ElementwiseImpl("add"),) * len(names)
+
+
+def _operand_binding(fold: Fold) -> dict:
+    """The bound-name → operand-edge map (positional binding, one lift param per operand RESULT
+    COMPONENT — a product edge binds every component to the same edge)."""
+    out: dict = {}
+    for e in fold.operands:
+        for n in _operand_result_names(e):
+            out[n] = e
+    return out
+
+
+def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
+    """The DERIVED blocked evaluation of a λ-spelled TWISTED fold: the INLINE-NODE operand edges
+    at the head in operand order (flash's ``Σ_dd Q·K`` score, ahead of the lift body), the lift
+    body (the scale / mask stmts), then the generated streaming merge
+    with each Load-bound EXPECTATION operand split out as a synthesized contraction
+    (:func:`_split_expect` — flash's PV). Deterministic from the stored params only; the operand
+    edges consumed here are excluded from the generic first-use splice
+    (:meth:`Fold._splice_edges`)."""
+    from emmy.compiler.ir.pure.carrier import exp_merge  # noqa: PLC0415
+
+    lam = fold.lift
+    names = tuple(fold.combine.results)
+    terms = tuple(lam.results)
+    merge = list(exp_merge(names, terms, key=names[0]))
+    by_param = _operand_binding(fold)
+    for i, (nm, term) in enumerate(zip(names, terms, strict=True)):
+        if i == 0 or not isinstance(term, str):
+            continue  # the pivot / a literal denominator — only EXPECTATION components split
+        edge = by_param.get(term)
+        if isinstance(edge, Load):
+            merge = _split_expect(merge, nm, term, edge)
+    head = tuple(e for e in fold.operands if isinstance(e, Fold))
+    return (*head, *lam.body, *merge)
+
+
+def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
+    """The DERIVED serial step of a λ-spelled fold — ``s′ = combine(s, lift(k))``, the combine
+    specialized at the singleton state the lift produces. For a DEGENERATE (componentwise)
+    monoid that specialization IS the ``Accum`` form — ``sᵢ = ⊕ᵢ(sᵢ, liftᵢ)`` — and each
+    component's ``Accum`` lands immediately after the lift stmt that defines its value (a
+    literal / param component falls to the tail), exactly where the dissolved fold sat, so the
+    derived loop is byte-identical to the historical spelling. A TWISTED (exp-family) monoid
+    specializes through the family's own generator (``exp_merge`` — the streaming fold IS
+    combine-at-the-singleton with the ψ-rescale simplification applied, temps renumbered by the
+    same deterministic emitter that produced the stored combine), landing after the lift body —
+    exactly where recognition's dissolved merge sat; a twisted fold with operand edges derives
+    the full blocked evaluation (:func:`_twisted_derived_step` — flash). Deterministic from the
+    stored params only — kernel identity (``Op.cache_key``) depends on nothing else."""
+    lam = fold.lift
+    names = fold.combine.results
+    ops = component_ops(fold.combine)
+    if ops is None:  # the twisted (exp-family) serial step — the derived state's channels
+        # carry the singleton terms (the lift results), so the generated streaming merge is the
+        # singleton specialization of the stored combine, names included.
+        return fold._derived_twisted
+    if (
+        not len(lam.body)
+        and tuple(lam.results) == tuple(names)
+        and len(fold.operands) == 1
+        and _composes_state(fold.operands[0], tuple(names), ops)
+    ):
+        # The reassociation COMPOSITION (split-K's outer reduce): an IDENTITY lift over one
+        # inline fold operand sharing the outer's exact accumulator state. Combine at that
+        # singleton is the shared-accumulator simplification (a ×1 fold): the derived step is
+        # the sliced fold in place — its own ``Accum``\\ s carry across both loops — with NO
+        # outer folds.
+        return (fold.operands[0],)
+    accums = tuple(Accum(name=names[i], value=str(lam.results[i]), op=ops[i], axes=(fold.axis.name,)) for i in range(len(names)))
+    after: dict[str, list[int]] = {}
+    for i, r in enumerate(lam.results):
+        if isinstance(r, str):
+            after.setdefault(r, []).append(i)
+    out: list[Stmt] = []
+    placed: set[int] = set()
+    for s in lam.body:
+        out.append(s)
+        for d in s.defines():
+            for i in after.get(d, ()):
+                out.append(accums[i])
+                placed.add(i)
+    out.extend(accums[i] for i in range(len(accums)) if i not in placed)
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class Fold:
+    """A scheduled reduce — the typed successor of the bare annotated reduce
+    ``Loop`` (``ir/pure/algebra``). It splits the reduce's **algebra** (the loop-carried
+    flat ⊕ — degenerate/componentwise for a plain
+    ``sum`` / ``max`` / ``mean``, twisted (exp-family) for online-softmax / flash) from its **structure**
+    (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
+    (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
+    never stored. The fold ``Loop`` is **synthesized on
+    demand** (:attr:`loop`), never stored — so the same node tiles under any
+    :class:`~emmy.compiler.ir.schedule.ReducePlan`, which is not a field here: the reduce
+    partition is a SLICE in ``TileOp.schedule``, read through ``ops.Sched``.
+
+    A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Fold``
+    (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
+    flash's ``Σ Q·K`` score at the head of its kv step — spells it ONE way: the node sits in
+    ``step`` and :func:`_flatten_nodes` flattens it in place. There is no second ``source`` edge.
+
+    It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid ``Write``
+    is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is the ``source`` of a wrapping
+    :class:`Fold` whose body IS that projection. Like every structural node it IS a ``Stmt`` — that is
+    what lets a composed step occupy a statement position in another node's body;
+    :meth:`lower` flattens it to the synthesized loop (``[loop]``), so ``Op.cache_key`` and the
+    ``_factor._tile_reduce_axis`` expander stay byte-identical to the bare-loop form.
+
+    The reduce PARTITION (:class:`ReducePlan` — GRID split / BLOCK coop / REG ILP) is the schedule's,
+    not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
+    ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical whichever partition the fork
+    picked. See the NO-schedule-fields note on ``operands`` below."""
+
+    pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
+
+    # The reduce axis — ``None`` is the ZERO-AXIS node (what zero-axis ``Fold`` was): no iteration, no monoid,
+    # its ``lift`` the per-cell projection. The BILINEAR reading is a READING of this one
+    # stored kind (the derived accessors below), never separate storage.
+    axis: Axis | None = None
+    unroll: bool = False
+    # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
+    # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
+    # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
+    operands: tuple = ()
+    # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
+    # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
+    # across the whole schedule search (a fork is a different map, never a rebuilt tree).
+    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_split_reduce``
+    # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
+    # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
+    # split parentage uses, read by the realizer and the mask machinery alike.
+    #
+    # ---- the λ-foldMap spelling — the fold's storage: a PURE ``lift`` ``λ(k, v₁…vₙ) → S``
+    # (params: the iteration var first, then one per operand edge, bound POSITIONALLY) plus the
+    # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
+    # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
+    # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
+    lift: Lambda = field(kw_only=True)
+    init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
+    combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.init, tuple):
+            object.__setattr__(self, "init", tuple(self.init))
+        if self.axis is None:
+            # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
+            # positional binding — one lift param per operand RESULT COMPONENT, no leading
+            # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
+            assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
+            bound = tuple(n for e in self.operands for n in _operand_result_names(e))
+            assert tuple(self.lift.params) == bound, f"lift params {self.lift.params} must bind the operands {bound} positionally"
+            return
+        # Formation validates the positional binding and the S × S → S arity; the ``carrier``
+        # annotation is a DERIVED read (:attr:`carrier`), never a second stored spelling.
+        n = len(self.init)
+        if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
+            raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
+        lam = self.lift
+        assert lam.params[:1] == (self.axis.name,), f"lift param 0 must be the iteration var {self.axis.name!r}: {lam.params}"
+        # One lift param per operand RESULT COMPONENT (a product edge — split-K's sliced
+        # multi-channel fold — binds every component), positionally.
+        bound = tuple(n for e in self.operands for n in _operand_result_names(e))
+        assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
+        assert len(lam.results) == n, "one lift result per monoid component"
+        if component_ops(self.combine) is not None:
+            return  # DEGENERATE: the componentwise family — nothing further to validate
+        # TWISTED: the family is selected STRUCTURALLY, never stored — the stored combine
+        # must BE the exp/LSE generator's program over these state names (recognition built it
+        # exactly there; a foreign twisted combine has no derivation yet and is rejected loudly).
+        # The state-component ROLE decision is shape-derived off the lift's injected singleton,
+        # no annotation: the pivot is component 0 (its injected term the score), a literal-1
+        # injection is a denominator, a value injection an expectation.
+        from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
+
+        names = self.combine.results
+        other = tuple(f"{nm}__o" for nm in names)
+        expected = exp_combine_states(names, other)
+        assert self.combine.params == names + other and tuple(self.combine.body) == tuple(expected), (
+            "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
+        )
+        assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
+
+    @property
+    def role(self) -> AxisRole:
+        """The fold's :class:`AxisRole`, DERIVED from the stored params — never stored:
+
+        - ``FREE`` iff there is no axis (the zero-axis node — a pure pointwise cell or the
+          projection over a source node; what zero-axis ``Fold`` was).
+        - ``TWISTED`` iff the stored combine's twist family is non-degenerate (``exp`` — online
+          softmax / flash).
+        - ``CONTRACTION`` iff the bilinear reading holds (:attr:`_contraction` — a ``⊗`` lift
+          distributed over ≥ 2 operand edges under a componentwise-additive ⊕). Split-K's outer
+          reduce is NOT one: it tiles nothing and has no operand pair, so it derives ``PLANAR``
+          like any other additive fold and :attr:`composed` — a structural probe, not a role —
+          stays the one read that recognizes the reassociation.
+        - ``PLANAR`` otherwise — including an unbindable contraction (matvec-shaped 1-D output,
+          no ``(m, n)`` loads, the zero-legal-rows fallback): recognition keeps its loads inline
+          in the lift instead of building the node, so there are no edges for the bilinear
+          reading to bind and the fold takes the reduce tiers at schedule dispatch. The demotion
+          is a FORMATION fact and there is no role rewrite anywhere: recognition keeps an
+          unbindable contraction's loads inline in the lift, so there are no edges to bind."""
+        if self.axis is None:
+            return AxisRole.FREE
+        if component_ops(self.combine) is None:
+            return AxisRole.TWISTED
+        if self._contraction is not None:
+            return AxisRole.CONTRACTION  # the bilinear cell itself — the node kind that was
+        return AxisRole.PLANAR
+
+    @cached_property
+    def _contraction(self) -> tuple[object, tuple[Channel, ...]] | None:
+        """The BILINEAR reading — ``(a, channels)`` — or ``None`` when this fold is not a
+        contraction. This is the derived successor of the retired ``Contraction`` kind's ``a`` /
+        ``channels`` fields: the shape it recognizes is exactly the
+        one :meth:`Fold.contraction` builds, so ``a`` / ``channels`` / ``b_trans`` read back
+        off any fold recognition stored as a contraction.
+
+        The A/B split rides the OPERAND ORDER — ``(b₀, a, b₁…)`` — not the accesses. That is not
+        a shortcut: node-locally the two are symmetric (matmul's ``A[m,k]`` and ``B[k,n]`` both
+        carry ``k`` plus one free axis), and telling M from N needs the PLACEMENT, which is a
+        caller fact living on the ``TileOp`` and deliberately absent here. Order is what
+        ``as_fold`` always used and what the byte-identity gate pins."""
+        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+
+        if self.axis is None or len(self.operands) < 2 or self.combine is None:
+            return None
+        ops = component_ops(self.combine)
+        n = len(self.combine.results)
+        if ops != (ElementwiseImpl("add"),) * n or len(self.operands) != n + 1:
+            return None
+        body = tuple(self.lift.body)
+        if len(body) != n or tuple(self.lift.results) != tuple(f"{r}__v" for r in self.combine.results):
+            return None
+        names = [operand_name(e) for e in self.operands]
+        b0, a, rest = names[0], names[1], names[2:]
+        want = [(b0, a), *((a, b) for b in rest)]
+        for stmt, (x, y) in zip(body, want, strict=True):
+            if not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("multiply") or stmt.args != (x, y):
+                return None
+        chans = tuple(Channel(b=e, acc=acc) for e, acc in zip((self.operands[0], *self.operands[2:]), self.combine.results, strict=True))
+        return self.operands[1], chans
+
+    @property
+    def composed(self) -> Fold | None:
+        """The single sliced contraction this outer reduce COMPOSES (split-K's
+        reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
+        λ spelling (one inline node operand carrying the outer's exact accumulator state). The ONE
+        read ``030_split_reduce`` and the derived :attr:`role` share."""
+        if len(self.lift.body) or len(self.operands) != 1:
+            return None
+        inner = self.operands[0]
+        return inner if is_contraction(inner) else None
+
+    # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
+    # collapse); every field they carried reads back off the one stored term here, so their old
+    # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
+    @property
+    def body(self) -> Body:
+        """The projection body — ``lift.body`` (the stmts live on the lambda)."""
+        return self.lift.body
+
+    @property
+    def a(self):
+        """The shared M-resident operand edge of the bilinear reading (``operands[1]``)."""
+        v = self._contraction
+        assert v is not None, f"not a contraction fold (role={self.role.value}) — no `a` reading"
+        return v[0]
+
+    @property
+    def channels(self) -> tuple[Channel, ...]:
+        """The product channels ``(bᵢ, accᵢ)`` of the bilinear reading — arity 1 is a plain
+        matmul, arity N the fused gate⊗up edge over ONE shared ``a``."""
+        v = self._contraction
+        assert v is not None, f"not a contraction fold (role={self.role.value}) — no `channels` reading"
+        return v[1]
+
+    @property
+    def b(self):
+        """The primary channel's streamed operand edge (``channels[0].b``)."""
+        return self.channels[0].b
+
+    @property
+    def acc(self) -> str:
+        """The primary channel's fold accumulator (``channels[0].acc``)."""
+        return self.channels[0].acc
+
+    @property
+    def b_trans(self) -> bool:
+        """B stored N×K (the K axis last in its index) vs the canonical ``B[k, n]`` — a gmem
+        LAYOUT question, so it is meaningful only for a materialized B; a computed B answers
+        ``False`` (every tier that would act on the layout gates on ``isinstance(c.b, Load)``)."""
+        return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
+
+    @classmethod
+    def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...]) -> Fold:
+        """A BILINEAR fold — the matmul cell (what the retired ``Contraction`` kind named). Unlike
+        :meth:`projection` this constructor GENERATES algebra: operands `(b₀, a, b₁…)`, the lift
+        ``λ(k, b, a, b₂…). (b·a, a·b₂, …)`` and the componentwise-additive ⊕ over the channel
+        accumulators. That generated shape is exactly what :attr:`_contraction` reads back, so
+        ``a`` / ``channels`` / ``b_trans`` and the ``CONTRACTION`` role all follow from it.
+
+        Arity N ≥ 2 is the fused sibling edge (gate⊗up): N matrices over ONE shared A, scheduled
+        and lowered as one unit. Sharing is the arity — the shared edge simply appears in every
+        lift term; there is no privileged slot and no let table.
+
+        Placement and schedule live nowhere here: the ``(m, n)`` axes ride ``TileOp.place`` and the
+        slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
+        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+
+        mul = ElementwiseImpl("multiply")
+        channels = tuple(channels)
+        prim = channels[0]
+        operands = (prim.b, a, *(ch.b for ch in channels[1:]))
+        a_name = operand_name(a)
+        body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name))]
+        body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b))) for ch in channels[1:]]
+        accs = tuple(ch.acc for ch in channels)
+        lift = Lambda(
+            params=(k_axis.name, *(operand_name(e) for e in operands)),
+            body=Body(tuple(body)),
+            results=tuple(f"{acc}__v" for acc in accs),
+        )
+        init, combine = M(*(["add"] * len(accs)), names=accs)
+        return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
+
+    @classmethod
+    def projection(cls, operands: tuple = (), *, body=None) -> Fold:
+        """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
+        No axis and no monoid: the synthesized binder IS the ``lift`` and IS the per-cell compute,
+        so softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over
+        the reducing fold rather than a wrapper kind around it.
+
+        ``operands`` bind POSITIONALLY, one lift param per RESULT COMPONENT — a product operand
+        binds every channel accumulator, so the geglu combine's second read is a bound param and
+        never a free name. ``body`` is the raw-loop-IR arm, where :func:`_loop_ir_fn` tolerates an
+        impure body; its params come from the operands' components and its results from the last
+        def. A caller holding a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly —
+        this builder exists for the body form, which is the only one anything spells."""
+        operands = tuple(operands)
+        b = Body.coerce(body) if body is not None else Body()
+        params = tuple(n for s in operands for n in _operand_result_names(s))
+        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, _map_results(b) or params[:1]))
+
+    def external_reads(self) -> tuple[str, ...]:
+        """Every input buffer read anywhere under this node's operand edges (deep — an inline
+        cone may nest its own loads)."""
+
+        def loads(stmts):
+            for s in stmts:
+                if isinstance(s, Load):
+                    yield s.input
+                for b in s.nested():
+                    yield from loads(b)
+
+        return tuple(dict.fromkeys(nm for e in self.operands for nm in loads(operand_body(e))))
+
+    def demoted(self) -> Fold:
+        """The operand hoist UNDONE — every edge moves INLINE into the lift body as a stmt (a
+        materialized ``Load`` verbatim, a computed node as the structural NODE — a term is a value,
+        legal in a pure ``Lambda``), each placed before the first read of its bound name (ties in
+        operand order — the splice rule). With no operand edges the bilinear reading declines, so
+        the fold DERIVES ``PLANAR`` and takes the reduce tiers at dispatch; :func:`_flatten_nodes`
+        flattens the inline node at lowering, so the derived loop is byte-identical to the hoisted
+        spelling's (the demotion is a spelling change, never a semantics change).
+
+        This is the COLLAPSE view: it REMOVES the edge's schedule site, which is why it is a
+        derived view rather than a value (``passes/lowering/tile/_schedule._views`` — the per-cell
+        view a scalar-tier row decodes through)."""
+        assert self.axis is not None, "demoted: an iterating fold only — the lift's leading param is the iteration var"
+        lam = self.lift
+        body = list(lam.body)
+        for edge in reversed(self.operands):
+            name = operand_name(edge)
+            idx = next((i for i, st in enumerate(body) if name in deep_reads([st])), len(body))
+            body.insert(idx, edge)
+        lift = Lambda(params=lam.params[:1], body=Body(tuple(body)), results=lam.results)
+        return Fold(axis=self.axis, unroll=self.unroll, lift=lift, init=self.init, combine=self.combine)
+
+    @cached_property
+    def _derived_twisted(self) -> tuple[Stmt, ...]:
+        """The MEMOIZED derived blocked evaluation of a λ-spelled twisted fold — cached so the
+        synthesized expectation contraction (flash's PV) has ONE identity per stored fold: the
+        path walker's derived sites, the schedule accessors (``Sched.tile_of``) and every
+        realizer read the same node object (site matching is by identity)."""
+        return _twisted_derived_step(self)
+
+    def step_stmts(self) -> tuple[Stmt, ...]:
+        """The DERIVED per-cell stmt sequence (:func:`_fold_derived_step`): the lift body with
+        each component's ``Accum`` — the combine specialized at the singleton; the full blocked
+        evaluation for a twisted fold with operand edges (flash's derived head is its score
+        operand edge, its PV the memoized synthesized contraction); the embedded operand for
+        the identity-lift composition."""
+        return _fold_derived_step(self)
+
+    def _splice_edges(self) -> tuple:
+        """The operand edges the GENERIC first-use splice places — every edge not already
+        consumed by the derived step: a λ-spelled TWISTED fold's derived blocked evaluation
+        embeds its inline-node edges at the head and its Load-bound expectation edges inside
+        the synthesized contraction (:func:`_twisted_derived_step`); the identity-lift
+        composition (split-K) embeds its one fold operand verbatim. None of those splice
+        twice."""
+        consumed = {id(s) for s in self.step_stmts()}
+        if component_ops(self.combine) is None:
+            by_param = _operand_binding(self)
+            for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
+                if isinstance(term, str):
+                    edge = by_param.get(term)
+                    if isinstance(edge, Load):
+                        consumed.add(id(edge))
+        return tuple(e for e in self.operands if id(e) not in consumed)
+
+    @property
+    def loop(self) -> Loop:
+        """The synthesized annotated reduce ``Loop`` — reconstructed from the params: byte-identical
+        to the loop :meth:`from_loop` captured (the λ spelling's construction gate guarantees it;
+        a retained ``step`` reproduces trivially). Any **nested structural node inside the
+        step** — any nested :class:`Fold` — is flattened to its own loop nest in place by the shared :func:`_flatten_nodes`
+        node-walk (so flash's kv loop holds the head ``Σ Q·K`` score contraction loop and the embedded
+        ``Σ_j P·V`` PV contraction loop, and split-K's kslice contraction its own nest — exactly the
+        loop-in-body form the scalar tier expands): ONE structural rule for a reduce whose per-step
+        partial composes other nodes. Operand edges splice in ahead of the first read of their
+        bound param (:func:`splice_operands` — positional binding names the edges, ties in
+        operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
+        that carried them in its body."""
+        stmts = splice_operands(self._splice_edges(), _flatten_nodes(self.step_stmts()))
+        return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role)
+
+    def spliced_step(self) -> tuple[Stmt, ...]:
+        """The (derived) step with every operand edge's body spliced before its first use — the
+        stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
+        :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
+        consumed (a twisted fold's head node / expectation Load) never splice twice."""
+        return splice_operands(self._splice_edges(), self.step_stmts())
+
+    @property
+    def out(self) -> str:
+        """The bound output name — the carried state's primary component (the combine's first
+        result; a bare reduce's grid ``Write`` is glue). At zero axes there is no carried state,
+        so it is the projection's primary result (what a projection's ``out`` read)."""
+        if self.axis is None:
+            r = self.lift.results
+            assert r and isinstance(r[0], str), f"zero-axis Fold has no named result: {r!r}"
+            return r[0]
+        return self.combine.results[0]
+
+    def lower(self) -> list[Stmt]:
+        """Flatten to the loop-IR body the materializer expands — the synthesized reduce ``Loop``,
+        or, at zero axes, the operand nests followed by the projection body (a ``Load`` edge is
+        the CUT TERMINAL: the seam value arrives materialized, so the "nest" is the load itself).
+
+        The ONE lowering spelling: every caller that consumes a body calls this method (there is no
+        free ``ops.lower`` wrapper duplicating it), which is also what keeps this module free of any
+        import back into :mod:`~emmy.compiler.ir.tile.ops`."""
+        if self.axis is None:
+            prefix = [s for e in self.operands for s in operand_body(e)]
+            return [*prefix, *self.body]
+        return [self.loop]
+
+    # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
+    # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its
+    # stmt siblings without dispatching on which they are. Nothing here is statement behaviour —
+    # a term has no scope to seed, no effect to order and no ``render``; it becomes statements
+    # once, through :meth:`lower`. ---------- #
+    def defines(self) -> tuple[str, ...]:
+        """The names this node BINDS. The block-stmt default for a plain fold — its names are
+        bound by the derived serial step's ``Accum``\\ s, exactly as for a plain reduce ``Loop``
+        — but the bilinear reading binds its channel accumulators directly, which is what the
+        retired ``Contraction`` kind did and what ``_operand_result_names`` reads."""
+        return tuple(ch.acc for ch in self.channels) if self._contraction is not None else ()
+
+    def nested(self) -> tuple[Body, ...]:
+        """The one nested body is the lift's — EXCEPT under the bilinear reading, whose lift is
+        pure algebra reached through the operand edges (the retired ``Contraction`` kind had no nested
+        body, and generic walks must keep seeing none, or a contraction's multiply args start
+        reading as body deps)."""
+        return () if self._contraction is not None else (self.lift.body,)
+
+    def with_bodies(self, bodies: tuple[Body, ...]) -> Fold:
+        if not bodies:
+            return self
+        (partial,) = bodies
+        return replace(self, lift=_loop_ir_fn(self.lift.params, Body.coerce(partial), self.lift.results))
+
+    def rewrite(self, rename_ssa, sigma=None, axis_fn=None):
+        """α-rename this term — the TERM operation that happens to share the stmt vocabulary's
+        spelling, so the shared canonicalizers (``rename_ssa_sequential`` and friends) reach a
+        node and its stmt siblings through one call. Dispatches to the registered handler at the
+        bottom of this module, which threads the rename through the operand edges, the lift and
+        the combine in lockstep."""
+        from emmy.compiler.ir.sigma import Sigma  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.base import _axis_identity  # noqa: PLC0415
+
+        return _rewrite(self, rename_ssa, Sigma.IDENTITY if sigma is None else sigma, _axis_identity if axis_fn is None else axis_fn)
+
+    def structural_key(self) -> str:
+        """The α-invariant identity digest of this term — the
+        :class:`~emmy.compiler.structural.Structural` implementation, computed BOTTOM-UP from
+        the children's cached keys (``tile/_key.py``). The term is immutable across the whole
+        schedule search, so the per-node memo is sound and a shared subtree keys once."""
+        from emmy.compiler.ir.tile._key import structural_key  # noqa: PLC0415
+
+        return structural_key(self)
+
+    def deps(self) -> tuple[str, ...]:
+        """No SSA read at this level: everything the term consumes is bound by its own ``lift``
+        params, whose values arrive through the ``operands`` edges. The reads a deep walk wants are
+        the children's (:func:`deep_reads` recurses through :meth:`nested` and the edges)."""
+        return ()
+
+    def exprs(self):
+        """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``
+        edges and the stmts inside its lift, which the walks reach as children."""
+        return ()
+
+    def binds_axes(self) -> frozenset[str]:
+        """The iteration var this term binds (empty at zero axes) — what scopes an axis-name read
+        so a nested fold's ``k`` shadows an enclosing one of the same name."""
+        return frozenset() if self.axis is None else frozenset({self.axis.name})
+
+
+def is_contraction(x) -> bool:
+    """The BILINEAR reading of ``x`` — the predicate that replaced ``isinstance(_, Contraction)``
+    when the kind dissolved. A predicate, not a kind: it cannot be constructed, subclassed or
+    annotated, and it answers ``False`` for a non-node (a ``Load`` edge, a plain stmt in a step
+    stream) exactly as a type test would. Prefer this over a bare
+    ``x.role is AxisRole.CONTRACTION`` anywhere ``x`` is not already known to be a ``Fold``."""
+    return isinstance(x, Fold) and x._contraction is not None
+
+
+def deep_defines(s: Stmt) -> set[str]:
+    """Every SSA name defined in ``s`` (deep — a stat reduce ``Loop``'s ``Accum`` counts)."""
+    out = set(s.defines())
+    for b in s.nested():
+        for child in b:
+            out |= deep_defines(child)
+    return out
+
+
+def deep_reads(stmts: list[Stmt]) -> set[str]:
+    """Every SSA name read anywhere in ``stmts`` (deep)."""
+    out: set[str] = set()
+    for s in stmts:
+        out |= set(s.deps())
+        for b in s.nested():
+            out |= deep_reads(list(b))
+    return out
+
+
+def stmt_axis_names(stmts) -> set[str]:
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
+    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
+    the same ``nested()`` walk as any block stmt's."""
+    out: set[str] = set()
+    for s in stmts:
+        ax = getattr(s, "axis", None)
+        if ax is not None and hasattr(ax, "name"):
+            out.add(ax.name)
+        for b in s.nested():
+            out |= stmt_axis_names(b)
+    return out
+
+
+def operand_body(op) -> tuple[Stmt, ...]:
+    """An operand edge's producing stmts — the singleton gmem ``Load``, or the inline node
+    flattened (:meth:`Fold.lower`). A free function, not a per-role ``a_body`` / ``b_body`` pair on
+    the node: an edge is an edge, and which ROLE it plays (A vs B) is the caller's reading of the
+    operand order, not a property of the edge itself."""
+    return (op,) if isinstance(op, Load) else tuple(op.lower())
+
+
+def operand_name(op) -> str:
+    """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def. Free
+    for the same reason as :func:`operand_body`."""
+    return op.defines()[-1] if isinstance(op, Load) else op.out
+
+
+def _operand_result_names(op) -> tuple[str, ...]:
+    """An operand edge's bound RESULT names — one per produced component. A single-valued edge
+    (a gmem ``Load``) is the 1-tuple of :func:`operand_name`; a product fold / multi-channel
+    node exposes EVERY component, so a wrapping zero-axis fold's synthesized params bind one name per
+    component (the 1q params-flattening fix: the geglu combine reads BOTH ``acc_g`` and
+    ``acc_u`` from one source — before the flattening the second component reached the lambda
+    as a free name)."""
+    if isinstance(op, Load):
+        return (op.defines()[-1],)
+    if isinstance(op, Fold):
+        if op.axis is None:
+            # The zero-axis reading: the projection's NAMED results (a store-only tail names
+            # none, and falls back to its primary bound value).
+            named = tuple(r for r in op.lift.results if isinstance(r, str))
+            return named if named else (op.out,)
+        return tuple(op.combine.results)
+    return (operand_name(op),)
+
+
+def refs_axis(s: Stmt, name: str) -> bool:
+    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
+    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
+    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
+    the per-cell body it predicates."""
+    if any(name in e.free_vars() for e in s.exprs()):
+        return True
+    return any(refs_axis(child, name) for b in s.nested() for child in b)
+
+
+def edge_refs_axis(edge, name: str) -> bool:
+    """Whether an operand EDGE's producing stmts index the ENCLOSING axis ``name`` — the K-SEAM
+    test, applied to an edge instead of a stmt. A node's own operands hang off ``operands``, not
+    ``nested()``, so the question is asked of its LOWERING. The cone seam (which of a cone's edges
+    runs once per tile row and which per cell) and the site walk (which of them a schedule slice
+    can address) are the same question, so they share this one read.
+
+    SCOPED: a nested loop that RE-BINDS the name shadows it, and indices under it name that inner
+    axis, not the enclosing one. Axis names collide across a tree by design (the codec spells
+    ``REDUCE@a.fold.k`` exactly for a cone statistic whose axis name matches the contraction's), so
+    an unscoped scan would read a row-invariant statistic as k-varying."""
+
+    def refs(s: Stmt) -> bool:
+        if name in s.binds_axes():  # a node re-binding the name shadows it — ``Fold.binds_axes`` is its iteration var
+            return False
+        if any(name in e.free_vars() for e in s.exprs()):
+            return True
+        return any(refs(child) for b in s.nested() for child in b)
+
+    return any(refs(s) for s in operand_body(edge))
+
+
+@dataclass(frozen=True)
+class Channel:
+    """One product channel of a contraction — the streamed K×N operand edge ``b`` plus the
+    additive fold accumulator ``acc`` that channel produces. A plain matmul is one channel; the
+    fused gate⊗up MLP edge is two channels over the node's single shared ``a`` (sharing is arity,
+    not naming — the product-carrier contraction outputs a tuple)."""
+
+    b: Load | Fold  # the streamed operand edge — MATERIALIZED or COMPUTED
+    acc: str  # this channel's fold accumulator
+
+
+def _loop_ir_fn(params, body, results) -> Lambda:
+    """The RAW-LOOP-IR formation arm — the ONE impure ``lift`` builder left after 1q, for the
+    kernels that are loop IR rather than recognized algebra: ``010_recognize``'s un-recognized
+    flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (the
+    annotated cross-partition merge ``Loop``), the prologue'd split partial, and
+    the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
+    strict :class:`Lambda` formation — every ROOT STORE left the term (``TileOp.stores``),
+    so impurity here is only iteration/seed structure, never an effect on the output. Reached
+    exclusively through zero-axis ``Fold``'s legacy ``body=`` construction / ``with_body`` / the rewrite
+    handler — never build one by hand; the escape spelling dies when recognition becomes total
+    (the "ONE algorithmic algebra recognizer" direction)."""
+    body = Body.coerce(body)
+    if all(s.pure for s in body):
+        return Lambda(params=tuple(params), body=body, results=tuple(results))
+    lam = object.__new__(Lambda)
+    object.__setattr__(lam, "params", tuple(params))
+    object.__setattr__(lam, "body", body)
+    object.__setattr__(lam, "results", tuple(results))
+    return lam
+
+
+def _map_results(body: Body) -> tuple[str, ...]:
+    """The synthesized ``results`` of a legacy ``Fold.projection(body=…)`` construction — the last defining
+    stmt's name (the last-def convention, run ONCE at construction instead of on every read).
+    Empty when nothing in the body defines a name (a store-only projection tail)."""
+    for s in reversed(body):
+        d = s.defines()
+        if d:
+            return (d[-1],)
+    return ()
+
+
+# ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
+# stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
+# INLINE node operand dispatches back through the same registry, so a stored computed operand
+# (the cone, flash's ``P``) canonicalizes like any other subtree.
+from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
+
+
+@_rewrite.register
+def _(s: Fold, rename, sigma, axis_fn):
+    # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
+    # singledispatch keys on the stored type, and there is now only one). Every operand edge
+    # dispatches back through the registry; the fold renames its lift / monoid in lockstep
+    # (params track the operand names positionally, the combine's results ARE the accumulator
+    # names). At zero axes there is no iteration var to rename and no monoid to thread.
+    operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
+    axis = axis_fn(s.axis) if s.axis is not None else None
+    lead = (axis.name,) if axis is not None else ()
+    lift = _loop_ir_fn(
+        (*lead, *(rename(p) for p in s.lift.params[len(lead) :])),
+        Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
+        tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
+    )
+    combine = rename_combine(s.combine, rename) if s.combine is not None else None
+    return replace(s, axis=axis, operands=operands, lift=lift, combine=combine)
+
+
+__all__ = [
+    "Channel",
+    "Fold",
+    "deep_defines",
+    "deep_reads",
+    "edge_refs_axis",
+    "is_contraction",
+    "operand_body",
+    "operand_name",
+    "refs_axis",
+    "splice_operands",
+    "stmt_axis_names",
+]

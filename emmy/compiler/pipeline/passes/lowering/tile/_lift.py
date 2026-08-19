@@ -16,15 +16,10 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import (
-    Channel,
-    Fold,
-    Placement,
-    TileOp,
-    split_effects,
-)
+from emmy.compiler.ir.tile import Placement, TileOp, split_effects
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop

@@ -248,7 +248,7 @@ How to comply:
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side decode cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
-  report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
+  report the first thing the transform *fundamentally cannot do*, like `ir/pure/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
   instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
@@ -446,7 +446,7 @@ failing several passes later:
 results the element's SINGLETON state
 (softmax's is `(x, 1)` — ι spelled in the lift, a literal component a bare float) — plus the TRUE monoid's flat
 `(init, combine)` fields (1r: the `Monoid` wrapper class is dissolved — `M(op…)` survives as the free componentwise
-pair constructor in `ir/stmt/algebra`, `component_ops`/`degenerate` as free shape-readers on the combine, the rename
+pair constructor in `ir/pure/algebra`, `component_ops`/`degenerate` as free shape-readers on the combine, the rename
 lockstep as `rename_combine`, the S×S→S arity check in `Fold.__post_init__`) whose combine threads the fold's REAL
 accumulator names (its results). Everything else is DERIVED, never stored: the streaming step is combine specialized
 at the singleton (the `Accum` forms
@@ -499,8 +499,8 @@ output-sweep coordinate stays bound by its loop while only per-cell SSA values g
 the cell suffix. If enumeration deliberately leaves a term unmapped because no schedule row is legal, materialization
 maps its free axes directly to the scalar grid before lowering; the valid guardrail term therefore remains executable.
 The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
-that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
-un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
+that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — the annotated
+cross-partition merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
 composed contraction tail), formed through the one `Fold.projection`-private `_loop_ir_fn` arm and dying with the
 recognizer's growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
 edge-iff-closed.

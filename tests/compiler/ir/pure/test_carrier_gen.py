@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.pure import carrier as _carrier
+from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_states, exp_merge
 from emmy.compiler.ir.stmt import Accum, Assign
-from emmy.compiler.ir.stmt import carrier as _carrier
-from emmy.compiler.ir.stmt.carrier import UnstableCarrierError, exp_combine_states, exp_merge
 
 
 def _exp_family(score, extra, state):

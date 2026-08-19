@@ -27,11 +27,11 @@ geometry."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.pure.fold import Channel, Fold, refs_axis
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile import Channel, Fold, Store
-from emmy.compiler.ir.tile.ir import refs_axis
+from emmy.compiler.ir.tile import Store
 from emmy.compiler.pipeline.pipeline import LoweringError
 
 
@@ -57,7 +57,7 @@ def map_cone(body: list, root: str) -> list | None:
     coordinate-predicated ``Select`` (a pure MAP cone — a reduce-bearing cone, e.g. an rmsnorm
     scale, is not compute-fillable per cell). A ``Select`` is a pure value binding of the cell's
     own coordinates (an attention mask's additive term), so it fills per cell like any other
-    pointwise stmt; its coordinates decide the K seam through :func:`~..ir.tile.ir.refs_axis`."""
+    pointwise stmt; its coordinates decide the K seam through :func:`~emmy.compiler.ir.pure.fold.refs_axis`."""
     defs: dict[str, Stmt] = {}
     for st in body:
         for d in st.defines():

@@ -14,14 +14,20 @@ softmax reduce. This file pins every tier of it:
   ``softmax·V`` half of SDPA is one contraction over the KV axis and takes the warp/mma tier, the
   staged transports and split-K wherever the target's atoms admit a compute-filled ``a`` edge
   (sm_80+; Volta's atoms are materialized-edges-only). The score contraction still lands in its own
-  kernel. The TERM for the single-kernel form needs nothing new — a score contraction on the cone's
-  per-cell edge lowers, schedules and runs (``test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice``) —
-  but the fill EVALUATES that edge per slab cell, so the score is computed scalar, and twice (once
-  for the row statistic, once for the weight). Measured on a V100 that fused form is 5× slower than
-  the two-kernel split at S=32/D=16 and far worse as S grows, which is why loop fusion still refuses
-  to nest the score reduce inside the softmax reduce. What closes the gap is RESIDENCE, not algebra:
-  the block's score must stay in C fragments across both consumers (the reference kernel below) —
-  the warp chain (score mma, fragment online-softmax, C->A repack) the flash deletion removed.
+  kernel. RECOGNITION of the single-kernel form is complete: a reduce whose step composes its own
+  producer reads with that producer on an operand edge (``lowering/tile/_fromloop`` — the COMPOSED
+  STEP), the online-softmax pair matches on the two passes' score cones by content, and the sweep
+  binds as one computed-A contraction whose cone reads a COMPUTED score
+  (``test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice``); with the merge allowed,
+  SDPA lowers to ONE kernel and matches torch. What is missing is the REALIZATION: the fill
+  EVALUATES the score edge per slab cell, so it is computed scalar, and twice (once for the row
+  statistic, once for the weight). Measured on a V100 that fused form is 5× slower than the
+  two-kernel split at S=32/D=16 and far worse as S grows, which is why loop fusion still refuses to
+  nest the score reduce inside the softmax reduce (``loop/fusion/_merge._nests_reduce`` — the
+  refusal is REVERSIBILITY: no ``PLACE`` cut puts a two-consumer producer back together). What
+  closes the gap is RESIDENCE, not algebra: the block's score must stay in C fragments across both
+  consumers (the reference kernel below) — the warp chain (score mma, fragment online-softmax,
+  C->A repack) the flash deletion removed.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →
@@ -162,6 +168,46 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
             assert "fmaxf" in srcs and "expf" in srcs, "the kernel set should carry the softmax (max + exp)"
         md = _max_diff(backend, compiled, feed, ref)
         assert md < 1e-4, f"{variant}{cfg}: sdpa vs torch max_diff={md:.6e}"
+
+
+@requires_cuda
+@pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
+def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
+    """SDPA lowers to ONE kernel and matches torch when the merge is allowed.
+
+    Loop fusion refuses to nest the score reduce inside the softmax reduce, and that refusal is a
+    REVERSIBILITY judgement, not a capability one (``loop/fusion/_merge._nests_reduce``: the
+    ``Q·Kᵀ`` producer has two consumers in the merged cell, so splicing duplicates it and no
+    ``PLACE`` cut puts it back). Lifting the refusal here pins the capability behind it — the
+    COMPOSED-STEP reading (``lowering/tile/_fromloop``), the pairing on composed score cones, the
+    computed-A bind over a COMPUTED score, and split-K's σ-reindex of the cone's producer edge —
+    so the recognition path cannot rot while the fill that makes the fused form worth deploying is
+    built. Perf is deliberately not asserted: the fill evaluates the score per slab cell, which is
+    why fusion still refuses (see this module's docstring).
+
+    The configs stay at ``D = 16`` because the other refusal — ``_total_work``'s blowup bound — is
+    real here: in LOOP IR the merged score sits inside the output-column sweep, so its cost counts
+    ``D`` times even though the realized fill computes it once per ``(m, kv)`` slab cell and shares
+    it across the column tile. At ``D = 128`` the bound refuses the merge outright."""
+    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
+
+    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
+    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")  # authoritative: keep the merged tree whole, so the count is not greedy's
+    torch.manual_seed(0)
+    B, H, S, D = cfg
+    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {n: torch.from_numpy(a).cuda() for n, a in feed.items()}
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
+
+    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
+    assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
+    md = _max_diff(backend, compiled, feed, ref)
+    assert md < 4e-3, f"fused sdpa{cfg} vs torch max_diff={md:.6e}"
 
 
 @requires_cuda

@@ -68,7 +68,11 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
     """The flash shape, λ-spelled (step 7 — mirroring ``_flash._flash_op``): the stream fold
     reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
     ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
-    the blocked evaluation, found among ``stream.step_stmts()``."""
+    the blocked evaluation, found among ``stream.step_stmts()``.
+
+    Both are read by AXIS, not by position: the derived step PLACES an inline-node edge at the
+    first read of its bound name, so the score sits after any lift stmt that precedes it (here the
+    ``scale`` ``Load``)."""
     from emmy.compiler.ir.pure import Lambda
     from emmy.compiler.ir.pure.carrier import exp_combine_states
 
@@ -87,7 +91,7 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
         init=(float("-inf"), 0.0, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION)  # the derived PV site
+    pv = next(s for s in stream.step_stmts() if isinstance(s, Fold) and s.axis.name == "pj")  # the derived PV site
     root = Fold.projection(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), operands=(stream,))
     return root, stream, qk, pv
 

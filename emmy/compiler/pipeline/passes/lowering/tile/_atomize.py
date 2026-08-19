@@ -27,7 +27,7 @@ geometry."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.pure.fold import Channel, Fold, refs_axis
+from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names, deep_reads, edge_refs_axis, refs_axis
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
@@ -57,11 +57,24 @@ def map_cone(body: list, root: str) -> list | None:
     coordinate-predicated ``Select`` (a pure MAP cone — a reduce-bearing cone, e.g. an rmsnorm
     scale, is not compute-fillable per cell). A ``Select`` is a pure value binding of the cell's
     own coordinates (an attention mask's additive term), so it fills per cell like any other
-    pointwise stmt; its coordinates decide the K seam through :func:`~emmy.compiler.ir.pure.fold.refs_axis`."""
+    pointwise stmt; its coordinates decide the K seam through :func:`~emmy.compiler.ir.pure.fold.refs_axis`.
+
+    One shape is not a MAP stmt and still belongs: a reduce ``Loop`` the cell READS (attention's
+    per-key score contraction). It enters the cone as a NODE, and :func:`make_cone` hangs it off the
+    cone's operands."""
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop  # noqa: PLC0415 — parser, imported on demand
+
     defs: dict[str, Stmt] = {}
     for st in body:
         for d in st.defines():
             defs[d] = st
+        if isinstance(st, Loop) and st.is_reduce:
+            # A reduce ``Loop`` binds its carried states through the ``Accum``\ s in its body, so
+            # the cone walk has to learn that binding from the body rather than from ``defines``.
+            for a in st.body:
+                if isinstance(a, Accum):
+                    defs[a.name] = st
+    order = {id(st): i for i, st in enumerate(body)}
     need, cone, seen = [root], [], set()
     while need:
         nm = need.pop()
@@ -82,8 +95,19 @@ def map_cone(body: list, root: str) -> list | None:
             cone.append(st)
             need.extend(st.deps())
             continue
+        if isinstance(st, Loop) and st.is_reduce:
+            # A PRODUCER the cone composes (attention's per-key score contraction ``Σ_d Q·K``):
+            # not a pure MAP stmt but a node the cell READS, so it enters the cone as a node and
+            # :func:`make_cone` hangs it off the cone's operands, where the K seam reads it as the
+            # per-cell producer edge. Unreadable as a term ⇒ no cone (the raw-loop escape stands).
+            node = fold_from_loop(st)
+            if node is None:
+                return None
+            order[id(node)] = order[id(st)]  # the node stands in for its loop in body order
+            cone.append(node)
+            need.extend(deep_reads([st]) - {a.name for a in st.body if isinstance(a, Accum)})
+            continue
         return None  # an Accum / Loop in the cone — not a pure MAP producer
-    order = {id(st): i for i, st in enumerate(body)}
     return sorted(cone, key=lambda st: order[id(st)])
 
 
@@ -97,14 +121,28 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     projected reduce, exactly the RMSNorm shape; the k-varying remainder is the cone's ``body``, the
     per-cell normalize. Everything downstream then READS that boundary (``ops.cone_seam``) instead of
     re-scanning stmts: the scheduler sizes the stat smem rows off it, the materializer runs the
-    prologue once per tile row and the body per cell."""
+    prologue once per tile row and the body per cell.
+
+    A producer NODE in ``cell`` is not a stmt of either side: it hangs off the cone's OPERANDS,
+    where ``cone_seam`` splits it by the same K seam — k-varying, so it is the per-cell producer
+    spliced ahead of its first use."""
+    # A PRODUCER NODE the cone composes hangs off the cone's OPERANDS, never its body (a term is
+    # an edge, not a statement of the cell): ``cone_seam`` then splits it by the same K seam it
+    # splits the stmts with — k-varying, so it is the per-cell producer spliced ahead of first use.
+    nodes = tuple(s for s in cell if isinstance(s, Fold))
+    cell = [s for s in cell if not isinstance(s, Fold)]
+    # A stmt READING a k-varying producer varies with k as surely as one that indexes it: the K
+    # seam is a dependency question, not only an index question. Without this, attention's
+    # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
+    # row-invariant prologue, where the per-cell score it reads is not yet defined.
+    varying = {nm for n in nodes if edge_refs_axis(n, k_name) for nm in _operand_result_names(n)}
     pro: list = []
     rest = list(cell)
-    while rest and not refs_axis(rest[0], k_name):
+    while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
         pro.append(rest.pop(0))
     prologue = Fold.projection(body=Body((*sweep, *pro)), operands=() if stat is None else (stat,))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
-    return Fold.projection(body=Body(tuple(rest)), operands=src)
+    return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
 
 
 def _hoist_k_invariant_factors(body: list, lift: Assign, a_leaf: Load, b_leaf: Load, k_name: str, acc: str, epilogue: Body):
@@ -368,8 +406,8 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     red = op.operands[0]
     if red.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
         return None  # the statistic is a projected reduce; WHICH carrier it folds is not this binding's business
-    if any(isinstance(s, Fold) for s in red.step_stmts()) or any(isinstance(e, Fold) for e in red.operands):
-        return None  # a composed reduce (its partial or an operand edge holds a node) is not the bare statistic shape
+    if red.composed is not None:
+        return None  # split-K's identity-lift reassociation is a partition, not a per-row statistic
     body = list(op.body)
     if not body or not isinstance(body[-1], Loop) or body[-1].is_reduce:
         return None
@@ -413,7 +451,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     # Every free SSA name the cone reads must be a statistic (the source reduce's carried state or
     # its scalar epilogue) — anything else is a shape this binding doesn't understand.
     stat_defs = {red.out} | {nm for s in stat_epi for nm in s.defines()}
-    cone_defs = {nm for st in cone for nm in st.defines()}
+    # A producer NODE in the cone binds through its own carried state, not ``defines`` — the same
+    # reading the operand binding uses (``_operand_result_names``).
+    cone_defs = {nm for st in cone for nm in (_operand_result_names(st) if isinstance(st, Fold) else st.defines())}
     free_refs = {a for st in cone if isinstance(st, (Assign, Select)) for a in st.deps() if a not in cone_defs}
     if not free_refs or not free_refs <= stat_defs:
         return None  # a stat-free cone is the demoted option's shape, not ours

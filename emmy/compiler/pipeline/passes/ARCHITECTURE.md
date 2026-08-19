@@ -117,8 +117,9 @@ bands name a kernel the wire format cannot tell apart, and admitting both produc
 and a candidate the enumeration offers must be one materialization can build: `splitk_computed_b_site` is asked at
 enumeration, not only inside `_splitk_option` where it is enforced with `pinned=True` and would turn an unpinned
 offered candidate into a raise. That predicate is also where the nested-key rule bites the other way — the split
-σ-reindexes both operand edges through `_sliced_edge`, and rewriting a COMPUTED cone replaces the nodes inside it, so
-a cone carrying a scheduling site of its own would lose the slice keyed by that node's identity.
+σ-reindexes both operand edges through `_sliced_edge`, and rewriting a COMPUTED cone replaces the nodes inside it —
+its body stmts and every K-VARYING producer edge it composes, since the slice's own k coordinate reaches gmem through
+that node — so a cone carrying a scheduling site of its own would lose the slice keyed by that node's identity.
 
 Three layers own three different questions, and keeping them apart is what stops a rule being stated twice:
 
@@ -461,8 +462,9 @@ twist family is selected STRUCTURALLY — the stored combine must BE the exp/LSE
 formation; the state-component roles read off the singleton shape: pivot = component 0, literal-1 = denominator,
 value name = expectation). The COMPOSED evaluations derive too (step 7): a twisted fold with a `Load`-bound
 expectation operand derives its blocked evaluation with the expectation contraction SYNTHESIZED — and memoized, one
-identity per stored fold — (`ir._twisted_derived_step`; no recognizer builds the operand-edge form today — the
-online-softmax pairing's `(m, d, o…)` expectation channels keep their value loads inline in the lift body); split-K's
+identity per stored fold — (`ir._twisted_derived_step`; the online-softmax pairing's `(m, d, o…)` expectation channels
+keep their value loads inline in the lift body, but a step that COMPOSES a producer it computes itself does arrive in
+operand-edge form — the composed-step reading, below); split-K's
 outer reduce is the
 IDENTITY-LIFT composition over its one inline sliced contraction node (combine at that singleton embeds the operand
 verbatim — no outer `Accum`s; `Fold.composed` is the one read of the composition, shared by `Fold.role` and
@@ -472,7 +474,12 @@ goes through; `.loop` splices only the operand edges the derived step did not co
 escape, an impure-bodied zero-axis fold), and its identity gate compares the derived body/axis/unroll only —
 the role annotation is the fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and
 derives `PLANAR` (the 1l
-demotion, now a formation fact; `_extract_lift` accepts any PURE prefix). The inverse — un-hoisting a computed
+demotion, now a formation fact; `_extract_lift` accepts any PURE prefix, and lifts a nested reduce `Loop` in that
+prefix to an operand EDGE — the COMPOSED STEP, `_fromloop._hoist_step_nodes`, recursively through the same parser:
+attention's per-key score contraction inside the streaming softmax statistic reads as a producer the step consumes,
+so a merged attention cell keeps its schedule tiers instead of falling to the escape. The identity gate compares
+role-blind for the same reason it compares at the canonical SSA spelling — the `AxisRole` is derived, and the raw
+pre-annotation body does not carry it). The inverse — un-hoisting a computed
 edge back into the lift body — has no implementation at present: its only caller was the scheduler's collapse arm,
 and it returns with the enumerator. Kernel identity is the α-INVARIANT TERM HASH (`Fold.structural_key`: canonical
 renumbering in first-appearance walk order plus hash-time ANF body-order canonicalization — the stored term is never

@@ -149,14 +149,19 @@ def _lift_cell(cell: list[Stmt], free: list, output: str) -> tuple[Fold, tuple]:
     reduce ``Loop`` in place (``CONTRACTION`` / ``PLANAR`` / pre-annotated ``TWISTED``), its body
     holding the reduce loop followed by the projection — stripped to just the loop when the only
     epilogue is the grid-cell ``Write`` (materialize stores ``out`` as glue). A cell with no, or
-    several, or a nested reduce stays a flat zero-axis fold (un-annotated → the scalar tier)."""
+    several, reduces stays a flat zero-axis fold (un-annotated → the scalar tier), and so does one
+    whose nested reduce the parser cannot read as a COMPOSED STEP (an operand edge of the step's
+    fold — ``_fromloop``; attention's spliced score contraction is the one it can)."""
     reduces = [i for i, s in enumerate(cell) if isinstance(s, Loop) and s.is_reduce]
     if len(reduces) != 1:
         return _flat_cell(cell)
     idx = reduces[0]
     rloop = cell[idx]
-    if _reduce_in(list(rloop.body)):
-        return _flat_cell(cell)  # nested (non-flash) reduce — keep loop-IR form
+    if _reduce_in(list(rloop.body)) and fold_from_loop(rloop) is None:
+        # A nested reduce this parser cannot read as a COMPOSED STEP — keep loop-IR form. One it
+        # CAN read (attention's per-key score contraction inside the streaming statistic) lifts
+        # with the producer as an operand edge, so the cell keeps a schedule tier.
+        return _flat_cell(cell)
     # Route the loop-invariant prologue (stmts above the reduce, sans the regenerated ``Init``
     # seeds) one dependency cone at a time: stmts feeding the reduce move INTO the loop
     # (``pre_reduce``), while independent stmts feeding only the epilogue stay after it. Treating

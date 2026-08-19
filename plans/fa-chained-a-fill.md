@@ -63,16 +63,25 @@ emitter, no attention vocabulary:
 
 Measured on a 5090, f16 `(1, 8, 512, D)`, cold greedy, fused arm vs the two-kernel graph vs torch:
 
-| D | torch | two-kernel | fused, per-cell | fused, chained |
+| shape | torch | two-kernel | fused, per-cell | fused, chained |
 | --- | --- | --- | --- | --- |
-| 16 | 8 µs | 38.3 µs | 219 µs | **14.0 µs** |
-| 32 | 8 µs | 24.9 µs | — | **13.8 µs** |
-| 64 | 10 µs | 28.7 µs | — | 29.7 µs |
-| 128 | 19 µs | 21.6 µs | — | 69.2 µs |
+| S=512 D=16 | 8 µs | 38.3 µs | 219 µs | **14.0 µs** |
+| S=512 D=32 | 8 µs | 24.9 µs | — | **13.8 µs** |
+| S=512 D=64 | 10 µs | 28.7 µs | — | 29.7 µs |
+| S=512 D=128 | 19 µs | 21.6 µs | — | 69.2 µs |
+| S=1024 D=128 | 45 µs | 72.1 µs | — | 370.6 µs |
+| S=2048 D=128 | 145 µs | 179.5 µs | — | 1039.3 µs |
 
-So the chained fused form WINS at small head dims (2.7× / 1.8×), ties at 64 and LOSES 3.2× at 128 — because it still
-computes `Q·Kᵀ` TWICE (once for the statistic, once for the weight), and that duplicate grows with D. That is why
-fusion still refuses: real models are D = 64 / 128.
+So the chained fused form WINS at small head dims (2.7× / 1.8× at D ≤ 32) and loses badly as either D or S grows. Two
+distinct causes, and the second is the bigger one:
+
+1. It computes `Q·Kᵀ` TWICE (statistic, then weight) — a fixed 1.5× flop penalty that grows in absolute terms with D.
+2. **The nested score is gmem-direct.** `_score_block` passes `stage=None`, so both the statistic sweep and the weight
+   fill read Q and K straight from gmem with no slab and no reuse: per query tile the statistic re-reads the WHOLE KV
+   row of K. At S=2048 D=128 that is 512 KB of K per query tile × 1024 query tiles ≈ 512 MB of reads, against the
+   two-kernel `Q·Kᵀ` kernel's staged, tiled, TMA-fed slabs. That is why the gap WIDENS with S rather than closing.
+
+That is why fusion still refuses: real models are D = 64 / 128 at long sequence.
 
 ## What makes it win at every D: the SINGLE-PASS sweep
 
@@ -89,9 +98,13 @@ FA-2 computes the score once. Two things stand between here and that, and the ma
 That removes the second `Q·Kᵀ` and the statistic prologue entirely. Then re-measure the table above and, if the fused
 arm wins at D = 64 / 128, lift `_merge._nests_reduce` (and the blowup bound below) so evidence prices it.
 
-## Still open
+## Still open, in the order that pays
 
-- **The single-pass sweep** (above) — the one thing that makes the fused arm win at D = 64 / 128.
+- **Stage the nested score's operands.** The biggest lever, and the reason the gap widens with S: `_score_block` runs
+  gmem-direct. Its K needs a slab (and its Q a fragment held across the KV sweep — today Q is re-loaded per KV chunk
+  per D-chunk). Note the nesting: `_staged` inside a fill puts a `__syncthreads()` inside the outer K-loop body, which
+  is legal only because every thread reaches the fill — check that before relying on it.
+- **The single-pass sweep** (above) — removes the second `Q·Kᵀ` and, with it, the second pass over K.
 - **A schedule site for the score.** `1a47f4fc` made an inline node carry no slice family (`Site.inline`), which was
   right while the fill could only evaluate it per cell. The chained fill derives the score's tile from the enclosing
   one instead, so nothing is pinnable there yet: its `bk`, its own staging, and the warp split of its rows are all

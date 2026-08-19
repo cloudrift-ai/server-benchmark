@@ -25,13 +25,15 @@ softmax reduce. This file pins every tier of it:
   into the A slab) and the CHAINED statistic (``_atom.chain_stat_fill``: ``FragmentRowReduce`` off
   those fragments, ``exp_merge`` at a BLOCK singleton). Measured on a 5090 at f16 (1,8,512,16):
   219 µs per-cell → 108 µs with the fill chained → **14.0 µs** with both, against 38.3 µs for the
-  two-kernel graph and 8 µs for torch. What is still missing is the SINGLE PASS: the fused form
-  computes ``Q·Kᵀ`` twice (statistic, then weight), and that duplicate grows with the head dim — it
-  wins 2.7× at D=16, ties at 64 and loses 3.2× at 128, which is why loop fusion still refuses to
-  nest the score reduce inside the softmax reduce (``loop/fusion/_merge._nests_reduce`` — the
-  refusal is REVERSIBILITY: no ``PLACE`` cut puts a two-consumer producer back together). Closing it
-  is FA-2 proper: hoist the ``1/d`` out of the cone and carry the statistic in the weight loop,
-  rescaling the output fragments per block (the reference kernel below is the executable spec).
+  two-kernel graph and 8 µs for torch. The fused arm wins 2.7× / 1.8× at D ≤ 32 and loses as either
+  the head dim or the sequence grows (S=512 D=128: 69 vs 21.6; S=2048 D=128: 1039 vs 180), for two
+  reasons: it computes ``Q·Kᵀ`` twice (statistic, then weight), and the nested score is gmem-direct,
+  so the statistic re-reads the whole KV row of K per query tile where the two-kernel ``Q·Kᵀ``
+  streams staged slabs. That is why loop fusion still refuses to nest the score reduce inside the
+  softmax reduce (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no ``PLACE``
+  cut puts a two-consumer producer back together). Closing it needs the nested score STAGED and the
+  sweep made SINGLE-pass (hoist the ``1/d`` out of the cone, carry the statistic in the weight loop,
+  rescale the output fragments per block) — the reference kernel below is that form's spec.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →

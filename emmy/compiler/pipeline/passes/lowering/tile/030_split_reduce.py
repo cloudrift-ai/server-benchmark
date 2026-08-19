@@ -291,7 +291,12 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # PLANAR, stated rather than inferred: ``010_recognize`` annotates every reduce loop it lifts,
     # and a kernel minted here has to arrive the same way or it cannot featurize like the kernel
     # it is — the structural ``Accum`` fallback agrees, but a stated role does not depend on it.
-    fin_loop = Loop(axis=split, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
+    # The merge axis carries the SAME consumed-split receipt the partial's slice does: the finalize
+    # enumerates the partitions of a split that already happened, so ``_splittable_axis`` must read it
+    # as a kernel that already realized one. Without the receipt an ambient ``REDUCE`` pin splits the
+    # finalize too and its workspace collides with the partial's (``<out>__partial`` already exists).
+    fin_axis = replace(split, window=Window(parent=split, partition=True))
+    fin_loop = Loop(axis=fin_axis, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
     fin_proj, fin_stores = _boundary(epilogue)
     if not fin_stores and not any(isinstance(s, Write) for s in fin_proj):
         # The projected value is the LAST defining stmt's name — the epilogue tail may end with
@@ -436,7 +441,12 @@ def rewrite(match: Match, root: Node) -> Graph:
     combine = alg.merge_stmts(other)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
     # PLANAR for the same reason as the deferred-kernel arm above.
-    fin_loop = Loop(axis=split, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
+    # The merge axis carries the SAME consumed-split receipt the partial's slice does: the finalize
+    # enumerates the partitions of a split that already happened, so ``_splittable_axis`` must read it
+    # as a kernel that already realized one. Without the receipt an ambient ``REDUCE`` pin splits the
+    # finalize too and its workspace collides with the partial's (``<out>__partial`` already exists).
+    fin_axis = replace(split, window=Window(parent=split, partition=True))
+    fin_loop = Loop(axis=fin_axis, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
     fin_proj, fin_stores = _boundary(after, plain_only=True)
     if not fin_stores and not Body(tuple(fin_proj)).writes:
         # Backward scan — the epilogue tail may end with non-defining stmts (see the deferred

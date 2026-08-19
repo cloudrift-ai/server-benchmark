@@ -452,12 +452,6 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     np.testing.assert_allclose(got.reshape(S, NO).astype(np.float32), ref, atol=0.5, rtol=0.1)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="split pieces are minted in the loop dialect (this PR); on a COMPUTED-A cone the Window(partition) "
-    "receipt is lost through the round-trip, so the ambient REDUCE pin splits the partial's statistic "
-    "fold too — 3 kernels, and the doubly-split partial drops off the mma tier to scalar",
-)
 @requires_cuda
 @pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
 def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
@@ -499,11 +493,6 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg, atol=0.5, rtol=0.1)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="split pieces are minted in the loop dialect (this PR); the Window(partition) receipt is lost on "
-    "the computed-A cone path, so the partial is split a second time and loses the mma tier",
-)
 @requires_cuda
 def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     """Redundant-statistic split-K on the MULTI-CHANNEL (gate/up) fused cone: both channels'

@@ -396,6 +396,12 @@ canonicalized before validation:
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
 - `canonicalize_free_axis_order` — sort outer free Loops by axis name.
+  A loop whose position is SEMANTIC rather than interchangeable must be
+  named so it sorts where it belongs: a cross-CTA partition axis leads
+  with `_` (`_ksplit`, `_<k>_ks`) to stay ahead of every `aN`, because
+  sinking it below the axes it partitions changes which shape
+  recognition can parse.
+
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
 - `unify_sibling_reduce_axes` — rename sibling reduce Loops whose
   reduce-axis Load positions overlap on any `(source, dim)` pair so

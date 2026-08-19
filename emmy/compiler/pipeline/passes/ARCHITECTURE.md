@@ -296,14 +296,14 @@ quiescent.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
-Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading
-(`_fromloop.fold_from_loop` — a reduce `Loop` interpreted as a `Fold`, gated by byte-identity of the re-derived
-loop) and the ⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)`
-facts, shared by both contraction binders). The online-softmax pairing states its condition on λ-fold results;
-contraction CANDIDACY (`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates
-every operand shape (direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition
-binds its channels through the same lift reading. What stays case-by-case is the dispatch — which composition
-applies — never the parsing: no recognition step holds a private stmt-pattern reading of the algebra.
+Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading (`_fromloop.fold_from_loop`
+— a reduce `Loop` interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling) and the
+⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)` facts, shared
+by both contraction binders). The online-softmax pairing states its condition on λ-fold results; contraction CANDIDACY
+(`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates every operand shape
+(direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition binds its channels through
+the same lift reading. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
+recognition step holds a private stmt-pattern reading of the algebra.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
@@ -469,7 +469,7 @@ verbatim — no outer `Accum`s; `Fold.composed` is the one read of the compositi
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns
 `None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR projection
-escape, an impure-bodied zero-axis fold), and its byte-identity gate compares the derived body/axis/unroll only —
+escape, an impure-bodied zero-axis fold), and its identity gate compares the derived body/axis/unroll only —
 the role annotation is the fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and
 derives `PLANAR` (the 1l
 demotion, now a formation fact; `_extract_lift` accepts any PURE prefix). The inverse — un-hoisting a computed
@@ -570,10 +570,26 @@ Three consequences follow, and all three are the point:
 **One split per axis — the split is CONSUMED by the kernel that realizes it.** A pin is *ambient*: `EMMY_REDUCE=g2k`
 is a statement about how kernels run, and the pieces are kernels, so it reaches them too. Nothing may re-partition
 an axis that is already a slice, and the slice records that structurally: `_slice_loop` / `_factor_k` build it as a
-`Window` of its parent, and `_schedule._splittable_axis` refuses to offer (and `_consumed_split` drops from a parsed
-pin) a cross-CTA stage on an axis whose `source_axis` is set. No provenance flag, no "this came from a split" bit —
-the axis's own shape is the record. Without that reading a K=512 partial re-splits its own slice on every sweep:
-512 → 256 → … → 1, ending in a raise.
+`Window` of its parent — the finalize's merge axis too, since it enumerates the partitions of a split that already
+happened — and `_schedule._splittable_axis` refuses to offer (and `_consumed_split` drops from a parsed pin) a
+cross-CTA stage on a kernel that carries one. No provenance flag, no "this came from a split" bit — the axis's own
+shape is the record. Without that reading a K=512 partial re-splits its own slice on every sweep: 512 → 256 → … →
+1, ending in a raise.
+
+**The receipt is read over the whole IR, not just the node tree** (`_carries_partition`). A computed-A cone keeps
+its sliced contraction inside the stored map view's LIFT, as a plain `Loop` rather than a site, so a `sites`-only
+scan misses it: the ambient pin then splits the piece a second time — the statistic fold, which no partition ever
+touched — and the doubly-split partial drops off the mma tier.
+
+**A piece is minted in the loop dialect, so its algebra must read back off the body alone.** Two things that
+sound cosmetic are therefore load-bearing. The partition axis is spelled with a LEADING UNDERSCORE
+(`_factor_k`, `_slice_loop`'s `_ksplit`) because `normalize_body`'s `canonicalize_free_axis_order` sorts the outer
+free-loop chain by axis NAME: sorted below the row / column axes it must dominate, `hoist_loop_invariants` sinks the
+partition between the column sweep and the K fold, where `bind_prologue_contraction` cannot parse it and the piece
+loses its computed-A binding. And the twisted extractors compare their regenerated `exp_merge` to the body
+**up to SSA temp names** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the generator's own temps
+the moment a term touches the loop dialect, so a raw byte compare would reject the α-equivalent program and lose
+every carrier that has been lowered and re-lifted.
 
 The atomic arm produces ONE kernel and still splices a `Graph`. That is not a formality: a 1:1 op rebind is how the
 engine says *the same kernel, decided further*, so it merges the replaced op's knobs forward and does not restart the

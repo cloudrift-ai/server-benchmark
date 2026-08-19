@@ -223,6 +223,33 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     assert con.a.operands[0].operands == (stat,), "the A cone's source is the pair, its K seam the node boundary"
 
 
+def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
+    """A rule that mints a kernel mints it in the LOOP dialect (a placement cut's fragments, a
+    cross-CTA split's pieces), so the piece re-enters through ``010_recognize`` and every algebra
+    fact has to read back off its body alone. Lower the bound region and hand it back: it must
+    bind to the same computed-A contraction. The twisted extractor proves the carrier by
+    REGENERATING ``exp_merge`` and comparing, and ``normalize_body`` renames the generator's own
+    temps (``acc0__o__t0`` → ``v0``) on the way through — so the comparison has to be up to SSA
+    temp names or a re-lifted pair is lost and the piece falls off the warp tier."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.ir.tile.ir import effect_tail
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    bound = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+    assert bound is not None
+    node, n_axis, stores = bound
+
+    stmts = tuple(effect_tail(node.lower(), stores))
+    for axis in reversed((*tile.place.free, n_axis)):
+        stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
+    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)), "out")
+    again = bind_prologue_contraction(relifted.op, tuple(relifted.place.free))
+    assert again is not None, "the round trip must not cost the region its computed-A binding"
+    assert is_contraction(again[0].operands[0]), "and it must come back as the SAME one contraction"
+
+
 # --------------------------------------------------------------------------------------------
 # The fusion pass in lockstep: the merged softmax·V region splices; other entanglements refuse.
 # --------------------------------------------------------------------------------------------
@@ -256,11 +283,6 @@ def test_softmax_matmul_merges_to_one_kernel_with_matching_numerics() -> None:
     np.testing.assert_allclose(list(after.values())[0], expect, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="split pieces are minted in the loop dialect (this PR); the TWISTED carrier does not survive the "
-    "round-trip intact — the pair's cross-lane state combine is missing from the emitted kernel",
-)
 def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> None:
     """The carrier step at fragment residence, end to end and CPU-side: with the contraction's
     warp tile pinned, the emitted kernel carries BOTH halves — the ``mma.sync`` product against the
@@ -301,8 +323,6 @@ def test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring(monkeypatch
     """A computed operand can only ride the smem compute fill, so a pin naming a byte transport must
     be refused rather than silently read as its depth alone. The fill IS asynchronous on its B slabs,
     but that ring is its own ``d2/smem`` depth, so the refusal names that spelling."""
-    import pytest
-
     from emmy.compiler import target as target_mod
     from emmy.compiler.backend.cuda.backend import CUDA_PASSES
 
@@ -323,8 +343,6 @@ def test_fill_decline_names_the_gate_it_actually_hit(monkeypatch) -> None:
     """The depth declines carry their own reason too. K=64 against a 128-element slab chunk is the
     whole-K-chunk rule, not the smem budget — the catch-all message used to blame the budget and
     send a reader hunting a capacity limit the pin never reached."""
-    import pytest
-
     from emmy.compiler import target as target_mod
     from emmy.compiler.backend.cuda.backend import CUDA_PASSES
 

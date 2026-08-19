@@ -817,16 +817,15 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     assert any(s.startswith("g") for s in offered), offered
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="split pieces are minted in the loop dialect (this PR); the sigma reindex to absolute k is lost "
-    "through the round-trip when B is a COMPUTED cone — the partial reads from the partition base",
-)
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
     ``kslice`` = K/2 columns, so both the materialized A load and the computed B cone's own
-    ``w_decoded_*`` reads must carry the ``<k>_ks · 64`` partition base; together the two
-    partitions cover K exactly, which IS the reassociation the split performs."""
+    ``w_decoded_*`` reads must carry the ``<partition> · 64`` base; together the two partitions
+    cover K exactly, which IS the reassociation the split performs. The base is READ OFF the
+    source rather than spelled: a piece is a brand-new kernel, so its axes carry canonical
+    names and the pre-split axis name never reaches codegen."""
+    import re
+
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -849,12 +848,14 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     mma_partials = [nid for nid, src in kernels.items() if nid.endswith("__partial") and "mma.sync" in src]
     assert mma_partials, f"the computed-B contraction must split into an mma partial; got {sorted(kernels)}"
     src = kernels[mma_partials[0]]
-    assert "_ks * 64" in src, "the partial must offset its reads by the partition base"
+    bases = set(re.findall(r"(\w+) \* 64\b", src))
+    assert len(bases) == 1, f"the partial must offset its reads by ONE partition base; got {sorted(bases)}"
+    base = f"{bases.pop()} * 64"
     # ``w_decoded_tile_step`` is the cone's k-INDEXED read (the other decode tables are scalars or
     # are indexed by an already-offset value).
     decode = [ln for ln in src.splitlines() if "w_decoded_tile_step[" in ln]
     assert decode, "the partial must still stream the trellis decode cone"
-    assert all("_ks * 64" in ln for ln in decode), "every computed-B cone read must be σ-reindexed to absolute k"
+    assert all(base in ln for ln in decode), "every computed-B cone read must be σ-reindexed to absolute k"
     assert kernels[mma_partials[0].removesuffix("__partial")], "the split must splice a finalize kernel"
 
 

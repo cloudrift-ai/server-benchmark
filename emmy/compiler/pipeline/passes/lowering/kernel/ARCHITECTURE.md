@@ -212,28 +212,56 @@ transport prologue
 the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
 the per-cell compute fill reads the bridged values back from the stat rows. A cone edge that DOES index K (attention's
 score contraction, read by the cone's `exp(s − m)`) is the **CHAINED** fill where it reads as a CONTRACTION and the
-atom can mma it (`_atom.chain_a_fill`): the slab comes from a nested contraction — `mma(Q, Kᵀ)` into C fragments, the
-cone folded into their fragment store (`RegStore` + `RegEpilogue`, its statistics read at each element's own row) and
-written straight into the slab the `ldmatrix` drain reads. There is no second mma emitter: the score is a contraction,
-so it is built out of the SAME atom strategy (`_atom_ops` on the score node — `state` declares the fragments, `reduce`
-emits the gmem-direct `ldmatrix` + `mma.sync` K-loop, `store` writes them), namespaced (`_AtomOps.frag_ns`) so the
-nested fragments never shadow the accumulators the enclosing drain carries across the same loop. The slab stays
-NONE-swizzle there — a fragment store applies no address XOR. Where the edge is not a bindable contraction (or the atom
-has no modeled C layout) it stays per-cell: spliced into the fill's cell and evaluated inline from lowered loop IR, a
-scalar dot per slab cell. Geometry: exact cover on N only. A
+atom can mma it: the slab comes from a nested contraction — `mma(Q, Kᵀ)` into C fragments, the cone folded into their
+fragment store (`RegStore` + `RegEpilogue`) and written straight into the slab the `ldmatrix` drain reads. There is no
+second mma emitter: the score is a contraction, so it is built out of the SAME atom strategy (`_atom_ops` on the score
+node — `state` declares the fragments, `reduce` emits the `ldmatrix` + `mma.sync` K-loop, `store` writes them),
+namespaced (`_AtomOps.frag_ns`) so the nested fragments never shadow the accumulators the enclosing drain carries
+across the same loop. The slab stays NONE-swizzle there — a fragment store applies no address XOR.
+
+The chained fill takes one of two forms, and the first is preferred wherever it reads:
+
+- **SINGLE-PASS** (`_atom.chain_stream_fill`) — the statistic and the weight come off ONE pass of the score. The two
+  cannot share a pass while the weight names a denominator the sweep has not finished, so the cone's state-only
+  factors are split off (`_cone_weight` over `_softmax.split_invariant_factors`) and multiplied back onto the output
+  fragments after the loop. What remains is the twisted monoid's streaming law: per KV chunk the block's scores land
+  in C fragments, its row pivot advances the carried one, and the ψ-RESCALE that advance puts on every carried channel
+  (`carrier.exp_rescale`) is applied to the ENCLOSING drain's output fragments — the one channel that lives outside
+  the fold's state. Nothing is bridged through smem: the carried `(pivot, denominator)` pair stays in registers at the
+  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement.
+- **TWO-PASS** (`_atom.chain_stat_fill` as the transport prologue, then `_atom.chain_a_fill`) — the statistic finishes
+  over the whole axis first and bridges through the stat smem rows, and the weight fill recomputes the score to read
+  it. The single-pass form declines to it wherever the two halves do not cover the same keys (a split-K partition
+  contracts a slice while its statistic still spans the whole axis, so each partition divides by the whole
+  denominator) or the cone does not read as the exp family's weight times state-only factors.
+
+The nested score's OWN operands stage like any other, through the same transports and the same `LdmatrixLoad` drain
+(`_atom.score_key_operand` / `score_query_operand`), so it crosses L1 once per CTA instead of once per warp. The two
+axes swap the roles the enclosing operands give them: what advances per chunk is the score's N (which is the
+contraction's K — the keys), and the score's own K (the head dim) is stationary and stages whole. So the KEY slab is
+`chunk × <score K>`, N-major, refilled per chunk; the QUERY slab is `tile_m × <score K>`, loop-INVARIANT
+(`SyncTransport.invariant_operands` — one fill ahead of the loop, no ring, no live range to schedule). The scheduler
+reserves both whenever a cone composes a score (`_legality.resolve_sync_stage`), so a tile that fits the budget still
+fits once realized.
+
+That is also why a chained fill is its own pipeline SEGMENT (`_stage.LeadSegment`) instead of running inside the
+transport's fill: the key slab's live range ends before the drain, so `pipelined_kloop` waits for it ahead of the
+score, barriers after it, and refills it under the P·V drain — while the drain's own group refills the values under the
+next chunk's score. The alternating pipeline falls out of the two live ranges; nothing about it is attention-specific.
+
+Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
+fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
-the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on
-the contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime
-extent stores the additive fold identity 0 (`_atom._k_masked`; the bilinear reading pins ⊕ = add, so a zero operand
-folds to nothing and the drain still reads whole chunks), while a canonical materialized peer clamps its overhanging
-slab ROW so its `cp.async` chunk stays contiguous. The K-MAJOR orientations keep the refusal, and the reason names
-why: a materialized A and a transposed B both stage K as the slab's contiguous inner dim, so their copy chunk runs
-ALONG K and clamping only its start still copies past the extent.
-A **multi-channel product node** (the gate/up MLP edge — N `(b, acc)` channels over the ONE
-shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per channel, drains N
-mma chains off the ONE ldmatrix'd A fragment
-into per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the
-store's `RegEpilogue` (`extra_accs`).
+the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on the
+contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime extent
+stores the additive fold identity 0 (`_atom._k_masked`; the bilinear reading pins ⊕ = add, so a zero operand folds to
+nothing and the drain still reads whole chunks), while a canonical materialized peer clamps its overhanging slab ROW
+so its `cp.async` chunk stays contiguous. The K-MAJOR orientations keep the refusal, and the reason names why: a
+materialized A and a transposed B both stage K as the slab's contiguous inner dim, so their copy chunk runs ALONG K
+and clamping only its start still copies past the extent. A **multi-channel product node** (the gate/up MLP edge — N
+`(b, acc)` channels over the ONE shared inline cone; `_AtomOps.channels` reads them off the node) fills one B slab per
+channel, drains N mma chains off the ONE ldmatrix'd A fragment into per-channel C fragments (`_fold_frag`), and the
+projection (SwiGLU) combines the channels per element in the store's `RegEpilogue` (`extra_accs`).
 
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
@@ -288,12 +316,14 @@ There is no attention emitter. A `TWISTED` reduce lowers at scalar residence thr
 `PLANAR` fold takes (`_tile_reduce_axis` — coop lanes / ILP chains / serial), its multi-component streaming merge
 regenerated off the node's `Reduction` view — with ONE fragment-residence arm, and it is a fill, not an emitter: a
 computed-A cone's per-row statistic over a COMPOSED score sweeps at fragment residence
-(`_atom.chain_stat_fill`). Per KV block the tile's scores land in mma C-fragments (the same `_score_block` the chained
-A fill uses), the block's row statistic comes off them through the layout's shuffle butterfly (`FragmentRowReduce`),
-and the carrier's OWN generated program merges the block into the running state — `exp_merge` at a BLOCK singleton
-`(rowmax, rowsum)` instead of an element singleton, the same generator and the same stability certificate. Each lane
-ends holding the statistic for the two rows the fragment layout gives it, and one lane per column group publishes them
-to the stat rows the weight fill reads. Everything else about the fold is unchanged.
+(the chained fills above). Per KV block the tile's scores land in mma C-fragments (`_score_block`), the block's row
+statistic comes off them through the layout's shuffle butterfly (`FragmentRowReduce`), and the carrier's OWN generated
+program merges the block into the running state — `exp_merge` at a BLOCK singleton `(rowmax, rowsum)` instead of an
+element singleton, the same generator and the same stability certificate. Each lane ends holding the statistic for the
+two rows the fragment layout gives it. In the two-pass form one lane per column group publishes them to the stat rows
+the weight fill reads; in the single-pass form they never leave the registers, and the carried state's advance also
+rescales the enclosing drain's output fragments (`carrier.exp_rescale` — the same ψ the merge puts on every carried
+channel, named on its own for an accumulator outside the fold's state). Everything else about the fold is unchanged.
 The fold MOVE itself is never re-decided per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE
 placement-keyed selector — within-warp → `SHFL`, within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL`
 (a multi-component carrier is kernel-finalize only) — and every emitter consumes its output (`emit_combine` at

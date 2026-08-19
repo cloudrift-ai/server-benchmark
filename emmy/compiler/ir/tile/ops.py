@@ -19,7 +19,7 @@ ahead of a lowering walk."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, splice_operands, stmt_axis_names
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction, splice_operands, stmt_axis_names
 from emmy.compiler.ir.schedule import ReducePlan
 from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
@@ -50,6 +50,22 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
     stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
+
+
+def chain_edge(cone, k_name: str):
+    """The cone's K-VARYING producer edge when it is a CONTRACTION over its own axis — attention's
+    score, read by the cone's ``exp(s − m)`` — or ``None`` (no such edge, or it is not a
+    contraction, so only the per-cell evaluation exists).
+
+    A node-boundary read like :func:`cone_seam`, and asked by both sides of the seam: the scheduler
+    sizes the score's key slab into the sync stage's smem budget, and the materializer realizes the
+    score on the tensor core (``lowering/kernel/_atom``'s chained fills)."""
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415 — leaf import, kept off the module head
+
+    if not isinstance(cone, Fold) or cone.axis is not None:
+        return None
+    kv = [e for e in cone.operands if isinstance(e, Fold) and e.axis is not None and edge_refs_axis(e, k_name)]
+    return kv[0] if len(kv) == 1 and is_contraction(kv[0]) and isinstance(kv[0].a, Load) else None
 
 
 class Sched:

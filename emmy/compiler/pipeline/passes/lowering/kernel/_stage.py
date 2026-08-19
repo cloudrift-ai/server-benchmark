@@ -408,8 +408,11 @@ class SyncOperand:
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
     # The CHAINED fill: ``chain(k0)`` is the whole slab's stmts, computed by a NESTED CONTRACTION on
-    # the tensor core instead of per-thread cell code (``_atom.chain_a_fill`` — attention's score
-    # mma, the cone folded into its fragment store). Set ⇒ ``value`` is never called.
+    # the tensor core instead of per-thread cell code (``_atom.chain_stream_fill`` — attention's
+    # score mma, the cone folded into its fragment store). Set ⇒ ``value`` is never called, and
+    # ``fill`` does not emit it either: the caller runs it as its OWN pipeline segment
+    # (:func:`staged_kloop`'s ``lead``), so the nested contraction's staged operands get a live
+    # range the scheduler can see and refill under the drain.
     chain: Callable[[Expr], list[Stmt]] | None = None
     # Smem swizzle mode this slab is written with ("NONE"/"B32"/"B64"/"B128") — the mma tier's
     # `_MmaOps.slab_swizzles`, applied by the fill's ``Write`` (the same flattened-index XOR the
@@ -468,6 +471,11 @@ class SyncTransport:
     prologue_stmts: tuple[Stmt, ...] = ()
     # Materialized peers filled by a vectorized copy instead of the per-thread compute loop.
     copy_operands: tuple[Operand, ...] = ()
+    # LOOP-INVARIANT staged peers — copied ONCE ahead of the loop and never refilled, because their
+    # gmem address does not advance with the chunk (the chained fill's query tile). Declared and
+    # filled here, and deliberately absent from :func:`_staged_slabs`: with nothing advancing there
+    # is no live range to schedule, so they never enter the pipeline at all.
+    invariant_operands: tuple[Operand, ...] = ()
     elem_bytes: int = 2
     # ``True`` → the peers copy with the BLOCKING vector load/store (no ``cp.async`` on the target).
     copy_sync: bool = False
@@ -478,10 +486,28 @@ class SyncTransport:
         return [
             *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands),
             *(slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype) for op in self.copy_operands),
+            *(slab_smem(op.slab, op.shape[0], op.shape[1], op.dtype or self.slab_dtype) for op in self.invariant_operands),
         ]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
-        return list(self.prologue_stmts)
+        # The invariant peers first, closed by their own handshake: every later reader — the stat
+        # prologue below and every chunk's fill — reads them already resident.
+        copy = sync_copy_fill if self.copy_sync else cp_async_fill
+        out: list[Stmt] = []
+        for op in self.invariant_operands:
+            out += copy(
+                slab=op.slab,
+                shape=op.shape,
+                src=op.buf,
+                gmem_index=op.index(_lit(0)),
+                cta=self.cta,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
+                name=op.tag,
+                swizzle=op.swizzle,
+            )
+        if out:
+            out += [Sync()] if self.copy_sync else [*cp_async_commit(), *cp_async_wait(0)]
+        return [*out, *self.prologue_stmts]
 
     @staticmethod
     def _affine_step(a: Expr, b: Expr, ctx: SimplifyCtx) -> int | None:
@@ -579,8 +605,7 @@ class SyncTransport:
             return out
         for op in self.operands:
             if op.chain is not None:
-                out += op.chain(k0_cur)  # the whole slab from one nested contraction — no per-cell run
-                continue
+                continue  # a nested contraction fills it, as its own segment (see :attr:`SyncOperand.chain`)
             rows, cols = op.shape
             v = _cp_async_width(cols, self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
@@ -635,6 +660,21 @@ class SyncTransport:
 
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
         return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
+
+
+@dataclass(frozen=True)
+class LeadSegment:
+    """A body segment placed BEFORE the drain, with the SINGLE-BUFFER operand group it reads.
+
+    One use today: the chained computed-A fill (``_atom.chain_stream_fill``), which reads the nested
+    score's key slab and WRITES the A slab the drain then reads. Splitting it out of the transport's
+    own fill is what lets the scheduler see two nested live ranges instead of one overlapping pair —
+    keys refill under the P·V drain, values under the next chunk's score. ``transport`` is ``None``
+    where the segment reads no staged slab of its own (the fill kept its operands gmem-direct); the
+    segment still runs first, and the drain's group ends its range after it."""
+
+    build: Callable[[], list[Stmt]]
+    transport: object | None = None
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1142,7 @@ def staged_kloop(
     k0: str = "_ks",
     k_end: Expr | None = None,
     k_first: Expr | None = None,
+    lead: LeadSegment | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1128,7 +1169,13 @@ def staged_kloop(
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
     NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal.
     ``k_first`` starts it late (the banded stream's sliding-window bound) — same contract, applied
-    at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped)."""
+    at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped).
+
+    ``lead`` (a :class:`LeadSegment`) runs BEFORE the drain and brings its own single-buffer operand
+    group: the chained computed-A fill. It becomes segment 0, so the scheduler waits for its slab
+    ahead of it, barriers after it, and — its live range ending mid-body — refills it under the
+    drain, while the drain's group ends its range at segment 1 and refills there. That is the
+    alternating pipeline: keys under the P·V drain, values under the next chunk's score."""
     # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
     # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
@@ -1136,6 +1183,7 @@ def staged_kloop(
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
     if workers is not None:
         symbolic = isinstance(k_extent, Dim)
+        assert lead is None, "the producer band drives one operand group — a chained fill's key slab has no band placement"
         assert not symbolic, "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
@@ -1154,9 +1202,18 @@ def staged_kloop(
             k_end=k_end,
         )
     slabs = _staged_slabs(transport)
+    lead_group = lead is not None and lead.transport is not None
+    groups = ((lead.transport, 1), (transport, depth)) if lead_group else ((transport, depth),)
+
+    def segments(slots):
+        drain_seg = (drain(slots[-1]), slabs)
+        if lead is None:
+            return [drain_seg]
+        return [(lead.build(), _staged_slabs(lead.transport) if lead_group else frozenset()), drain_seg]
+
     return pipelined_kloop(
-        operands=((transport, depth),),
-        build_segments=lambda slots: [(drain(slots[0]), slabs)],
+        operands=groups,
+        build_segments=segments,
         bk_elems=bk_elems,
         n_chunks=n_chunks,
         k_extent=k_extent,

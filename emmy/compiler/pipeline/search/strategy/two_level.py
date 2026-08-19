@@ -31,20 +31,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
+from emmy.compiler.context import Context
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
+from emmy.compiler.pipeline.knob import stamp_schedule_families
+from emmy.compiler.pipeline.passes.identity import IdentityStrategy
+from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
+from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
-from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent
+from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent, discovered_strategies
 
 if TYPE_CHECKING:
-    from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
-    from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +69,11 @@ def outer_pipeline() -> Pipeline:
     separable ``evaluate`` picks each up as its own slice (own patience, own progress leaf,
     deduped by ``Op.cache_key``) and tunes it via :data:`LOWERING_PASSES`."""
     passes = [Pass.load(name, i) for i, name in enumerate(TwoLevelStrategy.OUTER_PASSES)]
-    from emmy.compiler.pipeline.strategy import discovered_strategies  # noqa: PLC0415
-
     return Pipeline(passes=passes, strategies=discovered_strategies())
 
 
 def _identity() -> IdentityStrategy:
     """The discovered IdentityStrategy instance — the one spelling of structural identity."""
-    from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
-    from emmy.compiler.pipeline.strategy import discovered_strategies  # noqa: PLC0415
-
     return next(s for s in discovered_strategies() if isinstance(s, IdentityStrategy))
 
 
@@ -151,9 +153,6 @@ def _point_stats(us: float) -> PerfStats:
 def _mint_run_id() -> str:
     """A sortable, unique tune-session id stamped on this run's ``node`` rows —
     UTC timestamp + a uuid tail (two sessions in the same second stay distinct)."""
-    from datetime import UTC, datetime  # noqa: PLC0415
-    from uuid import uuid4  # noqa: PLC0415
-
     return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
 
 
@@ -162,8 +161,6 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
 
     An outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so every kernel is a
     finalized ``LoopOp`` and each gets its own inner slice."""
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-
     return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
 
 
@@ -199,8 +196,6 @@ class _KernelInventory(PipelineStrategy):
         self.seen = seen if seen is not None else set()
 
     def on_splice(self, e: SpliceEvent) -> None:
-        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-
         for nid, node in e.fragment.nodes.items():
             op = node.op
             if not isinstance(op, LoopOp):
@@ -265,12 +260,8 @@ class TwoLevelStrategy(SearchStrategy):
         structural offers yields a single terminal and this reduces to "tune each op once, sum,
         assemble". A terminal whose kernels are all known is a pure DB read, so extra terminals
         stay cheap."""
-        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-
         if ctx is None:
-            from emmy.compiler.context import Context as _Context  # noqa: PLC0415
-
-            ctx = _Context.probe()
+            ctx = Context.probe()
         if self.prior is None and self.manage_prior:
             from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
@@ -337,10 +328,6 @@ class TwoLevelStrategy(SearchStrategy):
         ``prior`` are touched only between bench ``await``\\ s, so they're atomic with no locks.
         ``max_candidates`` caps live measurements per kernel; cached observations do not consume
         it."""
-        from collections import OrderedDict  # noqa: PLC0415
-
-        from emmy.compiler.pipeline.pipeline import variant_label  # noqa: PLC0415
-
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
         ctx_key = ctx.structural_key()
@@ -455,8 +442,6 @@ class TwoLevelStrategy(SearchStrategy):
                 best = db.best_per_op_time(ctx_key, work.key, backend=backend_name)
                 searched_knobs = searched_us = searched_cuda_ops = None
                 if searched is not None:
-                    from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
-
                     searched_knobs = stamp_schedule_families(searched[0])
                     searched_us = searched[1]
                     searched_cuda_ops = searched[2]
@@ -491,8 +476,6 @@ class TwoLevelStrategy(SearchStrategy):
                 # A minting fragment carries InputOp boundary nodes but no ``Graph.inputs``
                 # registration (the splice never needed one) — declare them so the slice cut
                 # from it feeds them bench data instead of treating them as unproduced scratch.
-                from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-
                 for _nid, _op, frag in minted:
                     if not frag.inputs:
                         frag.inputs = [i for i, n in frag.nodes.items() if isinstance(n.op, InputOp)]

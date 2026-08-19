@@ -7,10 +7,24 @@ engine's loop yields. The engine never benches, persists, or reads a policy attr
 
 from __future__ import annotations
 
+import json
 import logging
+import statistics
+
+from emmy import config
+from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.ir.kernel.ir import KernelOp
+from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.pipeline.search.db import PerfStats
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
+
+# The nvcc flags of the deployable -O3 re-bench (:func:`rebench_o3_async`) — also the regime its
+# node rows are keyed under (``two_level`` derives their ``context_key`` from the tune context
+# with these flags substituted).
+O3_NVCC_FLAGS = "-Xcicc -O3"
 
 
 async def rebench_o3_async(cand, backend):
@@ -19,9 +33,6 @@ async def rebench_o3_async(cand, backend):
     median latency in µs, or ``None`` when the sweep is already at -O3 or the bench
     errors (best-effort — a re-bench hiccup must never abort the sweep). The winner
     already benched OK at -O1, so the only added cost is one -O3 compile (cubin-cached)."""
-    from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
-
     if "-O3" in config.nvcc_flags():
         return None
     try:
@@ -40,8 +51,6 @@ class TerminalBench:
     :meth:`finalize_exc`) live here, so the only awaited step is the device bench."""
 
     def __init__(self, cand, *, backend, db) -> None:
-        from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
         self.backend = backend
         self.db = db
@@ -69,33 +78,28 @@ class TerminalBench:
 
     @staticmethod
     def _point_stats(us: float):
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
 
         return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
     @classmethod
     def _stats_from_launch(cls, lt):
-        import statistics as _statistics  # noqa: PLC0415
-
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
 
         if lt.samples and len(lt.samples) >= 1:
             us = [s * 1000.0 for s in lt.samples]
             return PerfStats(
-                median=_statistics.median(us),
+                median=statistics.median(us),
                 min=min(us),
                 max=max(us),
-                mean=_statistics.fmean(us),
-                variance=_statistics.pvariance(us) if len(us) > 1 else 0.0,
+                mean=statistics.fmean(us),
+                variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
                 n_samples=len(us),
             )
         return cls._point_stats(lt.time_ms * 1000.0)
 
     @staticmethod
     def _body_json(op, dialect: str) -> str:
-        import json as _json  # noqa: PLC0415
 
-        return _json.dumps(
+        return json.dumps(
             {
                 "dialect": dialect,
                 "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
@@ -105,9 +109,6 @@ class TerminalBench:
         )
 
     def _record_op_inventory(self, op) -> None:
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-        from emmy.compiler.ir.kernel.ir import KernelOp  # noqa: PLC0415
-        from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
 
         key = op.cache_key()
         if key is None:
@@ -173,7 +174,6 @@ class TerminalBench:
         logger.info("[tune]   %s @ %.2f us  (%s)", getattr(cuda_op, "kernel_name", "?"), stats.median, status)
 
     def _accumulate(self, acc, s):
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
 
         if acc is None:
             return s

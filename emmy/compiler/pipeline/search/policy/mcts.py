@@ -34,10 +34,12 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy import config
-from emmy.compiler.pipeline.knob import context_view, decision_view
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.pipeline.knob import canonical_row_key, context_view, decision_view
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.policy.base import Search
+from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -54,11 +56,6 @@ if TYPE_CHECKING:
 # bounded by ``_o3_done``'s per-config dedup — one -O3 compile + short bench each.
 # Env-overridable via ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
 O3_REBENCH_TOL = 2.0
-
-# The nvcc flags of that deployable re-bench (``terminal_bench.rebench_o3_async``) — also
-# the regime the re-bench's node rows are keyed under (``two_level`` derives their
-# ``context_key`` from the tune context with these flags substituted).
-O3_NVCC_FLAGS = "-Xcicc -O3"
 
 
 @dataclass
@@ -217,8 +214,6 @@ class TuningSearch(Search):
         heterogeneous multi-op graphs with a union pin vector (each op takes its tier's subset).
         A per-op contradiction is a pruned branch here, not the loud user error the greedy
         compile wants."""
-        from dataclasses import replace  # noqa: PLC0415
-
         return replace(ctx, validate_pins=False) if ctx.validate_pins else ctx
 
     async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
@@ -227,8 +222,6 @@ class TuningSearch(Search):
         ``perf`` / inventory / lowering rows, feed the tree and the prior (:meth:`observe`), and
         re-bench near-best winners at the deployable -O3 regime. The engine awaits this and
         nothing else."""
-        from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async  # noqa: PLC0415
-
         stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
         self.note_bench(measured=measured)
         self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
@@ -355,8 +348,6 @@ class TuningSearch(Search):
         graph = getattr(candidate, "graph", None)
         if graph is None:
             return None
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-
         return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
 
     def best_realized(self) -> tuple[dict, float, int | None] | None:
@@ -368,8 +359,6 @@ class TuningSearch(Search):
         different configuration. Equal medians break deterministically by the
         canonical knob row.
         """
-        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-
         best: tuple[dict, float, int | None] | None = None
         stack = list(self.tree.root.children)
         while stack:

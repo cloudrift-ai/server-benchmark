@@ -34,6 +34,8 @@ from math import prod
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt.blocks import Cond, Loop
+from emmy.compiler.ir.stmt.leaves import Assign, Mma
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
@@ -130,9 +132,6 @@ def structure_features(body: Body, graph: Graph | None = None) -> dict[str, floa
 def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     """Extent-free histogram: stmt-type counts + pointwise/reduce op multisets
     + loop-nest roles/depth + operand dtype multiset."""
-    from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.leaves import Assign, Mma  # noqa: PLC0415
-
     feats: Counter[str] = Counter()
     loads = body.loads
     feats["S_n_load"] = len(loads)
@@ -163,8 +162,6 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
 def _loop_depth(body: Body) -> int:
     """Max ``Loop`` nesting depth along any path (non-Loop wrappers like
     ``Cond`` recurse without incrementing)."""
-    from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
-
     best = 0
     for s in body:
         if isinstance(s, Loop):

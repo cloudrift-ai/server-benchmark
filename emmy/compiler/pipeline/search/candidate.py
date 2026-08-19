@@ -13,15 +13,16 @@ copy the inner's graph once, replay ``pending`` through
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Tensor, _fmt_op
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_inputs
 from emmy.compiler.pipeline.fork import Fork, OptionFork
-from emmy.compiler.pipeline.pipeline import Cursor
-from emmy.compiler.pipeline.rule_diff import display_name, render_rule_diff
+from emmy.compiler.pipeline.pipeline import Cursor, RuleSkipped
+from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
+from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent
 
 # Use the engine logger so the existing debug-emit toggles (rule-
 # skipped lines under ``compile -vv``) keep working without callers
@@ -79,9 +80,6 @@ class Candidate:
         is skipped by the rule's own idempotence guard. The
         multi-option return path is the one exception: the cursor
         advance is left to the eventual fork's apply on resolve."""
-        from emmy.compiler.pipeline.pipeline import RuleSkipped  # noqa: PLC0415
-        from emmy.compiler.pipeline.rule_diff import emit, format_skipped  # noqa: PLC0415
-
         if not match.is_alive():
             # Earlier applies in this batch invalidated the match's
             # consumed nodes. Skip the rewrite, but still advance the
@@ -187,8 +185,6 @@ class Candidate:
         minted kernels and threads attribution) and ``on_spliced``
         after it, carrying the splice's receipt (where the provenance
         strategy threads op provenance). See ``pipeline.strategy``."""
-        from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent  # noqa: PLC0415
-
         self._log_apply(match, option)
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
@@ -221,8 +217,6 @@ class Candidate:
         """Render a per-rule diff at DEBUG and route a structured
         record to ``run.dump`` when set. Returns early when
         neither sink is active."""
-        from emmy.compiler.pipeline.rule_diff import emit  # noqa: PLC0415
-
         rule = match.rule
         pass_ = rule.pass_
         dump = self.run.dump
@@ -310,8 +304,6 @@ class LazyCandidate:
 
         Raises if called when :meth:`is_expandable` would return False —
         the search loop dispatches on that predicate."""
-        from dataclasses import replace  # noqa: PLC0415
-
         assert self.pending is not None and not self.pending[1].is_leaf, "expand() requires branch Fork pending"
         match, fork = self.pending
         children_options = fork.expand()

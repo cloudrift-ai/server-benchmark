@@ -7,9 +7,15 @@ module is the SHAPE (how many resolves, the blocklist retries, the loud failure)
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from emmy.compiler.context import Context
+from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.pipeline.pipeline import LoweringError, Run
+from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.policy.greedy import greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
@@ -50,19 +56,13 @@ class GreedyStrategy(SearchStrategy):
         self.dump = dump
 
     def run(self, graph: Graph, ctx=None) -> Graph:
-        import time  # noqa: PLC0415
-
-        from emmy.compiler.context import Context as _Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.db import SearchDB as _SearchDB  # noqa: PLC0415
-
         pipeline, backend, dump = self.pipeline, self.backend, self.dump
         if ctx is None:
-            ctx = _Context.probe()
+            ctx = Context.probe()
         backend_name = getattr(backend, "name", "cuda")
         if ctx.backend_name != backend_name:
             ctx = replace(ctx, backend_name=backend_name)
-        db = self.db if self.db is not None else _SearchDB()
+        db = self.db if self.db is not None else SearchDB()
         t_start = time.monotonic()
 
         blocked: dict[str, set[frozenset]] = {}
@@ -108,8 +108,6 @@ def _unlowered_tiles(graph: Graph, rejections: list[tuple[str, str, str]]) -> di
     so the greedy fallback lands on the next prior-ranked sibling."""
     if not rejections:
         return {}
-    from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     out: dict[str, frozenset] = {}
     for nid, _pass_label, _reason in rejections:
@@ -136,9 +134,6 @@ def _raise_on_unlowered(graph: Graph, rejections: list[tuple[str, str, str]], ct
     anything) never trip this."""
     if not rejections:
         return
-    from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import LoweringError  # noqa: PLC0415
 
     # Last recorded reason / pass wins (the final pass that tried to lower it).
     reason_by_node: dict[str, str] = {}

@@ -22,8 +22,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.stmt import Body, Loop
-from emmy.compiler.ir.stmt.carrier import exp_merge
 from emmy.compiler.ir.stmt.leaves import ElementwiseImpl
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop

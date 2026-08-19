@@ -120,7 +120,7 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     """The PLANAR/TWISTED half of the role is the stored combine's twist family — a fold whose
     body is the dissolved exp-family (online-softmax) merge derives ``TWISTED``; no stored role
     field, no side-band algebra (``from_loop`` reconstructs it from the body alone)."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge
+    from emmy.compiler.ir.pure.carrier import exp_merge
 
     loop = Loop(
         axis=Axis("k", 1024),
@@ -222,9 +222,9 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     and it still classifies as a ``CONTRACTION`` carrying the GRID (cta) partition."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.algebra import M
     from emmy.compiler.ir.sigma import Sigma
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.algebra import M
 
     c = _contraction()  # k_axis = k(256)
     # The split-K factoring, spelled inline: ksplit (the partition index, a distinct name) x kslice
@@ -273,8 +273,8 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     lands at the derived head, the lift body follows, and the synthesized PV ``Fold`` (a ``Stmt``)
     flattens to its own loop in place — one recursion rule, so the scalar tier expands
     ``for kv:[QK loop; P; PV loop; fold]``. This is the structural seam warp-flash rides."""
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
 
     qk = _contraction()  # Σ_k A·B -> acc (the score S)
     prob = Assign(name="p", op="exp", args=("acc",))  # the lift body — between QK and the merge

@@ -16,6 +16,46 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
+## Pure terms vs statements
+
+Two vocabularies, and exactly one direction between them.
+
+A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it has an order, a
+scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
+(`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
+α-renaming, and has no position at all. `Lambda`, the monoid vocabulary (`M` / `component_ops` /
+`rename_combine` / the foldMap spec oracle), the exp-family combine generators and `StateMerge`
+all live on the term side.
+
+**A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
+has to reach the instruction stream it is RENDERED into statements at the point of use — never
+spliced in as one. `StateMerge.stmts()` is the shape of that: the cross-partition state⊕state
+combine IS the fold's stored `combine` `Lambda` with its second operand renamed, and it becomes
+`Assign` rescale temps plus one `base`-`Accum` per state component wherever the lowering needs
+statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop).
+
+The invariant is what stops facts from acquiring a second home. A term that renders itself needs
+no private spelling of anything the statements already carry:
+
+- the neutral elements come from `Accum.op.identity` through the ONE identity placement
+  (`Loop.render` / `StridedLoop.render`), so no `identities` field rides on the term and no
+  `Init` seed is emitted beside it;
+- the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
+  counters see them with no special `deps()` channel to keep complete.
+
+While that combine travelled as one opaque renderable stmt it needed both, and both were subtly
+wrong: its temps were invisible to `rename_ssa_sequential` (patched by a uniquifying overlay in the
+rewrite handler) and its seed was a second placement path that `_lift` stripped. The flash
+cross-CTA finalize was numerically wrong as a result, and became correct when the combine started
+arriving as ordinary statements.
+
+**Tile IR stores terms, not statements.** `TileOp`'s node vocabulary is the `Fold` term and the
+`Lambda`s it stores; the schedule slices, root stores and knobs are the `TileOp`'s, not the term's.
+`Fold` is the one class still on the wrong side of the rule above — it subclasses `Stmt` so a
+composed step can occupy a statement position in another node's body, and `Fold.lower()` /
+`Fold.loop` are already the render-to-statements it would keep. Closing it means moving the term
+and its derivations out of `tile/ir.py` into `ir/pure/`, leaving `TileOp` behind.
+
 ## Invariants by stage
 
 - **Frontend → tensor** (after `decomposition`): `LinearOp`, `MatmulOp`,
@@ -182,7 +222,7 @@ stored `combine`, and `Fold.from_loop` reconstructs it from the body alone). Com
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-**The algebra is in the term, not a tag** (`ir/stmt/algebra.py` — the consolidated algebraic
+**The algebra is in the term, not a tag** (`ir/pure/algebra.py` — the consolidated algebraic
 vocabulary). There is no stored / derived `AlgebraKind` and no op-tree node zoo. The stored tile IR has
 exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
@@ -223,16 +263,17 @@ atom tier reads the operands off the annotated loop to pick the tensor-core cell
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
 `Fold` node's flat `(init, combine)` pair, and everything else derives where it is consumed.
-`ir/stmt/algebra.py` is the IR core only: `M` (the componentwise free constructor),
+`ir/pure/algebra.py` is the IR core only: `M` (the componentwise free constructor),
 `component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
 the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
 `Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
-denotational foldMap spec oracle; the renderable `StateMerge` stmt lives with the other stmt
-leaves (`ir/stmt/leaves.py`, next to `Accum`). The lowering side reads the algebra
-through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a `Fold`; `names` /
-`state_b` / `twisted`, the `combine_states` re-emission, `state_merge(other)`, the finalize
-`identities`, and `loop_state_head` — the loop-body read of the carried state's head), consumed
-only by the kernel materializer and `030_split_reduce`. A *degenerate* fold is a plain
+denotational foldMap spec oracle; the state⊕state combine is the pure `StateMerge` term
+(`ir/pure/merge.py`), which renders itself to statements rather than being one. The lowering side
+reads the algebra through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a
+`Fold`; `names` / `state_b` / `twisted`, the `combine_states` re-emission for the cross-thread
+primitives, `merge_stmts(other)` for the statement positions, and `loop_state_head` — the
+loop-body read of the carried state's head), consumed only by the kernel materializer and
+`030_split_reduce`. A *degenerate* fold is a plain
 `sum`/`max`/`mean` reduce; a *twisted* one is online-softmax; a contraction's algebra is
 the degenerate algebra of its additive fold.
 
@@ -247,7 +288,7 @@ cache are keyed on, in exchange for a field nothing reads.
 
 **The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
 conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation
-(`ir/stmt/carrier.py` — `exp_combine_states` / `exp_merge` over `(names, terms)`) builds the naive
+(`ir/pure/carrier.py` — `exp_combine_states` / `exp_merge` over `(names, terms)`) builds the naive
 `ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine — associativity inherited from the base monoid for free — then a
 per-family stabilizer rewrites it to the numerically-stable form (distribute the ψ-rescale, fuse
 exponentials, fold identities, DCE/CSE) and a structural certificate asserts every surviving
@@ -260,7 +301,7 @@ softmax·V region carries `(m, d, o…)`). **Example** — the
 online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
 `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
-**The λ-foldMap primitives** (`ir/stmt/body.py` / `ir/stmt/algebra.py`) — the finished algebra vocabulary the tile IR
+**The λ-foldMap primitives** (`ir/pure/lam.py` / `ir/pure/algebra.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
@@ -318,7 +359,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `lowering/tile/030_split_reduce`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
-`classify_fragment_epilogue` walk (`ir/stmt/algebra.py`) deliberately does NOT use it: it is a single pass
+`classify_fragment_epilogue` walk (`ir/pure/algebra.py`) deliberately does NOT use it: it is a single pass
 interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
 any-dep taint.
 

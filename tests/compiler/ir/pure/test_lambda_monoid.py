@@ -22,9 +22,10 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Lambda, Load, Loop, M, Write
-from emmy.compiler.ir.stmt.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
-from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.pure import Lambda, M
+from emmy.compiler.ir.pure.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
+from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 

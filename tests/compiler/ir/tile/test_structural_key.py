@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop
+from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -85,7 +86,7 @@ def test_independent_stmt_interleaving_never_moves_the_key() -> None:
 def test_twisted_state_renames_never_move_the_key() -> None:
     # The generated exp-family combine's internal temps are namespaced on the state names; the
     # key renames through ``rename_combine``'s regeneration lockstep, so state spelling is free.
-    from emmy.compiler.ir.stmt.carrier import exp_merge
+    from emmy.compiler.ir.pure.carrier import exp_merge
 
     def softmax(names: tuple[str, str]) -> Fold:
         body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(names, ("x0", 1.0), key=names[0])))

@@ -329,7 +329,6 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        StateMerge,
         StridedLoop,
         Unpack,
         Write,
@@ -362,7 +361,6 @@ def _stmt_eval_scope() -> dict:
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,
-        "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,

@@ -22,20 +22,19 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
     Body,
     Cond,
     Init,
-    Lambda,
     Load,
     Loop,
     Mma,
     Pack,
     Select,
     SelectBranch,
-    StateMerge,
     StridedLoop,
     Unpack,
     Write,
@@ -67,7 +66,6 @@ _DATA_CLASSES = (
     Pack,
     Select,
     SelectBranch,
-    StateMerge,
     StridedLoop,
     Unpack,
     Write,

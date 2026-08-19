@@ -6,7 +6,7 @@ value types are used by both the tile IR and the kernel materializer, so they li
 beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
-(:mod:`emmy.compiler.ir.stmt.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
+(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —

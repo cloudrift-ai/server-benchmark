@@ -77,20 +77,17 @@ from functools import cached_property
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.pure import Lambda, M, component_ops, rename_combine
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
     Body,
-    Lambda,
     Load,
     Loop,
-    M,
     RenderCtx,
     Stmt,
     Write,
-    component_ops,
-    rename_combine,
 )
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import digest
@@ -209,7 +206,7 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     (:func:`_split_expect` — flash's PV). Deterministic from the stored params only; the operand
     edges consumed here are excluded from the generic first-use splice
     (:meth:`Fold._splice_edges`)."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_merge  # noqa: PLC0415
 
     lam = fold.lift
     names = tuple(fold.combine.results)
@@ -278,7 +275,7 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
 @dataclass(frozen=True)
 class Fold(Stmt):
     """A scheduled reduce — the typed successor of the bare annotated reduce
-    ``Loop`` (``ir/stmt/algebra``). It splits the reduce's **algebra** (the loop-carried
+    ``Loop`` (``ir/pure/algebra``). It splits the reduce's **algebra** (the loop-carried
     flat ⊕ — degenerate/componentwise for a plain
     ``sum`` / ``max`` / ``mean``, twisted (exp-family) for online-softmax / flash) from its **structure**
     (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
@@ -364,7 +361,7 @@ class Fold(Stmt):
         # The state-component ROLE decision is shape-derived off the lift's injected singleton,
         # no annotation: the pivot is component 0 (its injected term the score), a literal-1
         # injection is a denominator, a value injection an expectation.
-        from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
+        from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
 
         names = self.combine.results
         other = tuple(f"{nm}__o" for nm in names)
@@ -887,8 +884,8 @@ class Channel:
 def _loop_ir_fn(params, body, results) -> Lambda:
     """The RAW-LOOP-IR formation arm — the ONE impure ``lift`` builder left after 1q, for the
     kernels that are loop IR rather than recognized algebra: ``010_recognize``'s un-recognized
-    flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (``Init``
-    seeds + the un-annotated ``StateMerge`` merge ``Loop``), the prologue'd split partial, and
+    flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (the
+    annotated cross-partition merge ``Loop``), the prologue'd split partial, and
     the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
     strict :class:`Lambda` formation — every ROOT STORE left the term (``TileOp.stores``),
     so impurity here is only iteration/seed structure, never an effect on the output. Reached

@@ -377,7 +377,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
 # ways across per-thread register accumulators (ILP). The serial reduce ``Loop`` becomes a
 # :class:`StridedLoop` of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
 # (each copy offset by ``r·coop`` and folding its own accumulator). After the loop: the REG tree
-# folds the ``reg`` accumulators into one (``as_state_merge``), then — if ``coop > 1`` — the
+# folds the ``reg`` accumulators into one (``Reduction.merge_stmts``), then — if ``coop > 1`` — the
 # cross-thread combine (:func:`emit_combine`), then the projection. The op tree + ``lower`` are
 # shared with the other tiers; only the partition changes.
 
@@ -498,7 +498,8 @@ def emit_combine(
       a single ``TreeHalve`` reduces + broadcasts in place.
 
     The stored combine's surface (its results / second-operand params / the
-    :func:`~emmy.compiler.ir.stmt.algebra.combine_states_of` program) drives the nodes; the
+    :attr:`~emmy.compiler.pipeline.passes.lowering._reduction.Reduction.combine_states` program)
+    drives the nodes; the
     combine renders at the accumulator dtype (fp32 for a reduction, with the fold's own dtype
     honored when set)."""
     state = red.names
@@ -557,15 +558,15 @@ def emit_combine(
 def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
     """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
-    into copy 0 (``state_merge_of``), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
+    into copy 0 (``Reduction.merge_stmts``), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
     not ``None``) — the cross-thread :func:`emit_combine`. Both reassign the carried state **in place**
     (the survivor SSA names hold the full reduction), so the post-reduce projection reads them directly.
 
     Algebra-generic (the ⊕ read off the ``red`` fold node's stored combine): a monoid reduce and a
     contraction's degenerate additive fold identically, so a cooperative reduce and a (future)
-    cooperative-K contraction share this tail. ``state_merge_of``
-    keys its finalize temps on the copy name, so each fold's internals are already unique."""
-    merge: list[Stmt] = [red.state_merge(tuple(f"{n}__r{r}" for n in red.names)) for r in range(1, reg)]
+    cooperative-K contraction share this tail. ``merge_stmts`` keys a twisted combine's temps on
+    the copy name, so each fold's internals are already unique."""
+    merge: list[Stmt] = [st for r in range(1, reg) for st in red.merge_stmts(tuple(f"{n}__r{r}" for n in red.names))]
     if lane is not None:
         merge += emit_combine(red, t=lane.name, n_threads=coop)
     return merge
@@ -628,7 +629,7 @@ def _tile_reduce_axis_transposed(
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
     strided = strided.rewrite(ident, subst)
 
-    merge: list[Stmt] = [alg.state_merge(tuple(f"{n}__r{r}" for n in alg.names)) for r in range(1, reg)]
+    merge: list[Stmt] = [st for r in range(1, reg) for st in alg.merge_stmts(tuple(f"{n}__r{r}" for n in alg.names))]
     if k_co is not None:
         merge += emit_combine(alg, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
@@ -659,7 +660,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction (flash Q@K / P@V) as a node. The algebra
     # is read off the ``Fold`` node itself (:class:`Reduction` — a contraction's K fold and a
-    # monoid's reduce fold both answer it, so the algebra-generic ``state_merge`` /
+    # monoid's reduce fold both answer it, so the algebra-generic ``merge_stmts`` /
     # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
     # ahead of its loop; the enclosing zero-axis ``Fold``'s projection is ``tail`` (already walked).
     (rloop,) = _emit(op, ctx).body

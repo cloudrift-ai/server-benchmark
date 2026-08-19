@@ -70,8 +70,8 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
     reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
     ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
     the blocked evaluation, found among ``stream.step_stmts()``."""
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
 
     qk = _contraction_fold("dd", acc="sacc", w="K")
     names = ("m_i", "l_i", "O_i")

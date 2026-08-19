@@ -125,11 +125,11 @@ def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> N
       stamped off the bare lowered body reports ``S_ext_n_free_axis = 0`` and every extent feature
       the occupancy and wave models are built on collapses to 1.
 
-    And the finalize's cross-partition fold must READ as a reduce: ``Loop.is_reduce``'s structural
-    fallback wants an ``Accum`` / ``Mma`` carrier and this one's is a ``StateMerge``, so the loop
-    carries an explicit ``PLANAR`` role — without it the finalize featurizes as a 3-deep parallel
-    nest that reduces nothing. (Annotating it is emission-neutral: the kernel source digests
-    identically across both arms and both carrier kinds.)
+    And the finalize's cross-partition fold must READ as a reduce: the loop carries an explicit
+    ``PLANAR`` role rather than leaning on ``Loop.is_reduce``'s structural ``Accum`` fallback —
+    without a stated role the finalize would featurize as a 3-deep parallel nest that reduces
+    nothing whenever the fallback missed. (Annotating it is emission-neutral: the kernel source
+    digests identically across both arms and both carrier kinds.)
 
     Read against the pieces' known geometry: the partial's frees are ``(ksplit=2, m=128, n=128)``
     and the finalize's the grid ``(m=128, n=128)`` over a 2-wide fold."""

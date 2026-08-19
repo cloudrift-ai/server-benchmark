@@ -9,8 +9,8 @@ escape."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, component_ops
-from emmy.compiler.ir.stmt.algebra import M
+from emmy.compiler.ir.pure import Lambda, M, component_ops
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
 from emmy.compiler.ir.tile.ir import Fold, is_contraction
 from emmy.compiler.ir.tile.ops import head, reduce_loop
 
@@ -19,7 +19,7 @@ def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, 
     """Read the λ spelling off a reduce ``Loop`` whose body is the dissolved ``[pure lift stmts…,
     Accum folds]`` sequence — ANNOTATION-FREE: every fact (accumulator names, channel ops, folded
     values) is read off the body's ``Accum``\\ s themselves, and threads into
-    :func:`~emmy.compiler.ir.stmt.algebra.M` with the loop's REAL accumulator names. Returns
+    :func:`~emmy.compiler.ir.pure.algebra.M` with the loop's REAL accumulator names. Returns
     ``(lift, init, combine)`` — the flat ⊕ pair — or ``None`` when the shape does not read
     off cleanly (a composed step, an effectful stmt, an identity-less op) — the caller keeps the
     raw-loop escape. A TWISTED (exp-family) loop has no self-describing ``Accum`` spelling (its
@@ -69,7 +69,7 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     it is unchanged."""
     from itertools import product as _product  # noqa: PLC0415
 
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
 
     body = tuple(loop.body)
     accums = [s for s in body if isinstance(s, Accum)]
@@ -115,7 +115,7 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
     folds, which carry their own schedule slices), a foreign merge spelling, a role the singleton
     shape cannot carry. :meth:`Fold.from_loop`'s byte-identity gate stands behind this extraction
     like the degenerate one's."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_merge  # noqa: PLC0415
 
     names = tuple(like.combine.results)
     terms = tuple(like.lift.results)

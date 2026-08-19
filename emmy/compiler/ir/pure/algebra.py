@@ -15,7 +15,7 @@ is consumed. This module holds only what the STORED TERM itself needs:
 - :func:`eval_lambda` / :func:`foldmap_eval` — the denotational spec oracle the agreement +
   associativity property tests run against.
 
-The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.stmt.carrier`; the
+The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.pure.carrier`; the
 lowering-side derivations (state⊕state re-emission, finalize seeds) live with their one consumer
 (``pipeline/passes/lowering/_reduction``). The old ``Monoid`` / ``Semiring`` node wrappers, the
 ψ-conjugation apparatus (``Carrier`` / ``Twist`` / ``State``) and the loop-annotation ``Algebra``
@@ -25,7 +25,8 @@ bundle are all retired: the node's stored combine is the single spelling of ⊕.
 from __future__ import annotations
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt.body import Body, Lambda
+from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Assign
 
 # --------------------------------------------------------------------------------------------
@@ -98,7 +99,7 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     its internal temps are namespaced on the state spelling, and regeneration is the
     deterministic rule that keeps the stored program equal to the generator's output (the
     formation invariant the consuming ``Fold`` asserts)."""
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
 
     def rn(name: str) -> str:
         if name.endswith("__o"):

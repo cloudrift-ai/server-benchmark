@@ -499,8 +499,8 @@ output-sweep coordinate stays bound by its loop while only per-cell SSA values g
 the cell suffix. If enumeration deliberately leaves a term unmapped because no schedule row is legal, materialization
 maps its free axes directly to the scalar grid before lowering; the valid guardrail term therefore remains executable.
 The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
-that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
-un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
+that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — the annotated
+cross-partition merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
 composed contraction tail), formed through the one `Fold.projection`-private `_loop_ir_fn` arm and dying with the
 recognizer's growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
 edge-iff-closed.

@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Channel, Fold, Store, TileOp
 from emmy.compiler.ir.tile._dump import pretty, unplaced_slices
 from emmy.compiler.ir.tile.ops import Sched

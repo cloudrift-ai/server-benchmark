@@ -12,9 +12,9 @@ the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBR
 - **finalize** — two arms, picked by the ``GRID`` stage's finalize letter
   (``ReducePlan.finalize``):
   - ``"kernel"`` — the partial writes its state to a ``ws[cta, *free]`` ``__partial``
-    workspace; a sibling **finalize kernel** seeds the carrier state then folds the
-    workspace over the split axis via ``Reduction.state_merge`` (the cross-partition
-    combine, a renderable :class:`StateMerge`) and projects the output. **2 nodes.** The only
+    workspace; a sibling **finalize kernel** folds the
+    workspace over the split axis via ``Reduction.merge_stmts`` (the cross-partition
+    combine, rendered to ``Accum``\\ s) and projects the output. **2 nodes.** The only
     legal arm for a twisted carrier (flash's ``e^{Δm}`` rescale can't be an atomic).
   - ``"atomic"`` — the partial ``atomicAdd``\\ s its (additive) state into the output (applying
     the kernel's projection epilogue per-partition first, when that epilogue *distributes* over
@@ -73,7 +73,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
     Fold,
@@ -277,29 +277,28 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     partial_tile = _piece(_partial(()), (split, *grid), stores=ws_stores)
 
-    # --- finalize kernel: seed each state, fold ``ws`` over ``ksplit`` (``as_state_merge`` — the
+    # --- finalize kernel: fold ``ws`` over ``ksplit`` (``Reduction.merge_stmts`` — the
     # 1-component additive fold, or the N-component per-channel sums), then the original
     # projection epilogue (the multi-channel ⊗-combine applies HERE, once, after the sums) or a
-    # bare store — the same finalize shape the residual path uses. The seeds + merge loop are
-    # raw loop IR (the finalize is not a recognized term); its root store rides ``TileOp.stores``.
+    # bare store — the same finalize shape the residual path uses. The merge loop is raw loop IR
+    # (the finalize is not a recognized term); its root store rides ``TileOp.stores``. The state
+    # seeds are NOT emitted here: the combine renders to ``Accum``\ s, so ``Loop.render``'s one
+    # identity placement declares them at the loop — an explicit ``Init`` would be a second
+    # seeding path, and ``_lift`` strips those anyway when it re-lifts this cell into a ``Fold``.
     other = tuple(f"{nm}__p" for nm in states)
-    combine = alg.state_merge(other)
-    ids = alg.identities()
-    seeds = tuple(Init(name=nm, identity=ids[nm], dtype=F32) for nm in states)
+    combine = alg.merge_stmts(other)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
-    # PLANAR, stated rather than inferred: ``Loop.is_reduce``'s structural fallback looks for an
-    # ``Accum`` / ``Mma`` carrier and this fold's is a ``StateMerge``, so an unannotated cross-
-    # partition loop reads as a FREE axis — the finalize then featurizes as a 3-deep parallel nest
-    # with no reduction. ``010_recognize`` annotates every reduce loop it lifts; a kernel minted
-    # here has to arrive the same way, or it cannot featurize like the kernel it is.
-    fin_loop = Loop(axis=split, body=Body((*loads, combine)), role=AxisRole.PLANAR)
+    # PLANAR, stated rather than inferred: ``010_recognize`` annotates every reduce loop it lifts,
+    # and a kernel minted here has to arrive the same way or it cannot featurize like the kernel
+    # it is — the structural ``Accum`` fallback agrees, but a stated role does not depend on it.
+    fin_loop = Loop(axis=split, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
     fin_proj, fin_stores = _boundary(epilogue)
     if not fin_stores and not any(isinstance(s, Write) for s in fin_proj):
         # The projected value is the LAST defining stmt's name — the epilogue tail may end with
         # non-defining stmts, so scan backward instead of indexing [-1].
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
-    fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
+    fin_op = Fold.projection(body=Body((fin_loop, *fin_proj)))
     # Stamped AFTER the workspace is in the fragment: the finalize reads it, and its structural
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
@@ -428,25 +427,23 @@ def rewrite(match: Match, root: Node) -> Graph:
     frag = _frag(match, root)
     partial_tile = _piece(_residual(partial_op, fold_node), (split, *grid), stores=ws_stores)
 
-    # --- finalize kernel: seed the carrier state, then fold each partition's state from the
-    # workspace over the split axis via the fold's cross-partition combine (``Reduction.state_merge`` —
-    # a renderable :class:`StateMerge`, the same combine the cooperative tier uses). A flat zero-axis fold
-    # of loop-IR: ``Init`` seeds, the split ``Loop`` (loads + the combine), then the original
-    # projection + store.
+    # --- finalize kernel: fold each partition's state from the workspace over the split axis via
+    # the fold's cross-partition combine (``Reduction.merge_stmts`` — the same combine the
+    # cooperative tier uses, rendered to ``Accum``\ s). A flat zero-axis fold of loop-IR: the
+    # split ``Loop`` (loads + the combine), then the original projection + store. The state seeds
+    # ride the ``Accum``\ s (see the deferred arm above), so no ``Init`` is emitted here.
     other = tuple(f"{nm}__p" for nm in states)
-    combine = alg.state_merge(other)
-    ids = alg.identities()
-    seeds = tuple(Init(name=states[i], identity=ids[states[i]], dtype=F32) for i in range(n_comp))
+    combine = alg.merge_stmts(other)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
     # PLANAR for the same reason as the deferred-kernel arm above.
-    fin_loop = Loop(axis=split, body=Body((*loads, combine)), role=AxisRole.PLANAR)
+    fin_loop = Loop(axis=split, body=Body((*loads, *combine)), role=AxisRole.PLANAR)
     fin_proj, fin_stores = _boundary(after, plain_only=True)
     if not fin_stores and not Body(tuple(fin_proj)).writes:
         # Backward scan — the epilogue tail may end with non-defining stmts (see the deferred
         # kernel arm above).
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
         fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
-    fin_op = Fold.projection(body=Body((*seeds, fin_loop, *fin_proj)))
+    fin_op = Fold.projection(body=Body((fin_loop, *fin_proj)))
 
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a

@@ -347,8 +347,8 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
     contraction over the KV axis whose A cone is ``exp(s − m)·(1/d)`` over a COMPUTED score — one
     edge for the row statistic (the twisted ``(m, d)`` pair) and one for the per-cell score
     contraction ``s = Σ_d Q·K``. Returns ``(root, cone)``."""
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
     from emmy.compiler.ir.tile import Channel
 
     def score(kv_name: str, dd: Axis, acc: str) -> Fold:

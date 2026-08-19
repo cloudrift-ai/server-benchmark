@@ -205,9 +205,10 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
 
 ### Strategies — engine events for cross-cutting concerns
 
-The engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS and never branches on pass names, dialects,
-or per-concern flags. Three prefixed protocols share the "strategy" vocabulary, each with its own ABC, told apart
-by what the loop is doing when they act:
+The engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS — frozen records of an engine moment
+(handlers act on the compilation state an event references, never on the event) — and never branches on pass
+names, dialects, or per-concern flags. Three prefixed protocols share the "strategy" vocabulary, each with its own
+ABC, told apart by what the loop is doing when they act:
 
 - **`PipelineStrategy`** (`pipeline/strategy.py`) — reacts to what the loop DID (events below): the cross-cutting
   concerns (provenance, identity, the kernel inventory). Never steers the search; the loop's trajectory is

@@ -418,7 +418,7 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 _SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpliceReceipt:
     """What one :meth:`Graph.splice` did — pure graph-surgery bookkeeping handed to whoever
     cares about what the splice MEANT (the engine emits it as ``SplicedEvent``; the provenance

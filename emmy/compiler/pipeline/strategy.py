@@ -20,7 +20,10 @@ Two binding scopes share the protocol:
 
 Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,
 ``Candidate.apply``'s Graph splice (before and after), and ``Cursor.advance``'s pass completion —
-and carry payload objects so signatures never churn.
+and carry payload objects so signatures never churn. Events are FROZEN records of a moment: a
+handler never mutates the event (nor could a mutation mean anything — nobody reads it after the
+dispatch). What a handler legitimately mutates is the compilation state an event references —
+fragment ops, node hints — because acting on that state is a strategy's whole job.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
         """A named pass completed (quiescent scan)."""
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunStartEvent:
     """A loop (``Run.drive`` / ``Run.resolve``) starts driving ``graph``. ``passes`` names the
     pipeline's pass list — a strategy keyed to a pass boundary reads it to handle partial
@@ -73,7 +76,7 @@ class RunStartEvent:
     passes: tuple[str, ...]
 
 
-@dataclass
+@dataclass(frozen=True)
 class SpliceEvent:
     """Emitted by ``Candidate.apply`` BEFORE a ``Graph`` fragment splices in. Fragment op
     identities are stable (pre-splice, pre-id-promotion); ``graph`` is the candidate's graph,
@@ -87,7 +90,7 @@ class SpliceEvent:
     graph: Graph
 
 
-@dataclass
+@dataclass(frozen=True)
 class SplicedEvent:
     """Emitted by ``Candidate.apply`` AFTER the splice; ``receipt`` is what the splice did
     (see :class:`emmy.compiler.graph.SpliceReceipt`)."""
@@ -97,7 +100,7 @@ class SplicedEvent:
     receipt: SpliceReceipt
 
 
-@dataclass
+@dataclass(frozen=True)
 class PassEndEvent:
     """Emitted by ``Cursor.advance`` when a named pass completes with a quiescent scan.
     ``passes`` names the pipeline's full pass list, so a strategy keyed to a boundary can

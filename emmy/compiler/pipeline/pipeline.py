@@ -36,7 +36,6 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork, OptionFork
 from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
-from emmy.compiler.pipeline.strategy import emit as emit_event
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -405,15 +404,14 @@ class Cursor:
                 logger.debug("compile: %-18s done (%d nodes)", pass_.name, len(graph.nodes))
                 if self.run.dump is not None:
                     self.run.dump.on_pass(pass_, graph)
-                self.run.emit(
-                    "on_pass_end",
-                    PassEndEvent(
-                        pass_name=pass_.name,
-                        graph=graph,
-                        ctx=self.run.ctx,
-                        passes=tuple(p.name for p in self.run.pipeline.passes),
-                    ),
+                event = PassEndEvent(
+                    pass_name=pass_.name,
+                    graph=graph,
+                    ctx=self.run.ctx,
+                    passes=tuple(p.name for p in self.run.pipeline.passes),
                 )
+                for strat in self.run.pipeline.strategies:
+                    strat.on_pass_end(event)
             self.pass_idx += 1
 
 
@@ -430,9 +428,12 @@ class Pipeline:
     """
 
     passes: list[Pass]
-    # Discovered engine-event strategies (``strategy.discovered_strategies``) —
-    # shared, stateless instances notified by ``Run.emit`` before any run-scoped
-    # run-scoped strategies. Empty for ``from_pattern`` test shims.
+    # Engine-event strategies (``PipelineStrategy`` instances): the discovered,
+    # stateless set (``strategy.discovered_strategies``) plus whatever a caller
+    # composed in via :meth:`with_strategies`. Empty for ``from_pattern`` test
+    # shims. A pipeline composed with STATEFUL strategies (e.g. the two-level
+    # tuner's minted-kernel watcher) serves ONE run — sharing across runs is
+    # only safe when every strategy is stateless.
     strategies: tuple = ()
 
     def match(self, graph: Graph, rule: Rule) -> list[Match]:
@@ -470,6 +471,12 @@ class Pipeline:
         select_set = set(select) if select is not None else None
         return cls(passes=[Pass.load(name, i, select_set) for i, name in enumerate(passes)], strategies=discovered_strategies())
 
+    def with_strategies(self, *extra) -> Pipeline:
+        """This pipeline with ``extra`` engine-event strategies composed after the existing
+        set — how a caller installs PER-RUN strategies (e.g. the two-level tuner's minted-kernel
+        watcher). The returned pipeline serves one run when any composed strategy holds state."""
+        return replace(self, strategies=(*self.strategies, *extra))
+
     def run(
         self,
         graph: Graph,
@@ -494,7 +501,7 @@ class Pipeline:
 
         ``backend`` (typically :class:`CudaBackend`) opts the run into
         real GPU measurement: the terminal graph's per-kernel latency is
-        recorded to ``db`` (via :func:`search.terminal_bench.bench_terminal_async`, once after the
+        recorded to ``db`` (via :func:`search.policy.terminal_bench.bench_terminal_async`, once after the
         resolution settles) and attributed to every ancestor along the
         ``Op.source`` chain. ``db`` defaults to a fresh in-memory store;
         pass an explicit :class:`SearchDB` to persist measurements
@@ -529,7 +536,7 @@ class Pipeline:
 
         return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
-    def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections, strategies=()) -> Run:
+    def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections) -> Run:
         """Build the :class:`Run` for :meth:`tune_async`: probe / align ``ctx`` — letting the
         search policy prepare it (``Search.prepare_ctx``, e.g. the tune search relaxing the
         strict knob-pin validator) — and wire the run-scoped sinks. Graph seeding is strategy
@@ -553,7 +560,6 @@ class Pipeline:
             backend=backend,
             dump=dump,
             rejections=rejections,
-            strategies=tuple(strategies),
         )
 
     async def tune_async(
@@ -566,7 +572,6 @@ class Pipeline:
         db: SearchDB | None = None,
         dump: CompilerDump | None = None,
         rejections: list[tuple[str, str, str]] | None = None,
-        strategies=(),
     ):
         """Async-generator tune driver: ONE loop, terminal valuation owned by the policy.
 
@@ -576,8 +581,9 @@ class Pipeline:
         not engine mechanics), so N kernels' benches overlap across device-pinned workers on
         one event loop while the (light) Python lowering runs cooperatively between awaits.
 
-        ``strategies`` installs the run's run-scoped strategies — see :class:`Run`."""
-        run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections, strategies=strategies)
+        Per-run engine-event strategies are COMPOSED into the pipeline
+        (:meth:`Pipeline.with_strategies`), never threaded through here."""
+        run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections)
         t_start = time.monotonic()
         n_terminals = 0
         for token, cand in run.drive(graph):
@@ -687,20 +693,10 @@ class Run:
     backend: object | None = None
     dump: CompilerDump | None = None
     rejections: list[tuple[str, str, str]] | None = None
-    # Run-scoped strategies — ``PipelineStrategy`` instances (the same protocol as the
-    # pipeline's discovered set; the base class declares every event as a
-    # no-op) with per-run state, e.g. the two-level tuner's minted-kernel watcher.
-    # Notified by :meth:`emit` after the discovered set.
-    strategies: tuple = ()
     # Count of search candidates dropped by :meth:`drive`'s per-variant
     # containment (un-lowerable forks that raised during lowering). Tune-only;
     # stays 0 on the deterministic greedy path.
     _dropped_candidates: int = 0
-
-    def emit(self, event_name: str, event) -> None:
-        """Notify the pipeline's discovered strategies, then this run's own."""
-        emit_event(self.pipeline.strategies, event_name, event)
-        emit_event(self.strategies, event_name, event)
 
     def _step(self, cand: Candidate) -> tuple[Match, list, bool] | None:
         """Run one rule batch against ``cand`` — the per-candidate engine
@@ -777,7 +773,9 @@ class Run:
         don't trace."""
         from emmy.compiler.pipeline.search.candidate import Candidate  # noqa: PLC0415
 
-        self.emit("on_run_start", RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes)))
+        event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
+        for strat in self.pipeline.strategies:
+            strat.on_run_start(event)
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
         while not cand.cursor.is_done:
@@ -835,7 +833,9 @@ class Run:
 
         search = self.search
         assert search is not None, "Run.drive needs a search policy; use Run.resolve for deterministic resolution"
-        self.emit("on_run_start", RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes)))
+        event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
+        for strat in self.pipeline.strategies:
+            strat.on_run_start(event)
         # Seed candidate: no parent token — the policy roots it itself.
         search.push(Candidate(run=self, graph=graph, cursor=Cursor(run=self)).lazy())
 

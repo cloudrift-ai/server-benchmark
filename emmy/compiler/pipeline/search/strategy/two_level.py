@@ -182,16 +182,16 @@ class _Work:
 
 class _KernelInventory(PipelineStrategy):
     """TwoLevelStrategy's PRIVATE splice watcher — not a composable component: the strategy
-    installs one instance on every inner run so kernels minted during lowering (a cut's
-    fragments, a split's pieces) can be enrolled as tuning targets. Reports each new
-    loop-dialect kernel — one whose structural identity has not been seen — to
-    ``on_kernel(node_id, op, fragment)``. Cross-trajectory by design: the MCTS re-minting the
-    same cut on every variant reports it once, and the seen-set is seeded with the outer
-    terminal's kernels so pieces structurally identical to an outer kernel are not re-enrolled.
-    Identity is COMPUTED through the IdentityStrategy's read API, so nothing here depends on a
-    stamp having happened or on strategy dispatch order. It derives from PipelineStrategy only
-    because ``Run.strategies`` is the channel the engine notifies — the event protocol is how a
-    search shape hears about splices."""
+    composes one instance into every inner run's pipeline (``Pipeline.with_strategies``) so
+    kernels minted during lowering (a cut's fragments, a split's pieces) can be enrolled as
+    tuning targets. Reports each new loop-dialect kernel — one whose structural identity has not
+    been seen — to ``on_kernel(node_id, op, fragment)``. Cross-trajectory by design: the MCTS
+    re-minting the same cut on every variant reports it once, and the seen-set is seeded with
+    the outer terminal's kernels so pieces structurally identical to an outer kernel are not
+    re-enrolled. Identity is COMPUTED through the IdentityStrategy's read API, so nothing here
+    depends on a stamp having happened or on strategy dispatch order. It derives from
+    PipelineStrategy because the pipeline's strategy set is the channel the engine notifies —
+    the event protocol is how a search shape hears about splices."""
 
     def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None) -> None:
         self.identity = identity
@@ -405,9 +405,8 @@ class TwoLevelStrategy(SearchStrategy):
                     prior_model=prior,
                     base_knobs=base_knobs,
                 )
-                async for cand in Pipeline.build(LOWERING_PASSES).tune_async(
-                    sub, search=inner, ctx=ctx, backend=backend, db=db, strategies=(inventory,)
-                ):
+                inner_pipeline = Pipeline.build(LOWERING_PASSES).with_strategies(inventory)
+                async for cand in inner_pipeline.tune_async(sub, search=inner, ctx=ctx, backend=backend, db=db):
                     if progress is not None and not work.enrolled:
                         st = inner.last_stats
                         best_us = (1.0 / inner.tree.best_reward) if inner.tree.best_reward > 0 else None

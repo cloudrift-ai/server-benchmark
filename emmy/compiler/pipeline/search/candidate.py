@@ -200,18 +200,20 @@ class Candidate:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
             pass_ = match.rule.pass_
             pass_name = pass_.name if pass_ is not None else ""
-            self.run.emit(
-                "on_splice",
-                SpliceEvent(
-                    match=match,
-                    fragment=option,
-                    root_op=self.graph.nodes[match.root_node_id].op,
-                    pass_name=pass_name,
-                    graph=self.graph,
-                ),
+            strategies = self.run.pipeline.strategies
+            event = SpliceEvent(
+                match=match,
+                fragment=option,
+                root_op=self.graph.nodes[match.root_node_id].op,
+                pass_name=pass_name,
+                graph=self.graph,
             )
+            for strat in strategies:
+                strat.on_splice(event)
             receipt = self.graph.splice(option, consumed=match.consumed, output=match.output or match.root_node_id)
-            self.run.emit("on_spliced", SplicedEvent(graph=self.graph, pass_name=pass_name, receipt=receipt))
+            spliced = SplicedEvent(graph=self.graph, pass_name=pass_name, receipt=receipt)
+            for strat in strategies:
+                strat.on_spliced(spliced)
             self.cursor.n_applied += 1
         self._advance_if_last(match)
 

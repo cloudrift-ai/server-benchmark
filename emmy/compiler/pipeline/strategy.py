@@ -14,9 +14,9 @@ Two binding scopes share the protocol:
   they hold immutable config only — never trajectory state. Dispatch order is deterministic
   (class-name sort) but MUST NOT be load-bearing: no strategy may depend on another having
   handled an event first.
-- **Run-scoped** (``Run.strategies``): instances with per-run state (e.g. the two-level tuner's
-  minted-kernel watcher), installed by the caller that owns the run and notified after the
-  discovered set.
+- **Composed per run** (``Pipeline.with_strategies``): instances with per-run state (e.g. the
+  two-level tuner's minted-kernel watcher), composed into the run's own pipeline instance after
+  the discovered set. A pipeline composed with stateful strategies serves one run.
 
 Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,
 ``Candidate.apply``'s Graph splice (before and after), and ``Cursor.advance``'s pass completion —
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods: every event hook is optional
     """ABC for engine-event strategies — the event protocol's one authoritative declaration.
     Subclasses defined in a ``passes/`` top-level module are DISCOVERED and instantiated at
-    ``Pipeline.build`` (see module docstring); run-scoped instances are installed via
-    ``Run.strategies``. Deliberately no abstract methods: every handler below is a concrete
+    ``Pipeline.build`` (see module docstring); per-run instances are composed via
+    ``Pipeline.with_strategies``. Deliberately no abstract methods: every handler below is a concrete
     no-op, since each strategy cares about a subset — override the events you act on. Contrast
     ``search.strategy.base.SearchStrategy`` (a search SHAPE over the engine's loop) and
     ``search.policy.Search`` (the frontier policy inside one loop)."""
@@ -132,11 +132,3 @@ def discovered_strategies() -> tuple[PipelineStrategy, ...]:
         classes = [cls for cls in PipelineStrategy.__subclasses__() if cls.__module__ in modules]
         _DISCOVERED = tuple(cls() for cls in sorted(classes, key=lambda c: c.__name__))
     return _DISCOVERED
-
-
-def emit(strategies, event_name: str, event) -> None:
-    """Notify every strategy in ``strategies``. Strategies derive from :class:`PipelineStrategy`, so
-    every event method exists (a no-op unless overridden) — a missing attribute is a loud
-    error, not a silently ignored observer."""
-    for strat in strategies:
-        getattr(strat, event_name)(event)

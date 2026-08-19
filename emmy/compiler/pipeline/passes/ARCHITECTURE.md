@@ -599,6 +599,15 @@ The fragment idiom's re-entry semantics are shared, not per-rule: every rule han
 scan, and `005_stamp_structural_features` / `010_recognize` / `020_schedule` pick up whatever is un-stamped,
 un-recognized or unmapped. The shared fixpoint is what lets such rules compose without knowing about each other.
 
+**A piece is stamped before it is recognized, and that order is enforced by `010_recognize`, not by the scan.** The
+scan returns to rule 0 only when it wraps past the LAST rule, and a fork's option is applied by the caller
+(`Candidate.apply`), which advances the rule cursor only if the applied match closed its batch. A cut taken at an
+UNPINNED placement fork with another kernel still pending therefore leaves the cursor on `010_recognize`, which
+re-matches its own fresh pieces on the next step — ahead of `005`. So `010` DEFERS an unstamped `LoopOp`
+(`RuleSkipped`); the batch ends, the scan wraps, and the piece is stamped first. Without that guard the piece lifts
+with no `S_*` and `020_schedule` asserts on the empty structural identity — which is what a whole-model compile with a
+discovered (rather than pinned) cut hit.
+
 `005_stamp_structural_features` duplicates `loop/stamp/020_stamp_structural_features` rather than replacing it,
 because a kernel is stamped in the pass where it is BORN. The loop-dialect pass owns the kernels the fusion end
 produces; it cannot reach one minted later, since `Cursor.advance` only restarts a scan WITHIN the current pass and

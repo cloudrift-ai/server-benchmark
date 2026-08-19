@@ -13,7 +13,9 @@ axes onto the grid and offers the scheduling forks; materialization back to loop
 Nothing here reads a knob or a pin — recognition is structure, and every choice it makes is
 unconditional. (The one exception is PLACEMENT, step 3.5: a ``PLACE`` pin
 cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
-schedule fork exists, so it cannot wait for ``020``.)
+schedule fork exists, so it cannot wait for ``020``.) An unstamped ``LoopOp`` is DEFERRED rather
+than recognized — that is the ``005_stamp_structural_features`` ordering, read off the stamp itself
+rather than assumed from the scan; see the guard below.
 
 All recognition lives in THIS one rule (no separate softmax pass), in order (each
 step unconditional — no knobs):
@@ -67,6 +69,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
@@ -77,6 +80,15 @@ PATTERN = [Pattern("root", LoopOp)]
 
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     loop: LoopOp = root.op
+    # A kernel is RECOGNIZED only once it has an identity. ``005_stamp_structural_features`` runs
+    # first in this pass, so an unstamped ``LoopOp`` here is a kernel this pass MINTED — a cut's
+    # fragment or a split's piece — that the scan reached before wrapping back to rule 0. Deferring
+    # is what makes the pass order a guarantee rather than a coincidence: a fork's option is applied
+    # by the CALLER (``Candidate.apply``), which advances the rule cursor only when the applied match
+    # closed its batch, so an un-deferred piece is re-matched HERE on the very next step and lifted
+    # with no ``S_*`` — the empty structural identity ``020_schedule`` then asserts on.
+    if not any(k.startswith(STRUCT_PREFIX) for k in loop.knobs):
+        raise RuleSkipped("kernel minted in this pass is not stamped yet — 005_stamp_structural_features runs first")
     # Steps (1)–(3) — softmax fusion, the free-axis peel, the cell lift / nodification — are the
     # pure recognition core (:func:`._lift.recognized_tile`), shared verbatim with the strict
     # golden decode's record-side identity derivation.

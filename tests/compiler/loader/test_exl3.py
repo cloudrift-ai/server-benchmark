@@ -1207,11 +1207,6 @@ def test_exl3_twin_carries_decoded_weights(tmp_path):
         np.testing.assert_array_equal(bound[nid], wrapper_state[op.source_path].detach().float().numpy())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="split pieces are minted in the loop dialect (this PR); a kernel reaches 020_schedule unstamped "
-    "(TileOp with an all-LoopOp source chain and no knobs), tripping its structural-identity assert",
-)
 @requires_cuda
 def test_exl3_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny EXL3 model through the same seam ``emmy compile`` / ``emmy run`` use, compiled

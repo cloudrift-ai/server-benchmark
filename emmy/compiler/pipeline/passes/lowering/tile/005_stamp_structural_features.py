@@ -15,13 +15,18 @@ cut's fragments, which are freshly-built ``LoopOp``\\ s with no knobs at all. Th
 ``010_recognize`` and ``020_schedule`` carrying their own identity, like any kernel, and no rule
 had to be told they were fragments.
 
+**Reaching them is a guarantee, not an ordering accident.** The restart only comes when the scan
+wraps past the LAST rule, and a fork's option is applied by the CALLER (``Candidate.apply``), which
+advances the rule cursor only if the applied match closed its batch. So a cut taken at an UNPINNED
+placement fork with another kernel still pending leaves the cursor on ``010_recognize``, which
+re-matches the pieces on the next step — ahead of this rule. ``010`` therefore DEFERS an unstamped
+``LoopOp`` (``RuleSkipped``): the batch ends, the scan wraps, and the piece is stamped here before
+anything recognizes it.
+
 **``LoopOp`` covers every kernel a rule mints**, because every rule mints in the loop dialect: a
 placement cut's fragments and a cross-CTA split's pieces are both plain ``LoopOp`` nodes, built that
 way precisely so they re-enter the pipeline where a freshly fused kernel does. Nothing needs a
-tile-dialect arm. The one thing this does NOT reach is a term ``010_recognize`` splices as a
-``Graph`` rather than rebinding (the online-softmax form), which has carried no structural identity
-since it was written — a separate hole, and not one this rule should paper over by growing a second
-way to read a body.
+tile-dialect arm, and there is no kernel-minting path left that skips this rule.
 """
 
 from __future__ import annotations

@@ -221,7 +221,7 @@ Two binding scopes share the protocol:
   load-bearing — no strategy may depend on another having handled an event first — which is why identity is a
   computed function, not a stamp others wait on. Build-scoped instances are shared across runs and candidates:
   immutable config plus content-keyed caches only, never trajectory state.
-- **Run-scoped** (`Run.observers`, also `tune_async(observers=…)`): instances with per-run state — e.g. the
+- **Run-scoped** (`Run.strategies`, also `tune_async(strategies=…)`): instances with per-run state — e.g. the
   two-level tuner's `KernelInventory` — installed by the caller that owns the run, notified after the discovered
   set.
 
@@ -770,13 +770,13 @@ fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 
-`async Pipeline.tune_async(graph, *, search, backend=None, db=None, observers=())` is the (async-only) autotune
+`async Pipeline.tune_async(graph, *, search, backend=None, db=None, strategies=())` is the (async-only) autotune
 sweep. Pass a `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per
 fully-explored rollout and awaits `search.evaluate(token, cand, backend=, db=)` — terminal VALUATION is search
 policy, not engine mechanics: the bench (or cache/stub short-circuit), the per-kernel `perf` / `lowering` /
 inventory rows, the observe protocol, and the deployable `-O3` re-bench all live on the policy
-(`search/terminal_bench.py` + `TuningSearch.evaluate`). `observers` installs run-scoped engine-event observers
-(the `Run.observers` half of the strategy protocol — see Part 0 of the rule contract above).
+(`search/terminal_bench.py` + `TuningSearch.evaluate`). `strategies` installs the run-scoped strategies
+(the `Run.strategies` half of the protocol — see the strategies section of the rule contract above).
 
 - With `backend=None` the bench is stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never
   overwrites tuned rows.

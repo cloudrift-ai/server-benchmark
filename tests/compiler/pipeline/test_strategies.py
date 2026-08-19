@@ -175,7 +175,7 @@ def test_events_fire_in_loop_order() -> None:
             self.events.append(f"pass_end:{e.pass_name}")
 
     rec = Recorder()
-    run = Run(pipeline=Pipeline.build(LOOP_PASSES), ctx=_CTX, observers=(rec,))
+    run = Run(pipeline=Pipeline.build(LOOP_PASSES), ctx=_CTX, strategies=(rec,))
     run.resolve(_matmul(), lambda fp: flatten_leaves(fp.options)[0])
     assert rec.events[0] == "run_start"
     assert any(ev.startswith("splice:frontend/decomposition") for ev in rec.events)

@@ -432,7 +432,7 @@ class Pipeline:
     passes: list[Pass]
     # Discovered engine-event strategies (``strategy.discovered_strategies``) —
     # shared, stateless instances notified by ``Run.emit`` before any run-scoped
-    # observers. Empty for ``from_pattern`` test shims.
+    # run-scoped strategies. Empty for ``from_pattern`` test shims.
     strategies: tuple = ()
 
     def match(self, graph: Graph, rule: Rule) -> list[Match]:
@@ -529,7 +529,7 @@ class Pipeline:
 
         return GreedyStrategy().run(self, graph, ctx=ctx, backend=backend, db=db, dump=dump)
 
-    def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections, observers=()) -> Run:
+    def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections, strategies=()) -> Run:
         """Build the :class:`Run` for :meth:`tune_async`: probe / align ``ctx`` — letting the
         search policy prepare it (``Search.prepare_ctx``, e.g. the tune search relaxing the
         strict knob-pin validator) — and wire the run-scoped sinks. Graph seeding is strategy
@@ -553,7 +553,7 @@ class Pipeline:
             backend=backend,
             dump=dump,
             rejections=rejections,
-            observers=tuple(observers),
+            strategies=tuple(strategies),
         )
 
     async def tune_async(
@@ -566,7 +566,7 @@ class Pipeline:
         db: SearchDB | None = None,
         dump: CompilerDump | None = None,
         rejections: list[tuple[str, str, str]] | None = None,
-        observers=(),
+        strategies=(),
     ):
         """Async-generator tune driver: ONE loop, terminal valuation owned by the policy.
 
@@ -576,8 +576,8 @@ class Pipeline:
         not engine mechanics), so N kernels' benches overlap across device-pinned workers on
         one event loop while the (light) Python lowering runs cooperatively between awaits.
 
-        ``observers`` installs the run's engine-event observers — see :class:`Run`."""
-        run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections, observers=observers)
+        ``strategies`` installs the run's run-scoped strategies — see :class:`Run`."""
+        run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections, strategies=strategies)
         t_start = time.monotonic()
         n_terminals = 0
         for token, cand in run.drive(graph):
@@ -687,20 +687,20 @@ class Run:
     backend: object | None = None
     dump: CompilerDump | None = None
     rejections: list[tuple[str, str, str]] | None = None
-    # Run-scoped engine-event observers — ``Strategy`` instances (the same
-    # protocol as the pipeline's discovered strategies; the base class declares
-    # every event as a no-op) with per-run state, e.g. the two-level tuner's
-    # ``KernelInventory``. Notified by :meth:`emit` after the discovered set.
-    observers: tuple = ()
+    # Run-scoped strategies — ``Strategy`` instances (the same protocol as the
+    # pipeline's discovered set; the base class declares every event as a
+    # no-op) with per-run state, e.g. the two-level tuner's ``KernelInventory``.
+    # Notified by :meth:`emit` after the discovered set.
+    strategies: tuple = ()
     # Count of search candidates dropped by :meth:`drive`'s per-variant
     # containment (un-lowerable forks that raised during lowering). Tune-only;
     # stays 0 on the deterministic greedy path.
     _dropped_candidates: int = 0
 
     def emit(self, event_name: str, event) -> None:
-        """Notify the pipeline's discovered strategies, then this run's observers."""
+        """Notify the pipeline's discovered strategies, then this run's own."""
         emit_event(self.pipeline.strategies, event_name, event)
-        emit_event(self.observers, event_name, event)
+        emit_event(self.strategies, event_name, event)
 
     def _step(self, cand: Candidate) -> tuple[Match, list, bool] | None:
         """Run one rule batch against ``cand`` — the per-candidate engine

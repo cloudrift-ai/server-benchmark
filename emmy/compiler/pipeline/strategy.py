@@ -14,7 +14,7 @@ Two binding scopes share the protocol:
   they hold immutable config only — never trajectory state. Dispatch order is deterministic
   (class-name sort) but MUST NOT be load-bearing: no strategy may depend on another having
   handled an event first.
-- **Run-scoped** (``Run.observers``): instances with per-run state (e.g. the two-level tuner's
+- **Run-scoped** (``Run.strategies``): instances with per-run state (e.g. the two-level tuner's
   ``KernelInventory``), installed by the caller that owns the run and notified after the
   discovered set.
 
@@ -41,7 +41,7 @@ class Strategy:
     """Base class for engine-event strategies — the event protocol's one authoritative
     declaration. Subclasses defined in a ``passes/`` top-level module are DISCOVERED and
     instantiated at ``Pipeline.build`` (see module docstring); run-scoped instances are
-    installed via ``Run.observers``. Every handler below is a concrete no-op (never abstract:
+    installed via ``Run.strategies``. Every handler below is a concrete no-op (never abstract:
     each strategy cares about a subset) — override the events you act on."""
 
     def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default

@@ -4,7 +4,7 @@ The two-level tuner's outer terminals enumerate the kernels that exist when the 
 settles — but kernels minted DURING the inner loops (a placement cut's fragments, a cross-CTA
 split's pieces) were never in that enumeration, so they could not be first-class tuning targets
 or golden identities; they existed only inside their parent slice's Σ. The inventory closes that
-gap: installed on every inner run (``tune_async(observers=(inventory,))``), it watches every
+gap: installed on every inner run (``tune_async(strategies=(inventory,))``), it watches every
 Graph splice and hands each genuinely NEW kernel to the enrolling strategy.
 
 Cross-trajectory by design: the MCTS re-minting the same cut on every variant reports it once —

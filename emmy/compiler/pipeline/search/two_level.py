@@ -369,7 +369,7 @@ class TwoLevelStrategy:
                     base_knobs=base_knobs,
                 )
                 async for cand in Pipeline.build(LOWERING_PASSES).tune_async(
-                    sub, search=inner, ctx=ctx, backend=backend, db=db, observers=(inventory,)
+                    sub, search=inner, ctx=ctx, backend=backend, db=db, strategies=(inventory,)
                 ):
                     if progress is not None and not work.enrolled:
                         st = inner.last_stats

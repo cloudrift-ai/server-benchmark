@@ -407,6 +407,10 @@ class SyncOperand:
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
+    # The CHAINED fill: ``chain(k0)`` is the whole slab's stmts, computed by a NESTED CONTRACTION on
+    # the tensor core instead of per-thread cell code (``_atom.chain_a_fill`` — attention's score
+    # mma, the cone folded into its fragment store). Set ⇒ ``value`` is never called.
+    chain: Callable[[Expr], list[Stmt]] | None = None
     # Smem swizzle mode this slab is written with ("NONE"/"B32"/"B64"/"B128") — the mma tier's
     # `_MmaOps.slab_swizzles`, applied by the fill's ``Write`` (the same flattened-index XOR the
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
@@ -574,6 +578,9 @@ class SyncTransport:
         if k0_cur is None:
             return out
         for op in self.operands:
+            if op.chain is not None:
+                out += op.chain(k0_cur)  # the whole slab from one nested contraction — no per-cell run
+                continue
             rows, cols = op.shape
             v = _cp_async_width(cols, self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)

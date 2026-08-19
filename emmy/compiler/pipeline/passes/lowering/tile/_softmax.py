@@ -41,6 +41,13 @@ the same binding the norm→linear edge uses (``_atomize.bind_prologue_contracti
 puts the region on the contraction schedule catalog — the warp/mma tier, the staged transports and
 split-K — instead of a per-cell serial fold, and it is why the pair must NOT be pushed into the
 sweep: inside it the statistic is recomputed once per output column.
+
+A pair's score is whatever its step produces. It is usually a ``Load``; when the step COMPOSES the
+score instead (loop fusion spliced the ``Q·Kᵀ`` producer into it), the cone's one source is that
+producer NODE and the pairing compares the two passes' cones by CONTENT — every bound name and
+each nested loop's iteration var α-renamed in walk order (:func:`_cone_canon`), since two
+separately-traced copies of one score differ in exactly those. The fused stream then carries ONE
+copy of the producer where the pair carried two.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import component_ops
 from emmy.compiler.ir.pure.carrier import exp_merge
+from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -77,35 +85,58 @@ def _fold_of(loop: Loop, canon: str):
     ops = component_ops(f.combine)
     if ops is None or [op.reduce_canon for op in ops] != [canon]:
         return None
-    return f.combine.results[0], f.lift.results[0], list(f.lift.body)
+    # The step's own producer NODES ride back as body members (the COLLAPSE view,
+    # :meth:`Fold.demoted` — each edge inline as the structural node, before its first read): a
+    # composed step (attention's per-key score contraction) reads as an operand edge, and the
+    # pairing's cone walk reads a producer the same way whether it is a ``Load`` or a node.
+    return f.combine.results[0], f.lift.results[0], list(f.demoted().lift.body)
 
 
-def _score_cone(body: list, result: str) -> tuple[list, Load] | None:
+def _score_cone(body: list, result: str) -> tuple[list, object] | None:
     """The pure elementwise cone producing ``result`` from a pair-loop body: the
     :meth:`Body.backward_cone` members (body order) restricted to ``Load``/``Assign``/``Select``
-    reaching exactly ONE ``Load``. Names defined outside the loop (an enclosing-scope value, an
-    axis var) surface as external reads and stay free. ``None`` when the value depends on
+    reaching exactly ONE SOURCE — a ``Load``, or a producer NODE the step composes (attention's
+    per-key score contraction), which leads the returned cone. Names defined outside the loop (an
+    enclosing-scope value, an axis var) surface as external reads and stay free. ``None`` when the value depends on
     anything else — the pairing then declines and the cell keeps its current reading."""
-    cone = Body.coerce(tuple(s for s in body if not isinstance(s, Accum))).backward_cone([result])
+    nodes = {operand_name(s): s for s in body if isinstance(s, Fold)}
+    if result in nodes:
+        return [nodes[result]], nodes[result]  # the bare node score — the degenerate cone
+    cone = Body.coerce(tuple(s for s in body if not isinstance(s, (Accum, Fold)))).backward_cone([result])
     stmts = list(cone.members)
     if not stmts or any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
         return None
-    loads = [s for s in stmts if isinstance(s, Load)]
-    if len(loads) != 1:
+    used = [n for n in nodes if n in {a for s in stmts for a in s.deps()}]
+    srcs = [s for s in stmts if isinstance(s, Load)] + [nodes[n] for n in used]
+    if len(srcs) != 1:
         return None
-    return stmts, loads[0]
+    return [*(nodes[n] for n in used), *stmts], srcs[0]
+
+
+def _cone_names(stmts: list, mapping: dict) -> None:
+    """Number every name a cone BINDS, deep — the stmts' defs plus each nested loop's iteration
+    var — in walk order. A composed cone's producer node carries its own axis and temps, and two
+    separately-traced copies of one score differ in exactly those, so identity has to see through
+    them (the key digest cannot: axis names are recognition-canonical and part of it)."""
+    for s in stmts:
+        if isinstance(s, Loop):
+            mapping.setdefault(s.axis.name, f"_c{len(mapping)}")
+        for n in s.defines():
+            mapping.setdefault(n, f"_c{len(mapping)}")
+        for b in s.nested():
+            _cone_names(list(b), mapping)
 
 
 def _cone_canon(stmts: list, result: str, axis_name: str) -> str:
-    """An α-renamed rendering of a score cone — locally-defined names canonicalize in definition
-    order, the loop axis to a fixed placeholder, free names verbatim — so the two pair loops'
-    recomputed score cones compare by content, exactly as the byte-identity λ gate compares
-    lift bodies."""
+    """An α-renamed rendering of a score cone — every bound name canonicalizes in walk order
+    (:func:`_cone_names`), the loop axis to a fixed placeholder, free names verbatim — so the two
+    pair loops' recomputed score cones compare by content, exactly as the byte-identity λ gate
+    compares lift bodies. A producer NODE in the cone renders through its own lowered nest, so a
+    composed score compares like any other."""
+    flat = [t for s in stmts for t in (s.lower() if isinstance(s, Fold) else [s])]
     mapping = {axis_name: "_ax"}
-    for s in stmts:
-        for n in s.defines():
-            mapping.setdefault(n, f"_c{len(mapping)}")
-    text = repr(tuple(stmts)) + "|" + mapping.get(result, result)
+    _cone_names(flat, mapping)
+    text = repr(tuple(flat)) + "|" + mapping.get(result, result)
     for old, new in mapping.items():
         text = re.sub(f"'{re.escape(old)}'", f"'{new}'", text)
     return text
@@ -230,16 +261,20 @@ def _deep_reads(stmts) -> set[str]:
     return out
 
 
-def _score_head(maxacc: str, score: str, cone: list, ld: Load) -> tuple[str, tuple]:
+def _score_head(maxacc: str, score: str, cone: list, ld) -> tuple[str, tuple]:
     """The fused loop's streaming score prefix. A bare-``Load`` score keeps the historical
-    renamed spelling; a composite score cone rides verbatim."""
-    if len(cone) == 1:
+    renamed spelling; a composite score cone — and a cone whose one source is a producer NODE
+    (attention's per-key score contraction) — rides verbatim."""
+    if len(cone) == 1 and isinstance(ld, Load):
         src = f"{maxacc}__osin"
         return src, (Load(name=src, input=ld.input, index=ld.index),)
-    return score, tuple(cone)
+    # The emitted prefix is LOOP IR: a producer node in the cone rides as its own loop nest (a
+    # ``Fold`` may only be a child of a ``Fold``, never a member of a raw ``Loop`` body). The
+    # twisted reading hoists it straight back to an operand edge (``_fromloop._hoist_step_nodes``).
+    return score, tuple(t for s in cone for t in (s.lower() if isinstance(s, Fold) else [s]))
 
 
-def _twist(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld: Load, canon: str, rest: list) -> tuple[list, int]:
+def _twist(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld, canon: str, rest: list) -> tuple[list, int]:
     """Emit the fused streaming loop for a matched ``(rowmax, Σexp)`` pair, joining every
     EXPECTATION channel that follows. Returns ``(emitted stmts, extra stmts consumed from
     ``rest``)``.
@@ -293,7 +328,7 @@ def _last_channel(region: list) -> int:
     return max(i + 1 for i, (t, _) in enumerate(region) if t is not None)
 
 
-def _emit_channels(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld: Load, region: list) -> list | None:
+def _emit_channels(s: Loop, maxacc: str, sumacc: str, score: str, cone: list, ld, region: list) -> list | None:
     """Build the N-channel fused loop + its epilogue for a pair and its joined channels.
     ``region`` interleaves held-back pure stmts (re-emitted after the loop, original order)
     with ``(channel loop, channel read)`` entries. Declines (``None``) when a held-back

@@ -40,9 +40,18 @@ def _walk_leaf_costs(loop_op: LoopOp):
 
 def _nests_reduce(loop_op: LoopOp) -> bool:
     """Whether the body carries a reduce ``Loop`` (transitively) inside another reduce ``Loop``.
-    That shape is unreadable downstream: ``_lift_cell`` keeps only the raw-loop escape for a
-    cell with more than one top-level reduce or a reduce nested in a reduce, so no schedule
-    tier beyond option-0 exists and no ``PLACE`` seam can split it back apart."""
+
+    The refusal's criterion is REVERSIBILITY, not readability alone: a merge evidence cannot price
+    the split back out of is one the compiler can never undo. Attention is the case that makes the
+    distinction sharp. Its ``Q·Kᵀ`` producer has TWO consumers in the merged cell (the streaming
+    softmax statistic and the weight cone), so splicing it duplicates the producer at each demand
+    site — and no ``PLACE`` cut puts that back: a cut fragment serves ONE consumer (an operand edge
+    is inline, and there is no let table), so cutting both seams mints two score kernels, never the
+    one shared producer the unmerged graph had. The merged cell is READABLE downstream — recognition
+    lifts each spliced producer to an operand edge of the step's fold
+    (``lowering/tile/_fromloop``), it binds as a computed-A cone over a computed score and it runs —
+    but until that fused form is realized at the tensor-core tier it is far slower than the
+    two-kernel graph this refusal preserves, and evidence has no way back."""
     reduce_names = loop_op.reduce_axis_names
 
     def walk(stmts: Body, inside: bool) -> bool:

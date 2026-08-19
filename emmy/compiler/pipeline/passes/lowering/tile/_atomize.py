@@ -233,15 +233,20 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs) -> PackedKBlockB | No
 def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
     """The contraction ``node``'s packed-pair k-block B operand, or ``None``.
 
-    The whole node shape the packed byte-slab stage stands on: a MATERIALIZED A, one channel, and
-    a computed B whose cone is :func:`match_packed_kblock_b`'s. Asked here rather than spelled at
-    each consumer, so the schedule's offer, the stage resolver and the materializer recognize one
-    set of nodes and cannot drift apart. Everything else answers ``None`` and keeps the generic
-    computed-B reading, which computes the same values through the sync compute-fill.
+    The whole node shape the packed byte-slab stage stands on: one channel and a computed B whose
+    cone is :func:`match_packed_kblock_b`'s. A may be materialized OR a producer cone — it rides
+    whichever side the compute fill gives it (:func:`_atom._a_slab_operand`), so only B decides
+    this. Asked here rather than spelled at each consumer, so the schedule's offer, the stage
+    resolver and the materializer recognize one set of nodes and cannot drift apart. Everything
+    else answers ``None`` and keeps the generic computed-B reading, which computes the same values
+    through the smem compute fill.
     """
     if inputs is None or not isinstance(node, Fold) or node.axis is None:
         return None
-    if not isinstance(node.a, Load) or len(node.channels) != 1:
+    # A may be materialized OR a producer cone. A fused RMSNorm ahead of the projection is what a
+    # serving program compiles, and refusing it there kept the packed weight off the whole serving
+    # path. What the packed reading needs is the B cone's shape, not A's.
+    if len(node.channels) != 1:
         return None
     b = node.channels[0].b
     if not isinstance(b, Fold) or b.axis is not None:

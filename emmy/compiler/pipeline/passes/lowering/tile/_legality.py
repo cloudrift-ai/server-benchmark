@@ -363,9 +363,16 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
     if a_dtype != b_dtype or a_dtype.name not in _PACKED_FRAGMENT_DTYPES:
         return None  # the drain has one value table and one scale multiply, both at the operand dtype
-    bits, a_tensor = inputs.get(packed.bits.input), inputs.get(c.a.input)  # A is a Load — the match requires it
-    if bits is None or a_tensor is None or a_tensor.dtype != a_dtype:
+    bits = inputs.get(packed.bits.input)
+    if bits is None:
         return None
+    if isinstance(c.a, Load):
+        a_tensor = inputs.get(c.a.input)
+        if a_tensor is None or a_tensor.dtype != a_dtype:
+            return None
+    # A COMPUTED A has no gmem tensor to match: it evaluates into its slab at the atom's operand
+    # dtype, converting on the store, which is the compute fill's own contract.
+
     if bits.dtype.logical_elems != 2 or len(bits.shape) != 2 or len(packed.bits.index) != 2:
         return None
     if c.axis.name not in packed.bits.index[-1].free_vars():

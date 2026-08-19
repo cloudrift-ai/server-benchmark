@@ -563,6 +563,48 @@ def _k_masked(stmts: list[Stmt], value: str, k: Expr, k_ext: Expr | None) -> tup
     )
 
 
+def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext):
+    """The A slab's operand, plus any statistic prologue it needs.
+
+    A is COPIED when it is a materialized ``Load`` and COMPUTE-FILLED when it is a producer cone —
+    a fused RMSNorm ahead of the projection, which is what a serving program's linears look like.
+
+    Shared by the ``smem`` compute fill and the packed byte-slab stage. Those two differ in how B
+    moves, never in how A does, and keeping one A side is what lets a packed weight sit behind a
+    fused activation: the bits still copy verbatim while the activation evaluates into its slab.
+
+    Returns ``(operand, copied, prologue)``."""
+    if isinstance(c.a, Load):
+        op = Operand(
+            tag="a",
+            buf=c.a.input,
+            shape=(mn[0].tile, bk_elems),
+            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
+            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
+            swizzle=swizzle,
+        )
+        return op, True, []
+    pro, cell, stats = seam
+    m_name, k_name = mn[0].axis.name, c.axis.name
+
+    def a_value(k0, row, col):
+        k = BinaryExpr("+", k0, col)
+        sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
+        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
+        stmts += [st.rewrite(lambda nm: nm, sigma) for st in cell]
+        return _k_masked(stmts, operand_name(c.a), k, k_ext)
+
+    prologue: list[Stmt] = []
+    if stats:
+        row_axis = Axis(name="_sr", extent=mn[0].tile)
+        sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
+        row_body = [st.rewrite(lambda nm: nm, sigma) for st in pro]
+        prologue = sync_stat_fill(
+            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
+        )
+    return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
+
+
 def _sync_operands(
     c: Fold,
     bk_elems: int,
@@ -593,9 +635,8 @@ def _sync_operands(
     contract the copy transports follow). A symbolic **K** is the same discipline applied to the
     contraction axis: :func:`_k_masked` clamps the cone's own reads and stores the fold identity
     into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
-    m_name, n_name, k_name = mn[0].axis.name, mn[1].axis.name, c.axis.name
+    n_name, k_name = mn[1].axis.name, c.axis.name  # the A side's names moved with it into _a_slab_operand
     row_base, col_base = _tile_base(mn)
-    pro, cell, stats = seam
     k_ext = c.axis.extent_expr() if not c.axis.extent.is_static else None
 
     def m_coord(row) -> Expr:
@@ -605,25 +646,10 @@ def _sync_operands(
     def k_coord(k) -> Expr:
         return clamp_last(k, k_ext) if k_ext is not None else k
 
-    def a_value(k0, row, col):
-        k = BinaryExpr("+", k0, col)
-        sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
-        stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
-        return _k_masked(stmts, operand_name(c.a), k, k_ext)
-
     def n_coord(col) -> Expr:
         t = BinaryExpr("+", col_base, col)
         return clamp_last(t, mn[1].ext) if mn[1].mask else t
 
-    prologue: list[Stmt] = []
-    if stats:
-        row_axis = Axis(name="_sr", extent=mn[0].tile)
-        sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
-        row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
-        prologue = sync_stat_fill(
-            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
-        )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -637,19 +663,19 @@ def _sync_operands(
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
 
-    if isinstance(c.a, Load):
-        a_op = Operand(
-            tag="a",
-            buf=c.a.input,
-            shape=(mn[0].tile, bk_elems),
-            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
-            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
-            swizzle=swizzles[0],
-        )
-        async_ops.append(a_op)
-    else:
-        a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
-        sync_ops.append(a_op)
+    a_op, a_copied, prologue = _a_slab_operand(
+        c,
+        mn=mn,
+        bk_elems=bk_elems,
+        cta=cta,
+        swizzle=swizzles[0],
+        seam=seam,
+        row_base=row_base,
+        m_coord=m_coord,
+        k_coord=k_coord,
+        k_ext=k_ext,
+    )
+    (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
     for f, (bl, _) in enumerate(channels):
@@ -685,8 +711,8 @@ def _sync_operands(
 
 
 def _packed_operands(
-    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype, *, pad: int
-) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...]]:
+    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype, *, pad: int, cta: CtaTile, seam: tuple = ((), (), ())
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
 
     Three slabs where the ordinary matmul has two, because the weight arrives as two tensors that
@@ -722,13 +748,28 @@ def _packed_operands(
         t = BinaryExpr("+", col_base, row)
         return clamp_last(t, n.ext) if n.mask else t
 
-    a_op = Operand(
-        tag="a",
-        buf=c.a.input,
-        shape=(m.tile, bk_elems),
-        coords=_box_origin(c.a.index, tile=m, tile_base=row_base, k_axis=k_axis, sibling=n),
-        index=_slab_index(c.a.index, tile=m, tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=n),
+    def m_coord(row) -> Expr:
+        t = BinaryExpr("+", row_base, row)
+        return clamp_last(t, m.ext) if m.mask else t
+
+    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+
+    def k_coord(k) -> Expr:
+        return clamp_last(k, k_ext) if k_ext is not None else k
+
+    # A rides the SAME side the compute fill gives it: copied when materialized, compute-filled
+    # when it is a cone. Only B differs here, and that is the whole point of the packed reading.
+    a_op, a_copied, a_prologue = _a_slab_operand(
+        c,
+        mn=mn,
+        bk_elems=bk_elems,
+        cta=cta,
         swizzle=a_swizzle,
+        seam=seam,
+        row_base=row_base,
+        m_coord=m_coord,
+        k_coord=k_coord,
+        k_ext=k_ext,
     )
 
     factor_cone = map_cone(list(operand_body(c.b)), packed.factor)
@@ -758,7 +799,10 @@ def _packed_operands(
         elem_bytes=bits_dtype.nbytes,
         scale=(scale_op.slab, block),
     )
-    return (a_op, bits_op), (scale_op,), (a_op, bits_op)
+    # The scale slab is always compute-filled; A joins it there when it is a cone.
+    filled = (scale_op,) if a_copied else (a_op, scale_op)
+    copied = (a_op, bits_op) if a_copied else (bits_op,)
+    return (a_op, bits_op), filled, copied, a_prologue
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -788,7 +832,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
         # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
         tma = stage.transport == "smem-tma"
-        operands, sync_ops, async_ops = _packed_operands(
+        operands, sync_ops, async_ops, packed_pro = _packed_operands(
             c,
             packed,
             stage.bk_elems,
@@ -796,6 +840,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             ops.slab_swizzles(mn, elem.nbytes)[0],
             ops.inputs[packed.bits.input].dtype,
             pad=0 if tma else BYTE_SLAB_PAD,
+            cta=cta,
+            seam=ops.cone,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if tma:
@@ -806,7 +852,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             # and the scale fill are simply two of them over one drain segment: the box copies ring
             # at the stage's depth, the compute fill stays single-buffer as it always is.
             copies = TmaTransport(operands=async_ops, **common)
-            fill = SyncTransport(operands=sync_ops, **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(packed_pro), **common)
             slabs = frozenset(op.slab for op in (*async_ops, *sync_ops))
             return pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
@@ -817,7 +863,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             )
         # cp.async: one ``sync`` producer whose copied peers are the two copied slabs — the
         # same shape the fused norm→linear edge takes.
-        transport = SyncTransport(operands=sync_ops, copy_operands=async_ops, **common)
+        transport = SyncTransport(operands=sync_ops, copy_operands=async_ops, prologue_stmts=tuple(packed_pro), **common)
     elif stage.transport == "smem":
         # The synchronous fill: every inline edge is evaluated into its canonical slab (converting
         # on the store when dtypes differ); every materialized counterpart is COPIED underneath

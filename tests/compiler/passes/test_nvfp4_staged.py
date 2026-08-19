@@ -107,16 +107,34 @@ def test_match_packed_b_node_declines_a_materialized_b():
     assert match_packed_b_node(node, inputs) is None
 
 
-def test_match_packed_b_node_declines_a_computed_a():
-    """A computed A beside the packed B is outside the staged shape: A rides the copy transport."""
+def test_match_packed_b_node_admits_a_computed_a():
+    """A computed A beside the packed B MATCHES: the packed reading is about B's shape, not A's.
+
+    A serving program fuses the input norm into its projections, so A arrives as a producer cone
+    there. Declining that kept the packed weight off the whole serving path. A copies or
+    compute-fills exactly as the smem fill decides (:func:`_atom._a_slab_operand`); only B differs."""
     node, inputs, _axes = _node()
     coned = Fold.contraction(k_axis=node.axis, a=_packed_cone(4096), channels=node.channels)
-    assert match_packed_b_node(coned, inputs) is None
+    assert match_packed_b_node(coned, inputs) is not None
 
 
 # ===================================================================
 # The stage resolver
 # ===================================================================
+
+
+def test_a_computed_a_still_resolves_the_byte_slab():
+    """The matcher admitting a computed A is only half of it — the resolver must grant the stage too.
+
+    Otherwise the recognizer says yes and the row still never reaches the materializer, which is
+    the shape of the bug this replaced: a serving projection sits behind a fused norm, so its A is
+    a cone, and the byte slab has to survive that all the way to a resolved stage."""
+    node, inputs, axes = _node()
+    coned = Fold.contraction(k_axis=node.axis, a=_packed_cone(4096), channels=node.channels)
+    assert match_packed_b_node(coned, inputs) is not None
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    st = resolve_warp_stage(coned, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs)
+    assert st is not None and st.transport == "smem-async", "a computed A must not lose the byte slab"
 
 
 @pytest.mark.parametrize(("atom", "a_dtype"), [(K16, F16), (K16_BF16, BF16)])

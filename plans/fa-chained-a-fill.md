@@ -46,29 +46,60 @@ Measured: `D = 16` merges (ratio at the `_BLOWUP_FACTOR = 8` bound), `D = 128` i
 `_nests_reduce` has to answer this too — either the metric learns that a k-invariant-in-`n` producer does not replay
 per column, or the merge is offered at the seam rather than judged by leaf count.
 
-## The work: score mma → cone epilogue on the C fragments → A slab
+## LANDED: the chained fill and the chained statistic
 
-The fill EVALUATES the cone's k-varying producer per slab cell (`_atom._sync_operands.a_value` splices the lowered
-loop into each cell), so the score is a scalar dot per cell — and it is computed twice, once in the row statistic and
-once in the weight. Both halves are the same defect: a score contraction realized at scalar residence.
+Both halves of the composed score now reach the tensor core, through `_atom_ops` on the score node — no second mma
+emitter, no attention vocabulary:
 
-1. **Give the producer edge a schedule site.** `1a47f4fc` made an inline node carry no slice family (`Site.inline`) —
-   correct while the fill can only evaluate it per cell, wrong once the fill can TILE it. The edge needs a `TILE`
-   slice (its own `(m, kv)` geometry over the slab) plus a `STAGE` for its own Q / K operands.
-2. **Emit the chain.** In the `smem` fill: `ldmatrix` Q once per query tile, mma the score into C fragments over the
-   head-dim, apply the cone body on those fragments, store into the A slab the existing `_MmaOps.staged_drain` reads.
-   The Kernel IR for the fragment half survived the flash deletion and is still dead code kept for this:
-   `FragmentApply`, `FragmentRowReduce`, `FragmentMask`, `FragmentBiasAdd`, `FragmentRepack`.
-3. **Block the statistic.** The row statistic cannot come from the fragments while it spans the whole KV row, so the
-   twisted fold blocks: `exp_merge` at a BLOCK singleton `(m_b, d_b, o_b)` — the SAME generator, `_certify` still
-   passes — with the per-block quantities reduced off the score fragments (`FragmentRowReduce`) and the outer step
-   rescaling the O fragments by α. That is FA-2, and `tests/compiler/e2e/test_attention_coverage.py`'s hand-written
-   `fa2` kernel is its executable spec (lane layouts, the C→A handoff, the 4-lane butterfly).
-4. **Schedule + legality.** `_schedule._row_stream_tiles` and `_warp_stream_place` are live orphans from the flash era
-   — the materialization half of the `(score, P@V)` streaming pair and its grid (query axis shrunk to its CTA-block
-   count, value axis folded into the P@V fragment, KV walked serially per CTA). The enumeration half (`_stream_tiles`)
-   was deleted and has to come back. Legality: the score tile must fit in C fragments.
-5. **Then** lift `_merge._nests_reduce`'s refusal and let evidence price fused against cut.
+- **`_score_block`** — one block of the composed score as C fragments, built from the same atom strategy every tiled
+  contraction dispatches through, namespaced by `_AtomOps.frag_ns` so a nested emission never shadows the enclosing
+  drain's accumulators.
+- **`chain_a_fill`** — the A slab from that block, the cone folded into its fragment store (`RegStore` + `RegEpilogue`,
+  statistics read at each element's own row). NONE-swizzle: a fragment store applies no address XOR.
+- **`chain_stat_fill`** — the per-row statistic swept at fragment residence: `FragmentRowReduce` off the score
+  fragments, then `exp_merge` at a BLOCK singleton `(rowmax, rowsum)` — the same generator, the same certificate.
+- Recognition stores BOTH score sites bound as contractions (`_atomize.bound_producer`), which is what lets the
+  schedule see a contraction instead of a scalar fold.
+
+Measured on a 5090, f16 `(1, 8, 512, D)`, cold greedy, fused arm vs the two-kernel graph vs torch:
+
+| D | torch | two-kernel | fused, per-cell | fused, chained |
+| --- | --- | --- | --- | --- |
+| 16 | 8 µs | 38.3 µs | 219 µs | **14.0 µs** |
+| 32 | 8 µs | 24.9 µs | — | **13.8 µs** |
+| 64 | 10 µs | 28.7 µs | — | 29.7 µs |
+| 128 | 19 µs | 21.6 µs | — | 69.2 µs |
+
+So the chained fused form WINS at small head dims (2.7× / 1.8×), ties at 64 and LOSES 3.2× at 128 — because it still
+computes `Q·Kᵀ` TWICE (once for the statistic, once for the weight), and that duplicate grows with D. That is why
+fusion still refuses: real models are D = 64 / 128.
+
+## What makes it win at every D: the SINGLE-PASS sweep
+
+FA-2 computes the score once. Two things stand between here and that, and the machinery for both now exists:
+
+1. **Hoist the `1/d` out of the cone.** `Σ_kv (exp(s−m)/d)·V = (1/d)·Σ_kv exp(s−m)·V` — the invariant-factor split
+   Stage 1 already built (`_softmax.split_invariant_factors`), applied to the cone rather than to a sibling fold. The
+   weight the A slab carries must not name a `d` that is not final yet.
+2. **Carry the statistic in the weight loop.** Per KV block: score fragments → rowmax → merge into the running
+   `(m, d)` → `P = exp(s − M)` → the A slab → rescale the OUTER C fragments by `α = exp(m_old − M)`
+   (`FragmentApply(in_place=True)` over `_c{i}_{j}` — they are in scope inside the K-loop) → the PV drain. The final
+   `O / d` lands in the output store's epilogue.
+
+That removes the second `Q·Kᵀ` and the statistic prologue entirely. Then re-measure the table above and, if the fused
+arm wins at D = 64 / 128, lift `_merge._nests_reduce` (and the blowup bound below) so evidence prices it.
+
+## Still open
+
+- **The single-pass sweep** (above) — the one thing that makes the fused arm win at D = 64 / 128.
+- **A schedule site for the score.** `1a47f4fc` made an inline node carry no slice family (`Site.inline`), which was
+  right while the fill could only evaluate it per cell. The chained fill derives the score's tile from the enclosing
+  one instead, so nothing is pinnable there yet: its `bk`, its own staging, and the warp split of its rows are all
+  implied. A `TILE` / `STAGE` slice on the producer edge is what makes them searchable.
+- **`units_n > 1` duplicates the fill.** Warps that differ only in their N unit own the same A-slab rows and each
+  compute them — same values, wasted work. Guard it, or require `units_n == 1` in legality.
+- **`_schedule._row_stream_tiles` / `_warp_stream_place`** are still live orphans from the flash era (the `(score,
+  P@V)` streaming pair's materialization half and its grid). The single-pass sweep is where they come back.
 
 ### Rejected, do not redo
 

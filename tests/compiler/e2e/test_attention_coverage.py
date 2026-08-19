@@ -19,15 +19,19 @@ softmax reduce. This file pins every tier of it:
   STEP), the online-softmax pair matches on the two passes' score cones by content, and the sweep
   binds as one computed-A contraction whose cone reads a COMPUTED score
   (``test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice``); with the merge allowed,
-  SDPA lowers to ONE kernel and matches torch. What is missing is the REALIZATION: the fill
-  EVALUATES the score edge per slab cell, so it is computed scalar, and twice (once for the row
-  statistic, once for the weight). Measured on a V100 that fused form is 5× slower than the
-  two-kernel split at S=32/D=16 and far worse as S grows, which is why loop fusion still refuses to
+  SDPA lowers to ONE kernel and matches torch. The REALIZATION follows it: both halves of the
+  composed score reach the tensor core through ``_atom_ops`` on the score node — the CHAINED A fill
+  (``_atom.chain_a_fill``: mma into C fragments, the cone folded into their fragment store, straight
+  into the A slab) and the CHAINED statistic (``_atom.chain_stat_fill``: ``FragmentRowReduce`` off
+  those fragments, ``exp_merge`` at a BLOCK singleton). Measured on a 5090 at f16 (1,8,512,16):
+  219 µs per-cell → 108 µs with the fill chained → **14.0 µs** with both, against 38.3 µs for the
+  two-kernel graph and 8 µs for torch. What is still missing is the SINGLE PASS: the fused form
+  computes ``Q·Kᵀ`` twice (statistic, then weight), and that duplicate grows with the head dim — it
+  wins 2.7× at D=16, ties at 64 and loses 3.2× at 128, which is why loop fusion still refuses to
   nest the score reduce inside the softmax reduce (``loop/fusion/_merge._nests_reduce`` — the
-  refusal is REVERSIBILITY: no ``PLACE`` cut puts a two-consumer producer back together). What
-  closes the gap is RESIDENCE, not algebra: the block's score must stay in C fragments across both
-  consumers (the reference kernel below) — the warp chain (score mma, fragment online-softmax,
-  C->A repack) the flash deletion removed.
+  refusal is REVERSIBILITY: no ``PLACE`` cut puts a two-consumer producer back together). Closing it
+  is FA-2 proper: hoist the ``1/d`` out of the cone and carry the statistic in the weight loop,
+  rescaling the output fragments per block (the reference kernel below is the executable spec).
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →
@@ -206,6 +210,13 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
     assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    # Both halves of the composed score reach the TENSOR CORE: the score's transposed-B fragment
+    # load (its own mma, not the enclosing P@V's staged drain) and the statistic's fragment
+    # row-reduce butterfly. Without these the score is a scalar dot per element — 15x slower, and a
+    # silent regression a numerics assert would never catch.
+    assert "emmy_mma_load_b_gmem_trans" in src, "the composed score is not on the mma tier (chained A fill)"
+    assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence (chained statistic)"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"fused sdpa{cfg} vs torch max_diff={md:.6e}"
 

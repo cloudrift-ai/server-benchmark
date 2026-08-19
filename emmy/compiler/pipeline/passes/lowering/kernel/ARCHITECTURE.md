@@ -211,10 +211,16 @@ transport prologue
 (`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
 the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
 the per-cell compute fill reads the bridged values back from the stat rows. A cone edge that DOES index K (attention's
-score contraction, read by the cone's `exp(s − m)`) is per-cell instead: it splices into the fill's cell and is
-evaluated inline, from lowered loop IR, so it takes no schedule slice of its own (a scalar dot per slab cell —
-computing that tile on the warp tier, and keeping it resident across the statistic and the weight, is what a
-single-kernel flash still needs). Geometry: exact cover on N only. A
+score contraction, read by the cone's `exp(s − m)`) is the **CHAINED** fill where it reads as a CONTRACTION and the
+atom can mma it (`_atom.chain_a_fill`): the slab comes from a nested contraction — `mma(Q, Kᵀ)` into C fragments, the
+cone folded into their fragment store (`RegStore` + `RegEpilogue`, its statistics read at each element's own row) and
+written straight into the slab the `ldmatrix` drain reads. There is no second mma emitter: the score is a contraction,
+so it is built out of the SAME atom strategy (`_atom_ops` on the score node — `state` declares the fragments, `reduce`
+emits the gmem-direct `ldmatrix` + `mma.sync` K-loop, `store` writes them), namespaced (`_AtomOps.frag_ns`) so the
+nested fragments never shadow the accumulators the enclosing drain carries across the same loop. The slab stays
+NONE-swizzle there — a fragment store applies no address XOR. Where the edge is not a bindable contraction (or the atom
+has no modeled C layout) it stays per-cell: spliced into the fill's cell and evaluated inline from lowered loop IR, a
+scalar dot per slab cell. Geometry: exact cover on N only. A
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
 the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on
 the contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime
@@ -278,9 +284,16 @@ the operand's own index evaluated at the tile base — an offset operand lands t
 
 ## A TWISTED carrier lowers through the generic reduce tiers
 
-There is no attention emitter and no fragment-residence realizer for a `TWISTED` reduce: the online-softmax fold
-lowers at scalar residence through the same reduce-axis tiling every `PLANAR` fold takes (`_tile_reduce_axis` —
-coop lanes / ILP chains / serial), its multi-component streaming merge regenerated off the node's `Reduction` view.
+There is no attention emitter. A `TWISTED` reduce lowers at scalar residence through the same reduce-axis tiling every
+`PLANAR` fold takes (`_tile_reduce_axis` — coop lanes / ILP chains / serial), its multi-component streaming merge
+regenerated off the node's `Reduction` view — with ONE fragment-residence arm, and it is a fill, not an emitter: a
+computed-A cone's per-row statistic over a COMPOSED score sweeps at fragment residence
+(`_atom.chain_stat_fill`). Per KV block the tile's scores land in mma C-fragments (the same `_score_block` the chained
+A fill uses), the block's row statistic comes off them through the layout's shuffle butterfly (`FragmentRowReduce`),
+and the carrier's OWN generated program merges the block into the running state — `exp_merge` at a BLOCK singleton
+`(rowmax, rowsum)` instead of an element singleton, the same generator and the same stability certificate. Each lane
+ends holding the statistic for the two rows the fragment layout gives it, and one lane per column group publishes them
+to the stat rows the weight fill reads. Everything else about the fold is unchanged.
 The fold MOVE itself is never re-decided per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE
 placement-keyed selector — within-warp → `SHFL`, within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL`
 (a multi-component carrier is kernel-finalize only) — and every emitter consumes its output (`emit_combine` at

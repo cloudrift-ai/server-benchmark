@@ -26,6 +26,8 @@ geometry."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names, deep_reads, edge_refs_axis, refs_axis
 from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
@@ -109,6 +111,34 @@ def map_cone(body: list, root: str) -> list | None:
             continue
         return None  # an Accum / Loop in the cone — not a pure MAP producer
     return sorted(cone, key=lambda st: order[id(st)])
+
+
+def bound_producer(node: Fold, free: tuple, n_name: str) -> Fold | None:
+    """A producer the cone composes, re-read as a CONTRACTION — or ``None`` when it is not one.
+
+    The loop→fold parser stores a producer with its loads INLINE in the lift (an unbindable
+    contraction derives ``PLANAR`` — the formation fact), because node-locally nothing tells the
+    ``(m, n)`` roles apart. Here the roles ARE known: the cone's rows are one of the kernel's ``free``
+    axes and its columns are the enclosing contraction's ``n_name``, so the ONE ⊗-lift reading
+    (:func:`bind_contraction`) binds attention's score ``Σ_d Q·K`` as A = Q, B = Kᵀ. Storing it bound
+    is what lets the SCHEDULE see a contraction there instead of a scalar fold — the tile catalog is
+    keyed on the bilinear reading, and an inline node that never derives it can only be evaluated
+    per cell.
+
+    Tried against each free axis in turn: which one plays m is a property of the producer's own
+    operand indices, and asking the binder is cheaper than re-deriving that here."""
+    loop = node.loop
+    for ax in free:
+        if ax.name == n_name:
+            continue
+        try:
+            a_load, b_load, acc, _ = bind_contraction(loop, ax.name, n_name, Body())
+        except LoweringError:
+            continue
+        if not (isinstance(a_load, Load) and isinstance(b_load, Load)):
+            continue  # a producer with its OWN computed operand cone is not this shape
+        return Fold.contraction(k_axis=loop.axis, a=a_load, channels=(Channel(b=b_load, acc=acc),))
+    return None
 
 
 def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
@@ -408,6 +438,13 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
         return None  # the statistic is a projected reduce; WHICH carrier it folds is not this binding's business
     if red.composed is not None:
         return None  # split-K's identity-lift reassociation is a partition, not a per-row statistic
+    # The statistic's OWN producer binds too, by the same reading — attention's streaming softmax
+    # composes the same score its weight cone does, and the schedule has to see a contraction in
+    # both places or the statistic stays a scalar sweep while the weight reaches the tensor core.
+    if len(red.operands) == 1 and isinstance(red.operands[0], Fold) and red.operands[0].axis is not None:
+        stat_score = bound_producer(red.operands[0], free, red.axis.name)
+        if stat_score is not None:
+            red = replace(red, operands=(stat_score,))
     body = list(op.body)
     if not body or not isinstance(body[-1], Loop) or body[-1].is_reduce:
         return None
@@ -445,6 +482,9 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     cone = map_cone(kbody, a_names[0])
     if cone is None or not cone:
         return None
+    # A producer the cone composes is stored BOUND where it reads as a contraction, so the schedule
+    # sees the bilinear reading (attention's score) instead of a scalar fold.
+    cone = [(bound_producer(st, free, k_ax.name) or st) if isinstance(st, Fold) and st.axis is not None else st for st in cone]
     for st in cone:
         if isinstance(st, Load) and n_ax.name in {v for e in st.index for v in e.free_vars()}:
             return None  # the cone must be (m, k)-indexed — an n-dependent producer isn't the A tile

@@ -18,7 +18,7 @@ Op identity and the rewrite-chain walk live on the ops themselves —
 :meth:`~emmy.compiler.ir.base.Op.source_chain` (the retired ``keys`` module).
 
 The bench + DB write orchestration lives in
-:func:`emmy.compiler.pipeline.search.terminal_bench.bench_terminal_async`;
+:func:`emmy.compiler.pipeline.search.policy.terminal_bench.bench_terminal_async`;
 ``Pipeline.tune`` calls it per yielded terminal and passes the
 aggregate :class:`PerfStats` to :meth:`Search.observe` for the policy
 to consume.

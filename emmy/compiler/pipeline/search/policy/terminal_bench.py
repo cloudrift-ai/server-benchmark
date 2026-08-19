@@ -1,4 +1,4 @@
-"""Bench + DB persistence for one tune terminal — the search-policy half of terminal valuation.
+"""Bench + DB persistence for one tune terminal — terminal valuation, the policy's half.
 
 What a terminal is worth is search policy, not engine mechanics: ``TuningSearch.evaluate`` drives
 :func:`bench_terminal_async` (and the deployable-regime :func:`rebench_o3_async`) per terminal the

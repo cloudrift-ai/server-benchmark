@@ -111,65 +111,6 @@ def totals(graph: Graph) -> dict[str, set[str]]:
     return out
 
 
-def propagate(
-    graph: Graph,
-    *,
-    consumed_prov: dict[str, dict],
-    new_compute_ids: list[str],
-    new_by_old: dict[str, str],
-    output_map: dict[str, str],
-    mint_pieces: bool,
-) -> None:
-    """Thread provenance across one ``Graph.splice``.
-
-    Called by the provenance STRATEGY from the post-splice event (``on_spliced``), off the
-    splice's receipt — the graph itself carries no provenance knowledge. Node ids are looked up
-    defensively: orphan removal runs inside the splice, so a receipt id may no longer exist.
-
-    ``consumed_prov`` is ``{consumed_node_id: prov}`` snapshotted before the
-    consumed nodes were removed; ``new_compute_ids`` are the graph ids of the
-    freshly-added non-boundary fragment nodes; ``new_by_old`` maps each
-    redirected consumed node to its fragment output's producing NODE id.
-
-    - **mint** (``mint_pieces=True``, decomposition): each new fragment node
-      becomes a fresh piece of the consumed origins — one op expanding into
-      many distinct primitives.
-    - **aggregate** (otherwise — fusion / lifting / optimization folds): each
-      fragment output inherits its own consumed node's pieces unioned with the
-      ``shared`` pieces of every *dissolved* consumed node (those not in
-      ``output_map`` — e.g. a producer inlined into all its consumers), so no
-      origin is dropped at a multi-output splice.
-
-    A fragment output that is a boundary sentinel (e.g. a fold collapsing a
-    transpose into its parameter ``ConstantOp``) gets its prov scrubbed instead:
-    the splice's generic hint merge copied the consumed node's hints — prov
-    included — onto it, and a boundary must never carry provenance (its pieces
-    would inflate :func:`totals` and make every other kernel of the origin read
-    as partial coverage)."""
-    for new_out in new_by_old.values():
-        node = graph.nodes.get(new_out)
-        if node is not None and is_boundary(node.op):
-            node.hints.remove(PROV)
-    if mint_pieces:
-        origins_kind = origins(union(*consumed_prov.values())) if consumed_prov else {}
-        for nid in new_compute_ids:
-            node = graph.nodes.get(nid)
-            if node is not None:
-                put(node, mint(origins_kind, nid))
-        return
-
-    shared = union(*[p for cid, p in consumed_prov.items() if cid not in output_map])
-    for old_id, new_out in new_by_old.items():
-        node = graph.nodes.get(new_out)
-        if node is not None:
-            put(node, union(consumed_prov.get(old_id, {}), shared))
-    outputs = set(new_by_old.values())
-    for nid in new_compute_ids:
-        node = graph.nodes.get(nid)
-        if node is not None and nid not in outputs:
-            put(node, union(shared))
-
-
 def coverage(node_prov: dict, all_totals: dict[str, set[str]]) -> dict[str, tuple[int, int, bool]]:
     """Per-origin ``(have, total, full)`` for one node given graph-wide
     :func:`totals`. ``full`` means every piece of that origin lives in this

@@ -227,7 +227,7 @@ class TuningSearch(Search):
         ``perf`` / inventory / lowering rows, feed the tree and the prior (:meth:`observe`), and
         re-bench near-best winners at the deployable -O3 regime. The engine awaits this and
         nothing else."""
-        from emmy.compiler.pipeline.search.terminal_bench import bench_terminal_async, rebench_o3_async  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async  # noqa: PLC0415
 
         stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
         self.note_bench(measured=measured)

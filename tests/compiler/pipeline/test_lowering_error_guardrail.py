@@ -151,7 +151,7 @@ def test_tuning_does_not_raise_and_prunes_branch():
 def _terminal_bench(graph, *, backend, db):
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.search.terminal_bench import TerminalBench as _TerminalBench
+    from emmy.compiler.pipeline.search.policy.terminal_bench import TerminalBench as _TerminalBench
 
     return _TerminalBench(SimpleNamespace(graph=graph, ctx=_small_smem_ctx()), backend=backend, db=db)
 

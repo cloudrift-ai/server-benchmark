@@ -1051,15 +1051,15 @@ def _raster_values(term: _Term) -> list[str]:
     return list(RASTER.narrow(raster_moves()))
 
 
-def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | None = None, kids: tuple = ()) -> list[dict]:
+def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | None = None) -> list[dict]:
     """The values ``site`` offers under the chosen inventory — TYPED schedule slices, keyed by
     family. Dispatch is the two stored-param predicates on the node, never the ``AxisRole``.
 
-    Two questions a site cannot answer alone travel with it, and both are about the SITE TREE rather
-    than the node: ``parent``, because a parent FORM can realize a nested decision itself (the
-    cone's statistic, the streaming pair's geometry), and ``kids``, because a value can depend on
-    what the subtree decided — the stream's transport is sized by the score tile it feeds, and the
-    sibling equality between the two flash sites is checked where the pair is visible."""
+    The one question a site cannot answer alone travels with it, and it is about the SITE TREE
+    rather than the node: ``parent``, because a parent FORM can realize a nested decision itself
+    (the cone's statistic, the streaming pair's geometry). Nothing here reads what the SUBTREE
+    decided, and that is the site tree's shape rather than an omission — the walk is a clean
+    product, so a site's values depend on ``work`` and its parent alone."""
     node = site.node
     if node.axis is None:
         return _strip_values(term, node)
@@ -1088,20 +1088,14 @@ class _Row:
     ``REDUCE`` band it claims. ``derive_inventory`` over exactly those is what ``ops.seal_workers``
     computes at materialization, so :func:`_work_holds` and the seal cannot answer differently.
 
-    The slices are kept BY KEY, not as a flat tuple: a parent whose value depends on its subtree
-    (the stream's transport, sized by the score tile) must read the child's slice back, and reading
-    it out of a flattened list by position is how a two-site term silently swaps its sites."""
+    The ``TILE`` slices are kept BY KEY, not as a flat tuple: reading a site's slice back out of a
+    flattened list by position is how a two-site term silently swaps its sites. No OTHER family's
+    resolved slice is carried — the row is the kernel's complete identity and :func:`_materialize`
+    re-resolves every slice from its spelling, so a second copy could only ever disagree."""
 
     knobs: dict
     plans: dict = field(default_factory=dict)
     coop: int = 1
-    #: ``{codec key -> resolved slice}`` for every family the row's sites DECIDED — the typed
-    #: ``TilePlan`` / ``ReducePlan`` / ``Stage`` the enumeration already built. Materialization
-    #: reads these instead of re-parsing the strings it just spelled from them. A family a site
-    #: left at its decided empty is ABSENT, not ``None``: the empty spelling still has to be
-    #: RESOLVED against the inventory (an empty ``TILE`` beside a thread inventory is a real
-    #: unit-register tile), and that is the resolver doing its job rather than a re-parse.
-    slices: dict = field(default_factory=dict)
 
     @property
     def tiles(self) -> tuple:
@@ -1110,7 +1104,7 @@ class _Row:
 
     @classmethod
     def union(cls, parts: Iterable[_Row]) -> _Row | None:
-        """Several rows as ONE — knobs and slices unioned, the cooperative claim RECONCILED.
+        """Several rows as ONE — knobs and tile slices unioned, the cooperative claim RECONCILED.
         ``None`` when the parts cannot share one inventory.
 
         The claim is a CONSISTENCY, not a maximum. Since step 7 a ``REDUCE`` value spells no coop
@@ -1126,17 +1120,15 @@ class _Row:
         this existed, and the looser of the two was the one that ran on multi-root terms."""
         knobs: dict = {}
         plans: dict = {}
-        slices: dict = {}
         coop = 1
         for part in parts:
             knobs.update(part.knobs)
             plans.update(part.plans)
-            slices.update(part.slices)
             if part.coop > 1:
                 if coop > 1 and part.coop != coop:
                     return None  # two sites, two widths, one WORK entry to spell them in
                 coop = part.coop
-        return cls(knobs=knobs, plans=plans, coop=coop, slices=slices)
+        return cls(knobs=knobs, plans=plans, coop=coop)
 
 
 def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
@@ -1150,7 +1142,6 @@ def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
         knobs={key: _spell(value.get(family)) for family, key in node.keys.items()},
         plans={node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {},
         coop=red.coop if red is not None else 1,
-        slices={node.keys[f]: v for f, v in value.items() if f in node.keys and v is not None},
     )
     return _Row.union((own, *combo))
 
@@ -1159,15 +1150,14 @@ def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | Non
     """Every row the subtree rooted at ``node`` offers under ``work`` — this site's values crossed
     with each child's own rows. The children are enumerated ONCE per inventory, not once per parent
     value: under a fixed ``work`` a child's candidates do not depend on what the parent chose (that
-    is what choosing the inventory at the root buys). The dependency that DOES exist runs the other
-    way — a site's values may read what its subtree decided (:func:`_site_values`) — so the child
-    rows lead and this site's values are asked per combination."""
+    is what choosing the inventory at the root buys). Neither direction has a dependency left —
+    :func:`_site_values` reads ``work`` and the parent form, never what the subtree decided — so
+    the walk is a clean PRODUCT of the site tree, with no dependent-product escape hatch."""
     children = _kids(node)
     child_rows = [_rows_at(term, c, work, node) for c in children]
     out: list[_Row] = []
     for combo in product(*child_rows):
-        kids = tuple(zip(children, combo, strict=True))
-        for value in _site_values(term, node.site, work, parent, kids):
+        for value in _site_values(term, node.site, work, parent):
             row = _merge(node, value, combo)
             if row is not None:
                 out.append(row)
@@ -1312,10 +1302,18 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str]]:
     empty, :func:`_Term._build_tiles`), and the per-cell view only scalar / per-cell ones, so the
     ``WORK`` tier is the discriminator by construction and two views can never spell one row."""
     keys = _union_keys(terms)
+    works = _inventories(terms)
     #: Every key the union spells, decided-empty — a view lacking a site stamps the empty there.
     empty = {k: "" for k in keys}
+    if any(term.warp_eligible for term in terms):
+        # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
+        # untouched (``canonical_row_key`` reads the tuning-knob view); it prices "a scalar tile
+        # where tensor cores were on offer". It rides the BASE dict rather than a closing pass over
+        # the rows: :func:`_inventories` above already asked every site for its tile catalog, which
+        # is the one thing that sets the flag, so the answer is known before the first row exists.
+        empty["S_warp_eligible"] = 1.0
     rows: list[dict] = []
-    for work in _inventories(terms):
+    for work in works:
         spelled = work.spell() if work is not None else ""
         for term in terms:
             rows.extend({**empty, **row} for row in _term_rows(term, work, _raster_values(term), spelled))
@@ -1329,12 +1327,6 @@ def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str]]:
     for term in terms:
         if not rows and term.pin_error is not None and not term.pin_spelled:
             raise term.pin_error  # NO inventory could spell the pin — a pin names a specific kernel
-    if any(term.warp_eligible for term in terms):
-        # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
-        # untouched (``canonical_row_key`` reads the tuning-knob view); it prices "a scalar tile
-        # where tensor cores were on offer".
-        for row in rows:
-            row["S_warp_eligible"] = 1.0
     return rows, keys
 
 

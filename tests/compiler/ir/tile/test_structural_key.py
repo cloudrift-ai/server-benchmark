@@ -13,8 +13,8 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.structural import Structural

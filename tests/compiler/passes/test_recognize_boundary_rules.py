@@ -22,10 +22,10 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.ir.tile import Fold, TileOp
-from emmy.compiler.ir.tile.ir import deep_defines, deep_reads, stmt_axis_names
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -109,7 +109,7 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
     # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
     # projection body — the preamble split kept the two independent feeds apart.
-    from emmy.compiler.ir.tile.ir import operand_body
+    from emmy.compiler.ir.pure.fold import operand_body
 
     assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
     fold = node.operands[0]
@@ -164,7 +164,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
 
     assert [axis.name for axis in free] == ["m", "n"]
     # Both views of the packed buffer hoist as materialized operand edges of the stored node.
-    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.pure.fold import is_contraction
 
     con = node if is_contraction(node) else node.operands[0]
     assert is_contraction(con)
@@ -319,7 +319,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     addressable (and later cuttable) in its own right. Lowering flattens the whole thing back to the
     identical ``[stat loop, …, cone]`` stmt run. The stored form is the role=CONTRACTION fold; the
     bilinear ``Fold`` reading is the PLACED stamp (``the placed reading``)."""
-    from emmy.compiler.ir.tile.ir import operand_body, operand_name, refs_axis
+    from emmy.compiler.ir.pure.fold import operand_body, operand_name, refs_axis
     from emmy.compiler.ir.tile.ops import cone_seam
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
@@ -349,7 +349,7 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
     contraction ``s = Σ_d Q·K``. Returns ``(root, cone)``."""
     from emmy.compiler.ir.pure import Lambda
     from emmy.compiler.ir.pure.carrier import exp_combine_states
-    from emmy.compiler.ir.tile import Channel
+    from emmy.compiler.ir.pure.fold import Channel
 
     def score(kv_name: str, dd: Axis, acc: str) -> Fold:
         q = Load(names=(f"{acc}__q",), input="q", index=(Var("m"), Var(dd.name)))
@@ -392,7 +392,7 @@ def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
     carrying it would emit the identical kernel). It stays a ``PLACE`` seam: cutting it is exactly
     how the score becomes a kernel of its own — the two-kernel form evidence prices against this
     one."""
-    from emmy.compiler.ir.tile.ir import refs_axis
+    from emmy.compiler.ir.pure.fold import refs_axis
     from emmy.compiler.ir.tile.ops import cone_seam
     from emmy.compiler.ir.tile.path import family_sites, sites
 
@@ -545,8 +545,8 @@ def _prologue_shape(*, b_layouts, cone_per_channel=False):
     the normalize cone (fresh SSA names, and odd copies commute the multiply's args)."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure.fold import Fold
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import Fold
 
     m, n, k, r = Axis("m", 8), Axis("n", 16), Axis("k", 32), Axis("r", 32)
     fold = Accum(name="sacc", value="sq", op="add", axes=("r",))

@@ -34,11 +34,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import Fold
-from emmy.compiler.ir.tile.ir import operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES

@@ -16,10 +16,10 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel, Fold, ReducePlan, TileOp
-from emmy.compiler.ir.tile.ir import operand_body, operand_name
+from emmy.compiler.ir.tile import ReducePlan, TileOp
 from emmy.compiler.ir.tile.ops import axis_role, reduce_loop, reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -355,24 +355,25 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
 # --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
 
 
-def test_there_is_exactly_one_stored_node_kind_and_it_is_a_stmt() -> None:
-    """A composed step occupies a STATEMENT position in another node's body — flash's Q@K and P@V
-    contractions in a reduce partial, split-K's sliced node — and ``Stmt``-hood is what makes that
-    legal. After the collapse there is ONE stored kind to check: ``Map`` and bilinear ``Fold`` are
-    derived READINGS (constructors returning a ``Fold``, ``isinstance`` answering the reading), so
-    everything a term can hold is a ``Fold``."""
+def test_there_is_exactly_one_stored_node_kind_and_it_is_a_term() -> None:
+    """ONE stored kind — ``Map`` and the bilinear reading are derived READINGS (constructors
+    returning a ``Fold``, a predicate answering the reading), so everything a term can hold is a
+    ``Fold`` — and that kind is a TERM, not a ``Stmt``. A composed step (flash's Q@K ahead of its
+    P@V, split-K's sliced node) reaches the emitted stream through ``operands`` and the derivation
+    that orders them, never by occupying a statement position; ``lower`` is the one crossing."""
     from emmy.compiler.ir.stmt.base import Stmt
 
-    assert issubclass(Fold, Stmt)
+    assert not issubclass(Fold, Stmt), "a pure term must not be a Stmt (ir/ARCHITECTURE.md)"
     for built in (_contraction(), Fold.projection(body=Body(()), operands=()), fold_from_loop(_sum_loop())):
         assert type(built) is Fold
 
 
-def test_a_generic_body_walk_reaches_a_composed_nodes_children() -> None:
-    """The protocol that matters: ``nested()`` exposes a composed node's body, so the generic deep
-    walks (``deep_defines`` and friends) descend into it instead of stopping at — or crashing on —
-    the node. This is the shape ``030_split_reduce`` produces: a ``Map`` group inside a partial."""
-    from emmy.compiler.ir.tile.ir import deep_defines
+def test_a_generic_walk_reaches_a_composed_nodes_children() -> None:
+    """A term is not a statement, but it still has children, and the shared deep walks
+    (``deep_defines`` and friends) have to descend into them rather than stop at — or crash on —
+    the node. ``nested()`` is that structural accessor; it is a term operation sharing the stmt
+    vocabulary's spelling so one walker serves both."""
+    from emmy.compiler.ir.pure.fold import deep_defines
 
     inner = Assign(name="g", op="copy", args=("x",))
     group = Fold.projection(body=Body((inner,)))
@@ -384,7 +385,7 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     """Position in the sequence is semantic — flash's P@V reads the softmax weight the merge stmts of
     that same loop step produce, so a composed step may not be hoisted ahead of them. ``_flatten_nodes``
     expands each node in place."""
-    from emmy.compiler.ir.tile.ir import _flatten_nodes
+    from emmy.compiler.ir.pure.fold import _flatten_nodes
 
     before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
     flat = _flatten_nodes(Body((before, _pv_contraction(), after)))

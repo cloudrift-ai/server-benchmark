@@ -2,7 +2,7 @@
 STRUCTURAL half of the Loop-IR → Tile-IR boundary.
 
 After this rule nothing downstream traffics in ``LoopOp``. Recognition reads the algebra off the
-body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Fold` whose body is the
+body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.pure.fold.Fold` whose body is the
 **annotated loop nest** (the reduce ``Loop`` stamped with its
 :class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body),
 wrapped in a :class:`~emmy.compiler.ir.tile.ir.TileOp` whose ``place`` carries just the free axes.

@@ -16,7 +16,7 @@ codecs see [`../ARCHITECTURE.md`](../ARCHITECTURE.md); for the row enumerator th
 | --- | --- |
 | `axis` | the OPTIONAL iteration axis — `None` is the zero-axis node |
 | `lift` | a pure `Lambda` `λ(k, v₁…vₙ) → S`: the element's SINGLETON state (ι is spelled here; softmax's is `(x, 1)`) |
-| `init` / `combine` | the TRUE monoid, flat — ONE program whose results are the fold's real accumulator names (helpers in `ir/stmt/algebra`) |
+| `init` / `combine` | the TRUE monoid, flat — ONE program whose results are the fold's real accumulator names (helpers in `ir/pure/algebra`) |
 | `operands` | a symmetric tuple of CLOSED inputs, each an edge, bound POSITIONALLY to the lift params |
 
 **`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a `Fold`, plus a

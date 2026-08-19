@@ -12,9 +12,8 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel
-from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 

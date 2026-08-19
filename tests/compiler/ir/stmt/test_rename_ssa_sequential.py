@@ -68,7 +68,7 @@ def test_fold_combine_tracks_accum_rename() -> None:
     # renames in lockstep (the Fold rewrite handler's ``rename_combine``), or the cooperative
     # combine reads a state name the renamed body no longer defines (the M=1 cut-consumer's
     # ``acc1``-undefined miscompile).
-    from emmy.compiler.ir.tile.ir import Fold
+    from emmy.compiler.ir.pure.fold import Fold
 
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),

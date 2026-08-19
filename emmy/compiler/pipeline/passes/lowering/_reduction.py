@@ -1,8 +1,8 @@
 """The lowering-side view of a fold's algebra — every cross-partition / cross-thread program the
-materializers derive from a :class:`~emmy.compiler.ir.tile.ir.Fold`'s stored ``(combine, lift,
+materializers derive from a :class:`~emmy.compiler.ir.pure.fold.Fold`'s stored ``(combine, lift,
 dtypes)``. This is a LOWERING helper, not IR vocabulary: the stored term keeps exactly one ⊕
 program (the flat ``combine``), and everything here — the state⊕state re-emission, the one-shot
-:class:`~emmy.compiler.ir.pure.merge.StateMerge` realization, the twist facts —
+statement realization of the cross-partition combine, the twist facts —
 is derived on demand at the two consumers, the kernel materializer (``lowering/kernel/_factor``
 and friends) and the cross-CTA split (``lowering/tile/030_split_reduce``). Nothing else reads it.
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
-from emmy.compiler.ir.pure import StateMerge, component_ops
+from emmy.compiler.ir.pure import component_ops, merge_stmts
 from emmy.compiler.ir.stmt import Accum, Assign, Stmt
 
 
@@ -78,13 +78,11 @@ class Reduction:
         return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
     def merge_stmts(self, other: tuple[str, ...]) -> tuple[Stmt, ...]:
-        """The cross-partition combine of this state with a second fully-reduced state named
-        ``other``, realized as loop-IR statements — this fold's own stored ``combine`` under
-        :class:`~emmy.compiler.ir.pure.merge.StateMerge`, rendered to ``Assign`` temps plus one
-        ``base``-``Accum`` per component. The ``Accum`` form is what carries the neutral element,
-        so the cooperative-tree / cross-CTA reduce gets its seed from the ONE identity placement
-        (``Loop.render``) instead of a second seeding path."""
-        return StateMerge.of(self.fold.combine, other).stmts()
+        """This fold's cross-partition combine against a second fully-reduced state named
+        ``other``, as loop-IR statements (:func:`~emmy.compiler.ir.pure.algebra.merge_stmts` — the
+        stored ``combine`` rendered to ``Assign`` temps plus one ``Accum`` per component, whose
+        ``op.identity`` is the seed the ONE identity placement emits)."""
+        return merge_stmts(self.fold.combine, other)
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:
@@ -92,7 +90,7 @@ class Reduction:
         of the cone's prologue node (``Fold.projection(body=cell, operands=(prologue,))``; the prologue itself
         a zero-axis ``Fold`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
         prologue (a gmem-``Load`` A) — the caller's serial fallback."""
-        from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415 — avoid an import cycle
+        from emmy.compiler.ir.pure.fold import Fold  # noqa: PLC0415 — avoid an import cycle
 
         pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
         head = pro.operands[0] if (isinstance(pro, Fold) and pro.axis is None) and pro.operands else pro

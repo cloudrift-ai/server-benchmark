@@ -71,12 +71,12 @@ from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
-    Fold,
     ReducePlan,
     Store,
     TileOp,

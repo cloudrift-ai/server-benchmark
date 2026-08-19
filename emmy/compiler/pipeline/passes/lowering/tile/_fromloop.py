@@ -10,8 +10,8 @@ escape."""
 from __future__ import annotations
 
 from emmy.compiler.ir.pure import Lambda, M, component_ops
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
-from emmy.compiler.ir.tile.ir import Fold, is_contraction
 from emmy.compiler.ir.tile.ops import head, reduce_loop
 
 
@@ -163,7 +163,7 @@ def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold | None:
 
 
 def nodify_reduce(op, like=None):
-    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node the reduce
+    """Nodify a kernel op into a :class:`~emmy.compiler.ir.pure.fold.Fold` node the reduce
     partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
     against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
     recognize-side per-cell contraction) is already the node — the coop / ILP K partition treats

@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
-from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 

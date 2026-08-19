@@ -295,8 +295,9 @@ def _two_site_term():
     edge (``REDUCE`` / ``STAGE``), the edge keyed by its own axis."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure.fold import Channel, Fold
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
-    from emmy.compiler.ir.tile import Channel, Fold, TileOp
+    from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.ir.tile.ir import Placement
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 

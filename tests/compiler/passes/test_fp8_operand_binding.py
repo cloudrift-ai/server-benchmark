@@ -24,9 +24,9 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
 from emmy.compiler.pipeline.pipeline import LoweringError

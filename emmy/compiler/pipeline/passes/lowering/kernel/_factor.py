@@ -53,10 +53,11 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import Fold, effect_tail, is_contraction
+from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import clamp_last, copy_cell, reduce_codegen, store_sink

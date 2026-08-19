@@ -23,16 +23,18 @@ Two vocabularies, and exactly one direction between them.
 A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it has an order, a
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
-α-renaming, and has no position at all. `Lambda`, the monoid vocabulary (`M` / `component_ops` /
-`rename_combine` / the foldMap spec oracle), the exp-family combine generators and `StateMerge`
-all live on the term side.
+α-renaming, and has no position at all. `Lambda`, the `Fold` term, the monoid vocabulary (`M` / `component_ops` /
+`rename_combine` / the foldMap spec oracle) and the exp-family combine generators all live on the
+term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
-spliced in as one. `StateMerge.stmts()` is the shape of that: the cross-partition state⊕state
-combine IS the fold's stored `combine` `Lambda` with its second operand renamed, and it becomes
-`Assign` rescale temps plus one `base`-`Accum` per state component wherever the lowering needs
-statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop).
+spliced in as one. `algebra.merge_stmts(combine, other)` is the shape of that: the cross-partition
+state⊕state combine IS the fold's stored `combine` applied with its second operand naming the
+partial being merged, and it becomes `Assign` rescale temps plus one `Accum` per state component
+wherever the lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA
+finalize loop). There is no `StateMerge` type: the term is the `Lambda` the fold already stores,
+and a rendering function is not a kind.
 
 The invariant is what stops facts from acquiring a second home. A term that renders itself needs
 no private spelling of anything the statements already carry:
@@ -49,12 +51,24 @@ rewrite handler) and its seed was a second placement path that `_lift` stripped.
 cross-CTA finalize was numerically wrong as a result, and became correct when the combine started
 arriving as ordinary statements.
 
-**Tile IR stores terms, not statements.** `TileOp`'s node vocabulary is the `Fold` term and the
-`Lambda`s it stores; the schedule slices, root stores and knobs are the `TileOp`'s, not the term's.
-`Fold` is the one class still on the wrong side of the rule above — it subclasses `Stmt` so a
-composed step can occupy a statement position in another node's body, and `Fold.lower()` /
-`Fold.loop` are already the render-to-statements it would keep. Closing it means moving the term
-and its derivations out of `tile/ir.py` into `ir/pure/`, leaving `TileOp` behind.
+**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and nothing else of the
+program; the schedule slices, the root stores and the knobs are the `TileOp`'s, not the term's. So
+`Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.
+
+A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
+the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
+need to be a statement to get there. The tree already carries it: a composed node is an entry in
+`operands`, and its position is produced by the derivation — `_twisted_derived_step` heads the
+inline-node edges, and `splice_operands` places each edge's body before the first read of its bound
+name. `Fold.loop` passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the
+only place terms become statements is `Fold.lower()`.
+
+`Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
+children, `rewrite()` for α-renaming, `defines()` for the bilinear reading's channel accumulators.
+These are term operations spelled the same way so one canonicalizer and one deep walk serve both
+vocabularies; they are not statement behaviour, and `Fold` has no `render`. What remains genuinely
+impure is the raw-loop-IR escape arm (`_loop_ir_fn` — recognition's un-recognized cells, `030`'s
+finalize, the split partial), which dies as recognition approaches totality.
 
 ## Invariants by stage
 
@@ -267,8 +281,8 @@ atom tier reads the operands off the annotated loop to pick the tensor-core cell
 `component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
 the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
 `Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
-denotational foldMap spec oracle; the state⊕state combine is the pure `StateMerge` term
-(`ir/pure/merge.py`), which renders itself to statements rather than being one. The lowering side
+denotational foldMap spec oracle, and `merge_stmts` — the state⊕state combine's one statement
+realization, a function over the stored combine rather than a second term kind. The lowering side
 reads the algebra through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a
 `Fold`; `names` / `state_b` / `twisted`, the `combine_states` re-emission for the cross-thread
 primitives, `merge_stmts(other)` for the statement positions, and `loop_state_head` — the

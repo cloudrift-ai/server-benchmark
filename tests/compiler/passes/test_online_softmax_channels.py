@@ -206,7 +206,7 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     contraction over the FULL reduce axis whose cone is ``exp(score − m)·(1/d)`` and whose cone
     SOURCE is the pair — the same binding the norm→linear edge uses, so the contraction schedule
     catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
-    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 

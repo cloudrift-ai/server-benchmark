@@ -37,10 +37,10 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
 )
+from emmy.compiler.ir.pure.fold import Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import Fold, operand_body, operand_name
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (

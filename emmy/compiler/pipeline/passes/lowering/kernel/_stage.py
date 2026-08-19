@@ -59,8 +59,8 @@ from emmy.compiler.ir.kernel.ir import (
     TmaDescriptor,
     TmaLoad,
 )
+from emmy.compiler.ir.pure.fold import deep_defines
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ir import deep_defines
 
 
 def _mul(a: Expr, b: Expr) -> Expr:

@@ -190,8 +190,20 @@ class Context:
         device-physical features to that card's **memorized** specs from the
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
         context so it featurizes with its own card's SM count / smem (not the live
-        device's). Default ``None`` → the live device (the live-compile path)."""
+        device's). Default ``None`` → the live device (the live-compile path).
+
+        A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
+        named a specific card, so substituting the live device's properties would featurize that
+        card's records as some other card and report nothing. The failure is silent by
+        construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
+        misresolved name produces H_* features identical to a correct one on a GPU-less host.
+        Recording goldens on a card before adding it to the registry is exactly when this fires."""
         spec = gpu.by_name(gpu_name) if gpu_name else None
+        if gpu_name and spec is None:
+            raise ValueError(
+                f"unknown GPU {gpu_name!r} — no entry in the emmy.gpu registry, so its device-physical "
+                f"features cannot be reconstructed. Add it to KNOWN_GPUS; do not fall back to the live device."
+            )
         props = spec.device_features() if spec else {}
         sm = int(props.get("sm_count") or _live_sm_count())
         return cls(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,52 @@ def test_hard_negative_mining_grows_the_training_set():
     one = CatBoostTrainer(feature_names=FEATURES, iterations=20, negatives=5, rounds=1).fit(_groups())
     two = CatBoostTrainer(feature_names=FEATURES, iterations=20, negatives=5, rounds=2).fit(_groups())
     assert two.rows > one.rows
+
+
+# --- several positives per pool ----------------------------------------------------
+
+
+def test_a_verified_row_is_never_drawn_as_a_negative():
+    """A pool the builder matched several goldens into holds several verified-good configs, and none of them
+    may be handed to the loss at label 0.0 — teaching the model that a config we measured as good is bad is
+    exactly the contamination ``DEFAULT_ROUNDS`` warns about, only self-inflicted.
+
+    Checked on both draws: the small-pool branch, which contributes every row it has rather than sampling,
+    and the sampling branch. And on the mined draw, whose window has to widen by the pin count or a pool
+    whose pins all rank high would come back short."""
+    trainer = CatBoostTrainer(feature_names=FEATURES, negatives=12)
+    rng = np.random.default_rng(0)
+    pins = (2, 5)
+    small = trainer._uniform(8, pins, rng)  # 6 unpinned rows <= 12: the every-row branch
+    assert sorted(small) == [0, 1, 3, 4, 6, 7]
+    big = trainer._uniform(200, pins, rng)
+    assert len(big) == 12 and not set(pins) & set(big.tolist())
+    scores = np.arange(50, dtype=float)[::-1]  # row 0 scores highest, so the pins sit inside the window
+    mined = trainer._hard(scores, (0, 1))
+    assert len(mined) == 12 and not {0, 1} & set(mined.tolist())
+
+
+def test_row_accounting_covers_every_positive():
+    """``rows`` is what the fit reports it trained on, so a pool with two pins must count two — otherwise the
+    number silently understates the training set as the corpus grows siblings."""
+    trainer = CatBoostTrainer(feature_names=FEATURES, negatives=4)
+    groups = [_groups(n_pools=1)[0], replace(_groups(n_pools=1)[0], key="gpuA/p1", pinned=(0, 1, 2))]
+    assert trainer._n_rows([np.arange(4), np.arange(4)], groups) == (4 + 1) + (4 + 3)
+
+
+def test_fit_treats_every_pin_as_a_positive():
+    """``QuerySoftMax`` takes several positives per group as they are, so a pool with two verified configs
+    needs no reshaping: both pins ride into the training set at label 1.0 and both end up ahead of every
+    unpinned row. A run that had drawn one of them as a negative would have pushed it back down."""
+    rows = [{"D_a": float(i), "D_b": 0.0} for i in range(20)]
+    groups = [Group.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
+    fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=8).fit(groups)
+    assert fit.rows == 6 * (8 + 2)
+    assert set(np.argsort(-fit.score_rows(groups[0]), kind="stable")[:2].tolist()) == {18, 19}
+    # Both pins land on one leaf, so they TIE — and the fit objective counts a tie against the golden, which
+    # is why two verified rows at the top score rank 1 rather than 0. Nothing to fix: deploy takes the
+    # earlier-emitted one, and it is verified too.
+    assert fit.ranks == [1] * 6
 
 
 # --- the model surface -------------------------------------------------------------

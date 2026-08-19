@@ -17,7 +17,7 @@ from emmy.compiler.pipeline.search.prior.fit.linear import (
     mean_log_rank,
     raw_weights,
 )
-from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank, rank_of_golden, topk_table
+from emmy.compiler.pipeline.search.prior.fit.rank import best_dual_rank, best_rank, dual_rank, rank_of_golden, topk_table
 
 __all__ = [
     "DEFAULT_FEATURES",
@@ -27,6 +27,8 @@ __all__ = [
     "Group",
     "LinearFit",
     "LinearTrainer",
+    "best_dual_rank",
+    "best_rank",
     "dual_rank",
     "eval_weights",
     "feature_matrix",

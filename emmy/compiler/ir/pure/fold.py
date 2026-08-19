@@ -29,7 +29,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.pure.algebra import M, component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, RenderCtx, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -472,15 +472,6 @@ class Fold:
         params = tuple(n for s in operands for n in _operand_result_names(s))
         return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, _map_results(b) or params[:1]))
 
-    def with_axis(self, axis: Axis) -> Fold:
-        """This fold over a different iteration ``axis`` — a pure ALGEBRA edit. The lift's
-        leading param IS the iteration var (positional binding), so it renames in lockstep;
-        nothing else moves. The warp-flash PV's intra-block → stream swap is the one caller: the
-        scalar tree contracts one key per step, the fragment tier the whole block."""
-        assert self.axis is not None, "with_axis: an iterating fold only"
-        lift = _loop_ir_fn((axis.name, *self.lift.params[1:]), self.lift.body, self.lift.results)
-        return replace(self, axis=axis, lift=lift)
-
     def external_reads(self) -> tuple[str, ...]:
         """Every input buffer read anywhere under this node's operand edges (deep — an inline
         cone may nest its own loads)."""
@@ -598,9 +589,9 @@ class Fold:
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
     # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its
-    # stmt siblings without dispatching on which they are. This is not statement behaviour — a term
-    # has no scope to seed, no effect to order and no ``render`` (see the one below), and the
-    # effect-shaped members below answer for a value, not by default. ---------- #
+    # stmt siblings without dispatching on which they are. Nothing here is statement behaviour —
+    # a term has no scope to seed, no effect to order and no ``render``; it becomes statements
+    # once, through :meth:`lower`. ---------- #
     def defines(self) -> tuple[str, ...]:
         """The names this node BINDS. The block-stmt default for a plain fold — its names are
         bound by the derived serial step's ``Accum``\\ s, exactly as for a plain reduce ``Loop``
@@ -615,7 +606,7 @@ class Fold:
         reading as body deps)."""
         return () if self._contraction is not None else (self.lift.body,)
 
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
+    def with_bodies(self, bodies: tuple[Body, ...]) -> Fold:
         if not bodies:
             return self
         (partial,) = bodies
@@ -656,20 +647,6 @@ class Fold:
         """The iteration var this term binds (empty at zero axes) — what scopes an axis-name read
         so a nested fold's ``k`` shadows an enclosing one of the same name."""
         return frozenset() if self.axis is None else frozenset({self.axis.name})
-
-    def external_writes(self) -> tuple[str, ...]:
-        return ()
-
-    def local_decls(self) -> tuple[str, ...]:
-        return ()
-
-    def has_side_effects(self) -> bool:
-        """False, always — a term denotes a value. A kernel's root stores are the ``TileOp``'s
-        (``TileOp.stores``), deliberately not the term's."""
-        return False
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        raise AssertionError("a Fold is a term — lower it (Fold.lower) instead of rendering it")
 
 
 def is_contraction(x) -> bool:
@@ -770,7 +747,7 @@ def edge_refs_axis(edge, name: str) -> bool:
     an unscoped scan would read a row-invariant statistic as k-varying."""
 
     def refs(s: Stmt) -> bool:
-        if name in s.binds_axes() or (isinstance(s, Fold) and s.axis is not None and s.axis.name == name):
+        if name in s.binds_axes():  # a node re-binding the name shadows it — ``Fold.binds_axes`` is its iteration var
             return False
         if any(name in e.free_vars() for e in s.exprs()):
             return True

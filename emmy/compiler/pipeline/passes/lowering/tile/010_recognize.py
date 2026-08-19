@@ -24,17 +24,21 @@ step unconditional — no knobs):
    into one streaming online-softmax loop: a ``TWISTED`` reduce ``Loop`` carrying the
    exp-family merge dissolved in the body. The carrier is N-channel: a further sibling additive
    fold whose lifted value is the pair's weight × a value cone joins the same loop as an
-   EXPECTATION channel (loop-invariant factors split off, multiplied back after the loop), and
-   a pair whose channels sit inside a following free output sweep (fused softmax·V) sinks into
-   that sweep first. The ``_softmax`` helper (``_fuse``).
+   EXPECTATION channel (loop-invariant factors split off, multiplied back after the loop). A pair
+   whose channels sit inside a following free output sweep (fused softmax·V) stays at its own
+   level and is that sweep's per-row statistic. A pair whose step COMPOSES its score (the spliced
+   ``Q·Kᵀ`` producer) pairs on the cones' content, so the fused stream carries one copy of the
+   producer. The ``_softmax`` helper (``_fuse``).
 3. **Lift** — peel the free (parallel) axes off the kernel and lift the per-cell compute into a
    zero-axis ``Fold`` whose body holds the annotated reduce ``Loop`` + projection: a pure pointwise body is a
    flat zero-axis fold; a single flat reduce is annotated in place — ``CONTRACTION`` (clean contraction)
    / ``PLANAR`` (plain ``sum`` / ``max`` / ``mean``) / pre-annotated ``TWISTED`` (online softmax) —
-   with the projection after it. The free axes ride on
+   with the projection after it. A reduce nested in the reduce is the COMPOSED STEP where the
+   parser can read it as an operand edge (``_fromloop``), and the raw-loop escape where it cannot.
+   The free axes ride on
    the ``TileOp``'s schedule (the root's concern); ``_schedule`` maps them onto the grid. A cell
-   the lift can't cleanly factor (no reduce, several reduces, or a nested non-flash reduce) stays a
-   flat un-annotated zero-axis ``Fold`` (→ the scalar tier).
+   the lift can't cleanly factor (no reduce, several reduces, or a nested reduce the parser cannot
+   read) stays a flat un-annotated zero-axis ``Fold`` (→ the scalar tier).
 4. **The MONOID-producer composition** — a lifted ``Fold.projection(source=Fold)`` whose body is the
    statistic's scalar epilogue + a fresh free (column) ``Loop`` over one or more ⊗-folds of ONE
    shared A value reading the statistic (the fused norm→linear edge ``rmsnorm(x)·nw @ w``; its
@@ -47,7 +51,7 @@ step unconditional — no knobs):
    The schedule re-derives it and merges both forms' candidates into ONE fork, because which
    of the two a row realizes is a decision about the SCHEDULE.
 
-Flash must precede online-softmax which must precede the lift: each later step consumes the
+Online softmax must precede the lift: each later step consumes the
 ``Accum``\\ s an earlier one matches. A **symbolic** axis (dynamic ``seq_len``) is left
 un-lifted (the scalar ``Tile`` decode needs static extents) — the ``LoopOp`` stays put for
 the dynamic-shape tier.

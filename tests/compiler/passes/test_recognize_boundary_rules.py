@@ -28,7 +28,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
 
 
@@ -430,6 +430,116 @@ def test_cone_per_cell_edge_reaches_the_per_cell_emitter():
     defined = {nm for s in body for nm in deep_defines(s)} | stmt_axis_names(body) | {"m", "n", "kvb"}
     assert "s2" in defined, "the cone's score edge never reached the emitted body"
     assert deep_reads(list(body)) <= defined, f"the emitted body reads an undefined name: {deep_reads(list(body)) - defined}"
+
+
+# --------------------------------------------------------------------------------------------- #
+# The COMPOSED STEP — a reduce whose per-element step reads a producer it computes itself
+# (attention's per-key score contraction ``Σ_d Q·K`` inside the streaming softmax statistic).
+# --------------------------------------------------------------------------------------------- #
+
+
+def _score_loop(kv: str, dd: str, acc: str, tag: str) -> Loop:
+    """``Σ_dd Q[m, dd]·K[kv, dd]`` as a raw reduce ``Loop`` — the per-key score, spelled the way
+    loop fusion leaves it when it splices the QK producer into its consumer's step."""
+    return Loop(
+        axis=Axis(dd, Dim(16)),
+        body=Body(
+            (
+                Load(names=(f"kl{tag}",), input="k", index=(Var(kv), Var(dd))),
+                Load(names=(f"ql{tag}",), input="q", index=(Var("m"), Var(dd))),
+                Assign(name=f"pr{tag}", op="multiply", args=(f"kl{tag}", f"ql{tag}")),
+                Accum(name=acc, value=f"pr{tag}", op="add", axes=(dd,)),
+            )
+        ),
+    )
+
+
+def _composed_rowmax() -> Loop:
+    """The row-max pass over a COMPUTED score: ``max_kv (Σ_d Q·K)·scale``."""
+    return Loop(
+        axis=Axis("kv", Dim(32)),
+        body=Body(
+            (
+                _score_loop("kv", "d0", "s0", "0"),
+                Assign(name="sc0", op="multiply", args=("s0", 0.25)),
+                Accum(name="mx", value="sc0", op="maximum", axes=("kv",)),
+            )
+        ),
+    )
+
+
+def _composed_sumexp() -> Loop:
+    """The ``Σ exp(score − mx)`` pass over its own copy of the same computed score."""
+    return Loop(
+        axis=Axis("kv", Dim(32)),
+        body=Body(
+            (
+                _score_loop("kv", "d1", "s1", "1"),
+                Assign(name="sc1", op="multiply", args=("s1", 0.25)),
+                Assign(name="df", op="subtract", args=("sc1", "mx")),
+                Assign(name="ex", op="exp", args=("df",)),
+                Accum(name="dn", value="ex", op="add", axes=("kv",)),
+            )
+        ),
+    )
+
+
+def test_composed_step_reads_its_producer_as_an_operand_edge():
+    """A reduce whose step computes what it folds reads as a fold with the producer on an OPERAND
+    EDGE — not as the raw-loop escape. The lift binds the producer's carried state positionally,
+    and ``fold_from_loop``'s byte-identity gate proves the reading: the derived step re-places the
+    edge ahead of its first use and flattens it back to the identical nest."""
+    loop = _composed_rowmax()
+    fold = fold_from_loop(loop)
+    assert fold is not None, "the composed step fell to the raw-loop escape"
+    (edge,) = fold.operands
+    assert isinstance(edge, Fold) and edge.axis.name == "d0", "the score producer is an operand edge"
+    assert fold.lift.params == ("kv", "s0"), f"the lift binds the producer's state positionally: {fold.lift.params}"
+    assert [type(s).__name__ for s in fold.lift.body] == ["Assign"], "only the scale survives in the lift body"
+    # Role-blind: the ``AxisRole`` is a DERIVED read, so the re-derived producer carries one where
+    # the raw pre-annotation loop does not. The program is what has to match.
+    assert _same_program(fold.loop.body, loop.body), "the derived loop is not the captured program"
+
+
+def test_composed_step_keeps_a_row_invariant_prologue_ahead_of_its_producer():
+    """An edge is PLACED at its first use, not prepended: a loop-invariant scalar ahead of the
+    producer keeps its position, so the byte-identity gate still accepts. Prepending unconditionally
+    read this step as a different program and cost it every schedule tier."""
+    loop = _composed_rowmax()
+    body = Body((Load(names=("sv",), input="scale", index=(Literal(0, "int"),)), *loop.body))
+    fold = fold_from_loop(Loop(axis=loop.axis, body=body))
+    assert fold is not None and _same_program(fold.loop.body, body)
+
+
+def test_online_softmax_pairs_two_composed_passes():
+    """The pairing compares the two passes' score cones by CONTENT, so two separately-traced copies
+    of one score — different bound axis, different temps — pair and fuse into ONE twisted stream.
+    Without that the fused attention cell keeps three passes over the score instead of two."""
+    from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
+
+    fused, changed = _fuse(Body((_composed_rowmax(), _composed_sumexp())))
+    assert changed, "the composed pair did not fuse"
+    loops = [s for s in fused if isinstance(s, Loop)]
+    assert len(loops) == 1 and loops[0].role is AxisRole.TWISTED, "the pair must collapse to one TWISTED stream"
+    assert any(isinstance(s, Loop) and s.is_reduce for s in loops[0].body), "the fused stream keeps ONE score producer"
+
+
+def test_split_k_reindexes_the_cones_producer_edge():
+    """A split partition σ-reindexes the cone's K-VARYING producer edge, not only its body stmts:
+    the slice's own k coordinate reaches gmem THROUGH that node. Leaving it alone makes every
+    partition recompute partition 0's scores (a silently wrong result, not a slow one)."""
+    from emmy.compiler.ir.expr import BinaryExpr
+    from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _sliced_edge
+
+    _root, cone = _attention_cone_term()
+    sigma = Sigma({"kvb": BinaryExpr("+", Var("_ks"), Var("kvb"))})
+    sliced = _sliced_edge(cone, sigma, "kvb")
+    score = sliced.operands[1]
+    assert [e.pretty() for ld in score.lower()[0].body if isinstance(ld, Load) for e in ld.index if "_ks" in e.pretty()], (
+        "the producer edge kept partition 0's k coordinate"
+    )
+    assert sliced.operands[0] == cone.operands[0], "the row-invariant statistic stays FULL-ROW in every partition"
 
 
 def test_norm_linear_fp32_keeps_map_rows_only():

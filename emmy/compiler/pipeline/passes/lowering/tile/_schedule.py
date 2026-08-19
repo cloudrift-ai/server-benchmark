@@ -78,7 +78,7 @@ from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Level as _ReduceLevel
 from emmy.compiler.ir.schedule import (
     Raster,
@@ -1551,16 +1551,20 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     return ksplit, kslice, sigma
 
 
-def _sliced_edge(edge, sigma: Sigma):
+def _sliced_edge(edge, sigma: Sigma, k_name: str):
     """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
     edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
-    only — the REDUNDANT-STATISTIC split: the cone's row-invariant prologue (the per-row statistic,
-    the K seam ``ops.cone_seam`` reads off the node boundary) spans the whole row and stays
-    FULL-ROW in every partition, each recomputing it. That redundancy is what the split trades for
-    parallelism; whether it pays on a given shape is evidence's decision."""
+    and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
+    slice's own k coordinate reaches gmem through that node, so leaving it unreindexed makes every
+    partition recompute partition 0's scores). The cone's row-invariant prologue (the per-row
+    statistic, the K seam ``ops.cone_seam`` reads off the node boundary) spans the whole row and
+    stays FULL-ROW in every partition, each recomputing it — the REDUNDANT-STATISTIC split. That
+    redundancy is what the split trades for parallelism; whether it pays on a given shape is
+    evidence's decision."""
     if isinstance(edge, Load):
         return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-    return edge.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
+    ops = tuple(e.rewrite(lambda nm: nm, sigma) if edge_refs_axis(e, k_name) else e for e in edge.operands)
+    return replace(edge, operands=ops).with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
 
 
 def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: str, knobs: dict, nested: Sequence[tuple] = ()) -> TileOp:
@@ -1584,8 +1588,8 @@ def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: s
     ksplit, kslice, sigma = _factor_k(node.axis, rplan.cta)
     inner = Fold.contraction(
         k_axis=kslice,
-        a=_sliced_edge(node.a, sigma),
-        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma)) for ch in node.channels),
+        a=_sliced_edge(node.a, sigma, node.axis.name),
+        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma, node.axis.name)) for ch in node.channels),
     )
     # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
     # operand, its combine the componentwise additive ⊕ over the same accumulator names — the

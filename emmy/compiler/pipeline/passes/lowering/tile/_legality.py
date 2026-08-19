@@ -38,7 +38,7 @@ from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import match_packed_b_node
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
@@ -630,10 +630,21 @@ def resolve_fill_stage(
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
-    if sync_bytes + async_bytes > budget:
-        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes} B, over the {budget} B smem budget")
+    # A cone that COMPOSES a score contraction (attention) fills its slab from a NESTED
+    # contraction, and that contraction's OWN operands stage beside the others: a
+    # ``bk × <score K>`` key slab per chunk (so the chunk crosses L1 once per CTA instead of once
+    # per warp) and one loop-invariant ``tile_m × <score K>`` query slab. Neither rings — the keys
+    # die inside the chunk and the queries never advance — and both are reserved whenever the cone
+    # composes a score: the materializer stages them wherever the fill can, and over-reserving is
+    # cheaper than a schedule that fits the budget only until it is realized.
+    score = chain_edge(c.a, c.axis.name) if not isinstance(c.a, Load) else None
+    score_k = score.axis.extent.as_static() if score is not None and score.axis.extent.is_static else 0
+    score_bytes = score_k * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
+    if sync_bytes + async_bytes + score_bytes > budget:
+        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes + score_bytes} B, over the {budget} B smem budget")
         return None
-    depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
+    fixed = sync_bytes + score_bytes  # the score's own slabs never ring (see above)
+    depth = want_depth if want_depth >= 2 and async_bytes and fixed + want_depth * async_bytes <= budget else 1
     computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
     return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)

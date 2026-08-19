@@ -15,11 +15,31 @@ atom supplies only descriptor reads: the four gmem leaf constructors (:meth:`gme
 slab drain leaf (:meth:`staged_drain`), and the slab element dtype. This IS the "atom as
 descriptor" seam: one factory, one loop over atoms, no scattered ``isinstance``.
 
+A computed-A cone that COMPOSES a score contraction (attention) reaches the tensor core through that
+same seam, without a second emitter: :func:`_score_block` is :func:`_atom_ops` on the SCORE node,
+namespaced by :attr:`_AtomOps.frag_ns` so a nested emission never shadows the enclosing drain's
+accumulators. Its preferred form is the **SINGLE-PASS chained sweep** (:func:`chain_stream_fill`) —
+one pass of the score serving both the cone's statistic and its weight, the cone's state-only
+factors split off and multiplied back onto the output fragments after the loop, the carried state
+advancing in registers and rescaling those same fragments per KV chunk. Where that does not read
+(a split-K partition, whose statistic spans keys the contraction does not) the TWO-PASS pair stands:
+the **CHAINED statistic** (:func:`chain_stat_fill`) sweeps the per-row reduce at fragment residence
+and bridges through smem rows, then the **CHAINED A fill** (:func:`chain_a_fill`) recomputes the
+score and folds the cone into its fragment store. All of them decline (leaving the per-cell /
+cooperative-row form standing) wherever the score does not read as a contraction or the atom has no
+modeled C-fragment layout.
+
+The nested score's own operands stage like any other (:func:`score_query_operand` /
+:func:`score_key_operand`): its keys as a per-chunk slab the enclosing loop's pipeline refills under
+the drain, its queries as the loop-INVARIANT slab filled once ahead of it. Both ride the same
+transports and the same :class:`~emmy.compiler.ir.kernel.ir.LdmatrixLoad` drain the enclosing
+contraction's operands do, so the score crosses L1 once per CTA instead of once per warp.
+
 Leading ``_`` so the pass loader (globs ``*.py``, skips ``_``-prefixed) skips it."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
@@ -29,23 +49,34 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
+    FRAG,
+    ROW,
+    UNIFORM,
     EpilogueLoad,
+    FragmentApply,
     FragmentPromote,
+    FragmentRowReduce,
     LdmatrixLoad,
     MmaSyncPtx,
     RegEpilogue,
     RegFragment,
     RegStore,
+    Smem,
+    Sync,
+    frag_layout,
 )
-from emmy.compiler.ir.pure.fold import Fold, operand_body, operand_name
+from emmy.compiler.ir.pure.carrier import exp_merge, exp_rescale
+from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body, operand_name
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.tile.ops import chain_edge
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
+    LeadSegment,
     Operand,
     SyncOperand,
     SyncTransport,
@@ -55,7 +86,9 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
+from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import map_cone, match_packed_b_node
+from emmy.compiler.pipeline.passes.lowering.tile._softmax import same_score_cone, split_invariant_factors
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -573,6 +606,11 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
     moves, never in how A does, and keeping one A side is what lets a packed weight sit behind a
     fused activation: the bits still copy verbatim while the activation evaluates into its slab.
 
+    What this decides is which SIDE of the transport A rides and, when it is materialized, its gmem
+    reading. The per-cell FILL it builds for a cone is the fallback: a caller whose cone composes a
+    score contraction swaps in a chained fill (:func:`chain_stream_fill` / :func:`_chain_of`) over
+    the same operand, and takes that fill's own prologue instead of the one returned here.
+
     Returns ``(operand, copied, prologue)``."""
     if isinstance(c.a, Load):
         op = Operand(
@@ -605,6 +643,495 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
     return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
 
 
+def _chain_of(*, c, score, mn, atom, bk_elems, slab, stats, lead, slabs):
+    """The chained fill CLOSURE — ``chain(k0)`` for the transport, deferring the emission until the
+    skeleton knows its chunk base."""
+
+    def chain(k0):
+        return chain_a_fill(c=c, score=score, mn=mn, atom=atom, bk_elems=bk_elems, k0=k0, slab=slab, stats=stats, lead=lead, slabs=slabs)
+
+    return chain
+
+
+#: The nested score's slab tags — its own operand namespace, so ``_s_a_smem`` / ``_s_b_smem`` never
+#: collide with the enclosing transport's ``_a_smem`` / ``_b_smem``.
+_QUERY_TAG, _KEY_TAG = "s_a", "s_b"
+
+
+def score_key_operand(*, c: Fold, score: Fold, atom, m_name: str, cols: int) -> Operand | None:
+    """The nested score's KEY operand — the enclosing chunk's keys, staged once per CTA instead of
+    re-read per warp through the gmem fragment loaders, or ``None`` where the geometry does not.
+
+    The two axes swap the roles the enclosing contraction's operands give them: what ADVANCES per
+    chunk is the score's own N axis (which is the contraction's K — the keys), and the score's own
+    K (the head dim) is stationary and stages whole. So the slab is ``chunk × <score K>``, N-MAJOR
+    — the operand's own gmem orientation, its K stride-1 in gmem and smem alike, which is what lets
+    the ordinary staged ``LdmatrixLoad(b_trans=True)`` read it back.
+
+    Declines a symbolic head dim (the slab is a static shape), one whose row is not a whole number
+    of ``cp.async`` chunks, a K-MAJOR key layout (the copy would stride, not run), a key that
+    indexes the QUERY tile (the slab is CTA-shared across it), and a symbolic key extent (whose
+    last chunk overhangs, and only the gmem-direct read carries that guard)."""
+    b = score.b
+    if not (isinstance(b, Load) and score.b_trans and score.axis.extent.is_static and c.axis.extent.is_static):
+        return None
+    k_ext = score.axis.extent.as_static()
+    if (k_ext * atom.operand_dtype("b").nbytes) % 16 or Body.coerce(()).depends_on(b, m_name):
+        return None
+
+    def index(k0):
+        def gmem(row, col):
+            return tuple(Sigma({c.axis.name: BinaryExpr("+", k0, row), score.axis.name: col}).apply(e) for e in b.index)
+
+        return gmem
+
+    def coords(k0):
+        return tuple(Sigma({c.axis.name: k0, score.axis.name: Literal(0, "int")}).apply(e) for e in b.index)
+
+    return Operand(tag=_KEY_TAG, buf=b.input, shape=(cols, k_ext), index=index, coords=coords, trans=True)
+
+
+def score_query_operand(*, score: Fold, atom, m: Side, k_name: str) -> Operand | None:
+    """The nested score's QUERY operand — the CTA's query tile, staged ONCE ahead of the chunk loop.
+
+    Unlike the keys, the queries do not advance with the chunk: the same ``tile_m × <score K>`` tile
+    feeds every block of the sweep, so this is the loop-INVARIANT staged operand
+    (:attr:`SyncTransport.invariant_operands`) — one fill, no ring, no live range to schedule. Its
+    slab is the canonical A geometry (the tile axis the row, the score's K the contiguous column),
+    read back by the ordinary staged ``LdmatrixLoad``. ``None`` where the geometry does not stage:
+    a symbolic or non-chunk-aligned head dim, a query whose K is not gmem-contiguous, or a masked
+    query tile (whose overhang the slab fill would have to clamp)."""
+    a = score.a
+    if not (isinstance(a, Load) and score.axis.extent.is_static) or m.mask:
+        return None
+    k_ext = score.axis.extent.as_static()
+    if (k_ext * atom.operand_dtype("a").nbytes) % 16 or k_name not in a.index[-1].free_vars():
+        return None
+    row_base = _side_base(m)
+
+    def index(_k0):
+        def gmem(row, col):
+            return tuple(Sigma({m.axis.name: BinaryExpr("+", row_base, row), k_name: col}).apply(e) for e in a.index)
+
+        return gmem
+
+    def coords(_k0):
+        return tuple(Sigma({m.axis.name: row_base, k_name: Literal(0, "int")}).apply(e) for e in a.index)
+
+    return Operand(tag=_QUERY_TAG, buf=a.input, shape=(m.tile, k_ext), index=index, coords=coords)
+
+
+def _lane_group(lay) -> Expr:
+    """The lane's fragment ROW GROUP (``_g``) written over ``_lane`` — the same value the fragment
+    store's ``lane_decl`` binds, for a reader that is not a fragment store."""
+    return BinaryExpr("/", BinaryExpr("%", Var("_lane"), Literal(32, "int")), Literal(lay.n_elems, "int"))
+
+
+@dataclass(frozen=True)
+class _ChainCols:
+    """The score tile's COLUMN offset — the K block it covers. Duck-types :class:`AxisOffset`'s one
+    reader (:meth:`base`): a block column has no grid block and no unit, only the block base."""
+
+    atom_dim: int
+    k0: Expr
+
+    def base(self, r: int) -> Expr:
+        return BinaryExpr("+", self.k0, Literal(r * self.atom_dim, "int")) if r else self.k0
+
+
+def _score_block(
+    *,
+    n_axis: Axis,
+    score: Fold,
+    mn: tuple[Side, Side],
+    atom,
+    cols: int,
+    k0: Expr,
+    lead: tuple,
+    ns: str,
+    epilogue=None,
+    slabs: tuple = (None, None),
+):
+    """One BLOCK of the composed score, on the tensor core — ``mma(Q, Kᵀ)`` over the score's own
+    axis into C fragments covering ``tile_m × cols`` of the enclosing contraction's ``(m, K)`` plane.
+
+    Built out of the SAME atom strategy every tiled contraction dispatches through
+    (:func:`_atom_ops` on the score node), so there is no second mma emitter here: its ``state``
+    declares the fragments, its ``reduce`` emits the ``ldmatrix`` + ``mma.sync`` K-loop over the
+    score's own axis, and its ``store`` — when the caller supplies an ``epilogue`` — writes them
+    out. ``ns`` namespaces the fragments, so a nested emission never shadows the accumulators the
+    enclosing drain carries across the same loop; ``slabs`` hands it the score's own STAGED
+    operands (:func:`score_query_operand` / :func:`score_key_operand`), each ``None`` reading
+    gmem-direct instead.
+
+    The ROWS are the enclosing tile's own, warp-partitioned and ABSOLUTE (the score of a query row
+    belongs to that row, whichever warp owns it); the COLUMNS are the block, ``cols / atom_n``
+    register columns wide. Returns ``(ops, cells, offset, mn, stmts, frags)`` with ``frags[i]`` the
+    register row ``i``'s column fragments in column order."""
+    m, _ = mn
+    n_reg = cols // atom.atom_n
+    tile = TilePlan(atom=atom, units=(m.units, 1), regs=(m.reg, n_reg)).at(m.axis, replace(n_axis, extent=Dim(cols)))
+    ops = _atom_ops(score, tile, epilogue=epilogue, lead=lead, frag_ns=ns, slabs=slabs)
+    offset = (
+        AxisOffset(atom_dim=atom.atom_m, reg=m.reg, block_var=m.block, unit_var=m.unit, unit_count=m.units),
+        _ChainCols(atom_dim=atom.atom_n, k0=k0),
+    )
+    cells = [(i, j) for i in range(m.reg) for j in range(n_reg)]
+    decls = list(ops.state(cells))
+    _, region = ops.reduce(cells, offset, tile.mn)
+    frags = tuple(tuple(ops.frag(f"_c{i}_{j}") for j in range(n_reg)) for i in range(m.reg))
+    return ops, cells, offset, tile.mn, [*decls, *region], frags
+
+
+def _frag_lift(body, frags: tuple[tuple[str, ...], ...], acc: str, cell_axes: tuple[str, ...] = ()) -> list[Stmt] | None:
+    """The score's own lift (its scale) re-expressed over the score FRAGMENTS — the fragment-tier
+    sibling of the scalar ``Assign``, one :class:`FragmentApply` per fragment. The fragment operand
+    is the score accumulator; every other argument is cell-uniform.
+
+    ``None`` for a lift the fragment tier cannot express: a stmt that transforms something other
+    than the accumulator, or one that is neither a fragment nor CELL-UNIFORM. The second is what
+    ``cell_axes`` names — the tiled coordinates the fragment tier does not bind, so a stmt reading
+    one (a per-key mask ``Load``) is per-ELEMENT and emitting it once for the whole block would
+    silently broadcast one element's value across the tile."""
+    out: list[Stmt] = []
+    frag_names = {acc}
+    for s in body:
+        if not (set(s.deps()) & frag_names):
+            if cell_axes and Body.coerce(tuple(body)).depends_on(s, cell_axes):
+                return None  # per-element, not cell-uniform — the caller keeps the scalar sweep
+            out.append(s)  # a cell-uniform stmt of the lift (the scale ``Load``) — scalar, once
+            continue
+        if not isinstance(s, Assign) or s.args[0] not in frag_names:
+            return None  # a shape the fragment tier cannot express — the caller keeps the scalar sweep
+        frag_names |= set(s.defines())
+        for row in frags:
+            for f in row:
+                out.append(
+                    FragmentApply(
+                        out=f,
+                        op=s.op,
+                        args=tuple(f if a in frag_names else (a if isinstance(a, str) else repr(a)) for a in s.args),
+                        kinds=tuple(FRAG if a in frag_names else UNIFORM for a in s.args),
+                        in_place=True,
+                    )
+                )
+    return out
+
+
+def chain_a_fill(
+    *,
+    c: Fold,
+    score: Fold,
+    mn: tuple[Side, Side],
+    atom,
+    bk_elems: int,
+    k0: Expr,
+    slab: str,
+    stats: tuple[str, ...],
+    lead: tuple,
+    slabs: tuple = (None, None),
+):
+    """The **CHAINED A fill** — the score contraction the cone composes, realized on the TENSOR CORE
+    with the cone as its store epilogue: ``mma(Q, Kᵀ) → C fragments → exp(s − m)·(1/d) → the A slab``
+    the ordinary ``ldmatrix`` drain then reads. The one fill that computes its slab with a nested
+    contraction instead of per-cell scalar code.
+
+    The statistics the cone reads arrive at each fragment element's own ROW, out of the stat rows
+    the prologue bridged; the slab ``Write`` lands at the element's LOCAL ``(row, col)`` — σ folds
+    the absolute cell coordinate back to the slab's own. Returns the fill stmts."""
+    m, _ = mn
+    row_base = _side_base(m)
+    local_row = BinaryExpr("-", Var(m.axis.name), row_base)
+    local_col = BinaryExpr("-", Var(c.axis.name), k0)
+    epilogue = Body(
+        (
+            *(Load(names=(nm,), input=_stat_slab(nm), index=(local_row,)) for nm in stats),
+            *c.a.body,
+            Write(output=slab, index=(local_row, local_col), value=c.a.out),
+        )
+    )
+    ops, cells, offset, smn, stmts, _ = _score_block(
+        n_axis=c.axis, score=score, mn=mn, atom=atom, cols=bk_elems, k0=k0, lead=lead, ns="_s", epilogue=epilogue, slabs=slabs
+    )
+    return [*stmts, *(s for i, j in cells for s in ops.store(i, j, offset, smn))]
+
+
+def chain_stat_fill(
+    *, c: Fold, mn: tuple[Side, Side], atom, cols: int, stats: tuple[str, ...], lead: tuple, slabs: tuple = (None, None)
+) -> list[Stmt] | None:
+    """The **CHAINED statistic** — the cone's per-row streaming reduce swept at FRAGMENT residence.
+
+    The scalar prologue (:func:`sync_stat_fill`) folds one tile row per warp with the 32 lanes
+    striding it: it computes the same score the weight cone computes, one element at a time. Here
+    the sweep is BLOCKED and the score is a contraction like any other — per block the tile's
+    scores land in mma C-fragments (:func:`_score_block`), the block's row statistic comes off those
+    fragments through the layout's shuffle butterfly (:class:`FragmentRowReduce`), and the
+    carrier's OWN generated program merges the block into the running state: ``exp_merge`` at a
+    BLOCK singleton ``(rowmax, rowsum)`` instead of an element singleton — the same generator, the
+    same stability certificate, no attention vocabulary.
+
+    Each lane ends holding the statistic for the two rows the fragment layout gives it, so one lane
+    per column group publishes them to the stat rows the weight fill reads. ``None`` when this is
+    not that shape (no bindable producer, an expectation channel, a carrier the block merge cannot
+    spell) — the scalar prologue stands."""
+    cone = c.a
+    if not (isinstance(cone, Fold) and cone.axis is None and cone.operands):
+        return None
+    pro_node = cone.operands[0]
+    if not (isinstance(pro_node, Fold) and pro_node.axis is None and pro_node.operands):
+        return None
+    stat = pro_node.operands[0]
+    score = stat.operands[0] if isinstance(stat, Fold) and stat.axis is not None and len(stat.operands) == 1 else None
+    if not (isinstance(score, Fold) and score.axis is not None and is_contraction(score) and isinstance(score.a, Load)):
+        return None
+    names = tuple(stat.combine.results) if stat.combine is not None else ()
+    if len(names) != 2 or len(stat.lift.results) != 2 or stat.lift.results[1] != 1.0:
+        return None  # the (m, d) pair only — an expectation channel is the streaming form, not this
+    if not stat.axis.extent.is_static or stat.axis.extent.as_static() % cols:
+        return None  # the block sweep unrolls whole blocks
+    m, _ = mn
+    try:
+        lay = frag_layout(atom.atom_m, atom.atom_n)
+    except NotImplementedError:
+        return None  # an atom whose C layout the fragment tier does not model — the scalar prologue stands
+    if lay.rows_per_lane != 2:
+        return None
+    k0 = Var("_sb")
+    _ops, _cells, _off, _smn, stmts, frags = _score_block(
+        n_axis=stat.axis, score=score, mn=mn, atom=atom, cols=cols, k0=k0, lead=lead, ns="_t", slabs=slabs
+    )
+    lift = _frag_lift(stat.lift.body, frags, score.acc, (mn[0].axis.name, stat.axis.name))
+    if lift is None:
+        return None
+    body = [*stmts, *lift]
+    state = [[tuple(f"_ss{i}_{r}_{x}" for x in range(2)) for r in range(2)] for i in range(m.reg)]
+    for i in range(m.reg):
+        rmax, rsum, pw = (f"_rm{i}_0", f"_rm{i}_1"), (f"_rs{i}_0", f"_rs{i}_1"), tuple(f"_p{i}_{j}" for j in range(len(frags[i])))
+        body += [
+            FragmentRowReduce(top=rmax[0], bot=rmax[1], frags=frags[i], op=ElementwiseImpl("maximum"), group=lay.reduce_group),
+            *(
+                FragmentApply(out=pw[j], op=ElementwiseImpl("subtract"), args=(f, rmax), kinds=(FRAG, ROW), post=(ElementwiseImpl("exp"),))
+                for j, f in enumerate(frags[i])
+            ),
+            FragmentRowReduce(top=rsum[0], bot=rsum[1], frags=pw, op=ElementwiseImpl("add"), group=lay.reduce_group),
+        ]
+        for r in range(2):
+            body += list(exp_merge(state[i][r], (rmax[r], rsum[r]), key=state[i][r][0]))
+    # The stat rows the weight fill reads back — declared here, as the scalar prologue declares
+    # them; the carrier's own state is seeded by the sweep loop's ``Accum``\ s.
+    out: list[Stmt] = [Smem(name=_stat_slab(nm), extents=(mn[0].tile,), dtype="float") for nm in stats]
+    out.append(
+        StridedLoop(
+            axis=Axis(name=k0.name, extent=stat.axis.extent),
+            start=Literal(0, "int"),
+            step=Literal(cols, "int"),
+            body=Body(tuple(body)),
+            unroll=False,
+        )
+    )
+    # Publish: the statistic's scalar epilogue per owned row, then one lane per column group writes
+    # each bridged value into its stat row.
+    writes: list[Stmt] = []
+    for i in range(m.reg):
+        for r in range(2):
+            sfx = f"__r{i}{r}"
+            ren = dict(zip(names, state[i][r], strict=True))
+            for s in pro_node.body:
+                ren.update({d: f"{d}{sfx}" for d in s.defines()})
+                writes.append(s.rewrite(lambda nm, ren=ren: ren.get(nm, nm)))
+            local = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
+            # The layout's in-tile row offset, over ``_lane`` — this publish is a plain ``Write``,
+            # not a fragment store, so the ``lane_decl`` locals its ``Expr``\ s name are not in scope.
+            local = BinaryExpr("+", local, lay.row_off[r].substitute({"_g": _lane_group(lay)}))
+            writes += [Write(output=_stat_slab(nm), index=(local,), value=ren.get(nm, nm)) for nm in stats]
+    out.append(
+        Cond(cond=BinaryExpr("==", BinaryExpr("%", Var("_lane"), Literal(lay.reduce_group, "int")), Literal(0, "int")), body=tuple(writes))
+    )
+    out.append(Sync())
+    return out
+
+
+def _pro_split(pro_body, state: set[str]) -> tuple[list[Stmt], list[Stmt]]:
+    """The row-invariant prologue's ``(state-free, state-dependent)`` halves. The free half reads
+    nothing the fold's carrier defines (a captured scale ``Load``) and can run once, ahead of the
+    sweep; the dependent half is the projection off the FINISHED state (``1/d``) and can only run
+    after it."""
+    tainted, free, dep = set(state), [], []
+    for s in pro_body:
+        if set(s.deps()) & tainted:
+            tainted |= set(s.defines())
+            dep.append(s)
+        else:
+            free.append(s)
+    return free, dep
+
+
+def _cone_weight(cone, k_name: str, pivot: str):
+    """Read a computed-A cone as the exp family's WEIGHT times state-only factors —
+    ``(the prefix producing the lifted score, the invariant factor names)``, or ``None``.
+
+    The reading is the stability certificate's own shape: the cone's k-varying leaf must be an
+    ``exp`` of ``lifted − pivot`` (:func:`~emmy.compiler.ir.pure.carrier._certify` proves every
+    generated ``exp`` has exactly that form), and everything multiplying it must be loop-invariant
+    — the factor split :func:`split_invariant_factors` performs. ``prefix`` is what produces the
+    lifted score from the raw one (the ``1/√d`` scale); the invariant factors ride the state and
+    multiply back after the sweep, so a streaming pass never has to name a denominator that is not
+    final yet."""
+    body = list(cone.body)
+    split = split_invariant_factors(body, cone.out, k_name)
+    if split is None:
+        return None
+    inv, varying = split
+    if len(varying) != 1:
+        return None
+    defs = {s.name: s for s in body if isinstance(s, Assign)}
+    weight = defs.get(varying[0])
+    if weight is None or weight.op.name != "exp" or len(weight.args) != 1:
+        return None
+    sub = defs.get(weight.args[0])
+    if sub is None or sub.op.name != "subtract" or len(sub.args) != 2 or sub.args[1] != pivot:
+        return None
+    return list(Body.coerce(tuple(body)).backward_cone([sub.args[0]]).members), inv
+
+
+def chain_stream_fill(
+    *,
+    c: Fold,
+    score: Fold,
+    mn: tuple[Side, Side],
+    atom,
+    bk_elems: int,
+    slab: str,
+    out_frags: tuple,
+    lead: tuple,
+    slabs: tuple = (None, None),
+):
+    """The **SINGLE-PASS chained sweep** — the statistic and the weight off ONE pass of the score.
+
+    The two-pass pair (:func:`chain_stat_fill` then :func:`chain_a_fill`) computes ``Q·Kᵀ`` twice:
+    once to finish the statistic, once to weight the values by it. They cannot merge while the
+    weight names a denominator the sweep has not finished — so the cone's state-only factors are
+    SPLIT OFF (:func:`_cone_weight`) and multiplied back after the loop, exactly as an expectation
+    channel's loop-invariant factors are. What remains is the twisted monoid's own streaming law:
+    per KV block, the block's scores land in C fragments, its row pivot advances the carried one,
+    and the ψ-RESCALE that advance puts on every carried channel
+    (:func:`~emmy.compiler.ir.pure.carrier.exp_rescale`) is applied to the ENCLOSING drain's output
+    fragments — the one channel that lives outside the fold's state.
+
+    So one pass over the keys does everything: mma the block, advance the pivot, weight the block at
+    the advanced pivot, sum it into the denominator, rescale the output tile, and store the weights
+    into the A slab the ``ldmatrix`` drain reads.
+
+    Returns ``(prologue stmts, fill(k0), finalize stmts)`` — the carried state's decls, the per-chunk
+    fill, and the post-loop projection — or ``None`` wherever the shape does not read (the two-pass
+    pair then stands)."""
+    cone = c.a
+    if not (isinstance(cone, Fold) and cone.axis is None and cone.operands):
+        return None
+    pro_node = cone.operands[0]
+    if not (isinstance(pro_node, Fold) and pro_node.axis is None and pro_node.operands):
+        return None
+    stat = pro_node.operands[0]
+    if not (isinstance(stat, Fold) and stat.axis is not None and len(stat.operands) == 1):
+        return None
+    names = tuple(stat.combine.results) if stat.combine is not None else ()
+    if len(names) != 2 or len(stat.lift.results) != 2 or stat.lift.results[1] != 1.0:
+        return None  # the (pivot, denominator) pair only — an expectation channel is a different shape
+    # ONE sweep serves both halves only while both cover the same keys. A split-K partition
+    # contracts a SLICE while its statistic still spans the whole axis (every partition divides by
+    # the whole denominator), so there the two-pass pair stands.
+    if not (stat.axis.extent.is_static and c.axis.extent.is_static):
+        return None
+    if stat.axis.extent.as_static() != c.axis.extent.as_static():
+        return None
+    if not same_score_cone(stat.operands[0], score, stat.axis.name, c.axis.name):
+        return None
+    if _f16acc(atom) or bk_elems % atom.atom_n:
+        return None
+    try:
+        lay = frag_layout(atom.atom_m, atom.atom_n)
+    except NotImplementedError:
+        return None
+    if lay.rows_per_lane != 2:
+        return None
+    read = _cone_weight(cone, c.axis.name, names[0])
+    if read is None:
+        return None
+    prefix, inv = read
+    m, _ = mn
+    pro_free, pro_dep = _pro_split(list(pro_node.body), set(names))
+    # The prefix runs at fragment residence INSIDE the sweep, so every name it reads has to be in
+    # scope there: the free prologue's defs are, the state's projection is not.
+    if {a for s in prefix for a in s.deps()} & ({d for s in pro_dep for d in s.defines()} | set(names)):
+        return None
+    cell_axes = (m.axis.name, c.axis.name)
+    if _frag_lift(prefix, (("_probe",),), score.acc, cell_axes) is None:
+        return None  # probe only: the emission below needs the real fragments
+    state = [[tuple(f"_ss{i}_{r}_{x}" for x in range(2)) for r in range(2)] for i in range(m.reg)]
+    # Only the free prologue is emitted ahead of the sweep. The carried state needs no explicit
+    # seed: its ``Accum``\ s sit in the chunk loop's immediate body, so the ONE seed-placement path
+    # (``Loop.render``, off each fold's ``op.identity``) declares them once before the loop.
+    prologue: list[Stmt] = list(pro_free)
+    row_base = _side_base(m)
+
+    def fill(k0):
+        # The weight lands at the element's LOCAL slab ``(row, col)`` — σ folds the absolute cell
+        # coordinate back to the slab's own.
+        local = (BinaryExpr("-", Var(m.axis.name), row_base), BinaryExpr("-", Var(c.axis.name), k0))
+        epilogue = Body((Write(output=slab, index=local, value=score.acc),))
+        ops, cells, offset, smn, stmts, frags = _score_block(
+            n_axis=c.axis, score=score, mn=mn, atom=atom, cols=bk_elems, k0=k0, lead=lead, ns="_s", epilogue=epilogue, slabs=slabs
+        )
+        body: list[Stmt] = [*stmts, *_frag_lift(prefix, frags, score.acc, cell_axes)]
+        for i in range(m.reg):
+            rmax, rsum, psi = (f"_rm{i}_0", f"_rm{i}_1"), (f"_rs{i}_0", f"_rs{i}_1"), (f"_psi{i}_0", f"_psi{i}_1")
+            body.append(FragmentRowReduce(top=rmax[0], bot=rmax[1], frags=frags[i], op=ElementwiseImpl("maximum"), group=lay.reduce_group))
+            pivots = []
+            for r in range(2):
+                prog, advanced = exp_rescale(psi[r], state[i][r][0], rmax[r], key=f"_pv{i}_{r}")
+                body += list(prog)
+                pivots.append(advanced)
+            # The weight, at the ADVANCED pivot, in place on the score fragments: the block's own
+            # rescale is already in it, so the drain accumulates a contribution the merge below
+            # does not have to touch.
+            body += [
+                FragmentApply(
+                    out=f,
+                    op=ElementwiseImpl("subtract"),
+                    args=(f, tuple(pivots)),
+                    kinds=(FRAG, ROW),
+                    post=(ElementwiseImpl("exp"),),
+                    in_place=True,
+                )
+                for f in frags[i]
+            ]
+            body.append(FragmentRowReduce(top=rsum[0], bot=rsum[1], frags=frags[i], op=ElementwiseImpl("add"), group=lay.reduce_group))
+            for r in range(2):
+                body += list(exp_merge(state[i][r], (pivots[r], rsum[r]), key=state[i][r][0]))
+            body += [
+                FragmentApply(out=of, op=ElementwiseImpl("multiply"), args=(of, psi), kinds=(FRAG, ROW), in_place=True)
+                for of in out_frags[i]
+            ]
+        return [*body, *(s for i, j in cells for s in ops.store(i, j, offset, smn))]
+
+    finalize: list[Stmt] = []
+    for i in range(m.reg):
+        rows: dict[str, list[str]] = {nm: [] for nm in inv}
+        for r in range(2):
+            ren = dict(zip(names, state[i][r], strict=True))
+            for s in pro_dep:
+                ren.update({d: f"{d}__f{i}{r}" for d in s.defines()})
+                finalize.append(s.rewrite(lambda nm, ren=ren: ren.get(nm, nm)))
+            for nm in inv:
+                rows[nm].append(ren.get(nm, nm))
+        for nm in inv:
+            finalize += [
+                FragmentApply(out=of, op=ElementwiseImpl("multiply"), args=(of, tuple(rows[nm])), kinds=(FRAG, ROW), in_place=True)
+                for of in out_frags[i]
+            ]
+    return prologue, fill, finalize
+
+
 def _sync_operands(
     c: Fold,
     bk_elems: int,
@@ -613,8 +1140,12 @@ def _sync_operands(
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     channels=(),
     seam: tuple = ((), (), ()),
-) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
-    """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
+    atom=None,
+    lead: tuple = (),
+    out_frags: tuple = (),
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt], list[Stmt], Operand | None]:
+    """The ``smem`` compute fill's drain-ordered, computed, copied, prologue and finalize operands,
+    plus the nested score's KEY operand when a chained fill stages one.
 
     Either contraction role may be a generic inline producer cone. A computed A evaluates at
     absolute ``(m, k)`` and fills the canonical ``tile_m × bk`` slab; a computed B evaluates at
@@ -635,7 +1166,8 @@ def _sync_operands(
     contract the copy transports follow). A symbolic **K** is the same discipline applied to the
     contraction axis: :func:`_k_masked` clamps the cone's own reads and stores the fold identity
     into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
-    n_name, k_name = mn[1].axis.name, c.axis.name  # the A side's names moved with it into _a_slab_operand
+    m_name, n_name, k_name = mn[0].axis.name, mn[1].axis.name, c.axis.name
+    stats = seam[2]  # the rest of the A side's seam moved with it into :func:`_a_slab_operand`
     row_base, col_base = _tile_base(mn)
     k_ext = c.axis.extent_expr() if not c.axis.extent.is_static else None
 
@@ -650,6 +1182,49 @@ def _sync_operands(
         t = BinaryExpr("+", col_base, col)
         return clamp_last(t, mn[1].ext) if mn[1].mask else t
 
+    prologue: list[Stmt] | None = []
+    finalize: list[Stmt] = []
+    # The SINGLE-PASS sweep first — one pass of the score serving both the statistic and the weight
+    # (:func:`chain_stream_fill`); it replaces the prologue outright, so nothing is bridged through
+    # the stat rows. It declines wherever the shape does not read, and then the two-pass pair below
+    # stands: the CHAINED statistic (the same score the weight fill mma's, swept at fragment
+    # residence) or, failing that, the scalar cooperative row sweep :func:`_a_slab_operand` builds.
+    stream = None
+    score_edge = chain_edge(c.a, c.axis.name) if (stats and isinstance(atom, AtomKind) and not isinstance(c.a, Load)) else None
+    # The nested score's own operands stage beside the enclosing ones (the scheduler already
+    # reserved both slabs): its KEYS per chunk, its QUERIES once. ``None`` on either leaves that
+    # operand reading gmem-direct.
+    key_op = score_key_operand(c=c, score=score_edge, atom=atom, m_name=m_name, cols=bk_elems) if score_edge is not None else None
+    query_op = score_query_operand(score=score_edge, atom=atom, m=mn[0], k_name=score_edge.axis.name) if score_edge is not None else None
+    slabs = (
+        (query_op.slab, query_op.shape[1]) if query_op is not None else None,
+        (key_op.slab, key_op.shape[1]) if key_op is not None else None,
+    )
+    if score_edge is not None:
+        stream = chain_stream_fill(
+            c=c,
+            score=score_edge,
+            mn=mn,
+            atom=atom,
+            bk_elems=bk_elems,
+            slab="_a_smem",
+            out_frags=out_frags,
+            lead=lead,
+            slabs=slabs,
+        )
+    stream_fill = None
+    if stream is not None:
+        prologue, stream_fill, finalize = stream
+    elif stats:
+        # The CHAINED statistic first — the same score the weight fill mma's, swept at fragment
+        # residence, so the prologue is not the one half of attention left at scalar residence.
+        # The statistic's own sweep advances on its OWN loop var, so only the invariant query slab
+        # is its to read — its keys stay gmem-direct.
+        prologue = (
+            chain_stat_fill(c=c, mn=mn, atom=atom, cols=bk_elems, stats=stats, lead=lead, slabs=(slabs[0], None))
+            if isinstance(atom, AtomKind)
+            else None
+        )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -663,7 +1238,7 @@ def _sync_operands(
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
 
-    a_op, a_copied, prologue = _a_slab_operand(
+    a_op, a_copied, scalar_pro = _a_slab_operand(
         c,
         mn=mn,
         bk_elems=bk_elems,
@@ -675,6 +1250,20 @@ def _sync_operands(
         k_coord=k_coord,
         k_ext=k_ext,
     )
+    # The CHAINED fill where the cone composes a score CONTRACTION and the atom can mma it: the slab
+    # comes from one nested contraction (fragments → the cone's epilogue → the slab), not the
+    # per-cell scalar code :func:`_a_slab_operand` built. Only the FILL and the slab's swizzle
+    # change — which side of the transport A rides, and its gmem reading when it is materialized,
+    # are that helper's answer and stand either way. NONE-swizzle by construction: the fragment
+    # store applies no XOR, so the drain must read the plain row-major slab.
+    if not a_copied and (stream is not None or score_edge is not None):
+        chain = stream_fill or _chain_of(
+            c=c, score=score_edge, mn=mn, atom=atom, bk_elems=bk_elems, slab="_a_smem", stats=stats, lead=lead, slabs=slabs
+        )
+        a_op = replace(a_op, chain=chain, swizzle="NONE")
+    # A chained fill brings its own prologue; the scalar cooperative row sweep is what stands when
+    # every chained form declined (``prologue`` is ``None`` only there).
+    prologue = scalar_pro if prologue is None else prologue
     (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
@@ -707,7 +1296,7 @@ def _sync_operands(
         )
         async_ops.append(op)
         drain.append(op)
-    return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
+    return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue, finalize, (query_op, key_op)
 
 
 def _packed_operands(
@@ -819,6 +1408,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
     k_axis = c.axis
+    finalize: list[Stmt] = []
+    lead: tuple | None = None
     # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
     # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
     # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
@@ -869,12 +1460,30 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # on the store when dtypes differ); every materialized counterpart is COPIED underneath
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
         # has none. A term with no inline edge at all lands here too: then it is only the copy.
-        operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
+        # The enclosing drain's output fragments, grouped by register ROW — a fill that streams a
+        # twisted carrier rescales them per chunk (its ψ acts on every carried channel, and this one
+        # lives in registers outside the fold's state).
+        out_frags = tuple(
+            tuple(_fold_frag(ops.frag(f"_c{i}_{j}"), f) for j in range(mn[1].reg) for f in range(len(ops.channels)))
+            for i in range(mn[0].reg)
         )
+        operands, sync_ops, copy_ops, stat_pro, finalize, (query_op, key_op) = _sync_operands(
+            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, tile.atom, ops.lead, out_frags
+        )
+        # A chained fill runs as its OWN pipeline segment: it reads the nested score's key slab and
+        # writes the A slab the drain reads, so the two live ranges nest instead of overlapping.
+        chained = next((op.chain for op in sync_ops if op.chain is not None), None)
+        if chained is not None:
+            keys = (
+                CpAsyncTransport(operands=(key_op,), slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+                if key_op is not None
+                else None
+            )
+            lead = LeadSegment(build=lambda: chained(Var("_ks")), transport=keys)
         transport = SyncTransport(
             operands=sync_ops,
             copy_operands=copy_ops,
+            invariant_operands=(query_op,) if query_op is not None else (),
             slab_dtype=cuda_name(elem),
             elem_bytes=elem.nbytes,
             cta=cta,
@@ -911,7 +1520,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     def drain(slot):  # the atom's slab-reading leaf, over ring `slot`
         return ops.staged_drain(operands, slot, cells, offset, mn)
 
-    return staged_kloop(
+    pre, region = staged_kloop(
         transport=transport,
         drain=drain,
         depth=stage.depth,
@@ -920,7 +1529,11 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         k_extent=K,
         workers=ops.workers,
         block_threads=tile.launch_threads,
+        lead=lead,
     )
+    # The streaming carrier's post-loop projection (its loop-invariant factors, evaluated at the
+    # FINISHED state) lands on the output fragments here — after the sweep, before the sink.
+    return pre, [*region, *finalize]
 
 
 def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
@@ -1112,6 +1725,21 @@ class _AtomOps:
     # (``ops.cone_seam``). ``None`` for a
     # plain gmem-``Load`` A — its whole body is the per-cell fill.
     seam: tuple | None = None
+    # The register-fragment NAMESPACE. Empty for the kernel's own contraction; a NESTED one (the
+    # chained A fill's score, emitted inside the enclosing K-loop) prefixes its fragments so its
+    # ``_a`` / ``_b`` / ``_c`` do not shadow the accumulators the enclosing drain carries across
+    # that same loop.
+    frag_ns: str = ""
+    # Per-operand ``(slab, ldm)`` when the caller's own transport already STAGED it — the nested
+    # score's query and key slabs, filled by the enclosing loop's pipeline instead of re-read per
+    # warp through the gmem fragment loaders. Both are the operand's own gmem orientation (so
+    # ``ldm`` is the score's K extent either way), NONE-swizzle, one chunk: the read is the
+    # ordinary staged ``LdmatrixLoad``, only its slab comes from outside. ``None`` = gmem-direct.
+    slabs: tuple[tuple[str, int] | None, tuple[str, int] | None] = (None, None)
+
+    def frag(self, name: str) -> str:
+        """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
+        return f"{self.frag_ns}{name}"
 
     @property
     def channels(self) -> tuple:
@@ -1252,7 +1880,7 @@ class _MmaOps(_AtomOps):
                 dtype=atom.operand_dtype("a"),
                 nregs=atom.fragment_nregs("a"),
             )
-            for nm in frags(lambda i: f"_a{i}", m.reg)
+            for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
         ]
         for f in range(n_folds):
             decls += [
@@ -1263,11 +1891,11 @@ class _MmaOps(_AtomOps):
                     dtype=atom.operand_dtype("b"),
                     nregs=atom.fragment_nregs("b"),
                 )
-                for nm in frags(lambda i, ff=f: _fold_frag(f"_b{i}", ff), n.reg)
+                for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
             ]
         decls += [
             RegFragment(
-                name=_fold_frag(_mma_c_base(atom, i, j), f),
+                name=_fold_frag(self.frag(_mma_c_base(atom, i, j)), f),
                 role="c",
                 shape=atom.ptx_shape,
                 dtype=atom.operand_dtype("c"),
@@ -1281,7 +1909,7 @@ class _MmaOps(_AtomOps):
             # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
             # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.
             decls += [
-                RegFragment(name=_fold_frag(f"_c{i}_{j}", f), role="c", shape=atom.shape, dtype=F32)
+                RegFragment(name=_fold_frag(self.frag(f"_c{i}_{j}"), f), role="c", shape=atom.shape, dtype=F32)
                 for f in range(n_folds)
                 for i in range(m.reg)
                 for j in range(n.reg)
@@ -1307,11 +1935,27 @@ class _MmaOps(_AtomOps):
         k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expr())
 
         def read_row(i):
+            if self.slabs[0] is not None:
+                # Already staged: the slab covers exactly this tile's M span, so the read is the
+                # warp's own within-tile row and the K-loop's column.
+                slab, ldm = self.slabs[0]
+                prim = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
+                return [
+                    LdmatrixLoad(
+                        frag=self.frag(f"_a{i}"),
+                        src_buffer=slab,
+                        src_index=(prim, Var(k_axis.name)),
+                        role="a",
+                        staged=True,
+                        ldm=ldm,
+                        fragment_layout=atom.fragment_layout,
+                    )
+                ]
             cell = offset[0].base(i)
             idx = tuple(Sigma({m.axis.name: cell}).apply(e) for e in a_load.index)
             return [
                 LdmatrixLoad(
-                    frag=f"_a{i}",
+                    frag=self.frag(f"_a{i}"),
                     src_buffer=a_load.input,
                     src_index=idx,
                     role="a",
@@ -1323,11 +1967,27 @@ class _MmaOps(_AtomOps):
             ]
 
         def read_col(j):
+            if self.slabs[1] is not None:
+                # Already staged: read the slab at the cell's LOCAL column (the slab covers exactly
+                # this tile's N span, so the absolute base drops out) and the K-loop's own row.
+                slab, ldm = self.slabs[1]
+                return [
+                    LdmatrixLoad(
+                        frag=self.frag(f"_b{j}"),
+                        src_buffer=slab,
+                        src_index=(Literal(j * atom.atom_n, "int"), Var(k_axis.name)),
+                        role="b",
+                        staged=True,
+                        ldm=ldm,
+                        b_trans=True,
+                        fragment_layout=atom.fragment_layout,
+                    )
+                ]
             cell = offset[1].base(j)
             idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
             return [
                 LdmatrixLoad(
-                    frag=f"_b{j}",
+                    frag=self.frag(f"_b{j}"),
                     src_buffer=b_load.input,
                     src_index=idx,
                     role="b",
@@ -1342,9 +2002,9 @@ class _MmaOps(_AtomOps):
         def contract(i, j):
             return [
                 MmaSyncPtx(
-                    c_frag=_mma_c_base(atom, i, j),
-                    a_frag=f"_a{i}",
-                    b_frag=f"_b{j}",
+                    c_frag=self.frag(_mma_c_base(atom, i, j)),
+                    a_frag=self.frag(f"_a{i}"),
+                    b_frag=self.frag(f"_b{j}"),
                     shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
                     c_dtype=atom.operand_dtype("c").name,
@@ -1382,7 +2042,7 @@ class _MmaOps(_AtomOps):
         sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
         chans = self.channels
         accs = tuple(acc for _, acc in chans)
-        frags = (f"_c{i}_{j}", *(_fold_frag(f"_c{i}_{j}", f) for f in range(1, len(chans))))
+        frags = (self.frag(f"_c{i}_{j}"), *(_fold_frag(self.frag(f"_c{i}_{j}"), f) for f in range(1, len(chans))))
         writes = [s for s in tail if isinstance(s, Write)]
         if len(chans) > 1 and len(tail) == len(writes) == len(chans) and {w.value for w in writes} == set(accs):
             # RAW per-channel stores — the split-K partial's epilogue is one workspace ``Write``
@@ -1404,14 +2064,14 @@ class _MmaOps(_AtomOps):
                 for acc, frag in zip(accs, frags, strict=True)
             ]
         write = next(s for s in writes)
-        extra = tuple((acc, _fold_frag(f"_c{i}_{j}", f)) for f, (_, acc) in enumerate(chans[1:], 1))
+        extra = tuple((acc, _fold_frag(self.frag(f"_c{i}_{j}"), f)) for f, (_, acc) in enumerate(chans[1:], 1))
         epi = _warp_epilogue(tail, c.acc, m.axis.name, n.axis.name, sigma, extra_accs=extra)
         assert len(chans) == 1 or epi is not None, "a fused sibling group's projection must combine the accumulators"
         return [
             RegStore(
                 dst_buffer=write.output,
                 dst_index=tuple(sigma.apply(e) for e in write.index),
-                frag=f"_c{i}_{j}",
+                frag=self.frag(f"_c{i}_{j}"),
                 shape=atom.shape,
                 epilogue=epi,
                 m_guard=_guard(m, mcell),
@@ -1534,6 +2194,8 @@ def _atom_ops(
     epilogue: Body | None = None,
     seam=None,
     lead: tuple = (),
+    frag_ns: str = "",
+    slabs: tuple = (None, None),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from.
@@ -1555,7 +2217,7 @@ def _atom_ops(
 
         c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels)
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam)
+    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
 
 
 def reduce_codegen(c: Fold, tile: TilePlan, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):

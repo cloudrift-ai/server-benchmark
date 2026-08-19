@@ -278,3 +278,22 @@ def exp_merge(state: tuple[str, ...], terms: tuple, *, key: str | None = None) -
     prog = _emit(outs, state, key or state[0], accum=True)
     _certify(prog)
     return prog
+
+
+def exp_rescale(rescale: str, pivot: str, arrival: str, *, key: str) -> tuple[tuple[Stmt, ...], str]:
+    """The exp-family **pivot advance** — the new pivot ``max(pivot, arrival)`` plus the ψ-RESCALE
+    factor ``exp(pivot − new)`` that every carried non-pivot channel takes when the pivot moves
+    there.
+
+    It is the same factor :func:`exp_combine_states` puts on each channel's ``Accum`` ``base``,
+    named on its own for a channel the merge cannot reach: an accumulator living OUTSIDE the fold's
+    state. Attention's streaming sweep is that case — the ``(pivot, denominator)`` pair rides the
+    state while the expectation it weights is a tensor-core output tile held in registers, rescaled
+    per KV block by this factor. Certified by the same rule as every generated combine.
+
+    Returns ``(program, the new pivot's name)`` — hand the pivot back as the arriving pivot of the
+    merge that follows, so the merge's own ``maximum`` is idempotent on it."""
+    new, diff = f"{key}__p", f"{key}__pd"
+    prog = (Assign(new, "maximum", (pivot, arrival)), Assign(diff, "subtract", (pivot, new)), Assign(rescale, "exp", (diff,)))
+    _certify(prog)
+    return prog, new

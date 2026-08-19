@@ -159,8 +159,18 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
         edge = by_param.get(term)
         if isinstance(edge, Load):
             merge = _split_expect(merge, nm, term, edge)
-    head = tuple(e for e in fold.operands if isinstance(e, Fold))
-    return (*head, *lam.body, *merge)
+    # The inline-node edges are PLACED, not prepended: each lands immediately before the first
+    # stmt (lift body or merge) that reads its bound name, ties in operand order — the same
+    # first-use rule :func:`splice_operands` applies to every other edge, with the node itself
+    # riding the sequence (``_flatten_nodes`` lowers it later). Prepending unconditionally would
+    # reorder a step whose pure prologue precedes the producer (a loop-invariant scale ``Load``
+    # ahead of attention's score contraction), and the byte-identity gate reads that as a
+    # different program.
+    steps: list[Stmt] = [*lam.body, *merge]
+    for edge in reversed([e for e in fold.operands if isinstance(e, Fold)]):
+        nm = operand_name(edge)
+        steps.insert(next((i for i, st in enumerate(steps) if nm in deep_reads([st])), 0), edge)
+    return tuple(steps)
 
 
 def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:

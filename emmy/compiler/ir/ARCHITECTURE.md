@@ -58,10 +58,13 @@ program; the schedule slices, the root stores and the knobs are the `TileOp`'s, 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
-`operands`, and its position is produced by the derivation — `_twisted_derived_step` heads the
-inline-node edges, and `splice_operands` places each edge's body before the first read of its bound
-name. `Fold.loop` passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the
-only place terms become statements is `Fold.lower()`.
+`operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
+inline-node edge before the first stmt that reads its bound name (lift body or merge), and
+`splice_operands` applies the same first-use rule to every other edge. Placement, not prepending, is
+what lets a step whose pure prologue precedes its producer (a loop-invariant scale `Load` ahead of
+attention's score contraction) re-derive to the program it was read from. `Fold.loop` passes that
+mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become statements
+is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, `defines()` for the bilinear reading's channel accumulators.

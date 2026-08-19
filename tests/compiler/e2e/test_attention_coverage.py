@@ -50,6 +50,25 @@ softmax reduce. This file pins every tier of it:
   refuse the merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no
   ``PLACE`` cut puts a two-consumer producer back together).
 
+  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, the same measurement protocol) the ``D = 128``
+  conclusion does NOT hold — the fused arm wins there once the schedule is right, and the cold pick
+  is what loses:
+
+  | shape        | torch | two-kernel | fused (cold pick) | fused (best ``WORK`` pinned) |
+  | ------------ | ----- | ---------- | ----------------- | ---------------------------- |
+  | S=256 D=128  |  14   |       45   |          **20.8** | **20.8** (``w4x1``)          |
+  | S=512 D=128  |  27   |      131   |             295   | **56.9** (``w4x1``)          |
+  | S=1024 D=128 |  54   |      188   |             310   |   226   (``w8x1``)           |
+
+  The cold pick lands on ``w8x2`` (129.5 KB of slabs, one block per SM) where ``w4x1`` takes 80 KB;
+  that one knob is 5.2x at ``S = 512``. Two consequences for the campaign: the fused form is already
+  worth deploying at ``D = 128`` on this card, and what stands between it and the default is the
+  schedule pick rather than the kernel. Structurally the merged tree IS reversible here —
+  with the merge allowed, ``EMMY_PLACE=cut`` lowers back to two kernels and both arms pass
+  ``run --bench --strict`` — but the recovered split is not the good one (909 us at ``S = 256``
+  against the default's 45), so pricing fused against cut needs the cut arm's own schedule
+  evidence before the refusal can be lifted.
+
   The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
   of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
   ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (323 cold vs

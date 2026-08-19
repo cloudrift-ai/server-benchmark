@@ -142,6 +142,18 @@ def _cone_canon(stmts: list, result: str, axis_name: str) -> str:
     return text
 
 
+def same_score_cone(a, b, a_axis: str, b_axis: str) -> bool:
+    """Whether two score cones are the SAME program modulo their own bound names and the axis each
+    streams — the pairing's own content comparison (:func:`_cone_canon`), asked of two nodes that
+    reached lowering separately.
+
+    The online-softmax pair carries one score per pass; the pairing matched them at recognition, but
+    a later pass may rewrite one side alone (a split-K partition re-indexes the weight's keys while
+    the statistic keeps spanning the whole axis), and a lowering that folds the two passes into one
+    sweep may only do so while they still read the same keys."""
+    return _cone_canon([a], operand_name(a), a_axis) == _cone_canon([b], operand_name(b), b_axis)
+
+
 def _rowmax(loop: Loop) -> tuple[str, str, list, Load] | None:
     """``(state, score name, cone stmts, load)`` if ``loop`` reads as a row-max fold of a score
     cone over ONE loaded value (the bare ``Load`` is the degenerate cone; a masked score —

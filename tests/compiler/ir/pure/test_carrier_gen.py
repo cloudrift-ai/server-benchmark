@@ -11,7 +11,7 @@ import pytest
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.pure import carrier as _carrier
-from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_states, exp_merge
+from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_states, exp_merge, exp_rescale
 from emmy.compiler.ir.stmt import Accum, Assign
 
 
@@ -190,3 +190,34 @@ def test_softmax_is_flash_minus_the_expectation_channel():
     # both have exactly one exp-rescale pair (a, b) in combine_states
     n_exp = lambda p: sum(isinstance(s, Assign) and s.op.name == "exp" for s in p)  # noqa: E731
     assert n_exp(soft_cs) == n_exp(flash_cs) == 2
+
+
+def test_rescale_is_the_factor_the_merge_puts_on_the_carried_state():
+    # The ψ-rescale named on its own must BE the factor ``exp_merge`` applies to every carried
+    # channel — otherwise an accumulator outside the fold's state (attention's output tile) would
+    # advance by a different law than the state beside it. Structural: the merge's ``Accum`` base
+    # for each channel is ``<channel> · exp(pivot − max(pivot, arrival))``, and the rescale is
+    # exactly that ``exp``.
+    prog, advanced = exp_rescale("psi", "m", "s", key="k")
+    defs = {s.name: s for s in prog}
+    assert defs[defs["psi"].args[0]].op.name == "subtract"
+    assert defs[defs["psi"].args[0]].args == ("m", advanced)
+    assert defs[advanced].op.name == "maximum" and defs[advanced].args == ("m", "s")
+
+    merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
+    mdefs = {s.name: s for s in merge if isinstance(s, Assign)}
+    base = next(s.base for s in merge if isinstance(s, Accum) and s.name == "d")
+    factor = mdefs[base].args[1] if mdefs[base].args[0] == "d" else mdefs[base].args[0]
+    assert mdefs[base].op.name == "multiply"
+    assert mdefs[factor].op.name == "exp"
+    arg = mdefs[mdefs[factor].args[0]]
+    assert arg.op.name == "subtract" and arg.args[0] == "m"
+    assert mdefs[arg.args[1]].op.name == "maximum" and set(mdefs[arg.args[1]].args) == {"m", "s"}
+
+
+def test_rescale_is_certified_like_every_generated_combine():
+    # The rescale's ``exp`` argument is ``pivot − max(pivot, arrival)`` — provably ≤ 0 by the same
+    # rule; a hand-built one that subtracts a foreign max is rejected.
+    exp_rescale("psi", "m", "s", key="k")  # certifies inside the builder
+    with pytest.raises(UnstableCarrierError):
+        _carrier._certify((Assign("mx", "maximum", ("a", "b")), Assign("d", "subtract", ("m", "mx")), Assign("psi", "exp", ("d",))))

@@ -1,4 +1,4 @@
-"""Engine events + the :class:`Strategy` protocol + discovery.
+"""Engine events + the :class:`PipelineStrategy` protocol + discovery.
 
 The rewrite engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS and never
 branches on pass names, dialects, or per-concern flags. Every cross-cutting concern — provenance
@@ -10,7 +10,7 @@ Two binding scopes share the protocol:
 
 - **Discovered** (build-scoped): strategy modules are plain ``.py`` files at the top level of the
   ``passes/`` directory; :func:`discovered_strategies` imports them and instantiates every
-  :class:`Strategy` subclass they define. Instances are shared across runs and candidates, so
+  :class:`PipelineStrategy` subclass they define. Instances are shared across runs and candidates, so
   they hold immutable config only — never trajectory state. Dispatch order is deterministic
   (class-name sort) but MUST NOT be load-bearing: no strategy may depend on another having
   handled an event first.
@@ -26,6 +26,7 @@ and carry payload objects so signatures never churn.
 from __future__ import annotations
 
 import importlib
+from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,12 +38,14 @@ if TYPE_CHECKING:
     from emmy.compiler.pipeline.pipeline import Match
 
 
-class Strategy:
-    """Base class for engine-event strategies — the event protocol's one authoritative
-    declaration. Subclasses defined in a ``passes/`` top-level module are DISCOVERED and
-    instantiated at ``Pipeline.build`` (see module docstring); run-scoped instances are
-    installed via ``Run.strategies``. Every handler below is a concrete no-op (never abstract:
-    each strategy cares about a subset) — override the events you act on."""
+class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods: every event hook is optional
+    """ABC for engine-event strategies — the event protocol's one authoritative declaration.
+    Subclasses defined in a ``passes/`` top-level module are DISCOVERED and instantiated at
+    ``Pipeline.build`` (see module docstring); run-scoped instances are installed via
+    ``Run.strategies``. Deliberately no abstract methods: every handler below is a concrete
+    no-op, since each strategy cares about a subset — override the events you act on. Contrast
+    ``search.strategy.SearchStrategy`` (a search SHAPE over the engine's loop) and
+    ``search.policy.Search`` (the frontier policy inside one loop)."""
 
     def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """A loop (``Run.drive`` / ``Run.resolve``) starts driving a graph."""
@@ -108,12 +111,12 @@ class PassEndEvent:
 
 
 _STRATEGY_DIR = Path(__file__).resolve().parent / "passes"
-_DISCOVERED: tuple[Strategy, ...] | None = None
+_DISCOVERED: tuple[PipelineStrategy, ...] | None = None
 
 
-def discovered_strategies() -> tuple[Strategy, ...]:
+def discovered_strategies() -> tuple[PipelineStrategy, ...]:
     """Import every top-level ``passes/*.py`` strategy module and return one shared instance of
-    each :class:`Strategy` subclass they define, class-name-sorted. Cached — the same instances
+    each :class:`PipelineStrategy` subclass they define, class-name-sorted. Cached — the same instances
     serve every pipeline build (they are stateless by contract)."""
     global _DISCOVERED
     if _DISCOVERED is None:
@@ -126,13 +129,13 @@ def discovered_strategies() -> tuple[Strategy, ...]:
             name = f"emmy.compiler.pipeline.passes.{path.stem}"
             importlib.import_module(name)
             modules.add(name)
-        classes = [cls for cls in Strategy.__subclasses__() if cls.__module__ in modules]
+        classes = [cls for cls in PipelineStrategy.__subclasses__() if cls.__module__ in modules]
         _DISCOVERED = tuple(cls() for cls in sorted(classes, key=lambda c: c.__name__))
     return _DISCOVERED
 
 
 def emit(strategies, event_name: str, event) -> None:
-    """Notify every strategy in ``strategies``. Strategies derive from :class:`Strategy`, so
+    """Notify every strategy in ``strategies``. Strategies derive from :class:`PipelineStrategy`, so
     every event method exists (a no-op unless overridden) — a missing attribute is a loud
     error, not a silently ignored observer."""
     for strat in strategies:

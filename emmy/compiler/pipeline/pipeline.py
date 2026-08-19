@@ -527,7 +527,7 @@ class Pipeline:
         this method is the thin engine entry point."""
         from emmy.compiler.pipeline.search.policy.greedy import GreedyStrategy  # noqa: PLC0415
 
-        return GreedyStrategy().run(self, graph, ctx=ctx, backend=backend, db=db, dump=dump)
+        return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
     def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections, strategies=()) -> Run:
         """Build the :class:`Run` for :meth:`tune_async`: probe / align ``ctx`` — letting the
@@ -687,7 +687,7 @@ class Run:
     backend: object | None = None
     dump: CompilerDump | None = None
     rejections: list[tuple[str, str, str]] | None = None
-    # Run-scoped strategies — ``Strategy`` instances (the same protocol as the
+    # Run-scoped strategies — ``PipelineStrategy`` instances (the same protocol as the
     # pipeline's discovered set; the base class declares every event as a
     # no-op) with per-run state, e.g. the two-level tuner's ``KernelInventory``.
     # Notified by :meth:`emit` after the discovered set.

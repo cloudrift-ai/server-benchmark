@@ -12,10 +12,10 @@ seed gives every unseeded node a fresh self-origin.
 from __future__ import annotations
 
 from emmy.compiler import provenance
-from emmy.compiler.pipeline.strategy import RunStartEvent, SplicedEvent, Strategy
+from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent
 
 
-class ProvenanceStrategy(Strategy):
+class ProvenanceStrategy(PipelineStrategy):
     """Threads op provenance through every rewrite of a run. A decomposition's fragments MINT —
     each new compute node becomes a fresh piece of the consumed origins (one op expanding into
     many distinct primitives); every other splice AGGREGATES — fragment outputs union the pieces

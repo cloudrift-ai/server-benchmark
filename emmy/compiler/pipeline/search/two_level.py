@@ -39,6 +39,7 @@ from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
+from emmy.compiler.pipeline.search.strategy import SearchStrategy
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -179,7 +180,7 @@ class _Work:
     enrolled: bool
 
 
-class TwoLevelStrategy:
+class TwoLevelStrategy(SearchStrategy):
     """The two-level search as one strategy composing the engine's loop — see the module
     docstring for the design. Construct once per tune session; ``run`` drives one target."""
 
@@ -222,7 +223,7 @@ class TwoLevelStrategy:
         self.backend_slots = backend_slots
         self.close_backends = close_backends
 
-    async def run(self, graph: Graph, ctx: Context) -> TwoLevelResult:
+    async def run(self, graph: Graph, ctx: Context | None = None) -> TwoLevelResult:
         """Drive the outer structural search, scoring each terminal by the separable
         :meth:`_evaluate_terminal`, then greedy-assemble the DB-best kernels.
 
@@ -234,6 +235,10 @@ class TwoLevelStrategy:
         stay cheap."""
         from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
+        if ctx is None:
+            from emmy.compiler.context import Context as _Context  # noqa: PLC0415
+
+            ctx = _Context.probe()
         if self.prior is None and self.manage_prior:
             from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 

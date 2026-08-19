@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves
+from emmy.compiler.pipeline.search.strategy import SearchStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -889,8 +890,8 @@ def greedy_decide(
 _MAX_GREEDY_RETRIES = 8
 
 
-class GreedyStrategy:
-    """The greedy compile as search policy over the engine's one loop (``Run.resolve``):
+class GreedyStrategy(SearchStrategy):
+    """The greedy compile as a search shape over the engine's one loop (``Run.resolve``):
     deterministic resolution with :func:`greedy_decide`, plus the retry orchestration that used
     to live inside the engine —
 
@@ -909,19 +910,26 @@ class GreedyStrategy:
       ``CudaBackend`` mystery.
     """
 
-    def run(self, pipeline, graph: Graph, *, ctx=None, backend=None, db=None, dump=None) -> Graph:
+    def __init__(self, pipeline, *, backend=None, db=None, dump=None) -> None:
+        self.pipeline = pipeline
+        self.backend = backend
+        self.db = db
+        self.dump = dump
+
+    def run(self, graph: Graph, ctx=None) -> Graph:
         import time  # noqa: PLC0415
 
         from emmy.compiler.context import Context as _Context  # noqa: PLC0415
         from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
         from emmy.compiler.pipeline.search.db import SearchDB as _SearchDB  # noqa: PLC0415
 
+        pipeline, backend, dump = self.pipeline, self.backend, self.dump
         if ctx is None:
             ctx = _Context.probe()
         backend_name = getattr(backend, "name", "cuda")
         if ctx.backend_name != backend_name:
             ctx = replace(ctx, backend_name=backend_name)
-        db = db if db is not None else _SearchDB()
+        db = self.db if self.db is not None else _SearchDB()
         t_start = time.monotonic()
 
         blocked: dict[str, set[frozenset]] = {}

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.pipeline.strategy import SpliceEvent, Strategy
+from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 
 
-class KernelInventory(Strategy):
+class KernelInventory(PipelineStrategy):
     """Reports each new loop-dialect kernel — one whose structural identity has not been seen —
     to ``on_kernel(node_id, op, fragment)``. Identity is COMPUTED through the
     :class:`IdentityStrategy`'s read API, so nothing here depends on a stamp having happened or

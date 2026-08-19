@@ -25,7 +25,7 @@ from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy, structure_features
 from emmy.compiler.pipeline.passes.provenance import ProvenanceStrategy
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.strategy import Strategy, discovered_strategies
+from emmy.compiler.pipeline.strategy import PipelineStrategy, discovered_strategies
 
 _CTX = Context.from_target((12, 0))
 
@@ -59,12 +59,12 @@ def _resolve(passes, graph):
 
 
 def test_discovery_finds_the_two_strategies_once() -> None:
-    """Every ``Strategy`` subclass defined in a ``passes/`` top-level module is discovered,
+    """Every ``PipelineStrategy`` subclass defined in a ``passes/`` top-level module is discovered,
     instantiated once (shared instances), in deterministic class-name order."""
     found = discovered_strategies()
     assert [type(s).__name__ for s in found] == ["IdentityStrategy", "ProvenanceStrategy"]
     assert found is discovered_strategies(), "instances are cached and shared"
-    assert all(isinstance(s, Strategy) for s in found)
+    assert all(isinstance(s, PipelineStrategy) for s in found)
 
 
 def test_built_pipelines_carry_the_discovered_strategies() -> None:
@@ -92,7 +92,7 @@ def test_decomposition_mints_fresh_pieces_and_fusion_aggregates() -> None:
 
 
 def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
-    """Strategy-scoped concern: strip ProvenanceStrategy from the pipeline and NO node carries
+    """PipelineStrategy-scoped concern: strip ProvenanceStrategy from the pipeline and NO node carries
     provenance — the graph and engine hold none of it. (Identity is kept so kernels still stamp.)"""
     pipeline = Pipeline.build(LOOP_PASSES)
     stripped = Pipeline(
@@ -157,7 +157,7 @@ def test_events_fire_in_loop_order() -> None:
     """A run-scoped observer sees run start, then splices (with receipts), then pass ends —
     the engine's own moments, one protocol."""
 
-    class Recorder(Strategy):
+    class Recorder(PipelineStrategy):
         def __init__(self) -> None:
             self.events: list[str] = []
 

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, SpliceEvent, Strategy
+from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
 
 
-class IdentityStrategy(Strategy):
+class IdentityStrategy(PipelineStrategy):
     """Stamps every loop-dialect kernel's ``S_*`` structural identity at birth and serves the
     one spelling of identity to every reader (``signature`` / ``op_sig``)."""
 

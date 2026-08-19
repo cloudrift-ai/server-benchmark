@@ -206,9 +206,23 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
 ### Strategies — engine events for cross-cutting concerns
 
 The engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS and never branches on pass names, dialects,
-or per-concern flags. Every cross-cutting concern is a `Strategy` class (`pipeline/strategy.py`) implementing the
-event methods it cares about; extension is a new strategy over the existing events (or a new event field), never a
-new engine parameter. The events, each a payload object: `RunStartEvent` (a loop starts driving a graph),
+or per-concern flags. Three prefixed protocols share the "strategy" vocabulary, each with its own ABC, told apart
+by what the loop is doing when they act:
+
+- **`PipelineStrategy`** (`pipeline/strategy.py`) — reacts to what the loop DID (events below): the cross-cutting
+  concerns (provenance, identity, the kernel inventory). Never steers the search; the loop's trajectory is
+  identical without them.
+- **`Search`** (`search/policy/base.py`) — answers what ONE loop ASKS during exploration: frontier ranking
+  (`push`/`pop`) and terminal valuation (`evaluate`); `TuningSearch` is the realization, and `greedy_decide`'s
+  decide callback is the deterministic sibling for `Run.resolve`.
+- **`SearchStrategy`** (`search/strategy.py`) — the search SHAPES above the loop: how many loops, over which pass
+  lists, with which policy inside, and what the results mean together (`GreedyStrategy`, `TwoLevelStrategy`; each
+  implements `run(graph, ctx)`).
+
+The composition chain for a tune: a `SearchStrategy` constructs runs with a `Search` policy inside; the loop emits
+events that `PipelineStrategy` instances act on. Each layer only knows the one below it. Every cross-cutting
+concern is a `PipelineStrategy` implementing the event methods it cares about; extension is a new strategy over
+the existing events (or a new event field), never a new engine parameter. The events, each a payload object: `RunStartEvent` (a loop starts driving a graph),
 `SpliceEvent` (before a `Graph` fragment splices in — op identities stable; strategies may mutate fragment OPS,
 never the graph or cursor), `SplicedEvent` (after the splice, carrying its `SpliceReceipt` — `Graph.splice` is pure
 surgery and hands back what it did), and `PassEndEvent` (a named pass completed a quiescent scan).
@@ -216,8 +230,8 @@ surgery and hands back what it did), and `PassEndEvent` (a named pass completed 
 Two binding scopes share the protocol:
 
 - **Discovered** (build-scoped): strategy modules are plain `.py` files at the top level of `passes/`
-  (`passes/provenance.py`, `passes/identity.py`); `Pipeline.build` collects every `Strategy` subclass they define
-  into shared instances (`strategy.discovered_strategies`), class-name-sorted. Dispatch order MUST NOT be
+  (`passes/provenance.py`, `passes/identity.py`); `Pipeline.build` collects every `PipelineStrategy` subclass they
+  define into shared instances (`strategy.discovered_strategies`), class-name-sorted. Dispatch order MUST NOT be
   load-bearing — no strategy may depend on another having handled an event first — which is why identity is a
   computed function, not a stamp others wait on. Build-scoped instances are shared across runs and candidates:
   immutable config plus content-keyed caches only, never trajectory state.
@@ -235,9 +249,8 @@ enters the graph, so no rule at any cursor position can observe an unstamped ker
 engine's rebind knob-merge into every later dialect (which is what keeps a terminal `CudaOp`'s cache key, DB rows,
 and prior feature columns carrying the loop-birth identity). It also threads decomposition attribution
 (`Op.source`) and serves the read API (`signature` / `op_sig` — knobs-first, compute-fallback) every identity
-consumer goes through. Search-SHAPE strategies (`GreedyStrategy`, `TuningSearch`, `TwoLevelStrategy`) are the same
-idea one level up — they own fork policy, exploration, and terminal valuation over the engine's one loop — but are
-constructed by their entry points, not discovered.
+consumer goes through. The search shapes (`SearchStrategy` subclasses) are the same idea one level up — they own
+loop composition and terminal aggregation — but are constructed by their entry points, not discovered.
 
 A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
 AND again at apply time (`Candidate.try_rewrite`). This matters because an earlier apply in the same batch may have

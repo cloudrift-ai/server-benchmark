@@ -7,18 +7,26 @@ SITE of a term, and the tree that generates it is the term's own:
 .. code-block:: text
 
     for work in _inventories(views)           # the kernel's ONE inventory, CHOSEN at the root
-      for term in _views(tile)                # the derived views — the one union above the product
-        for raster in _raster_values(term)    # kernel-global, like work
-          for row in _rows_at(root, work)     # the product over the site tree
+      for term in _views(tile)                # the derived views - the one union above the product
+        Segment(rows=_term_rows(term, work),  # ONE (WORK, view) rectangle of the space
+                rasters=_raster_values(term)) # kernel-global, like work - a free axis of the segment
 
-    _rows_at(site, work) = for value in _site_values(site, work)      # RESOLVED against work
-                             for combo in product(_rows_at(child, work) for child in children)
-                               _merge(site, value, combo)             # spells each slice ONCE
+    _rows_at(site, work) = for combo in product(_rows_at(child, work) for child in children)
+                             for block in _site_blocks(site, work)      # RESOLVED against work
+                               _merge(site, block, combo)               # spells each slice ONCE
+
+The walk emits :class:`._pool.Block` rectangles, not values: a block fixes everything a site decides
+except ``STAGE`` and carries the stages legal for it. That factoring is a fact about the FILTER -
+:func:`_work_holds` and :meth:`_Row.union` read the resolved tiles and the cooperative width alone,
+so the transport and the launch order multiply through them unconditionally. A ``_Row`` therefore
+stands for ``width x len(rasters)`` candidates, the validation runs once per legal
+``(TILE, REDUCE)`` assignment, and :mod:`._pool` turns the whole thing into an addressable space
+whose size is known before any candidate dict exists.
 
 ``WORK`` leads because the codec says so: :meth:`TilePlan.parse` and :meth:`ReducePlan.parse` both
 take the inventory as an INPUT — a ``TILE`` value's unit widths and a ``REDUCE`` value's coop width
 are READ OFF it — so the dependency runs work → slice, and a candidate that cannot spell against the
-chosen inventory is simply not in ``_site_values(site, work)``. :func:`derive_inventory` stays, as
+chosen inventory is simply not in ``_site_blocks(site, work)``. :func:`derive_inventory` stays, as
 the VALIDATION that a row's own slices imply the inventory it claims.
 
 Three layers, each with one job:
@@ -101,6 +109,7 @@ from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
     REDUCE,
@@ -131,12 +140,16 @@ FAMILIES = ("TILE", "STAGE", "REDUCE")
 #: The ``Knob`` each family pins through.
 _KNOBS = {"TILE": TILE, "STAGE": STAGE, "REDUCE": REDUCE}
 
-#: The most rows one kernel's enumeration may produce. The product across sites is GENERATED, so a
-#: term that widens it silently would hand the search a space it cannot walk and the prior a
+#: The most rows one kernel's enumeration may MATERIALIZE. The product across sites is GENERATED,
+#: so a term that widens it silently would hand the search a space it cannot walk and the prior a
 #: feature space it cannot cover. Exceeding it is a LOUD failure, never a truncation — a truncated
 #: enumeration reads as "covered everything" while dropping whichever rows the walk reached last.
 #: Measured headroom: the widest live term (a static f16 square matmul, both tiers, every stage /
 #: split / raster) enumerates ~133k rows.
+#:
+#: The budget is checked against :meth:`PoolSpace.__len__`, which is a prefix-sum lookup — so an
+#: over-budget term now fails BEFORE its first candidate dict exists rather than after 400k of
+#: them. The space itself is unbounded: it is the MATERIALIZATION this bounds.
 MAX_ROWS = 400_000
 
 
@@ -652,7 +665,7 @@ def _strip_width(plan: TilePlan) -> int:
     return 0 if plan.is_warp else plan.reg_n
 
 
-def _strip_values(term: _Term, node) -> list[dict]:
+def _strip_blocks(term: _Term, node) -> list[Block]:
     """The register-strip values: the flat per-cell tile and every ladder width the cell can carry.
     ``r`` IS the spelled ``TILE=f<r>`` — the strip is a TERM VARIANT applied at materialization, a
     function of the ROW, not a member of a pre-enumerated variant set."""
@@ -675,8 +688,8 @@ def _strip_values(term: _Term, node) -> list[dict]:
         # inner extent, a warp codec on a pointwise cell) drops the row; the flat per-cell base
         # below is always offered, so a narrowing pin degrades to it.
         if legal.enforce(legal.strip_width(ext, _strip_width(plan)), pinned=False):
-            out.append({"TILE": plan})
-    return out or [{"TILE": TilePlan()}]
+            out.append(Block({"TILE": plan}, (None,)))
+    return out or [Block({"TILE": TilePlan()}, (None,))]
 
 
 # --- the reduce partition ---
@@ -781,13 +794,14 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     return cands
 
 
-def _reduce_values(term: _Term, node) -> list[dict]:
+def _reduce_blocks(term: _Term, node) -> list[Block]:
     """The reduce-partition values a non-contraction fold offers: the partition itself plus the
     shared-row ``STAGE`` a cooperative band can drive (a resolver, not a choice — see
-    :func:`_row_stage`). Which of them SPELL against the kernel's chosen inventory is the row's
-    question, not this site's (:func:`_work_holds`) — a serial fold claims no workers at all, so at
-    a NESTED site it composes with any parent inventory."""
-    return [{"REDUCE": plan, "STAGE": _row_stage(term, node) if plan.coop > 1 else None} for plan in _reduce_specs(term, node)]
+    :func:`_row_stage`). Each block is a rectangle ONE stage deep: the transport here is a function
+    of the partition, never a free axis beside it. Which of them SPELL against the kernel's chosen
+    inventory is the row's question, not this site's (:func:`_work_holds`) — a serial fold claims
+    no workers at all, so at a NESTED site it composes with any parent inventory."""
+    return [Block({"REDUCE": plan}, (_row_stage(term, node) if plan.coop > 1 else None,)) for plan in _reduce_specs(term, node)]
 
 
 def _fill_realized(parent: _Node | None, site: Site) -> bool:
@@ -977,10 +991,16 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     return out
 
 
-def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
+def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     """The contraction's values at ``work``: the tile × stage × reduce legal product, over EITHER
     inhabitant of the ``a`` edge — a materialized ``Load`` (both tiers, every transport) or a
-    COMPUTED cone (the warp tier alone, over the mandatory compute fill)."""
+    COMPUTED cone (the warp tier alone, over the mandatory compute fill).
+
+    The product is emitted as one BLOCK per ``(TILE, REDUCE)`` pair rather than one value per
+    ``(TILE, REDUCE, STAGE)`` triple. Same catalog calls, same legality calls, same order — only
+    the return SHAPE differs, and it is the shape that says what the walk already knew: the
+    transport is a free axis over the pair, not a third coupled dimension. A pair whose every stage
+    was refused is no block at all, exactly as it used to be no rows at all."""
     pin = term.pin("TILE", node)
     if pin is not None:
         try:
@@ -1029,10 +1049,13 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
     out = []
     for plan in plans:
         for red in _contraction_reduces(term, node, plan):
-            for stage in _stage_values(term, node, plan):
-                if work is not None and work.producer and not legal.enforce(legal.producer_transport(stage), pinned=False):
-                    continue
-                out.append({"TILE": plan, "STAGE": stage, "REDUCE": red})
+            stages = tuple(
+                stage
+                for stage in _stage_values(term, node, plan)
+                if not (work is not None and work.producer) or legal.enforce(legal.producer_transport(stage), pinned=False)
+            )
+            if stages:
+                out.append(Block({"TILE": plan, "REDUCE": red}, stages))
     return out
 
 
@@ -1051,9 +1074,10 @@ def _raster_values(term: _Term) -> list[str]:
     return list(RASTER.narrow(raster_moves()))
 
 
-def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | None = None) -> list[dict]:
-    """The values ``site`` offers under the chosen inventory — TYPED schedule slices, keyed by
-    family. Dispatch is the two stored-param predicates on the node, never the ``AxisRole``.
+def _site_blocks(term: _Term, site: Site, work: Workers | None, parent: _Node | None = None) -> list[Block]:
+    """The values ``site`` offers under the chosen inventory, as :class:`Block` rectangles — TYPED
+    schedule slices, keyed by family. Dispatch is the two stored-param predicates on the node,
+    never the ``AxisRole``.
 
     The one question a site cannot answer alone travels with it, and it is about the SITE TREE
     rather than the node: ``parent``, because a parent FORM can realize a nested decision itself
@@ -1062,14 +1086,14 @@ def _site_values(term: _Term, site: Site, work: Workers | None, parent: _Node | 
     product, so a site's values depend on ``work`` and its parent alone."""
     node = site.node
     if node.axis is None:
-        return _strip_values(term, node)
+        return _strip_blocks(term, node)
     if is_contraction(node):
-        return _contraction_values(term, node, work)
+        return _contraction_blocks(term, node, work)
     if _fill_realized(parent, site):
         # The one site that offers nothing but the decided empty: its PARENT form realizes the
         # partition itself, so there is no choice left here to spell.
-        return [{"REDUCE": ReducePlan(), "STAGE": None}]
-    return _reduce_values(term, node)
+        return [Block({"REDUCE": ReducePlan()}, (None,))]
+    return _reduce_blocks(term, node)
 
 
 # ---- the recursion: one row is a joint assignment across the site tree --------------------------- #
@@ -1091,21 +1115,37 @@ class _Row:
     The ``TILE`` slices are kept BY KEY, not as a flat tuple: reading a site's slice back out of a
     flattened list by position is how a two-site term silently swaps its sites. No OTHER family's
     resolved slice is carried — the row is the kernel's complete identity and :func:`_materialize`
-    re-resolves every slice from its spelling, so a second copy could only ever disagree."""
+    re-resolves every slice from its spelling, so a second copy could only ever disagree.
+
+    A row is PARTLY decided: it stands for :attr:`width` candidates, not one. The transport axis of
+    the site whose values vary FASTEST stays open in :attr:`stages`, because legality never reads
+    it — :func:`_work_holds` and :meth:`union` see ``plans`` and ``coop`` alone — so the filter runs
+    once per row instead of once per stage. Leaving the FASTEST site's axis open is what keeps
+    emission order untouched: its stage already varied immediately above ``RASTER``, which is where
+    the space multiplies it back in."""
 
     knobs: dict
     plans: dict = field(default_factory=dict)
     coop: int = 1
+    #: One ``{key: spelling}`` stamp per still-open ``STAGE`` value, or ``()`` when the row decided
+    #: its transport already (every site but the fastest one, which spells it into ``knobs``).
+    stages: tuple[dict, ...] = ()
 
     @property
     def tiles(self) -> tuple:
         """The row's resolved ``TILE`` slices — what the inventory folds out of."""
         return tuple(self.plans.values())
 
+    @property
+    def width(self) -> int:
+        """How many candidates this row stands for, before ``RASTER`` multiplies through."""
+        return len(self.stages) or 1
+
     @classmethod
     def union(cls, parts: Iterable[_Row]) -> _Row | None:
-        """Several rows as ONE — knobs and tile slices unioned, the cooperative claim RECONCILED.
-        ``None`` when the parts cannot share one inventory.
+        """Several rows as ONE — knobs and tile slices unioned, the still-open transport axis
+        carried through, the cooperative claim RECONCILED. ``None`` when the parts cannot share one
+        inventory.
 
         The claim is a CONSISTENCY, not a maximum. Since step 7 a ``REDUCE`` value spells no coop
         width — the width lives once in ``WORK`` — so two sites claiming DIFFERENT cooperative
@@ -1120,33 +1160,46 @@ class _Row:
         this existed, and the looser of the two was the one that ran on multi-root terms."""
         knobs: dict = {}
         plans: dict = {}
+        stages: tuple[dict, ...] = ()
         coop = 1
         for part in parts:
             knobs.update(part.knobs)
             plans.update(part.plans)
+            if part.stages:
+                stages = part.stages  # at most one part is open — the fastest site's
             if part.coop > 1:
                 if coop > 1 and part.coop != coop:
                     return None  # two sites, two widths, one WORK entry to spell them in
                 coop = part.coop
-        return cls(knobs=knobs, plans=plans, coop=coop)
+        return cls(knobs=knobs, plans=plans, coop=coop, stages=stages)
 
 
-def _merge(node: _Node, value: dict, combo: tuple[_Row, ...]) -> _Row | None:
-    """One site's row: each family's slice spelled at ITS canonical path key (``Sched.key`` spells
+def _merge(node: _Node, block: Block, combo: tuple[_Row, ...], *, open_stage: bool) -> list[_Row]:
+    """One site's rows: each family's slice spelled at ITS canonical path key (``Sched.key`` spells
     ANY site, so there are no new keys and no new codec), unioned with the child rows — and with
-    them the inventory claim, which is a fact about the whole row, never one site's. ``None`` when
-    the sites cannot share ONE inventory (:meth:`_Row.union` owns that rule)."""
-    red = value.get("REDUCE")
-    tile = value.get("TILE")
+    them the inventory claim, which is a fact about the whole row, never one site's. Empty when the
+    sites cannot share ONE inventory (:meth:`_Row.union` owns that rule).
+
+    ``open_stage`` decides whether the block's transport axis stays open on the row (ONE row, of
+    :attr:`_Row.width` candidates) or is spelled out into one row per stage. Only the site whose
+    values vary fastest may leave it open — see :class:`_Row`."""
+    red = block.values.get("REDUCE")
+    tile = block.values.get("TILE")
+    key = node.keys.get("STAGE")
+    stamps = tuple({key: _spell(stage)} if key is not None else {} for stage in block.stages)
     own = _Row(
-        knobs={key: _spell(value.get(family)) for family, key in node.keys.items()},
+        knobs={k: _spell(block.values.get(family)) for family, k in node.keys.items() if family != "STAGE"},
         plans={node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {},
         coop=red.coop if red is not None else 1,
+        stages=stamps if open_stage else (),
     )
-    return _Row.union((own, *combo))
+    row = _Row.union((own, *combo))
+    if row is None:
+        return []
+    return [row] if open_stage else [replace(row, knobs={**row.knobs, **stamp}) for stamp in stamps]
 
 
-def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | None = None) -> list[_Row]:
+def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | None = None, *, open_stage: bool = False) -> list[_Row]:
     """Every row the subtree rooted at ``node`` offers under ``work`` — this site's values crossed
     with each child's own rows. The children are enumerated ONCE per inventory, not once per parent
     value: under a fixed ``work`` a child's candidates do not depend on what the parent chose (that
@@ -1157,10 +1210,8 @@ def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | Non
     child_rows = [_rows_at(term, c, work, node) for c in children]
     out: list[_Row] = []
     for combo in product(*child_rows):
-        for value in _site_values(term, node.site, work, parent):
-            row = _merge(node, value, combo)
-            if row is not None:
-                out.append(row)
+        for block in _site_blocks(term, node.site, work, parent):
+            out.extend(_merge(node, block, combo, open_stage=open_stage))
     return out
 
 
@@ -1276,63 +1327,86 @@ def _union_keys(terms: list[_Term]) -> list[str]:
     return [k for family in FAMILIES for k in (seen[family] or [family])]
 
 
-def _term_rows(term: _Term, work: Workers | None, rasters: list[str], spelled: str) -> list[dict]:
-    """One view's rows at one inventory — the site product over the term's ROOT sites, filtered
-    by the row-level inventory validation, closed by the kernel-global ``RASTER``. The roots
-    reconcile through the same :meth:`_Row.union` a site uses for its children: one rule, whichever
-    level of the tree assembles the row. Only the SPELLED dict leaves this function: the row is the
-    kernel's complete identity, and materialization re-resolves every slice from it (replay by the
-    codec, never by a carried object)."""
-    out: list[dict] = []
-    for combo in product(*(_rows_at(term, node, work) for node in term.tree)):
+def _term_rows(term: _Term, work: Workers | None) -> list[_Row]:
+    """One view's PARTLY-DECIDED rows at one inventory - the site product over the term's ROOT
+    sites, filtered by the row-level inventory validation. The roots reconcile through the same
+    :meth:`_Row.union` a site uses for its children: one rule, whichever level of the tree
+    assembles the row.
+
+    The kernel-global ``RASTER`` and the fastest site's ``STAGE`` are NOT closed here: they
+    multiply through that filter unconditionally (it reads ``plans`` and ``coop`` alone), so the
+    segment carries them as EXTENTS and the space spells them per candidate. That is the whole
+    saving - the validation runs once per legal ``(TILE, REDUCE)`` assignment instead of once per
+    stage per launch order."""
+    roots = term.tree
+    out: list[_Row] = []
+    for combo in product(*(_rows_at(term, node, work, open_stage=node is roots[-1]) for node in roots)):
         row = _Row.union(combo)
         if row is None or not _work_holds(row, work):
             continue
-        out.extend({**row.knobs, WORK.name: spelled, RASTER.name: raster} for raster in rasters)
+        out.append(row)
     return out
 
 
-def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str]]:
-    """Every legal schedule row across the term VIEWS, in the site value grammar, plus the fork's
-    site keys. An empty result is the guardrail contract, never a raise: the caller leaves the
-    term unmapped.
+def _space(terms: list[_Term]) -> PoolSpace:
+    """Every legal schedule candidate across the term VIEWS, as the addressable
+    :class:`~._pool.PoolSpace` - one ``(WORK, view)`` segment per inventory per view, in the order
+    the walk visits them.
 
-    A row carries NO ownership: which view it decodes through is a function of the row itself —
-    the derived contraction view offers only warp tiles (a computed operand's scalar list is
+    A candidate carries NO ownership: which view it decodes through is a function of the row itself
+    - the derived contraction view offers only warp tiles (a computed operand's scalar list is
     empty, :func:`_Term._build_tiles`), and the per-cell view only scalar / per-cell ones, so the
     ``WORK`` tier is the discriminator by construction and two views can never spell one row."""
     keys = _union_keys(terms)
     works = _inventories(terms)
-    #: Every key the union spells, decided-empty — a view lacking a site stamps the empty there.
-    empty = {k: "" for k in keys}
+    #: Every key the union spells, decided-empty - a view lacking a site stamps the empty there.
+    base = {k: "" for k in keys}
     if any(term.warp_eligible for term in terms):
-        # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
+        # ``S_``-prefixed - not a schedule family, so tile identity and prefix-consistency are
         # untouched (``canonical_row_key`` reads the tuning-knob view); it prices "a scalar tile
         # where tensor cores were on offer". It rides the BASE dict rather than a closing pass over
         # the rows: :func:`_inventories` above already asked every site for its tile catalog, which
         # is the one thing that sets the flag, so the answer is known before the first row exists.
-        empty["S_warp_eligible"] = 1.0
-    rows: list[dict] = []
+        base["S_warp_eligible"] = 1.0
+    segments: list[Segment] = []
     for work in works:
-        spelled = work.spell() if work is not None else ""
+        spelled = {WORK.name: work.spell() if work is not None else ""}
         for term in terms:
-            rows.extend({**empty, **row} for row in _term_rows(term, work, _raster_values(term), spelled))
-        if len(rows) > MAX_ROWS:
-            raise ValueError(
-                f"schedule enumeration for {terms[0].tile.name!r} exceeds the {MAX_ROWS}-row budget "
-                f"({len(terms)} views, {len(keys)} site keys) — the product across sites widened; "
-                f"narrow a catalog or add the legality predicate that bounds it, never truncate."
-            )
-    keys, rows = _decided(keys, rows)
+            rows = _term_rows(term, work)
+            if rows:
+                segments.append(Segment.build(rows, spelled, [{RASTER.name: r} for r in _raster_values(term)]))
+    return PoolSpace.build(*_decided(keys, base, segments))
+
+
+def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str]]:
+    """The space MATERIALIZED - every legal schedule row in the site value grammar, plus the fork's
+    site keys. An empty result is the guardrail contract, never a raise: the caller leaves the term
+    unmapped.
+
+    This is where :data:`MAX_ROWS` belongs, and the space is what lets it be asked before the answer
+    is built: an over-budget term now fails on a prefix-sum lookup instead of after 400k dicts."""
+    space = _space(terms)
+    if len(space) > MAX_ROWS:
+        raise ValueError(
+            f"schedule enumeration for {terms[0].tile.name!r} exceeds the {MAX_ROWS}-row budget "
+            f"({len(space)} rows over {len(terms)} views and {len(space.keys)} site keys) - the product "
+            f"across sites widened; narrow a catalog or add the legality predicate that bounds it, never truncate."
+        )
+    rows = list(space)
     for term in terms:
         if not rows and term.pin_error is not None and not term.pin_spelled:
-            raise term.pin_error  # NO inventory could spell the pin — a pin names a specific kernel
-    return rows, keys
+            raise term.pin_error  # NO inventory could spell the pin - a pin names a specific kernel
+    return rows, list(space.keys)
 
 
-def _decided(keys: list[str], rows: list[dict]) -> tuple[list[str], list[dict]]:
-    """The fork's keys and rows with the addressed ``REDUCE`` / ``STAGE`` keys NO row decides
-    removed.
+def _decided(keys: list[str], base: dict, segments: list[Segment]) -> tuple[list[str], dict, list[Segment]]:
+    """The fork's keys, base and segments with the addressed ``REDUCE`` / ``STAGE`` keys NO row
+    decides removed.
+
+    A FOLD over the rows, not a scan over the candidates: every row stands for at least one
+    candidate and every still-open stage appears in at least one of them, so "does any candidate
+    decide this key" is exactly "does any row or any of its open stamps spell it". The trim is
+    applied to the base and the rows ONCE, so no candidate is ever built and rebuilt.
 
     The uniform-key obligation is that every leaf of one fork spells the SAME family keys — not that
     every SITE gets one per family. A site whose partition and transport are not its own to decide
@@ -1348,10 +1422,27 @@ def _decided(keys: list[str], rows: list[dict]) -> tuple[list[str], list[dict]]:
     site offering no tile on this shape is still the site a golden joins against. Bare family keys
     stay too — a bare key is the row's "this family declined" stamp, which the featurizer,
     ``stamp_schedule_families`` and the golden matcher all expect on every row."""
-    dead = {k for k in keys if "@" in k and family_of(k) != "TILE" and not any(row.get(k) for row in rows)}
+    live: set[str] = set()
+    for seg in segments:
+        for row in seg.rows:
+            live.update(k for k, v in row.knobs.items() if v)
+            live.update(k for stamp in row.stages for k, v in stamp.items() if v)
+    dead = {k for k in keys if "@" in k and family_of(k) != "TILE" and k not in live}
     if not dead:
-        return keys, rows
-    return [k for k in keys if k not in dead], [{k: v for k, v in row.items() if k not in dead} for row in rows]
+        return keys, base, segments
+
+    def trim(d: dict) -> dict:
+        return {k: v for k, v in d.items() if k not in dead}
+
+    trimmed = [
+        Segment.build(
+            [replace(row, knobs=trim(row.knobs), stages=tuple(trim(stamp) for stamp in row.stages)) for row in seg.rows],
+            seg.knobs,
+            seg.rasters,
+        )
+        for seg in segments
+    ]
+    return [k for k in keys if k not in dead], trim(base), trimmed
 
 
 # ---- materialization: one builder per form, all fed by the same row ------------------------------ #

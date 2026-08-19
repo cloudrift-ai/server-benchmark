@@ -27,7 +27,7 @@
 **The schedule step is INCOMPLETE.** It covers every term whose operand edges are all MATERIALIZED —
 the pointwise cell + the register-strip term reading, the reduce partition, and the contraction
 (scalar + warp tiers, staging, split-K, raster) — plus the COMPUTED operand edge (the fused
-norm→linear / gate⊗up cone), which arrives as a ``_site_values`` entry under the term-reading union
+norm→linear / gate⊗up cone), which arrives as a ``_site_blocks`` entry under the term-reading union
 rather than as an emitter of its own — the flash streaming pair included, whose two sites
 (the hoisted score edge and the derived P@V) enumerate their own halves of the twisted geometry and
 reconcile at the stream. A term the enumeration cannot schedule yields NO rows and ``020`` leaves it

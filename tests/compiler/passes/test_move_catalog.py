@@ -356,7 +356,7 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
     # node's families cannot state — pruned by the ONE inventory validation, which is a JOINT fact
     # over the pair (a coop edge and a tiled parent claim the same threads) and so cannot factor per
     # site.
-    def claim(*values):
+    def claim(*blocks):
         """The pair's joint inventory claim, or ``None`` when the two sites want different
         cooperative widths — since a ``REDUCE`` value spells no width and the kernel has exactly
         one ``WORK`` entry to carry it.
@@ -367,10 +367,10 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
         parts = [
             sch._Row(
                 knobs={},
-                plans={i: v["TILE"]} if v.get("TILE") is not None else {},
-                coop=v["REDUCE"].coop if v.get("REDUCE") is not None else 1,
+                plans={i: b.values["TILE"]} if b.values.get("TILE") is not None else {},
+                coop=b.values["REDUCE"].coop if b.values.get("REDUCE") is not None else 1,
             )
-            for i, v in enumerate(values)
+            for i, b in enumerate(blocks)
         ]
         return sch._Row.union(parts)
 
@@ -379,14 +379,17 @@ def test_two_site_term_merges_both_sites_under_one_inventory():
         by_work[r["WORK"]] = by_work.get(r["WORK"], 0) + 1
     for work_spell, n in by_work.items():
         work = Workers.parse(work_spell or None)
-        parent = sch._contraction_values(term, term.tree[0].site.node, work)
-        edge = sch._site_values(term, term.tree[0].children[0].site, work, term.tree[0])
+        parent = sch._contraction_blocks(term, term.tree[0].site.node, work)
+        edge = sch._site_blocks(term, term.tree[0].children[0].site, work, term.tree[0])
         pairs = [(p, e) for p in parent for e in edge if (c := claim(p, e)) is not None and sch._work_holds(c, work)]
         # NOT `len(pairs) <= len(parent) * len(edge)` — `pairs` is a filtered comprehension over
         # exactly that product, so the bound cannot fail. What the equation below tests is the
-        # RECURSION: that the enumerator's row count for this inventory is the site product.
+        # RECURSION: that the enumerator's row count for this inventory is the site product. A pair
+        # is a rectangle, not a row: the parent site's transport axis is still open on it, so the
+        # pair contributes `len(p.stages)` rows and each of those `len(rasters)` candidates.
         assert pairs, f"{work_spell!r}: no legal pair"
-        assert n == len(pairs) * len(sch._raster_values(term)), f"{work_spell!r}: {n} != {len(pairs)} pairs x rasters"
+        want = sum(len(p.stages) for p, _ in pairs) * len(sch._raster_values(term))
+        assert n == want, f"{work_spell!r}: {n} != {want} (pairs x stages x rasters)"
 
 
 def test_two_site_rows_are_distinct_and_materialize_both_sites():

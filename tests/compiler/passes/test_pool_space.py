@@ -26,6 +26,7 @@ to catch.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
 import pytest
 
@@ -35,7 +36,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.pipeline.knob import canonical_row_key
-from emmy.compiler.pipeline.passes.lowering.tile import _schedule
+from emmy.compiler.pipeline.passes.lowering.tile import _pool, _schedule
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 
 _CC = (12, 0)
@@ -124,6 +125,20 @@ def _enumerated(graph, monkeypatch) -> tuple[list[tuple[tuple[str, ...], list[di
     return pools, deploy
 
 
+def _spaces(graph, monkeypatch) -> list:
+    """Every :class:`~._pool.PoolSpace` the graph builds, in enumeration order."""
+    seen: list = []
+    original = _schedule._space
+
+    def spy(terms):
+        seen.append(space := original(terms))
+        return space
+
+    monkeypatch.setattr(_schedule, "_space", spy)
+    enumerate_graph(graph, Context.from_target(_CC))
+    return seen
+
+
 @pytest.fixture
 def unpinned(monkeypatch):
     for var in _PIN_VARS:
@@ -147,3 +162,78 @@ def test_the_space_agrees_with_the_deploy_surface(case, unpinned, monkeypatch) -
     assert sorted(map(canonical_row_key, space)) == sorted(map(canonical_row_key, deploy)), (
         "the enumerated space and the fork's leaves are the same set of candidates or the space is a fiction"
     )
+
+
+# --- the space itself: two traversals of one structure -------------------------------------------
+
+
+@dataclass(frozen=True)
+class _FakeRow:
+    """The whole contract :mod:`_pool` has with a row — spelled knobs, the stamps its one open axis
+    offers, and the derived width. Nothing else, which is why the space needs no ``_schedule``
+    import and cannot acquire one by accident."""
+
+    knobs: dict
+    stages: tuple = ()
+
+    @property
+    def width(self) -> int:
+        return len(self.stages) or 1
+
+
+def _fake_space() -> _pool.PoolSpace:
+    """A deliberately RAGGED space: segments of different sizes, rows of different widths, one row
+    with no open axis at all, and two launch orders — so every radix in the arithmetic is exercised
+    and none of them can be a coincidence of being 1."""
+    rows_a = [
+        _FakeRow({"TILE": "t0"}, ({"STAGE": ""}, {"STAGE": "d1/smem"}, {"STAGE": "d2/smem"})),
+        _FakeRow({"TILE": "t1"}, ({"STAGE": ""},)),
+        _FakeRow({"TILE": "t2"}),
+    ]
+    rows_b = [_FakeRow({"TILE": "t3"}, ({"STAGE": ""}, {"STAGE": "d1/smem"}))]
+    return _pool.PoolSpace.build(
+        ("TILE", "STAGE"),
+        {"TILE": "", "STAGE": ""},
+        [
+            _pool.Segment.build(rows_a, {"WORK": ""}, [{"RASTER": ""}, {"RASTER": "gm8"}]),
+            _pool.Segment.build(rows_b, {"WORK": "w2x2"}, [{"RASTER": ""}]),
+            _pool.Segment.build([], {"WORK": "t128"}, [{"RASTER": ""}]),
+        ],
+    )
+
+
+def test_the_two_traversals_are_one_traversal() -> None:
+    """``list(space)`` and ``space[i]`` decode the same radices, so they must agree element for
+    element — the no-drift guarantee, which is structural rather than a discipline."""
+    space = _fake_space()
+    assert len(space) == (3 + 1 + 1) * 2 + 2 * 1
+    assert len(space) == len(list(space))
+    assert list(space) == [space[i] for i in range(len(space))]
+    assert space[-1] == space[len(space) - 1]
+    with pytest.raises(IndexError):
+        space[len(space)]
+
+
+def test_the_size_is_known_before_any_candidate_exists(monkeypatch) -> None:
+    """``len`` is a prefix-sum lookup: it must not build a candidate. That is what lets the row
+    budget be checked before 400k dicts exist, and what makes an indexed sample exact."""
+    space = _fake_space()
+
+    def explode(*_args):
+        raise AssertionError("len() must not spell a candidate")
+
+    monkeypatch.setattr(_pool, "spell", explode)
+    assert len(space) == 12
+    assert all(len(seg) for seg in space.segments), "an empty segment must never enter the space"
+    with pytest.raises(AssertionError):
+        space[0]
+
+
+@pytest.mark.parametrize("case", sorted(FIXTURES))
+def test_a_real_space_addresses_what_it_iterates(case, unpinned, monkeypatch) -> None:
+    """The same equality over the LIVE spaces, whose radices are whatever the catalogs offer."""
+    spaces = _spaces(FIXTURES[case](), monkeypatch)
+    assert spaces
+    for space in spaces:
+        assert len(space) == len(list(space))
+        assert list(space) == [space[i] for i in range(len(space))]

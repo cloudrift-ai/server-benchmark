@@ -109,3 +109,22 @@ def test_back_compat_maps_match_registry():
     assert gpu.pci_device_id_to_name()["2684"] == "NVIDIA GeForce RTX 4090"
     assert gpu.pci_device_id_to_name()["1db1"] == "NVIDIA Tesla V100 SXM2 16GB"
     assert gpu.short_names()["NVIDIA GeForce RTX 5090"] == "rtx5090"
+
+
+def test_from_target_raises_on_a_card_the_registry_does_not_know():
+    """A named card that does not resolve is a hard error, never a silent fall back to the live
+    device. The fallback is undetectable by construction: ``DEFAULT_SM_COUNT`` is the most common
+    card in the corpus, so on a GPU-less host a misresolved name produced H_* features IDENTICAL to
+    a correct one — a golden recorded before its card was registered would have trained as a 5090
+    with nothing reporting it. ``gpu_name=None`` stays the live-compile path and is unaffected."""
+    import pytest
+
+    from emmy.compiler.context import Context
+
+    with pytest.raises(ValueError, match="no entry in the emmy.gpu registry"):
+        Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 9090")
+
+    # The live path is the one case where no name is named, so it must still work.
+    assert Context.from_target((12, 0)).sm_count > 0
+    # A registered card still reconstructs its own memorized specs.
+    assert Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090").sm_count == 170

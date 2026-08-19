@@ -281,7 +281,11 @@ def _context_for_device(device_id: int | None, *, target: str | None = None):
     raw_name = str(raw_name) if raw_name is not None else None
     spec = gpu.by_name(raw_name) if raw_name else None
     gpu_name = spec.name if spec else raw_name
-    ctx = Context.from_target(cap, gpu_name=gpu_name)
+    # Only a REGISTERED name goes to ``from_target`` — it raises on one it cannot resolve, and here
+    # that is the wrong answer: the card is physically present, so the live probe below supplies its
+    # real properties and the registry is only a fallback base. An unregistered card keeps its raw
+    # name on the returned context; it just does not pretend to have memorized specs.
+    ctx = Context.from_target(cap, gpu_name=spec.name if spec else None)
     fallback = ctx.device_props
     feature_keys = {
         "sm_count": "multiProcessorCount",

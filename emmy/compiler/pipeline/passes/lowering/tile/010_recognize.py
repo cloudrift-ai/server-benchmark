@@ -2,7 +2,7 @@
 STRUCTURAL half of the Loop-IR → Tile-IR boundary.
 
 After this rule nothing downstream traffics in ``LoopOp``. Recognition reads the algebra off the
-body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.tile.ir.Fold` whose body is the
+body and lifts the per-cell compute into a :class:`~emmy.compiler.ir.pure.fold.Fold` whose body is the
 **annotated loop nest** (the reduce ``Loop`` stamped with its
 :class:`~emmy.compiler.ir.axis.AxisRole` — the only loop annotation; the algebra is the body),
 wrapped in a :class:`~emmy.compiler.ir.tile.ir.TileOp` whose ``place`` carries just the free axes.
@@ -13,7 +13,9 @@ axes onto the grid and offers the scheduling forks; materialization back to loop
 Nothing here reads a knob or a pin — recognition is structure, and every choice it makes is
 unconditional. (The one exception is PLACEMENT, step 3.5: a ``PLACE`` pin
 cuts the recognized tree into a fragment of un-mapped ``LoopOp``\\ s, and it must resolve BEFORE any
-schedule fork exists, so it cannot wait for ``020``.)
+schedule fork exists, so it cannot wait for ``020``.) An unstamped ``LoopOp`` is DEFERRED rather
+than recognized — that is the ``005_stamp_structural_features`` ordering, read off the stamp itself
+rather than assumed from the scan; see the guard below.
 
 All recognition lives in THIS one rule (no separate softmax pass), in order (each
 step unconditional — no knobs):
@@ -67,6 +69,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize_cut, route_cut
 from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
@@ -77,6 +80,15 @@ PATTERN = [Pattern("root", LoopOp)]
 
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     loop: LoopOp = root.op
+    # A kernel is RECOGNIZED only once it has an identity. ``005_stamp_structural_features`` runs
+    # first in this pass, so an unstamped ``LoopOp`` here is a kernel this pass MINTED — a cut's
+    # fragment or a split's piece — that the scan reached before wrapping back to rule 0. Deferring
+    # is what makes the pass order a guarantee rather than a coincidence: a fork's option is applied
+    # by the CALLER (``Candidate.apply``), which advances the rule cursor only when the applied match
+    # closed its batch, so an un-deferred piece is re-matched HERE on the very next step and lifted
+    # with no ``S_*`` — the empty structural identity ``020_schedule`` then asserts on.
+    if not any(k.startswith(STRUCT_PREFIX) for k in loop.knobs):
+        raise RuleSkipped("kernel minted in this pass is not stamped yet — 005_stamp_structural_features runs first")
     # Steps (1)–(3) — softmax fusion, the free-axis peel, the cell lift / nodification — are the
     # pure recognition core (:func:`._lift.recognized_tile`), shared verbatim with the strict
     # golden decode's record-side identity derivation.
@@ -108,9 +120,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | None:
     # UNPINNED, placement is an enumerated STRUCTURAL fork: the fused form beside one cut fragment
     # per legal seam, so tune DISCOVERS cuts and a deploy prices them like any kernel-set choice
     # (``greedy._priced_pick``). Nothing holds the fused side ahead of the cuts — this list is a
-    # set of legal placements, not a ranking. The chosen fragment's parent piece carries
-    # ``PLACE@<seam>: cut`` in its op knobs, so a measured cut records and replays as the exact
-    # pin.
+    # set of legal placements, not a ranking. Each fragment's parent piece is stamped
+    # ``PLACE@<seam>: cut`` so a recorded routing golden can match the OPTION by the seam it names
+    # (``greedy._verified_pick``); the splice then consumes the stamp with everything else, because
+    # the resulting kernel set is the record of what was chosen.
     route_tree, route_free, route_stores = (pro[0], (*free, pro[1]), pro[2]) if pro is not None else (node, free, stores)
     verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if verdict == "cut":

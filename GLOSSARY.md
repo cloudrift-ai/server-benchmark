@@ -192,7 +192,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   supply the estimates — on a machine with nothing measured that is the offline prior, which therefore owns the
   quality of those kernel-set choices. When some alternative cannot be costed at all, the comparison decides
   nothing and all the alternatives go back into the ordinary ranking; none of them is withheld to keep the set of
-  kernels unchanged.
+  kernels unchanged. Every kernel such an alternative produces is a **brand-new kernel**: it inherits nothing from
+  the kernel it replaced — not the tile, not the staging, not the identity that measurements are filed under — and
+  chooses its own settings from scratch, exactly like a kernel the compiler recognized in the first place. Nothing
+  downstream can tell the two apart.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
   variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the

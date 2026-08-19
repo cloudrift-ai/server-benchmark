@@ -181,4 +181,40 @@ def test_pin_naming_no_seam_is_skipped(monkeypatch) -> None:
     assert len(_kernel_ids(out)) == 1
 
 
+def test_a_cut_taken_at_a_fork_mid_batch_still_reaches_the_stamp(monkeypatch) -> None:
+    """An UNPINNED cut is a fork option, and a fork's option is applied by the CALLER — which
+    advances the rule cursor only when the applied match closed its batch. With a second kernel
+    still pending, the cursor stays on ``010_recognize``, so the pieces it just minted are
+    re-matched on the very next step, BEFORE the scan wraps back to ``005_stamp_structural_features``.
+    Recognizing them there lifts kernels with no ``S_*`` and ``020_schedule`` asserts. Two chains,
+    the first one cut, is the smallest graph that puts a cut match ahead of another kernel's."""
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.delenv("EMMY_PLACE", raising=False)
+    g = Graph()
+    for tag in ("a", "b"):
+        _inp(g, f"x{tag}", (1, 2, 16))
+        _inp(g, f"wn{tag}", (16,))
+        _inp(g, f"w{tag}", (16, 16))
+        g.add_node(RmsNormOp(), [f"x{tag}", f"wn{tag}"], Tensor(f"xn{tag}", (Dim(1), Dim(2), Dim(16)), dtype=F16), node_id=f"xn{tag}")
+        g.add_node(MatmulOp(), [f"xn{tag}", f"w{tag}"], Tensor(f"y{tag}", (Dim(1), Dim(2), Dim(16)), dtype=F16), node_id=f"y{tag}")
+    g.inputs = [f"{n}{tag}" for tag in ("a", "b") for n in ("x", "wn", "w")]
+    g.outputs = ["ya", "yb"]
+
+    taken: list[str] = []
+
+    def cut_once(fp):
+        leaves = flatten_leaves(fp.options)
+        cut = next((o for o in leaves if isinstance(o, Graph)), None) if not taken else None
+        if cut is None:
+            return leaves[0]
+        taken.append("cut")
+        return cut
+
+    out, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(g, cut_once)
+    kernels = _kernel_ids(out)
+    assert taken, "no placement fork offered a cut — the graph no longer exercises the ordering"
+    assert any("__cut_" in k for k in kernels), kernels
+    assert {"ya", "yb"} <= set(kernels), kernels
+
+
 # --- routing entries drive the same realizer -------------------------------------------------------

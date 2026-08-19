@@ -12,6 +12,7 @@ still refuse. Numeric equivalence of the merged region is pinned via ``NumpyBack
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
@@ -21,8 +22,8 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.stmt import Body, Loop
-from emmy.compiler.ir.stmt.carrier import exp_merge
 from emmy.compiler.ir.stmt.leaves import ElementwiseImpl
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -205,7 +206,7 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     contraction over the FULL reduce axis whose cone is ``exp(score − m)·(1/d)`` and whose cone
     SOURCE is the pair — the same binding the norm→linear edge uses, so the contraction schedule
     catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
-    from emmy.compiler.ir.tile.ir import is_contraction
+    from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
     from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
@@ -220,6 +221,33 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     assert is_contraction(con) and con.axis.extent == Dim(128), "one contraction over the whole reduce axis"
     assert n_axis.extent == Dim(32), "the output column axis joins the grid"
     assert con.a.operands[0].operands == (stat,), "the A cone's source is the pair, its K seam the node boundary"
+
+
+def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
+    """A rule that mints a kernel mints it in the LOOP dialect (a placement cut's fragments, a
+    cross-CTA split's pieces), so the piece re-enters through ``010_recognize`` and every algebra
+    fact has to read back off its body alone. Lower the bound region and hand it back: it must
+    bind to the same computed-A contraction. The twisted extractor proves the carrier by
+    REGENERATING ``exp_merge`` and comparing, and ``normalize_body`` renames the generator's own
+    temps (``acc0__o__t0`` → ``v0``) on the way through — so the comparison has to be up to SSA
+    temp names or a re-lifted pair is lost and the piece falls off the warp tier."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.ir.tile.ir import effect_tail
+    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    bound = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+    assert bound is not None
+    node, n_axis, stores = bound
+
+    stmts = tuple(effect_tail(node.lower(), stores))
+    for axis in reversed((*tile.place.free, n_axis)):
+        stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
+    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)), "out")
+    again = bind_prologue_contraction(relifted.op, tuple(relifted.place.free))
+    assert again is not None, "the round trip must not cost the region its computed-A binding"
+    assert is_contraction(again[0].operands[0]), "and it must come back as the SAME one contraction"
 
 
 # --------------------------------------------------------------------------------------------
@@ -265,7 +293,9 @@ def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> No
     from emmy.compiler.backend.cuda.backend import CUDA_PASSES
     from emmy.compiler.ir.cuda.ir import CudaOp
 
-    monkeypatch.setenv("EMMY_KNOBS", "TILE=mma_m16n8k16_f16_f32/f1x1,STAGE=d1/smem,WORK=w1x1")
+    # PLACE=fuse: the subject is the ONE fused kernel's codegen. Unpinned, the recognized cone is
+    # an ordinary placement fork whose pick depends on whatever prior the host has.
+    monkeypatch.setenv("EMMY_KNOBS", "TILE=mma_m16n8k16_f16_f32/f1x1,STAGE=d1/smem,WORK=w1x1,PLACE=fuse")
     target_mod.set_target((8, 0))
     try:
         out = Pipeline.build(CUDA_PASSES).run(_softmax_matmul_graph(m=32, k=64, n=16, dtype=F16))
@@ -275,6 +305,57 @@ def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> No
     assert "mma.sync" in src, "the twisted statistic's contraction must reach the mma tier"
     assert "__shfl_xor_sync" in src, "the pair's cross-lane state combine rides the shared reduction emitters"
     assert src.count("expf") >= 2, "the streaming merge and the cone's exp both survive into the kernel"
+
+
+def _sdpa_graph(heads: int = 1, seq: int = 32, head_dim: int = 128):
+    """One fp16 attention program — the shape whose QK/PV kernels stage through the compute fill."""
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (1, heads, seq, head_dim), dtype=F16), node_id=name)
+    g.add_node(SdpaOp(), ["q", "k", "v"], Tensor("o", (1, heads, seq, head_dim), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v"], ["o"]
+    return g
+
+
+def test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring(monkeypatch) -> None:
+    """A computed operand can only ride the smem compute fill, so a pin naming a byte transport must
+    be refused rather than silently read as its depth alone. The fill IS asynchronous on its B slabs,
+    but that ring is its own ``d2/smem`` depth, so the refusal names that spelling."""
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.backend import CUDA_PASSES
+
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem-async")  # the per-knob var: the aggregate splats at import time
+    target_mod.set_target((8, 0))
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            Pipeline.build(CUDA_PASSES).run(_sdpa_graph())
+    finally:
+        target_mod.set_target(None)
+    message = str(excinfo.value)
+    assert "no smem-async sibling" in message, message
+    assert "d2/smem" in message, message
+    assert "smem budget" not in message, f"the budget was never the gate here: {message}"
+
+
+def test_fill_decline_names_the_gate_it_actually_hit(monkeypatch) -> None:
+    """The depth declines carry their own reason too. K=64 against a 128-element slab chunk is the
+    whole-K-chunk rule, not the smem budget — the catch-all message used to blame the budget and
+    send a reader hunting a capacity limit the pin never reached."""
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.backend import CUDA_PASSES
+
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    target_mod.set_target((8, 0))
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            Pipeline.build(CUDA_PASSES).run(_sdpa_graph(seq=32))
+    finally:
+        target_mod.set_target(None)
+    message = str(excinfo.value)
+    assert "whole K chunks" in message, message
+    assert "K=32" in message, message
 
 
 def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:

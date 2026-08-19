@@ -10,8 +10,6 @@ Four companion documents cover what this one doesn't:
 
 - The rewrite rules themselves and their authoring invariants → [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 - What each IR dialect looks like → `ir/ARCHITECTURE.md`.
-- The shipped bugs and retired designs behind the stricter rules below → [`HISTORY.md`](HISTORY.md). This file states
-  each rule and its reason briefly; where the reason was a production incident, the full story lives there.
 - A gentler, worked-example introduction to the same material, written for someone who has not read the code → the
   Tutorials section of the course site (`docs/docs/tutorials/`). It covers forks, the deploy evidence hierarchy, the
   prior and the goldens in nine short pages; this file remains the reference the tutorials defer to.
@@ -209,8 +207,7 @@ A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are r
 AND again at apply time (`Candidate.try_rewrite`). This matters because an earlier apply in the same batch may have
 swapped a consumed node's op for a rebuilt instance still carrying its `(f32, ())` seeding placeholders — a change
 `Match.is_alive`'s node-identity check cannot see. (This was the gemma o_proj misdeploy: a scalar tile shipped at 16x
-the kernel's measured mma rows because the warp atom gate read placeholder dtypes off an all-f16 graph — HISTORY.md:
-"Placeholder dtypes read off a rebuilt op".)
+the kernel's measured mma rows because the warp atom gate read placeholder dtypes off an all-f16 graph.)
 
 ### The three kinds of rewrite result
 
@@ -312,7 +309,7 @@ explain the machinery that order leans on; the two after it are the guards that 
 Ranking always happens in one place: the search policy asks a single `Prior`. Forks carry no score of their own, and
 nothing builds or scores a `TileOp` merely to rank it — the `Prior` turns the row's knob values straight into features
 (`features.knob_features`). Several older per-variant scoring mechanisms were removed in favor of this single path
-(HISTORY.md: "Retired designs").
+and the design it retired.
 
 That one path has two halves: the `OfflinePrior` that ships with the repo, and the `OnlinePrior` that a local tune
 trains. `FallbackPrior` composes them, and `load_prior` builds the composite. The offline half is called the *cold*
@@ -358,7 +355,7 @@ What a newcomer needs to know about the fit:
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
   golden-rank metrics and catastrophic when scoring a fork, where a not-yet-decided knob scores such a feature 0.0.
   The penalty must be in raw units (`w_z/sd`), because after de-standardizing, the inflated weight looks like an
-  ordinary O(1) weight (HISTORY.md: "The `D_pow2_threads` cold-deploy pick").
+  ordinary O(1) weight.
 - **Loading is strict.** A missing artifact, or one whose `feat_ver` does not match, is a hard error — refit it, never
   a silent fallback. The error comes from the artifact loader, and it surfaces in `tune` / `eval`, which load the
   prior directly. A greedy compile wraps `load_prior` best-effort, so there a bad artifact does not abort the compile:
@@ -381,7 +378,7 @@ What a newcomer needs to know about the fit:
   (`exp(-scale·quality)`), whose argument is clipped only at the point where floats stop being safe (~±700). **That
   exponential must never flatten out over the range of quality scores that actually occur.** A clip inside the live
   range collapses good candidates onto one identical value, and the argmin then falls back on the order the options
-  were emitted in (HISTORY.md: "The saturated-score plateau"). The one consumer that needs a bounded value —
+  were emitted in. The one consumer that needs a bounded value —
   `FallbackPrior`'s offline multiplier — clamps to `e**±8` on its own side; the consumers that rank get the
   strictly-ordered version.
 
@@ -576,8 +573,8 @@ The gate is an alarm for measured failure, not a demand for proof of quality. It
 small tune (the fit needs only `min_rows` = 50 dataset rows) whose op groups all stay under 8 rows ends up fitted with
 calibration `None` — trustworthy, and therefore owning deploys, on very little data.
 
-Why the gate exists: `fitted` alone once let a mis-calibrated model own deploys silently (HISTORY.md: "The
-mis-calibrated online model"). Correlating predictions against the training rows catches one failure specifically: the
+Why the gate exists: `fitted` alone once let a mis-calibrated model own deploys silently. Correlating predictions
+against the training rows catches one failure specifically: the
 collapse where model and rows no longer share feature names (constant predictions, worse-than-random ranking). It
 deliberately does NOT catch subtler failures — overfitting to the op families that were tuned, or being wrong about
 absolute µs on ops that were not. Those are what the Part 8 diagnostics exist to surface.
@@ -681,7 +678,7 @@ can match several offered candidates. Every tier therefore resolves its ties thr
 sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fallback), the reservoir and DB
 measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
 can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set
-(HISTORY.md: "The bimodal boot-time kernel set").
+across boots.
 Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py` at every evidence tier; rendered
 bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
@@ -704,8 +701,7 @@ avoids re-splitting the slice it is pricing.
 tier: a candidate's fork-time `S_*` base may carry scheduler stamps the persisted perf rows predate (#311's
 `S_warp_eligible` is on no row recorded before it), and a strict-equality signature join would let one added feature
 silently disable the whole evidence tier against every existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the
-model's `g2k` pick beating the measured-faster fused config it was never allowed to see; HISTORY.md: "The evidence
-tier silently disabled by one new feature"). The index spans three
+model's `g2k` pick beating the measured-faster fused config it was never allowed to see). The index spans three
 context keys (the deploy's own flags, and the same key with `-Xcicc -O1` and with `-Xcicc -O3` — where the tune's
 deployable re-benches land), and the pick is two-tier: a row measured at deployable flags decides outright; `-O1`
 rows decide only when no candidate has deployable evidence, because an -O1 median is a ranking signal with -O3
@@ -739,7 +735,7 @@ returns the aggregate `PerfStats`), then calls `search.observe(stats, status)`.
 - A terminal that still holds an un-lowered kernel-bearing node (because its rewrite was dropped by validation) is
   marked `bench_fail` **before** any bench or cache lookup happens. The bench only sums `CudaOp`s, so without this
   guard the un-lowered kernel would count as zero and the µs of whatever cached kernels remained could stand in for
-  the whole graph as an `ok` measurement (HISTORY.md: "The zero-priced un-lowered kernel").
+  the whole graph as an `ok` measurement.
 
 ## Part 5: The tuning workflow (`emmy tune`)
 
@@ -798,8 +794,7 @@ already-measured variant is served from the DB with no GPU bench. An identical r
 deterministic trajectory → every terminal is a cache hit → zero benches and the same total. But the global online
 prior keeps changing (it refits across ops and runs), so the same patience can steer the MCTS down a *different*
 trajectory; re-running lets it reach and bench the genuinely-new variants the improved prior surfaces, replaying the
-rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed —
-HISTORY.md: "Retired designs".)
+rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed.)
 
 ### Per-kernel and working-target GPU parallelism (`--gpus N` / `--devices 0,1,2`)
 
@@ -917,7 +912,7 @@ every node with a benched descendant:
 
 **Why CatBoost** (chosen by `scripts/prior_bakeoff.py`): the model's greedy pick must not run off to a degenerate
 extreme. A linear model is monotone in every knob, so its optimum always sits at a corner of the box of candidate
-values — which shipped real blow-ups before the switch (HISTORY.md: "The linear prior's corner pick"). Any tree
+values — which shipped real blow-ups before the switch. Any tree
 ensemble is **bounded**, so it stays sane outside the region the data covers: an un-benched extreme simply inherits
 the value of the nearest leaf. Among the bounded models, CatBoost also generalizes to an op that was never tuned
 almost perfectly (leave-one-op-out pick ratio ~1.0, against 1.18 for xgb/lgbm and 1.31 for rf). One global CatBoost
@@ -1061,8 +1056,7 @@ label is (`SearchNode.visits`, the leaf's `bench_stats` / `bench_status` that `o
 benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement — plus the greedy
 pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with no parent and `depth=0`. This is on by
 default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes` turns it off. It
-is what stops measurements from a manual sweep evaporating (HISTORY.md: "Hand-found optima that never reached the
-store").
+is what stops measurements from a manual sweep evaporating.
 
 - **The row must be keyed to the same set of candidates the tuner used.** That means recovering, for each kernel, the
   fork point it descended from, via `source_chain`: descent writes further `S_*` values onto the op, so keying off the
@@ -1182,7 +1176,7 @@ explicit working file whose GPU header is checked against the selected tune devi
 
 1. **Realized-vs-pinned knob check — a miss FAILS the row before it benches.** A structurally invalid pin silently
    falls back to the planner's own pick, so benching it would compare greedy against itself and report a fake 1.00×
-   under the pin's name (HISTORY.md: "The pin that benched greedy against itself"). The check runs right after the
+   under the pin's name. The check runs right after the
    pinned compile. A pin that matches none of the knob values the compile actually produced marks the row
    `pin_unmatched` / `unreproducible pin … NOT benched` (a loud error log; the row is kept in the table and in
    `--json`, and no GPU time is spent), and the remaining rows still run. Matching is aware of knob families — a
@@ -1242,8 +1236,8 @@ below run over the goldens, the tune DB's `node` table, or a measurement freeze.
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
-once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29× (HISTORY.md: "The
-saturated-score plateau"). Both counts come from ONE computation (`prior/fit/rank.dual_rank`): the pessimistic rank is
+once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29×. Both counts come from
+ONE computation (`prior/fit/rank.dual_rank`): the pessimistic rank is
 the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy fit`'s metrics file.
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
@@ -1252,7 +1246,7 @@ are saturating.
 golden's compile context as `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file
 along with its known SM count and smem specs — never the host's. Building them for the host's context makes golden
 ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
-from (HISTORY.md: "Machine-dependent golden evals"). The offline fitter's case builder always did this correctly; the
+from. The offline fitter's case builder always did this correctly; the
 eval now matches it.
 
 **Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
@@ -1421,7 +1415,11 @@ cross-CTA split is the `g<n>` field (GRID stage), and the
 carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
 cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
 (any carrier; the only legal arm for a multi-component twisted carrier and for a multi-channel ⊗-combine). Pin
-via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
+via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
+`lowering/tile/030_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
+re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
+CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
+twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
 letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and

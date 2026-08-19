@@ -126,11 +126,12 @@ def test_the_layer_needs_no_node_ctx_or_algebra() -> None:
     provide: three of this list's entries had rotted that way — `Map` and `Placed` named classes
     the one-kind collapse deleted, and a glossary rename left the literal `"bilinear fold"`, which
     has a space in it and so can never be an identifier at all."""
+    from emmy.compiler.ir.pure import fold as pure_fold
     from emmy.compiler.ir.tile import ir as tile_ir
     from emmy.compiler.pipeline.passes.lowering.kernel import _atom, _factor, _tiling
 
     banned = ("Fold", "Channel", "TileOp", "Ctx", "reduce_codegen", "store_sink", "copy_cell")
-    live = {n for mod in (tile_ir, _factor, _atom) for n in dir(mod)}
+    live = {n for mod in (pure_fold, tile_ir, _factor, _atom) for n in dir(mod)}
     assert set(banned) <= live, f"the guard names nothing: {sorted(set(banned) - live)}"
 
     names = {n for n in dir(_tiling) if not n.startswith("__")}

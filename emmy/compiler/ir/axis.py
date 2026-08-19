@@ -78,11 +78,19 @@ class Window:
     mid-tensor (``min((s+1)·B, S)``): the realizer runs ``bound − base`` local steps and masks
     against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
     the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
+
+    ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
+    a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
+    ``M_b``/``M_t``/``M_r``, a carved or strided sub-axis — leaves it false. The distinction has to
+    be recorded because a split is CONSUMED by the kernel that realizes it: the schedule reads this
+    to refuse a second cross-CTA partition anywhere in the same kernel, and "carries a window" alone
+    cannot answer that question (nearly every scheduled axis carries one).
     """
 
     parent: Axis | None = None
     base: Expr | None = None
     bound: Expr | None = None
+    partition: bool = False
 
 
 @dataclass(frozen=True)

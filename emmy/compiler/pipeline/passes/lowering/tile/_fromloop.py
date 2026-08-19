@@ -9,17 +9,30 @@ escape."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Lambda, Load, Loop, Select, component_ops
-from emmy.compiler.ir.stmt.algebra import M
-from emmy.compiler.ir.tile.ir import Fold, is_contraction
+from emmy.compiler.ir.pure import Lambda, M, component_ops
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
+from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.ir.tile.ops import head, reduce_loop
+
+
+def _same_program(a, b) -> bool:
+    """Whether two bodies are the SAME program up to SSA temp names. ``exp_merge`` spells its
+    rescale temps ``<state>__t0…``; ``normalize_body`` rewrites them to ``v0…`` the moment the term
+    passes through the loop dialect, so a raw byte compare rejects a merge that is α-equivalent to
+    the one the generator would emit — and the twisted extraction, which PROVES the algebra by
+    regenerating and comparing, loses every carrier that has been lowered and re-lifted. Comparing
+    at the canonical spelling keeps the proof and drops the accidental dependence on which pass
+    happened to name the temps."""
+    a, b = Body.coerce(a), Body.coerce(b)
+    return a == b or rename_ssa_sequential(a) == rename_ssa_sequential(b)
 
 
 def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, Lambda] | None:
     """Read the λ spelling off a reduce ``Loop`` whose body is the dissolved ``[pure lift stmts…,
     Accum folds]`` sequence — ANNOTATION-FREE: every fact (accumulator names, channel ops, folded
     values) is read off the body's ``Accum``\\ s themselves, and threads into
-    :func:`~emmy.compiler.ir.stmt.algebra.M` with the loop's REAL accumulator names. Returns
+    :func:`~emmy.compiler.ir.pure.algebra.M` with the loop's REAL accumulator names. Returns
     ``(lift, init, combine)`` — the flat ⊕ pair — or ``None`` when the shape does not read
     off cleanly (a composed step, an effectful stmt, an identity-less op) — the caller keeps the
     raw-loop escape. A TWISTED (exp-family) loop has no self-describing ``Accum`` spelling (its
@@ -59,8 +72,9 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     side-band algebra: the state is ``(the maximum-Accum, the add-Accums in body order)`` (the
     generator emits them exactly there), the pivot term is the maximum's folded score, and each
     non-pivot term is either the literal ``1.0`` (a denominator) or an external value name (an
-    expectation) — resolved by regenerating the streaming merge per candidate and BYTE-COMPARING
-    it against the body's tail (``exp_merge`` is deterministic, so equality is proof). The pure
+    expectation) — resolved by regenerating the streaming merge per candidate and comparing it
+    against the body's tail up to SSA temp names (:func:`_same_program`; ``exp_merge`` is
+    deterministic, so equality is proof). The pure
     prefix ahead of the merge becomes the ``lift`` body. Returns ``None`` when no candidate
     matches — a composed step (flash's in-step folds) or a foreign merge spelling.
 
@@ -69,7 +83,7 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     it is unchanged."""
     from itertools import product as _product  # noqa: PLC0415
 
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge  # noqa: PLC0415
 
     body = tuple(loop.body)
     accums = [s for s in body if isinstance(s, Accum)]
@@ -88,9 +102,11 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda] | None:
     cands = sorted((defined | read) - {score} - set(names))
     for combo in _product([1.0, *cands], repeat=len(adds)):
         merge = tuple(exp_merge(names, (score, *combo), key=names[0]))
-        if len(body) < len(merge) or body[-len(merge) :] != merge:
+        if len(body) < len(merge):
             continue
         prefix = body[: -len(merge)]
+        if not _same_program((*prefix, *merge), body):
+            continue
         if any(not isinstance(s, (Load, Assign, Select)) for s in prefix):
             return None  # a composed step keeps the raw-loop escape
         try:
@@ -107,7 +123,8 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
     """Read the λ spelling off an exp-family TWISTED reduce ``Loop`` against the ``like`` fold
     that carries its algebra (the 030 split partial — the sliced loop's state names are the
     original fold's): the body must be ``[pure score prefix…, the dissolved streaming merge]``
-    verbatim (the merge regenerated from ``like``'s stored combine + injection terms), the prefix
+    (the merge regenerated from ``like``'s stored combine + injection terms, matched up to SSA temp
+    names — :func:`_same_program`), the prefix
     becomes the ``lift`` body and the injected terms its results (the singleton — ``(x, 1)``),
     and the flat ⊕ pair stores ``like``'s combine — the generated cross-partition program over
     the loop's REAL state names (the formation invariant the consuming ``Fold`` asserts).
@@ -115,15 +132,17 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
     folds, which carry their own schedule slices), a foreign merge spelling, a role the singleton
     shape cannot carry. :meth:`Fold.from_loop`'s byte-identity gate stands behind this extraction
     like the degenerate one's."""
-    from emmy.compiler.ir.stmt.carrier import exp_merge  # noqa: PLC0415
+    from emmy.compiler.ir.pure.carrier import exp_merge  # noqa: PLC0415
 
     names = tuple(like.combine.results)
     terms = tuple(like.lift.results)
     merge = tuple(exp_merge(names, terms, key=names[0]))
     body = tuple(loop.body)
-    if len(body) < len(merge) or body[-len(merge) :] != merge:
+    if len(body) < len(merge):
         return None
     prefix = body[: -len(merge)]
+    if not _same_program((*prefix, *merge), body):
+        return None
     if any(not isinstance(s, (Load, Assign, Select)) for s in prefix):
         return None  # a composed step keeps the step spelling
     if not terms or not isinstance(terms[0], str):
@@ -157,13 +176,13 @@ def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold | None:
     # captures a CONTRACTION-shaped loop and derives PLANAR — the 1l demotion, now a
     # formation fact (its loads stay inline in the lift).
     derived = fold.loop
-    if (derived.body, derived.axis, derived.unroll) != (loop.body, loop.axis, loop.unroll):
+    if (derived.axis, derived.unroll) != (loop.axis, loop.unroll) or not _same_program(derived.body, loop.body):
         return None
     return fold
 
 
 def nodify_reduce(op, like=None):
-    """Nodify a kernel op into a :class:`~emmy.compiler.ir.tile.ir.Fold` node the reduce
+    """Nodify a kernel op into a :class:`~emmy.compiler.ir.pure.fold.Fold` node the reduce
     partition can key on (the plan itself lives in ``TileOp.schedule`` — the caller stores it
     against the returned fold). Returns ``(op2, fold)``. A stored contraction fold (the
     recognize-side per-cell contraction) is already the node — the coop / ILP K partition treats

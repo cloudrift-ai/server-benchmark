@@ -186,7 +186,9 @@ own term — a 16-bit atom, a resolvable fill, an inventory a value can spell ag
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and
 warp tiers, with split-K routing through the structural `Fold ⊃ Fold` composition `030_split_reduce` consumes — and
 the COMPUTED `a` edge with them: the fused cone's contraction offers the warp tier over the MANDATORY resolved `smem`
-compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2`), its split-K is the redundant-statistic form (the
+compute fill (`d1` plus the asymmetric B-only prefetch ring at `d2` — the fill's asynchrony is that depth, not a
+`smem-async` spelling, and a pin naming a byte transport is refused rather than read as its depth alone), its
+split-K is the redundant-statistic form (the
 k-invariant prologue stays full-row in every partition, only the per-cell cone σ-reindexes), and the cone's own
 statistic site is a nested site under the same inventory — the nested site is why the enumerator recurses. The compute fill is MANDATORY for a computed edge with ONE exception, the packed-pair (NVFP4)
 weight cone, which additionally offers the `smem-async` / `smem-tma` byte-slab rows as fork siblings — its bits
@@ -249,7 +251,7 @@ How to comply:
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side decode cone) is covered for free.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
-  report the first thing the transform *fundamentally cannot do*, like `ir/stmt/algebra.classify_fragment_epilogue`
+  report the first thing the transform *fundamentally cannot do*, like `ir/pure/algebra.classify_fragment_epilogue`
   (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
   instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
@@ -297,14 +299,14 @@ quiescent.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
-Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading
-(`_fromloop.fold_from_loop` — a reduce `Loop` interpreted as a `Fold`, gated by byte-identity of the re-derived
-loop) and the ⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)`
-facts, shared by both contraction binders). The online-softmax pairing states its condition on λ-fold results;
-contraction CANDIDACY (`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates
-every operand shape (direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition
-binds its channels through the same lift reading. What stays case-by-case is the dispatch — which composition
-applies — never the parsing: no recognition step holds a private stmt-pattern reading of the algebra.
+Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading (`_fromloop.fold_from_loop`
+— a reduce `Loop` interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling) and the
+⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)` facts, shared
+by both contraction binders). The online-softmax pairing states its condition on λ-fold results; contraction CANDIDACY
+(`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates every operand shape
+(direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition binds its channels through
+the same lift reading. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
+recognition step holds a private stmt-pattern reading of the algebra.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
 the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
@@ -447,7 +449,7 @@ failing several passes later:
 results the element's SINGLETON state
 (softmax's is `(x, 1)` — ι spelled in the lift, a literal component a bare float) — plus the TRUE monoid's flat
 `(init, combine)` fields (1r: the `Monoid` wrapper class is dissolved — `M(op…)` survives as the free componentwise
-pair constructor in `ir/stmt/algebra`, `component_ops`/`degenerate` as free shape-readers on the combine, the rename
+pair constructor in `ir/pure/algebra`, `component_ops`/`degenerate` as free shape-readers on the combine, the rename
 lockstep as `rename_combine`, the S×S→S arity check in `Fold.__post_init__`) whose combine threads the fold's REAL
 accumulator names (its results). Everything else is DERIVED, never stored: the streaming step is combine specialized
 at the singleton (the `Accum` forms
@@ -470,7 +472,7 @@ verbatim — no outer `Accum`s; `Fold.composed` is the one read of the compositi
 `030_split_reduce`'s structural arm). `Fold.step_stmts()` is the public per-cell read every former `.step` consumer
 goes through; `.loop` splices only the operand edges the derived step did not consume. `Fold.from_loop` returns
 `None` for a non-λ-representable loop (an effectful / raw-block body — the callers keep the raw-loop-IR projection
-escape, an impure-bodied zero-axis fold), and its byte-identity gate compares the derived body/axis/unroll only —
+escape, an impure-bodied zero-axis fold), and its identity gate compares the derived body/axis/unroll only —
 the role annotation is the fold's own derived read, so an unbindable matvec captures a CONTRACTION-shaped loop and
 derives `PLANAR` (the 1l
 demotion, now a formation fact; `_extract_lift` accepts any PURE prefix). The inverse — un-hoisting a computed
@@ -500,8 +502,8 @@ output-sweep coordinate stays bound by its loop while only per-cell SSA values g
 the cell suffix. If enumeration deliberately leaves a term unmapped because no schedule row is legal, materialization
 maps its free axes directly to the scalar grid before lowering; the valid guardrail term therefore remains executable.
 The interim `effectful_lambda` is DELETED — what remains impure is exactly the raw-loop-IR kernels
-that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — `Init` seeds + the
-un-annotated `StateMerge` merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
+that are not recognized algebra (the un-recognized flat escape cell, `030`'s finalize — the annotated
+cross-partition merge `Loop` — the prologue'd split partial, and the coop norm→linear/geglu sibling's
 composed contraction tail), formed through the one `Fold.projection`-private `_loop_ir_fn` arm and dying with the
 recognizer's growth toward totality. The closure scan (`_cut._captured_values`) demoted to the validation reading of
 edge-iff-closed.
@@ -531,13 +533,90 @@ grammar it read).
 `lowering/tile` carries one one-kernel→graph-fragment rule:
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
-  computation, its K partitioned across CTAs into a partial + finalize. It runs AFTER its decision — the `g` row was
-  chosen FOR the split form — so the partial carries the decided knob row verbatim and the finalize is deliberately
-  `_mapped`: both **opt out** of re-recognition, because re-entering would discard the very decision being realized.
+  computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
+  accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
 
-The fragment idiom's re-entry semantics are the rule's own: `030` opts its halves OUT of recognition, while a rule
-that emits plain un-mapped `LoopOp`s hands them back to `010_recognize` on the pass-scan restart. The shared fixpoint
-is what lets such rules compose without knowing about each other.
+**Every piece is a BRAND-NEW kernel — and no rule has to remember that.** A rewrite that returns DIFFERENT NODES
+is a kernel-set change, so the ENGINE clears the knobs of every KERNEL it splices before they land
+(`candidate._strip_minted`; `Op.cache_key` is the is-this-a-kernel test, so the pre-lowering ops a decomposition
+or the checkpoint loader splices keep the data they carry). A rule cannot leak a decision or an identity across a
+kernel boundary by forgetting to clear one, and no pass has to assert that it didn't.
+
+The DECISION is cleared along with everything else, because **a decision is consumed by the rewrite that realizes
+it** — the same rule the cross-CTA split follows. Once a cut has happened the graph holds two kernels where it
+held one, and that is the record; a surviving `PLACE@<seam>: cut` knob would be a second, weaker copy of what the
+node set already says. The stamp still goes on the OPTION, which is what a recorded routing golden matches
+(`greedy._verified_pick`) — it is consumed at the splice, not before.
+
+What happens next is the ordinary pass scan. `005_stamp_structural_features` gives each piece its own `S_*`
+because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
+neither is called, and neither is told what a piece is. **No pass can tell a split piece from a fresh kernel**,
+and no pass tries. The invariant holds in both directions: nothing downstream reads split provenance, and nothing
+upstream is told what the pieces are for.
+
+Contrast an OP rebind, which the engine leaves alone: that says *the same kernel, decided further*, so its knobs
+merge forward by design. Which is why even the one-kernel atomic arm splices a `Graph` (`_one`) — a rebind would
+hand the piece the row it was minted to shed, and would not restart the pass scan.
+
+Three consequences follow, and all three are the point:
+
+- Each piece **chooses its own schedule**. The partial contracts a K-slice; the finalize folds a workspace. They
+  are differently shaped kernels and there is no reason for them to agree, so nothing makes them.
+- Each piece is **separately identifiable to the evidence store**. Its structural stamp describes the body it
+  actually has, so its measurements and the prior's estimates are its own. (The partial used to arrive wearing the
+  pre-split kernel's whole row — 21 `S_*` features describing a body it no longer had — and the finalize arrived
+  already-placed with no knobs at all: no fork, no identity, untunable.)
+- The split node has **no latency of its own** — it does not run. Its estimate is the Σ over the kernels the
+  resolution ends with (`greedy._resolved_price`), which is what makes the split row comparable against the rows
+  that keep one kernel.
+
+**One split per axis — the split is CONSUMED by the kernel that realizes it.** A pin is *ambient*: `EMMY_REDUCE=g2k`
+is a statement about how kernels run, and the pieces are kernels, so it reaches them too. Nothing may re-partition
+an axis that is already a slice, and the slice records that structurally: `_slice_loop` / `_factor_k` build it as a
+`Window` of its parent — the finalize's merge axis too, since it enumerates the partitions of a split that already
+happened — and `_schedule._splittable_axis` refuses to offer (and `_consumed_split` drops from a parsed pin) a
+cross-CTA stage on a kernel that carries one. No provenance flag, no "this came from a split" bit — the axis's own
+shape is the record. Without that reading a K=512 partial re-splits its own slice on every sweep: 512 → 256 → … →
+1, ending in a raise.
+
+**The receipt is read over the whole IR, not just the node tree** (`_carries_partition`). A computed-A cone keeps
+its sliced contraction inside the stored map view's LIFT, as a plain `Loop` rather than a site, so a `sites`-only
+scan misses it: the ambient pin then splits the piece a second time — the statistic fold, which no partition ever
+touched — and the doubly-split partial drops off the mma tier.
+
+**A piece is minted in the loop dialect, so its algebra must read back off the body alone.** Two things that
+sound cosmetic are therefore load-bearing. The partition axis is spelled with a LEADING UNDERSCORE
+(`_factor_k`, `_slice_loop`'s `_ksplit`) because `normalize_body`'s `canonicalize_free_axis_order` sorts the outer
+free-loop chain by axis NAME: sorted below the row / column axes it must dominate, `hoist_loop_invariants` sinks the
+partition between the column sweep and the K fold, where `bind_prologue_contraction` cannot parse it and the piece
+loses its computed-A binding. And the twisted extractors compare their regenerated `exp_merge` to the body
+**up to SSA temp names** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the generator's own temps
+the moment a term touches the loop dialect, so a raw byte compare would reject the α-equivalent program and lose
+every carrier that has been lowered and re-lifted.
+
+The atomic arm produces ONE kernel and still splices a `Graph`. That is not a formality: a 1:1 op rebind is how the
+engine says *the same kernel, decided further*, so it merges the replaced op's knobs forward and does not restart the
+pass scan — the piece would inherit the very row it was minted to shed and would never reach its own fork (`_one`).
+
+The fragment idiom's re-entry semantics are shared, not per-rule: every rule hands its fragment back to the pass
+scan, and `005_stamp_structural_features` / `010_recognize` / `020_schedule` pick up whatever is un-stamped,
+un-recognized or unmapped. The shared fixpoint is what lets such rules compose without knowing about each other.
+
+**A piece is stamped before it is recognized, and that order is enforced by `010_recognize`, not by the scan.** The
+scan returns to rule 0 only when it wraps past the LAST rule, and a fork's option is applied by the caller
+(`Candidate.apply`), which advances the rule cursor only if the applied match closed its batch. A cut taken at an
+UNPINNED placement fork with another kernel still pending therefore leaves the cursor on `010_recognize`, which
+re-matches its own fresh pieces on the next step — ahead of `005`. So `010` DEFERS an unstamped `LoopOp`
+(`RuleSkipped`); the batch ends, the scan wraps, and the piece is stamped first. Without that guard the piece lifts
+with no `S_*` and `020_schedule` asserts on the empty structural identity — which is what a whole-model compile with a
+discovered (rather than pinned) cut hit.
+
+`005_stamp_structural_features` duplicates `loop/stamp/020_stamp_structural_features` rather than replacing it,
+because a kernel is stamped in the pass where it is BORN. The loop-dialect pass owns the kernels the fusion end
+produces; it cannot reach one minted later, since `Cursor.advance` only restarts a scan WITHIN the current pass and
+never returns to an earlier one. Moving it is not an option either: the OUTER search's terminals are finalized
+`LoopOp`s, handed over before tile lowering runs, so `two_level`'s `op_sig` would digest an empty set for every
+kernel in every model. Two registrations of one work function, each idempotent, is the whole design.
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
@@ -644,7 +723,7 @@ enumerated grids (the permanence test in `tests/compiler/test_golden_configs.py`
 re-spell — membership means the replayed pin resolves to a slice the catalog hands out; a space edit can never
 silently orphan a golden into unreachability again, the sixth sweep's `.s512` regression class; the scalar reg grid
 carries the golden-informed deep-FM points `f2x6..f2x14`, `f4x6..f4x26` for exactly this reason), and a cross-CTA
-split deploy
-(`030_split_reduce`) stamps the decided knob row onto its **partial** kernel — the engine merges knobs forward on 1:1
-rebinds only, so without the explicit stamp the graph splice dropped them and the deployed split recorded no
-schedule identity (the A/B table then couldn't say what greedy deployed).
+split deploy records a schedule identity per **piece**: each is a new kernel that reached its own fork, so each
+carries the row it chose. (The engine merges knobs forward on 1:1 rebinds only. The split's earlier fix was to
+stamp the pre-split row onto the partial by hand, which made the A/B table readable at the cost of attributing one
+kernel's decision to another; minting the pieces unmapped removes both the stamp and the misattribution.)

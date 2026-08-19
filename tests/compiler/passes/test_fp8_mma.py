@@ -28,10 +28,10 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Placement, TilePlan, Workers
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched

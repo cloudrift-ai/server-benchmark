@@ -16,7 +16,7 @@ Implementers today:
 - :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
   rendering with SSA / axis / commutative-arg / external-buffer names
   normalized away.
-- :class:`emmy.compiler.ir.tile.ir.Fold` /
+- :class:`emmy.compiler.ir.pure.fold.Fold` /
   :class:`emmy.compiler.ir.tile.ir.TileOp` — the tile term's α-invariant
   identity, digested bottom-up from per-node canonical content plus the
   children's cached keys (``ir/tile/_key.py``); excludes placement,

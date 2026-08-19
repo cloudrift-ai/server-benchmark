@@ -16,15 +16,10 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile import (
-    Channel,
-    Fold,
-    Placement,
-    TileOp,
-    split_effects,
-)
+from emmy.compiler.ir.tile import Placement, TileOp, split_effects
 from emmy.compiler.pipeline.passes.lowering._reduction import loop_state_head
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction, make_cone
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -334,9 +329,15 @@ def _order_free_by_output(node: Fold, free: list, stores: tuple = ()) -> tuple:
     if write is None:
         return tuple(free)
     pos = {e.name: i for i, e in enumerate(write.index) if isinstance(e, Var)}
-    if not all(ax.name in pos for ax in free):
-        return tuple(free)  # a free axis absent from the output index — leave the peel order
-    return tuple(sorted(free, key=lambda ax: pos[ax.name]))
+    # A free axis the store does NOT index is a PARTITION: many grid cells accumulate into one
+    # output element, which is legal exactly because that store is atomic (the cross-CTA split's
+    # in-place arm). The output cannot order it, and leaving it wherever the peel happened to put
+    # it is not neutral — an unindexed axis landing in the trailing pair makes the contraction
+    # binding read ``(m, n)`` off ``(n, partition)``, so the cell declines to nodify and a matmul
+    # partial drops to the scalar tier. Partitions sort OUTERMOST, in peel order among themselves;
+    # the indexed axes keep the output's own order behind them.
+    order = list(free)
+    return tuple(sorted(free, key=lambda ax: (1, pos[ax.name]) if ax.name in pos else (0, order.index(ax))))
 
 
 def recognized_tile(op: LoopOp, output_name: str, name: str = "") -> TileOp:

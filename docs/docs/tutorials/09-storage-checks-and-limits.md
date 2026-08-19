@@ -190,6 +190,5 @@ measurement if one exists, a local measurement if one was taken, a prediction ot
 is nothing at all.
 
 For the level of detail below this series, the reference documents live beside the code: `ARCHITECTURE.md` in
-`emmy/compiler/pipeline/` for the pipeline itself, its `passes/` sibling for the rewrite rules, and `HISTORY.md` in
-the same directory for the full stories behind the incidents this series mentions in passing. The vocabulary is
+`emmy/compiler/pipeline/` for the pipeline itself, and its `passes/` sibling for the rewrite rules. The vocabulary is
 defined in `GLOSSARY.md` at the root of the repository.

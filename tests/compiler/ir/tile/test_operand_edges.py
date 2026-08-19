@@ -12,11 +12,10 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile import Channel, Fold
-from emmy.compiler.ir.tile.ir import operand_body, operand_name
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 

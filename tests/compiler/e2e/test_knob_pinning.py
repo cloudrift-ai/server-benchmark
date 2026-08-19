@@ -326,6 +326,10 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
         "WORK": "t16x8",
         "TILE": "f2x2",
         "STAGE": "",
+        # Serial K: the subject is the sweep's bound coordinate in ONE kernel, and an unpinned
+        # REDUCE leaves the cross-CTA split fair game — a split's pieces are new kernels with
+        # their own sweeps.
+        "REDUCE": "",
         "LOOPIFY": "0",
         "INTERLEAVE_LOADS": "1",
         "VECTORIZE_LOADS": "1",

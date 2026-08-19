@@ -27,10 +27,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.ir.pure.algebra import rename_combine
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.stmt.algebra import rename_combine
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile.ir import Fold, _operand_result_names
 from emmy.compiler.structural import digest
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the

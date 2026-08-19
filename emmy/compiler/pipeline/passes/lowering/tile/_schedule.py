@@ -77,6 +77,9 @@ from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.pure import Lambda, M
+from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body
+from emmy.compiler.ir.schedule import Level as _ReduceLevel
 from emmy.compiler.ir.schedule import (
     Raster,
     ReducePlan,
@@ -89,11 +92,9 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Lambda, Load, Stmt, Write
-from emmy.compiler.ir.stmt.algebra import M
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
-from emmy.compiler.ir.tile import Fold, Placement, Store, TileOp
-from emmy.compiler.ir.tile.ir import is_contraction, operand_body
+from emmy.compiler.ir.tile import Placement, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
@@ -687,16 +688,84 @@ def _strip_values(term: _Term, node) -> list[dict]:
 # --- the reduce partition ---
 
 
+def _splittable_axis(term: _Term, node) -> bool:
+    """Whether a cross-CTA partition may still be offered here — false once THIS KERNEL already
+    carries one.
+
+    A cross-CTA split is consumed by the rewrite that realizes it. The pieces are brand-new
+    kernels reaching this enumeration with no knobs of their own, so nothing but the IR records
+    that the partition happened — and what records it is a reduce axis that is already a slice of
+    a parent (``_factor_k`` / ``_slice_loop`` build it as a ``Window``). No provenance flag: the
+    axis's own shape is the receipt.
+
+    The scope is the KERNEL, not the axis, because that is the scope of the decision being
+    consumed. ``REDUCE`` is one pin and a bare one fans out to every eligible site
+    (``_Term.pin``), so reading the receipt per-axis lets the same pin fire again on a DIFFERENT
+    reduce axis of the piece: a fused cone's partial still holds the cone's per-row statistic
+    fold, never sliced, and ``g4k`` split that too — a third kernel from one pinned split. Reading
+    it per kernel is what makes ``g4k`` mean one split.
+
+    Per-axis alone also never terminates on its own axis: a pinned split re-applies to its own
+    partial, halving the extent every sweep until it runs out (found on a K=64 matmul:
+    64 → 32 → … → 1)."""
+    if node.axis is None:
+        return False
+    return not _carries_partition(term.tile.op)
+
+
+def _carries_partition(op) -> bool:
+    """Whether this kernel's IR already records a realized cross-CTA split — the ``Window``
+    receipt :func:`_splittable_axis` reads.
+
+    The receipt sits on the sliced axis, and that axis is not always a NODE: on a computed-A cone
+    the stored map view keeps its sliced contraction inside the lift as a plain ``Loop``, so a
+    ``sites``-only scan misses it and the ambient pin splits the piece a second time — the
+    statistic fold, which no partition ever touched (measured on the gate⊗up twin: three kernels
+    from one ``g4k``, the doubly-split partial off the mma tier). Scan the loop bodies too; the
+    receipt is in the IR either way."""
+
+    def loops(stmts):
+        for s in stmts:
+            if isinstance(s, Loop):
+                yield s
+                yield from loops(s.body)
+
+    for site in sites(op):
+        node = site.node
+        ax = getattr(node, "axis", None)
+        if ax is not None and ax.window is not None and ax.window.partition:
+            return True
+        bodies = [node.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
+        if any(lp.axis.window is not None and lp.axis.window.partition for b in bodies for lp in loops(b)):
+            return True
+    return False
+
+
+def _consumed_split(term: _Term, node, plan: ReducePlan) -> ReducePlan:
+    """``plan`` with its cross-CTA stage dropped when ``node``'s axis is already a slice — the pin
+    half of :func:`_splittable_axis`. A pin is a statement about a kernel's schedule; the split it
+    asked for was realized on the kernel that was split, so what reaches the pieces is the rest of
+    the row (``g2k/coop`` on a sliced axis is ``coop``)."""
+    if not plan.needs_split or _splittable_axis(term, node):
+        return plan
+    return ReducePlan(tuple(st for st in plan.stages if st.level is not _ReduceLevel.GRID))
+
+
 def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     """Every reduce partition a non-contraction fold can legally spell: the serial fold, plus each
     :func:`coop_reduce_moves` entry this node admits. No candidate is preferred, promoted or
-    dropped for speed — the catalog is filtered by LEGALITY alone (the band's geometry, its
-    epilogue, and a width the reduce extent can actually feed), so the 16- / 32-wide reduce
-    goldens and the wide normalizer bands are all reachable and the evidence hierarchy ranks them.
-    An env pin is authoritative."""
+    dropped for speed — the catalog is filtered by LEGALITY
+    alone (the band's geometry, its epilogue, and a width the reduce extent can actually feed), so
+    the 16- / 32-wide reduce goldens and the wide normalizer bands are all reachable and the
+    evidence hierarchy ranks them. An env pin is authoritative — minus any cross-CTA stage this
+    axis already consumed (:func:`_consumed_split`).
+
+    A cross-CTA split is offered here only in COMPOSITE with the transposed band — every split
+    candidate in the catalog is one, so the loop below states the catalog's shape rather than
+    adding a rule."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
-        return [ReducePlan.parse(pin, Workers.parse(WORK.raw()))]
+        return [_consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
     extent = _hint_extent(node.axis)
     cands = [ReducePlan()]
     inner = _inner_free(term.place)
@@ -704,11 +773,8 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
     for p in coop_reduce_moves():
-        if p.needs_split and not p.coop_transposed:
-            # A cross-CTA split is offered on this tier only in COMPOSITE with the transposed band
-            # — every split candidate in the catalog is one, so this states the catalog's shape
-            # rather than adding a rule.
-            continue
+        if p.needs_split and not _splittable_axis(term, node):
+            continue  # the axis is already a slice — its cross-CTA partition was consumed
         if p.coop_transposed:
             # The band's own requirements: the geometry (shared with the contraction tier) plus
             # this tier's epilogue condition.
@@ -751,7 +817,7 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 # --- the contraction: tile x stage x reduce ---
 
 
-def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
+def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: list[str] | None = None) -> Stage | None:
     """The ONE transport-resolver dispatch — which operand edges and tier select.
 
     Any COMPUTED contraction operand takes the smem compute fill, which is MANDATORY (no byte
@@ -774,12 +840,18 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
             resolved = legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
             if resolved is not None:
                 return resolved
-        # Every other computed (or converting materialized) edge takes only the ``smem`` compute
-        # fill — a want naming an asynchronous byte transport declines rather than silently
-        # resolving to the fill.
+        # A computed (or converting materialized) edge takes only the ``smem`` compute fill — a
+        # want naming an asynchronous byte transport declines rather than silently resolving to
+        # the fill. The fill IS asynchronous on its B slabs; that ring is its own depth 2, so the
+        # decline names that spelling instead of leaving the caller hunting a smem budget.
         if want is not None and want.transport != "smem":
+            legal.decline(
+                why,
+                f"the smem compute fill has no {want.transport} sibling: a computed operand cannot ride a byte "
+                f"transport, and the fill's own asynchronous B-slab prefetch ring is spelled d2/smem",
+            )
             return None
-        return legal.resolve_fill_stage(node, tile, budget, want.depth if want is not None else 1, inputs=term.tile.inputs)
+        return legal.resolve_fill_stage(node, tile, budget, want.depth if want is not None else 1, inputs=term.tile.inputs, why=why)
     if want is None or (want.transport == "smem-tma" and not term.ctx.has_tma):
         return None
     if tile.is_warp:
@@ -816,9 +888,9 @@ def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     :func:`_legality.resolve_fill_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row.
 
-    A PACKED-PAIR k-block B (an NVFP4 weight's decode cone) offers the BYTE-SLAB rows beside them,
-    on either copy transport: the weight copies as raw packed bytes with a small decoded block-scale
-    slab, and the fragment drain does the decode. They are fork SIBLINGS of the compute fill, so a
+    A PACKED-PAIR k-block B (an NVFP4 weight's decode cone) is the one computed operand that DOES
+    have byte-transport siblings: its bits copy verbatim as raw packed bytes beside a small decoded
+    block-scale slab, and the fragment drain does the decode. Those rows sit beside the fill, so a
     shape the byte slab declines simply keeps the generic reading.
 
     A ``STAGE`` pin is authoritative and names ONE row, its transport saying which family it means:
@@ -826,15 +898,29 @@ def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     either of those on a node the byte slab declines — names a compute-fill depth."""
     packed = match_packed_b_node(node, term.tile.inputs) is not None
     pin = term.pin("STAGE", node)
+    if pin and not packed:
+        # A pinned spelling names a kernel, so its TRANSPORT cannot be quietly dropped and read as
+        # depth alone: an ordinary cone has no byte-transport sibling, and its own asynchronous
+        # B-slab prefetch ring is the depth-2 ``smem`` row, not ``smem-async``. A PACKED cone is
+        # the exception — it really does have those siblings — so it is excluded here.
+        pinned_stage = Stage.parse(pin)
+        if pinned_stage.transport != "smem":
+            legal.enforce(
+                f"the smem compute fill has no {pinned_stage.transport} sibling: a computed operand cannot ride a "
+                f"byte transport (nothing but the fill can evaluate a producer cone). Its own asynchronous B-slab "
+                f"prefetch ring is spelled d2/smem.",
+                pinned=True,
+            )
 
     def resolve(st: Stage) -> Stage | None:
-        r = _resolve_stage(term, node, tile, st)
-        # Only the FILL rows name the smem budget; a declined byte-slab row is the packed arm
+        why: list[str] = []
+        r = _resolve_stage(term, node, tile, st, why=why)
+        # Only the FILL rows name the fill's own limits; a declined byte-slab row is the packed arm
         # saying no, which the generic reading below covers.
         if r is None and st.transport == "smem":
             legal.enforce(
-                f"the smem compute fill does not resolve at depth {st.depth}: its slabs must fit the "
-                f"{term.ctx.max_dynamic_smem} B smem budget and its K chunk must tile the contraction K",
+                f"the smem compute fill does not resolve at depth {st.depth}: "
+                + (why[-1] if why else f"its slabs must fit the {term.ctx.max_dynamic_smem} B smem budget"),
                 pinned=pin is not None,
             )
         return r
@@ -896,7 +982,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     epilogue."""
     pin = term.pin("REDUCE", node)
     if pin is not None:
-        pinned = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
+        pinned = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
         if pinned.needs_split:
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
@@ -908,9 +994,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     ext = node.axis.extent
     k = ext.as_static() if ext.is_static else None
     # A cross-CTA split factors a STATIC K; either edge's σ-reindex then rides ``_sliced_edge``
-    # (a gmem index, or a computed cone's own k coordinate). Asked HERE and not only at
-    # materialization: ``_splitk_option`` enforces the same rule with ``pinned=True``, so a
-    # candidate the enumeration offered would otherwise become a raise instead of a dropped row.
+    # (a gmem index, or a computed cone's own k coordinate).
     splittable = k is not None and legal.enforce(legal.splitk_computed_b_site(node), pinned=False)
     if k is not None and not plan.is_tiled:
         inner = _inner_free(term.place)
@@ -924,7 +1008,7 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
             if not legal.enforce(legal.coop_band_geometry(p, k, inner), pinned=False):
                 continue
             out.append(p)
-    if splittable:
+    if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
         atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
@@ -989,7 +1073,7 @@ def _contraction_values(term: _Term, node, work: Workers | None) -> list[dict]:
     for plan in plans:
         for red in _contraction_reduces(term, node, plan):
             for stage in _stage_values(term, node, plan):
-                if work is not None and work.producer and not legal.enforce(legal.producer_transport(stage, red), pinned=False):
+                if work is not None and work.producer and not legal.enforce(legal.producer_transport(stage), pinned=False):
                     continue
                 out.append({"TILE": plan, "STAGE": stage, "REDUCE": red})
     return out
@@ -1452,8 +1536,17 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     reconstruct the absolute index; distinct names are what avoid a double-reduce."""
     legal.enforce(legal.splitk_width(k_axis, w), pinned=True)
     b = k_axis.extent.as_static() // w
-    ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
-    kslice = replace(k_axis, extent=Dim(b))
+    # LEADING UNDERSCORE, and it is load-bearing: ``normalize_body``'s ``canonicalize_free_axis_order``
+    # sorts a body's outer free-loop chain by axis NAME, so a partition axis spelled ``a3_ks`` sorts
+    # BELOW the row / column axes it must dominate and ``hoist_loop_invariants`` then sinks it between
+    # the column sweep and the K fold — a shape ``bind_prologue_contraction`` cannot parse, which
+    # costs a re-recognized split piece its computed-A binding (and its warp rows). ``_`` sorts ahead
+    # of every ``aN``, keeping the partition a LEAD grid axis, the same convention the residual path's
+    # ``_ksplit`` already relies on.
+    ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
+    # The slice carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes
+    # it, and an axis that is already a window of a parent is one nothing may partition again.
+    kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
     sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
     return ksplit, kslice, sigma
 
@@ -1470,36 +1563,30 @@ def _sliced_edge(edge, sigma: Sigma):
     return edge.with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
 
 
-def _splitk_option(
-    term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: str, knobs: dict, stage_spec: str, nested: Sequence[tuple] = ()
-) -> TileOp:
+def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: str, knobs: dict, nested: Sequence[tuple] = ()) -> TileOp:
     """One SPLIT-K contraction row — the structural ``Fold(axis=ksplit) ⊃ Fold(axis=kslice)``
     composition ``030_split_reduce`` consumes into the cross-CTA partial + finalize. The inner node
     is the SAME contraction a non-split matmul builds, over ``kslice`` with operands σ-reindexed to
     absolute k; the outer reduce is the IDENTITY-lift composition over it (``Fold.composed``).
 
-    Knob keying stamps against the PRE-SPLIT tree, keeping the kernel single-eligible-axis so the
-    golden bare-collapse and the prior featurizer stay invariant."""
+    It resolves NO STAGE. The split mints brand-new kernels that schedule themselves, so a
+    transport resolved here for the partial would be discarded at the splice — including the
+    smem-budget refusal a declining compute fill used to raise, which is the partial's own fork's
+    to make about the partial's own K. The TILE slice stays because the ROW needs it: ``WORK`` is
+    the inventory derived from a row's tile slices, and a row that seals none spells an empty
+    inventory."""
     if not plan.is_warp:
         legal.enforce(legal.scalar_block_threads(plan), pinned=True)
-    w = rplan.cta
-    legal.enforce(legal.splitk_slice_k_step(node, plan, w), pinned=True)
+    # The enumeration asks the same question with ``pinned=False`` (a dropped row); asked again
+    # here because a PINNED split never goes through it, and a computed-B cone the σ-reindex cannot
+    # carry must raise rather than silently mis-lower.
     legal.enforce(legal.splitk_computed_b_site(node), pinned=True)
-    ksplit, kslice, sigma = _factor_k(node.axis, w)
+    ksplit, kslice, sigma = _factor_k(node.axis, rplan.cta)
     inner = Fold.contraction(
         k_axis=kslice,
         a=_sliced_edge(node.a, sigma),
         channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma)) for ch in node.channels),
     )
-    placed = plan.placed_on(term.place)
-    # Resolved against the SLICED node, whose K is K/w. A computed-A partial's compute fill is
-    # MANDATORY, so it resolves whether or not the row spelled a depth — :func:`_resolve_stage`
-    # states that, and the enforce is what turns a declining fill into a loud row rather than a
-    # silently gmem-direct one.
-    stage = _resolve_stage(term, inner, placed, Stage.parse(stage_spec) if stage_spec else None)
-    if _needs_fill(term, inner, plan):
-        budget = term.ctx.max_dynamic_smem
-        legal.enforce(None if stage is not None else f"split-K: the fill slabs exceed the {budget} B smem budget", pinned=True)
     # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
     # operand, its combine the componentwise additive ⊕ over the same accumulator names — the
     # reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``.
@@ -1511,10 +1598,7 @@ def _splitk_option(
         **dict(zip(("init", "combine"), M(*(["add"] * len(accs)), names=accs), strict=True)),
     )
     op = Fold.projection(body=term.proj, operands=(outer,)) if len(term.proj) else outer
-    # The nested triples key against the PRE-SPLIT nodes the enumeration walked, which the split
-    # rewrite leaves untouched below the sliced contraction.
-    own = [("REDUCE", outer, rplan), ("TILE", inner, placed), ("STAGE", inner, stage)]
-    return _stamp(term, op, name, knobs, [*own, *nested])
+    return _stamp(term, op, name, knobs, [("REDUCE", outer, rplan), ("TILE", inner, plan.placed_on(term.place)), *nested])
 
 
 def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
@@ -1566,8 +1650,7 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     # invents a slice the codec cannot address.
     plan = resolve_site_tile(value("TILE"), work, rplan.coop) if "TILE" in keys else TilePlan()
     if is_contraction(node) and rplan.needs_split:
-        # The stage is re-resolved INSIDE against the sliced node, so it stays a spelling here.
-        return _splitk_option(term, plan, node, rplan, name, op_knobs, value("STAGE"), nested)
+        return _splitk_option(term, plan, node, rplan, name, op_knobs, nested)
     stage = _stage_of(term, node, plan, value("STAGE")) if value("STAGE") else None
     return _node_option(term, node, plan, rplan, stage, work, name, op_knobs, nested)
 

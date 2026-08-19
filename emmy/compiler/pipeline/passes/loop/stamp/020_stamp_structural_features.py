@@ -20,10 +20,15 @@ repeated through a model) featurize alike and share the prior's rows. The
 reserved ``S_`` prefix keeps them out of the tuning-knob view
 (``format_tuning_knobs``).
 
-This pass stamps during lowering; callers that build LoopOps outside the
-pipeline re-stamp via ``stamp._stamp.restamp_structural_features``. Idempotent:
-a LoopOp already carrying any ``S_`` knob is skipped, so the rewrite engine
-reaches fixed-point in one pass.
+Idempotent: a LoopOp already carrying any ``S_`` knob is skipped, so the rewrite
+engine reaches fixed-point in one pass. There is never a *re*-stamp — a kernel
+gets its identity once, at birth, and an op arriving here already stamped is one
+this pass has seen, not one to re-derive.
+
+This pass cannot reach a kernel minted LATER: the cursor never returns to an
+earlier pass. ``lowering/tile/005_stamp_structural_features`` is its twin for
+kernels born in the tile dialect, registering the same work against the same
+pattern — read it for why the job is duplicated rather than moved.
 
 Known limitation: the histogram is extent-free except for ``S_ext_*`` — two
 kernels with identical histograms but different write-index coalescing layouts

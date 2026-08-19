@@ -262,6 +262,23 @@ class Knob:
 _AXIS_FAMILIES = SLICE_FAMILIES  # the one list, defined in ``ir/tile/path.py``
 
 
+def decision_view(knobs: dict) -> dict:
+    """The DECIDED knobs of a row — everything that is not a FEATURE. A feature is a structural
+    ``S_*`` fact about the kernel or an ``H_*`` fact about the host/regime; neither is anything a
+    fork chose. So this is what a fork chose, in the values it chose: no canonicalization, no
+    ordering (see :func:`tuning_knob_items` for the rendered view).
+
+    This module owns the reserved prefixes, which is why the split lives here — a caller comparing
+    two kernels' decisions asks for the view rather than re-deriving what counts as one."""
+    return {k: v for k, v in knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
+
+
+def context_view(knobs: dict) -> dict:
+    """The ``H_*`` host/regime features of a row (GPU compute capability, nvcc opt level) — the
+    regime a measurement was taken in, which is what lets one global prior span every card."""
+    return {k: v for k, v in knobs.items() if k.startswith(CTX_PREFIX)}
+
+
 def family_of(key: str) -> str:
     """The knob family — the part before an ``@<axis>`` suffix (``TILE@d`` → ``TILE``); the whole key
     when unsuffixed."""
@@ -501,6 +518,21 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+
+
+def consume_kernel_row(knobs: dict) -> dict:
+    """``knobs`` with everything that described the kernel it came from removed — every SCHEDULE
+    family and every FEATURE (``S_*`` / ``H_*``).
+
+    A rule that splits or cuts a kernel calls this on the pieces it mints. What it takes out is
+    exactly what belongs to the kernel being replaced: the row it was scheduled with, and the
+    structural identity of the body it had. A piece is a brand-new kernel and must arrive with
+    neither — it is stamped and scheduled on its own, from its own body.
+
+    What it LEAVES is the rule's own decision stamp (``PLACE@<seam>: cut``), which is not
+    something inherited but the record of the choice being made, and any knob outside those
+    families that the rewrite computed for the piece itself."""
+    return {k: v for k, v in knobs.items() if family_of(k) not in SCHEDULE_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
 
 
 #: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare

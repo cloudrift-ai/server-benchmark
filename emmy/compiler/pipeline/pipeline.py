@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork, OptionFork
-from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, format_tuning_knobs
+from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -623,9 +623,9 @@ class Pipeline:
             n_terminals += 1
             if backend is not None:
                 logger.info("[tune] variant #%d  [%s]", n_terminals, variant_label(cand.graph))
-            stats, status, measured = await _bench_terminal_async(cand, backend=backend, db=run.db)
+            stats, status, measured, per_kernel = await _bench_terminal_async(cand, backend=backend, db=run.db)
             search.note_bench(measured=measured)
-            search.observe(token, stats, status, candidate=cand)
+            search.observe(token, stats, status, candidate=cand, kernels=per_kernel)
             if backend is not None and getattr(search, "last_o3_worthy", False):
                 o3_us = await _rebench_o3_async(cand, backend)
                 if o3_us is not None:
@@ -948,21 +948,20 @@ def _concrete_option(option: object) -> object | None:
 
 
 def _option_decision(option: object, root_knobs: dict) -> dict | None:
-    """The decision-knob delta one raw structural-fork option would stamp vs
-    the offer op: non-``S_*`` knob keys the option's op / fork knobs **add or
-    change** vs the offer (a ``Graph`` option reads the union over its nodes'
-    op knobs — fragment kernels restamp their own ``S_*``, which describe the
-    child bodies, not the decision). A *changed value* on an existing key counts
-    (e.g. the cross-CTA finalize fork mutates the ``REDUCE`` codec's ``g``
-    field from a bare ``g<cta>`` to ``g<cta>a`` / ``g<cta>k`` — same key, new
-    value), not only a brand-new key. ``None`` when the option stamps nothing new."""
+    """The decision-knob delta one raw structural-fork option would stamp vs the offer op: the
+    DECIDED knobs (:func:`~emmy.compiler.pipeline.knob.decision_view` — features are facts, not
+    decisions) the option's op / fork knobs **add or change** vs the offer. A ``Graph`` option
+    reads the union over its nodes' op knobs: a fragment's kernels are brand-new ones carrying only
+    their own restamped features plus whatever decision the rule stamped, so that union IS the
+    decision. A *changed value* on an existing key counts, not only a brand-new key. ``None`` when
+    the option stamps nothing new."""
     if isinstance(option, Graph):
         knobs: dict = {}
         for node in option.nodes.values():
             knobs.update(getattr(node.op, "knobs", None) or {})
     else:
         knobs = getattr(option, "knobs", None) or {}
-    delta = {k: v for k, v in knobs.items() if root_knobs.get(k) != v and not k.startswith("S_")}
+    delta = {k: v for k, v in decision_view(knobs).items() if root_knobs.get(k) != v}
     return delta or None
 
 
@@ -980,42 +979,49 @@ def _choice_knobs(choice: object, option: object, root_op) -> dict:
 
 
 def _replay_structural_decision(graph: Graph, root_op, options: list) -> object | None:
-    """The concrete option a structurally identical, already-decided offer
-    site on this trajectory took — or ``None`` (undecided / unmatchable →
-    fork normally).
+    """The concrete option a structurally identical, already-decided offer site on this trajectory
+    took — or ``None`` (undecided / unmatchable → fork normally).
 
-    The earlier decision is read off the candidate's own graph, not a
-    side-table: a decided site leaves its evidence in the IR by contract —
-    every structural rule stamps its decision knob onto the surviving ops
-    (the ``CUT`` considered-vs-declined idiom), and those ops chain to
-    the pre-decision offer op via the engine-owned ``Op.source`` (stamped
-    unconditionally on rebinds, stamped across loop-dialect splices,
-    preserved by ``_rename_buf_in_op``). So: find any op carrying every
-    decision knob whose source chain contains an op structurally identical
-    to this offer (same ``Op.cache_key``), and replay the option whose delta
-    matches its stamped values. Matching by decision-knob agreement (not a
-    stored option index) survives rules reordering their emissions."""
+    Read off the candidate's own GRAPH, with no side table and no stamped marker: a structural
+    decision is CONSUMED by the rewrite that realizes it, so what it chose is not recorded anywhere
+    afterwards — the node set IS the record. A site that cut holds two kernels where it held one,
+    and that is the whole of the evidence.
+
+    So: find the kernels whose ``Op.source`` chain reaches an op structurally identical to this
+    offer (same ``Op.cache_key`` — the engine stamps ``source`` unconditionally on rebinds and
+    across loop-dialect splices, and ``_rename_buf_in_op`` preserves it), count them, and replay
+    the option that produces that many. This keeps the tune tree linear in UNIQUE kernels rather
+    than ``2^sites`` — one decision for 28 identical per-layer seams.
+
+    Counting is the only comparison available. The earlier site's pieces have since been recognized
+    into the tile dialect while a fresh option's are still loop-dialect, so their structural digests
+    are not comparable term-for-term. When two options would produce the SAME count — several legal
+    seams on one tree, each cutting into a producer and a consumer — the evidence does not
+    distinguish them, and this answers ``None`` so the fork is offered normally. Correctness never
+    depended on the replay; only the tree's width does."""
     key = root_op.cache_key()
     if key is None:
         return None
-    deltas = [(opt, _option_decision(opt, root_op.knobs)) for opt in options]
-    decision_keys = {k for _, d in deltas if d for k in d}
-    if not decision_keys:
-        return None
+    produced = 0
     for node in graph.nodes.values():
-        knobs = getattr(node.op, "knobs", None)
-        if not knobs or not decision_keys <= set(knobs):
-            continue  # undecided or unrelated op — the cheap pre-filter
+        if node.op.cache_key() is None:
+            continue  # not a kernel
         chain = node.op.source_chain()
-        next(chain)  # the op itself — its key differs from the pre-decision key by the stamp
-        if not any(anc.cache_key() == key for anc in chain):
-            continue
-        found = {k: knobs[k] for k in decision_keys}
-        for opt, delta in deltas:
-            if delta == found:
-                return _concrete_option(opt)
-        return None  # decided, but no option matches (emission drift) — fork normally
-    return None
+        next(chain)  # the op itself — its key differs from the pre-decision key by later stamps
+        if any(anc.cache_key() == key for anc in chain):
+            produced += 1
+    if not produced:
+        return None  # this site is undecided on this trajectory
+    matches = []
+    for opt in options:
+        concrete = _concrete_option(opt)
+        if isinstance(concrete, Graph):
+            n = sum(1 for node in concrete.nodes.values() if node.op.cache_key() is not None)
+        else:
+            n = 1
+        if n == produced:
+            matches.append(concrete)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _unlowered_tiles(graph: Graph, rejections: list[tuple[str, str, str]]) -> dict[str, frozenset]:
@@ -1169,6 +1175,14 @@ class _TerminalBench:
         # for the whole matmul).
         self.unlowered = [nid for nid in order if not isinstance(self.graph.nodes[nid].op, (CudaOp, InputOp, ConstantOp))]
         self.backend_name = getattr(backend, "name", "stub")
+        #: Per-KERNEL measurements, ``[(knobs, median_us, status), ...]`` in launch order — what
+        #: the search trains its prior on. A terminal is a Σ over its kernels; when a structural
+        #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
+        #: the total to. Each kernel carries its own decisions and earns its own sample.
+        self.per_kernel: list[tuple[dict, float, str]] = []
+
+    def _note(self, op, stats, status: str) -> None:
+        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
 
     @staticmethod
     def _point_stats(us: float):
@@ -1327,10 +1341,11 @@ class _TerminalBench:
             logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(self.cuda_nodes))
             agg = None
             status = "ok"
-            for row in cached_rows:
+            for node, row in zip(self.cuda_nodes, cached_rows, strict=True):
                 if row.status != "ok":
                     status = row.status
                 agg = self._accumulate(agg, row.stats)
+                self._note(node.op, row.stats, row.status)
                 logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
             return "done", (agg or self._point_stats(0.0), status)
 
@@ -1343,8 +1358,9 @@ class _TerminalBench:
             # Tests that need lowering edges in stub mode should pass an
             # explicit stub backend.
             agg = None
-            for _node in self.cuda_nodes:
+            for node in self.cuda_nodes:
                 agg = self._accumulate(agg, self._point_stats(1.0))
+                self._note(node.op, self._point_stats(1.0), "ok")
             return "done", (agg or self._point_stats(0.0), "ok")
 
         logger.info("[tune] benching %d kernel(s) in graph", len(self.cuda_nodes))
@@ -1362,6 +1378,7 @@ class _TerminalBench:
         agg = None
         for node in self.cuda_nodes:
             self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
+            self._note(node.op, s, "bench_fail")
             agg = self._accumulate(agg, s)
         return agg or self._point_stats(0.0), "bench_fail"
 
@@ -1378,11 +1395,13 @@ class _TerminalBench:
             s = self._point_stats(avg_us)
             for node in self.cuda_nodes:
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
+                self._note(node.op, s, "ok")
                 agg = self._accumulate(agg, s)
         else:
             for node, lt in zip(self.cuda_nodes, per_launch, strict=True):
                 s = self._stats_from_launch(lt)
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
+                self._note(node.op, s, "ok")
                 agg = self._accumulate(agg, s)
         try:
             import cupy as _cp  # noqa: PLC0415
@@ -1395,21 +1414,22 @@ class _TerminalBench:
 
 
 async def _bench_terminal_async(cand, *, backend, db):
-    """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` /
-    inventory / lowering rows, and return ``(stats, status)`` where ``stats`` is the
-    per-kernel ``PerfStats`` summed across the graph (total terminal latency), plus
-    whether a live backend measurement was required. The
+    """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
+    rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
+    ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
+    backend measurement was required, and ``per_kernel`` the ``(knobs, median_us, status)`` of each
+    kernel — the terminal's Σ decomposed into the rows that earned it. The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`_TerminalBench`."""
     b = _TerminalBench(cand, backend=backend, db=db)
     kind, payload = b.prelude()
     if kind == "done":
-        return *payload, False
+        return *payload, False, b.per_kernel
     try:
         result = await backend.benchmark_async(b.graph, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
-        return *b.finalize_exc(exc), True
-    return *b.finalize_result(result), True
+        return *b.finalize_exc(exc), True, b.per_kernel
+    return *b.finalize_result(result), True, b.per_kernel
 
 
 __all__ = ["Decision", "ForkPoint", "LoweringError", "Match", "Pass", "Pattern", "Pipeline", "Rule", "RuleSkipped"]

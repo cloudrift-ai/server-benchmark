@@ -5,7 +5,9 @@
    the kernel to a ``TileOp`` carrying ONE op-tree — a ``Fold`` / contraction term — with an
    **unmapped** placement (its parallel ``free`` axes). After this nothing downstream traffics
    in ``LoopOp``. The ``_softmax`` helper holds the streaming-softmax fusion, ``_atomize`` the
-   algebra→atom binding, ``_cut`` the placement cut.
+   algebra→atom binding, ``_cut`` the placement cut. An UNSTAMPED ``LoopOp`` is deferred — a kernel
+   minted here reaches ``005`` before anything recognizes it, which the scan alone does not
+   guarantee.
 2. **Schedule** (``020_schedule``) — decide that op's ``place`` (free axes → grid) and its per-node
    ``schedule`` slices, and offer them as a fork. ONE generic row enumerator (``_schedule``): the
    kernel's single ``WORK`` inventory is CHOSEN first, then a recursive walk of the site tree hands

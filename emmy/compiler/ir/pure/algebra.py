@@ -1,6 +1,6 @@
 """The fold algebra's IR core — the TRUE monoid ``(init, combine)``, spelled ONCE.
 
-The algebra of a kernel lives on the :class:`~emmy.compiler.ir.tile.ir.Fold` node as the flat
+The algebra of a kernel lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node as the flat
 ``combine`` :class:`Lambda` (``S × S → S`` — ONE program, its params ``(s₁…sₙ, s₁′…sₙ′)``, its
 results the merged state) plus the stored ``init`` seeds; every derived program — the streaming
 step, the cross-partition combine, the cooperative tree — is read off it structurally where it
@@ -15,7 +15,7 @@ is consumed. This module holds only what the STORED TERM itself needs:
 - :func:`eval_lambda` / :func:`foldmap_eval` — the denotational spec oracle the agreement +
   associativity property tests run against.
 
-The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.stmt.carrier`; the
+The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.pure.carrier`; the
 lowering-side derivations (state⊕state re-emission, finalize seeds) live with their one consumer
 (``pipeline/passes/lowering/_reduction``). The old ``Monoid`` / ``Semiring`` node wrappers, the
 ψ-conjugation apparatus (``Carrier`` / ``Twist`` / ``State``) and the loop-annotation ``Algebra``
@@ -24,9 +24,13 @@ bundle are all retired: the node's stored combine is the single spelling of ⊕.
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt.body import Body, Lambda
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.pure.carrier import exp_combine_states
+from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.leaves import Accum, Assign
 
 # --------------------------------------------------------------------------------------------
 # The TRUE monoid — ``(init, combine)``, ONE program, stored FLAT on the ``Fold`` node.
@@ -98,7 +102,6 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     its internal temps are namespaced on the state spelling, and regeneration is the
     deterministic rule that keeps the stored program equal to the generator's output (the
     formation invariant the consuming ``Fold`` asserts)."""
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states  # noqa: PLC0415
 
     def rn(name: str) -> str:
         if name.endswith("__o"):
@@ -117,6 +120,35 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
         body=Body(tuple(st.rewrite(rn) for st in combine.body)),
         results=tuple(rn(r) if isinstance(r, str) else r for r in combine.results),
     )
+
+
+# --------------------------------------------------------------------------------------------
+# The one STATEMENT realization of a stored combine — a pure term never occupies a statement
+# position, it renders into one (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
+# --------------------------------------------------------------------------------------------
+
+
+def merge_stmts(combine: Lambda, other: tuple[str, ...]) -> tuple[Stmt, ...]:
+    """The cross-partition state⊕state combine, realized as loop-IR statements: ``combine``
+    applied at ``S × S → S`` with its second operand naming ``other`` — a second FULLY-REDUCED
+    state (a REG copy ``<n>__r1``, a tree neighbour's partial, a workspace slice ``<n>__p``).
+    Emitted wherever a partitioned reduce has to fold its partials together: the REG-tree merge,
+    the cooperative tail, the cross-CTA finalize loop.
+
+    Both families land on the same shape — ``Assign`` rescale temps followed by one ``Accum`` per
+    state component. The ``Accum`` is doing two jobs: it renders the in-place reassignment
+    ``s = ⊕(base, value)``, and it carries the neutral element, so the seed comes from the ONE
+    identity placement (``Loop.render``) and never has to travel beside the combine. A DEGENERATE
+    ⊕ needs no temps at all — one self-``Accum`` per component. A TWISTED one is REGENERATED in
+    ``Accum`` form keyed on ``other[0]``: its temps are namespaced on the second operand's
+    spelling, so two merges of different partials into one state cannot collide. Regenerating
+    rather than patching is the same rule :func:`rename_combine` follows — a generated program is
+    the deterministic function of its state names."""
+    names = tuple(r for r in combine.results if isinstance(r, str))
+    ops = component_ops(combine)
+    if ops is None:
+        return exp_combine_states(names, other, key=other[0], accum=True)
+    return tuple(Accum(name=n, value=o, op=op, dtype=F32) for n, op, o in zip(names, ops, other, strict=True))
 
 
 # --------------------------------------------------------------------------------------------
@@ -147,4 +179,4 @@ def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:
     return state
 
 
-__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "rename_combine"]
+__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "rename_combine"]

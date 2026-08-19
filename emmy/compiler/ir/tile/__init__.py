@@ -8,8 +8,9 @@ a contraction, with computed operands stored inline on their edges) plus
 node's derived ``Fold.role``, no per-kind type.
 """
 
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import FoldMove, Level, Placement, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import Channel, Fold, Store, TileOp, effect_tail, split_effects
+from emmy.compiler.ir.tile.ir import Store, TileOp, effect_tail, split_effects
 
 __all__ = [
     "Channel",

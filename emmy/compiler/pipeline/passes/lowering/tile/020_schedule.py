@@ -7,11 +7,13 @@ THIS rule picks that up and decides the schedule — the free-axis → grid mapp
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families — through the ``_schedule``
 helper's ONE recursive row enumerator over the term's own site tree.
 
-Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by three
-routes — the ordinary lift, flash's graph rewrite, and a placement cut's re-recognized pieces — and
-all three converge here. The engine restarts its rule scan after every functional rewrite, so a
-``TileOp`` this pass's ``010`` just emitted is matched here on the next sweep, exactly as
-``030_split_reduce`` already matches the ``TileOp``\\ s this rule produces.
+Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
+several routes — the ordinary lift, flash's graph rewrite, a placement cut's re-recognized pieces,
+a cross-CTA split's partial and finalize — and all of them converge here. The engine restarts its
+rule scan after every functional rewrite, so a ``TileOp`` this pass's ``010`` just emitted is
+matched here on the next sweep, and so is every unmapped ``TileOp`` a structural rewrite minted.
+That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
+like any other, and this rule cannot tell them apart.
 
 **Empty enumeration is a skip, not a failure.** A term the enumerator cannot schedule leaves the
 ``TileOp`` unmapped and the materializer lowers it on its per-cell path. That is the guardrail
@@ -28,7 +30,9 @@ from emmy.compiler.pipeline.fork import Fork
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
-# pass. Pin reads / knob-key spelling ride the enumerator's helpers instead.
+# pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
+# are plain strings and a function, which that scan does not see.
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
 PATTERN = [Pattern("root", TileOp)]
@@ -39,6 +43,15 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
+    # This pass DECIDES, so it requires the kernel's identity. Every row it enumerates carries the
+    # ``S_*`` stamp forward, and that is what the prior ranks on, what a recorded golden matches by,
+    # and what the measurement is later filed under — decide without it and the fork's pick is made
+    # against an empty signature that matches every kernel and identifies none. ``005_stamp`` runs
+    # ahead of this rule for exactly that reason, so an unstamped kernel here is a pass-order
+    # break, not a case to handle.
+    assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
+        f"{tile.name!r}: scheduling a kernel with no structural identity — 005_stamp must run first"
+    )
     rows = schedule(tile, tile.name, tile.knobs, ctx)
     options = rows if isinstance(rows, list) else [rows]
     if not options:

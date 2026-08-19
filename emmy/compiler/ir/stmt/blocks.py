@@ -60,7 +60,7 @@ class Loop(Stmt):
     ``role`` is the axis's scheduling :class:`~emmy.compiler.ir.axis.AxisRole`
     (``FREE`` / ``PLANAR`` / ``CONTRACTION`` / ``TWISTED``), stamped by tile-lowering
     detection (the unannotated default is ``FREE``). The loop carries NO algebra — the fold's ⊕
-    lives on the :class:`~emmy.compiler.ir.tile.ir.Fold` node's stored ``combine``, and the
+    lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's stored ``combine``, and the
     dissolved fold ``Accum``\\ s in the body are the loop-level spelling.
     """
 
@@ -111,9 +111,11 @@ class Loop(Stmt):
         # immediate body — the seed rides on the fold, derived here from ``op.identity`` at
         # the fold's ``dtype`` (so fp32-over-fp16 declares ``float acc = 0.0f;``, a fp16
         # ``max`` declares ``__half acc = __float2half(0.0f);``), no explicit ``Init``. This
-        # is the SINGLE seed-placement path: a reduce ``Loop``'s body already holds the loose
-        # fold ``Accum``\\ s (dissolved at recognition), so there
-        # is never a carrier stmt to special-case here. A nested fold re-declares per enclosing
+        # is the SINGLE seed-placement path, and ``Accum`` is the ONLY stmt it reads: a reduce
+        # ``Loop``'s body already holds the loose fold ``Accum``\\ s (dissolved at recognition),
+        # and a cross-partition combine reaches a statement position only by rendering itself to
+        # ``Accum``\\ s (``algebra.merge_stmts``), so no neutral element ever travels on a term and
+        # there is no second carrier kind to special-case. A nested fold re-declares per enclosing
         # iteration (scope-local shadowing), so a same-named outer carrier is harmless. This
         # is the *serial* schedule's placement; a cooperative / cross-CTA realization reads
         # the same fold ``Accum``\\ s' ``op.identity`` to seed its partials.

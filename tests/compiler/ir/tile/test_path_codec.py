@@ -12,9 +12,8 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel
-from emmy.compiler.ir.tile.ir import Fold
 from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -70,8 +69,8 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
     reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
     ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
     the blocked evaluation, found among ``stream.step_stmts()``."""
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
 
     qk = _contraction_fold("dd", acc="sacc", w="K")
     names = ("m_i", "l_i", "O_i")

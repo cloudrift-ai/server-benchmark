@@ -34,11 +34,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import Fold
-from emmy.compiler.ir.tile.ir import operand_name
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.pipeline.passes.lowering.tile._atomize import match_packed_b_node
@@ -51,6 +50,12 @@ _TMA_ALIGN = 16  # the NONE-swizzle box-copy rule: 16 B-aligned inner dim and in
 
 # cp.async needs a >= 4 B contiguous chunk, so a 2 B/elem slab's inner dim must be even.
 _CP_ASYNC_MIN_ELEMS = 2
+
+
+def decline(why: list[str] | None, reason: str) -> None:
+    """Record a tier's refusal reason for a caller that will report it (a pinned candidate)."""
+    if why is not None:
+        why.append(reason)
 
 
 def enforce(reason: str | None, *, pinned: bool) -> bool:
@@ -93,14 +98,17 @@ def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
     return None
 
 
-def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
+def producer_transport(stage: Stage | None) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
     mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
-    async load half) on a kernel that is not split across CTAs."""
+    async load half).
+
+    It used to also refuse a cross-CTA split as "not co-representable", and took the row's
+    ``ReducePlan`` for that alone. A split now mints brand-new kernels that schedule themselves, so
+    a split row's band never reaches a kernel at all, and a partial that wants one asks for it at
+    its own fork like any other kernel."""
     if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
-    if reduce.needs_split:
-        return "a producer band and a cross-CTA split-K are not co-representable"
     return None
 
 
@@ -212,21 +220,6 @@ def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
         f"warp TILE K-step {step} (atom_k={plan.atom.atom_k}*bk={plan.bk}) does not divide the static "
         f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
         f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
-    )
-
-
-def splitk_slice_k_step(node: Fold, plan: TilePlan, width: int) -> str | None:
-    """After a cross-CTA split the inner contraction sees ``K/width``, which must still be a
-    multiple of the mma K-step."""
-    if not plan.is_warp:
-        return None
-    step = plan.atom.atom_k * plan.bk
-    ks = node.axis.extent.as_static() // width
-    if ks % step == 0:
-        return None
-    return (
-        f"split-K slice K={ks} (K/{width}) is not a multiple of the mma K-step {step} "
-        f"(atom_k={plan.atom.atom_k}*bk={plan.bk}); pick a split width whose slice is divisible."
     )
 
 
@@ -576,7 +569,9 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting_a
     return None
 
 
-def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1, inputs=None) -> Stage | None:
+def resolve_fill_stage(
+    c: Fold, tile: TilePlan, budget: int, want_depth: int = 1, inputs=None, why: list[str] | None = None
+) -> Stage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
     cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
@@ -590,13 +585,24 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     overlap, it runs on the drain's own threads. Measured on the gemma gate_up edge at M=512 (5090)
     the ring LOSES (897 vs 665 µs) — the extra B slot alone crosses the smem occupancy quantization
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
-    so both depths are enumerated as fork siblings and measured per shape."""
+    so both depths are enumerated as fork siblings and measured per shape.
+
+    ``why`` collects the decline reason when the tier refuses, so a PINNED caller reports the gate it
+    actually hit instead of one catch-all sentence."""
     atom = tile.atom
     if atom.operand_dtype("a").nbytes < 2:
-        return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
+        # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
+        decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
+        return None
     bk_elems = tile.bk * atom.atom_k
     if c.axis.extent.is_static and c.axis.extent.as_static() % bk_elems:
-        return None  # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
+        # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
+        decline(
+            why,
+            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
+            f"does not divide the contraction K={c.axis.extent.as_static()}",
+        )
+        return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
     _, _, stats = cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
@@ -618,6 +624,7 @@ def resolve_fill_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
     if sync_bytes + async_bytes > budget:
+        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes} B, over the {budget} B smem budget")
         return None
     depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
     computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
@@ -681,11 +688,11 @@ __all__ = [
     "producer_band",
     "producer_transport",
     "resolve_scalar_stage",
+    "decline",
     "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
     "splitk_computed_b_site",
-    "splitk_slice_k_step",
     "splitk_width",
     "stage_target",
     "strip_width",

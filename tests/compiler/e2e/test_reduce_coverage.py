@@ -32,7 +32,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
 from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
 from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import requires_cuda
@@ -302,6 +302,11 @@ _CROSS_CTA = {
     "sum": {"op": "sum", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},
     "flash": {"op": "attention", "flash": True, "tol": 2e-3, "finalizes": ("kernel",)},
 }
+# The TWISTED carrier survives the Tile→Loop→Tile round-trip: its cross-partition combine reaches
+# the finalize as ordinary ``Assign`` temps + ``base``-``Accum``\ s (``StateMerge.stmts``), so the
+# generic rename / liveness / identity placement all see it. While the combine travelled as one
+# opaque stmt instead, its temps escaped the SSA rename and the finalize came out wrong
+# (max abs err 0.42 against this 2e-3 tolerance).
 _CROSS_CTA_CASES = [(carrier, fin) for carrier, spec in _CROSS_CTA.items() for fin in spec["finalizes"]]
 
 
@@ -425,10 +430,11 @@ def _unrelated_reduce_pair() -> Body:
 def test_exp_family_generator_builds_asymmetric_monoid() -> None:
     # state (m, d), partial (s); the asymmetric LSE monoid's streaming merge folds exactly the
     # injected score, and the cross-partition state⊕state combine is generated from the same spec.
-    from emmy.compiler.ir.stmt.leaves import _merge_reads
-
+    # The merge's external read set is read through the ordinary per-stmt ``deps()`` — a generated
+    # program is a run of ordinary stmts, so nothing has to surface its reads specially.
     merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
-    assert _merge_reads(merge, ("m", "d")) == ("s",)
+    reads = {r for st in merge for r in st.deps()} - {st.name for st in merge} - {"m", "d"}
+    assert reads == {"s"}
     assert exp_combine_states(("m", "d"), ("m__o", "d__o")), "combine_states must be derived for the asymmetric LSE monoid"
 
 

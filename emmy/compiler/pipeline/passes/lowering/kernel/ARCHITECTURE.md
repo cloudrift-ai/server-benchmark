@@ -217,7 +217,10 @@ fragment store (`RegStore` + `RegEpilogue`) and written straight into the slab t
 second mma emitter: the score is a contraction, so it is built out of the SAME atom strategy (`_atom_ops` on the score
 node — `state` declares the fragments, `reduce` emits the `ldmatrix` + `mma.sync` K-loop, `store` writes them),
 namespaced (`_AtomOps.frag_ns`) so the nested fragments never shadow the accumulators the enclosing drain carries
-across the same loop. The slab stays NONE-swizzle there — a fragment store applies no address XOR.
+across the same loop. That slab SWIZZLES like every other one: the fragment store applies the same flattened-index XOR
+the `ldmatrix` drain undoes (`RegStore.swizzle`, stamped through the fill's `Write`), so the weight tile costs no more
+bank conflicts than the operands beside it. The nested score's own staged operands (its per-chunk keys, its
+loop-invariant query tile) carry their mode on the cp.async fill the same way.
 
 The chained fill takes one of two forms, and the first is preferred wherever it reads:
 

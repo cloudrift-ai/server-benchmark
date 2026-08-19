@@ -45,37 +45,54 @@ softmax reduce. This file pins every tier of it:
   | S=2048 D=64  |  60.6 |      140.8 | 97.0  |               148.3 |
   | S=2048 D=128 | 117   |      162   | 190.8 |               273   |
 
-  So the fused arm beats the graph the refusal preserves at every ``D ≤ 64`` and beats torch at
-  every ``D`` at ``S = 512``, and still loses at ``D = 128`` — which is why loop fusion continues to
-  refuse the merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no
-  ``PLACE`` cut puts a two-consumer producer back together).
+  So on that card the fused arm beat the graph the refusal preserves at every ``D ≤ 64`` and beat
+  torch at every ``D`` at ``S = 512``, and lost at ``D = 128`` — which is why loop fusion continues
+  to refuse the merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no
+  ``PLACE`` cut puts a two-consumer producer back together). Those rows PREDATE the slab-swizzle
+  fix below and have not been re-measured; the A100 rows have.
 
-  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, the same measurement protocol) the ``D = 128``
-  conclusion does NOT hold — the fused arm wins there once the schedule is right, and the cold pick
-  is what loses:
+  All four of the fused kernel's slabs SWIZZLE. Three of them did not: the score's own staged
+  operands and the weight tile the ``ldmatrix`` drain reads were left plain row-major, and at
+  ``D = 128`` their 256 B rows drained ~32-way bank-conflicted — 78% of the kernel's shared
+  wavefronts were conflict replays, L1/TEX sat at 80% against 7% compute, and THAT, not the tile,
+  was the ``D = 128`` wall. Three things had to hold at once, each worth measuring on its own
+  (A100, f16, ``(1, 8, 1024, 128)``, ``w4x1``/``f1x16``/``k8``): the score's key and query slabs
+  swizzling on their ``cp.async`` fill (108.7 → 84.8 us), the weight tile swizzling on its FRAGMENT
+  store (84.8 → 64.9 — its ``RegStore`` had no mode to carry, and the per-cell store rewrite
+  dropped the one it was given), and the XOR shifting by the slab's own ROW rather than by the
+  swizzle atom (64.9 → 50.1 at the best schedule). The last is why the D-sweep above looks the way
+  it does: the fixed shift reads the row index only while a slab row IS one 128 B atom, so
+  ``D ≤ 64`` was always conflict-free and only ``D = 128`` paid — ncu measures 7.8-way at
+  ``D = 128`` and none at ``D = 64`` on the same kernel.
 
-  | shape        | torch | two-kernel | fused (cold pick) | fused (best ``WORK`` pinned) |
-  | ------------ | ----- | ---------- | ----------------- | ---------------------------- |
-  | S=256 D=128  |  14   |       45   |          **20.8** | **20.8** (``w4x1``)          |
-  | S=512 D=128  |  27   |      131   |             295   | **56.9** (``w4x1``)          |
-  | S=1024 D=128 |  54   |      188   |             310   |   226   (``w8x1``)           |
+  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, ``EMMY_PLACE=fuse``, serial ``REDUCE``, empty
+  tune DB and prior) the ``D = 128`` conclusion does NOT hold — the fused arm beats torch at the
+  short shapes and reaches parity at ``S = 1024``:
 
-  The cold pick lands on ``w8x2`` (129.5 KB of slabs, one block per SM) where ``w4x1`` takes 80 KB;
-  that one knob is 5.2x at ``S = 512``. Two consequences for the campaign: the fused form is already
-  worth deploying at ``D = 128`` on this card, and what stands between it and the default is the
-  schedule pick rather than the kernel. Structurally the merged tree IS reversible here —
-  with the merge allowed, ``EMMY_PLACE=cut`` lowers back to two kernels and both arms pass
-  ``run --bench --strict`` — but the recovered split is not the good one (909 us at ``S = 256``
-  against the default's 45), so pricing fused against cut needs the cut arm's own schedule
-  evidence before the refusal can be lifted.
+  | shape        | torch | fused (best schedule pinned)     |
+  | ------------ | ----- | -------------------------------- |
+  | S=256 D=128  |  13   | **9.0**  (``w4x1``/``f1x8/k8``)  |
+  | S=512 D=128  |  24   | **19.0** (``w4x1``/``f1x16/k8``) |
+  | S=1024 D=128 |  48   |   50.1   (``w8x1``/``f1x16/k8``) |
+  | S=2048 D=128 | 133   |  179.0   (``w4x1``/``f1x16/k8``) |
+
+  Emmy's column repeats to ±0.2 us across runs; torch's drifts a few percent, and more at
+  ``S = 2048`` (132-148 observed). The COLD pick is a separate matter and this changed nothing
+  about it: unpinned it lands on ``f1x8`` at every shape, which happens to be the best schedule at
+  ``S = 256`` (9.0) and is 231 us at ``S = 512``.
+
+  Structurally the merged tree IS reversible here — with the merge allowed, ``EMMY_PLACE=cut``
+  lowers back to two kernels and both arms pass ``run --bench --strict`` — but the recovered split
+  is not the good one (909 us at ``S = 256`` against the default's 45), so pricing fused against cut
+  needs the cut arm's own schedule evidence before the refusal can be lifted.
 
   The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
   of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
   ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (323 cold vs
-  190.8 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left after
-  them at ``D = 128`` is no longer the score's memory path — staging took L1/TEX from 96% to 89% —
-  but the tile itself: 254 registers per thread and four slabs cap the kernel at ONE block per SM,
-  and compute utilization sits at 16%. The reference kernel below is the target form's spec.
+  190.8 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left at
+  ``D = 128`` after the swizzles is no longer the shared path either: L1/TEX fell from 80% to 61%
+  and compute rose from 7% to 24%, and the residual grows with ``S`` — the two long shapes are
+  where the fused arm still trails. The reference kernel below is the target form's spec.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →
@@ -85,6 +102,8 @@ GPU accuracy in the correctness lane; the warp-tier needs sm_90+ where pinned.
 """
 
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pytest
@@ -262,6 +281,18 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
     # silent regression a numerics assert would never catch.
     assert "emmy_mma_load_b_gmem_trans" in src, "the composed score is not on the mma tier (chained A fill)"
     assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence (chained statistic)"
+    # Every slab is addressed through ONE swizzle mode — all of its uses XOR, or none do. Which
+    # mode a slab picks is the schedule's business (a row too narrow for any atom stays NONE), but
+    # a MIXED slab is a silently WRONG kernel, not a slow one: it stores row-major under a drain
+    # that reads permuted. The weight tile is where that bites, because its producer is a fragment
+    # store rather than a copy — its mode rides ``RegStore.swizzle``, and the per-cell store
+    # rewrite dropped exactly that field.
+    slabs = set(re.findall(r"__shared__[^;]*?(\w+_smem)\[", src))
+    assert slabs, "the fused kernel stages no slab"
+    for slab in slabs:
+        uses = len(re.findall(rf"(?<!\w){slab}\[", src)) - 1  # every use but the declaration
+        swizzled = len(re.findall(rf"(?<!\w){slab}\[emmy_swizzle_", src))
+        assert swizzled in (0, uses), f"{slab}: {swizzled} of {uses} uses swizzle — producer and drain disagree"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"fused sdpa{cfg} vs torch max_diff={md:.6e}"
 

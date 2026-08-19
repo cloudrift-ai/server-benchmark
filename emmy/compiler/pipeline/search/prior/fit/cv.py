@@ -6,13 +6,18 @@ building, which needs the snippet tracer ``pipeline/`` must not import) and prod
 run's metrics dict, so every piece here is testable on synthetic cases with no tracing.
 
 The report is standard grouped cross-validation: individual folds are construction machinery;
-the pooled tables are the result. Each golden is held out exactly ONCE — its ``holdout`` rank
+the pooled tables are the result. Each CASE is held out exactly ONCE — its ``holdout`` rank
 comes from the single fold model that never trained on it, its ``train`` rank is the median
 across the fold models that did — and the per-card ``gap`` (holdout median − train median)
 separates overfitting (train good, holdout bad) from a too-weak model class (both bad,
 small gap). Per-fold medians survive only in ``fold_detail`` as the spread/noise view,
 plus ``excluded`` folds with reasons: a fold whose training slice can't fit a weight set
 the holdout needs is dropped loudly, never scored with a stale or empty vector.
+
+A case is ONE candidate pool, which the builder may have matched several goldens into. Its rank
+is then the best over those positives (:func:`~.rank.best_dual_rank`), and every ``per_golden``
+row carries ``positives`` so a merged case is never mistaken for a single-golden one — the count
+moves when the corpus grows a sibling, and two metrics files are only comparable knowing that.
 
 **Folds group by SHAPE** (:attr:`Group.shape` — the extent identity), five of them, balanced by
 case count. That is the deploy question stated as an experiment: a new shape, on a card we have
@@ -44,7 +49,7 @@ from __future__ import annotations
 import statistics
 
 from emmy.compiler.pipeline.search.prior.fit.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
+from emmy.compiler.pipeline.search.prior.fit.rank import best_dual_rank
 
 TOP_KS = (1, 10, 25, 50, 100)
 
@@ -93,15 +98,16 @@ def _unfittable(trainer, train: list[Group], hold: list[Group]) -> str | None:
 
 
 def case_ranks(case: Group, model) -> tuple[int, int] | None:
-    """The case's golden ``(rank, rank_optimistic)`` under a fitted model — any object
+    """The case's best golden ``(rank, rank_optimistic)`` under a fitted model — any object
     with the trainer protocol's ``score_rows(group) -> scores | None`` (higher =
     predicted faster; the linear model's weight-set selection lives inside it).
     ``None`` when the model can't score the group (an unfittable fold — callers
-    exclude it up front)."""
+    exclude it up front). A pool with several verified configs is scored on the best
+    of them: deploy ships one, so any of them ranked first is the same win."""
     scores = model.score_rows(case)
     if scores is None:
         return None
-    return dual_rank(scores, case.pinned_idx)
+    return best_dual_rank(scores, case.pinned)
 
 
 def _median(vals: list[float]) -> float:
@@ -130,7 +136,7 @@ def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
 def evaluate_full_train(cases: list[Group], model) -> dict:
     """The ``full_train`` metrics block: every case ranked under the shippable model."""
     entries = [(c, r) for c in cases if (r := case_ranks(c, model)) is not None]
-    per_golden = {c.key: {"rank": r, "rank_optimistic": o, "pool": len(c.feats)} for c, (r, o) in entries}
+    per_golden = {c.key: {"rank": r, "rank_optimistic": o, "pool": len(c.feats), "positives": len(c.pinned)} for c, (r, o) in entries}
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 
@@ -179,11 +185,13 @@ def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     train_cards = _per_card(train_entries)
     return {
         "holdout": {
-            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "fold": holdout_fold[c.key]} for c, (r, o) in holdout},
+            "per_golden": {
+                c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.pinned), "fold": holdout_fold[c.key]} for c, (r, o) in holdout
+            },
             "per_card": holdout_cards,
         },
         "train": {
-            "per_golden": {c.key: {"rank": r, "rank_optimistic": o} for c, (r, o) in train_entries},
+            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.pinned)} for c, (r, o) in train_entries},
             "per_card": train_cards,
         },
         "gap": {gpu: round(holdout_cards[gpu]["median"] - train_cards[gpu]["median"], 2) for gpu in holdout_cards if gpu in train_cards},

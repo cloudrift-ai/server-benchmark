@@ -11,16 +11,19 @@ This module owns what is specific to the model class; everything a different mod
 elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in :mod:`.group`, the rank metrics in
 :mod:`.rank`, the fold harness in :mod:`.cv`).
 
-**The objective.** ``QuerySoftMax`` over one group per pool: the golden is the single positive (label 1.0) and
-the sampled negatives are 0.0. That is the loss shape the golden dataset actually has — one *verified* row per
-pool, no graded labels — and it is what the deployed ranking is: a softmax over one fork's candidates. The
-deployed :func:`~..base.normalize_policy` is that same softmax numerator, so the fitted objective and the
-deployed policy are the same function of the model's output.
+**The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
+sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
+graded labels — and it is what the deployed ranking is: a softmax over one fork's candidates. The deployed
+:func:`~..base.normalize_policy` is that same softmax numerator, so the fitted objective and the deployed policy
+are the same function of the model's output. ``QuerySoftMax`` takes several positives per group as they are, so
+a pool with more than one verified config needs no reshaping — and those siblings are then never drawn as
+negatives against each other, which is what labelling a verified-good config 0.0 used to do.
 
 **Why negatives are sampled.** The linear fit scores whole pools every descent step because a pool is one matrix
 multiply. Here the pools are the training set: all of them at once is ~38 M rows / ~18 GB before CatBoost's own
-quantized copy. So each round draws ``negatives`` rows per pool, uniformly. The full pool is still what
-:meth:`CatBoostFit.score_rows` ranks the golden within, so the *metric* never sees the sampling.
+quantized copy. So each round draws ``negatives`` rows per pool, uniformly, from the rows that are NOT pinned.
+The full pool is still what :meth:`CatBoostFit.score_rows` ranks the golden within, so the *metric* never sees
+the sampling.
 
 A further round instead mines **hard negatives** — the rows the current model ranks nearest the golden. That is
 implemented and reachable (``--rounds 2``) but OFF by default, because the one measurement of it says it hurts;
@@ -35,19 +38,20 @@ needs a second weight set.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
+from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES
 
 logger = logging.getLogger(__name__)
 
-# Sampled negatives per pool per round. ~500 against one positive puts the softmax denominator in the range the
-# loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.
+# Sampled negatives per pool per round. ~500 against a pool's handful of positives puts the softmax denominator in
+# the range the loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.
 DEFAULT_NEGATIVES = 500
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
 # golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
@@ -59,7 +63,7 @@ DEFAULT_NEGATIVES = 500
 # it; labelling those 0.0 teaches the model to bury good configs. That is the contamination the debiased
 # contrastive-learning bound predicts — it scales with the expected NUMBER of better-but-unlabeled rows in the
 # contrast set, and mining maximizes that number by construction. Standard hard-negative mining assumes the
-# negatives are known bad; here only the positive is verified.
+# negatives are known bad; here only the pinned rows are verified.
 #
 # The evidence is in-sample (no cross-validation run yet), so this is a default, not a verdict: re-measure
 # ``--rounds 2`` held-out before concluding mining is useless.
@@ -104,57 +108,58 @@ class CatBoostTrainer:
         rng = np.random.default_rng(self.random_state)
         cols = list(self.cols)
         pools = [g.matrix(cols, fill=ABSENT) for g in groups]
-        # Sampled negative indices per pool, grown each round. The golden is added at assembly time, so it can
-        # never be sampled in as a negative against itself.
-        sampled = [self._uniform(len(m), g.pinned_idx, rng) for m, g in zip(pools, groups, strict=True)]
+        # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
+        # one can never be sampled in as a negative — against itself or against a verified sibling.
+        sampled = [self._uniform(len(m), g.pinned, rng) for m, g in zip(pools, groups, strict=True)]
 
         model = self._fit_once(pools, groups, sampled)
         ranks = self._ranks(model, pools, groups)
-        logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled), topk_table(ranks))
+        logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled, groups), topk_table(ranks))
         for r in range(1, max(1, self.rounds)):
-            sampled = [
-                np.union1d(s, self._hard(model.quality_rows(m), g.pinned_idx)) for s, m, g in zip(sampled, pools, groups, strict=True)
-            ]
+            sampled = [np.union1d(s, self._hard(model.quality_rows(m), g.pinned)) for s, m, g in zip(sampled, pools, groups, strict=True)]
             model = self._fit_once(pools, groups, sampled)
             ranks = self._ranks(model, pools, groups)
-            logger.info("  round %d mined (%d rows): %s", r, self._n_rows(sampled), topk_table(ranks))
+            logger.info("  round %d mined (%d rows): %s", r, self._n_rows(sampled, groups), topk_table(ranks))
 
-        return CatBoostFit(model, ranks, rows=self._n_rows(sampled))
+        return CatBoostFit(model, ranks, rows=self._n_rows(sampled, groups))
 
     @staticmethod
-    def _n_rows(sampled) -> int:
-        return sum(len(s) + 1 for s in sampled)  # +1 for each pool's golden
+    def _n_rows(sampled, groups: list[Group]) -> int:
+        return sum(len(s) + len(g.pinned) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
 
     @staticmethod
     def _ranks(model: CatBoostModel, pools, groups: list[Group]) -> list[int]:
-        """Every golden's rank in its FULL pool under ``model`` — the fit-objective tie convention
-        (:func:`~.rank.rank_of_golden`), matching what the linear fit reports per round."""
-        return [rank_of_golden(model.quality_rows(m), g.pinned_idx) for m, g in zip(pools, groups, strict=True)]
+        """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
+        (:func:`~.rank.best_rank`), matching what the linear fit reports per round."""
+        return [best_rank(model.quality_rows(m), g.pinned) for m, g in zip(pools, groups, strict=True)]
 
-    def _uniform(self, n: int, golden: int, rng) -> np.ndarray:
-        """A uniform draw of negative row indices from one pool, the golden excluded. Small pools contribute
-        every row they have rather than being padded with duplicates."""
-        others = np.delete(np.arange(n), golden)
+    def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
+        """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
+        contribute every row they have rather than being padded with duplicates."""
+        others = np.delete(np.arange(n), list(pinned))
         if len(others) <= self.negatives:
             return others
         return rng.choice(others, size=self.negatives, replace=False)
 
-    def _hard(self, scores: np.ndarray, golden: int) -> np.ndarray:
-        """The current model's top-ranked non-golden rows — the ones it would deploy INSTEAD of the golden, so
-        exactly the rows the loss needs to push down. A uniform draw over a 78k-row pool almost never lands
-        here, which is why one uniform round is not enough."""
+    def _hard(self, scores: np.ndarray, pinned: Sequence[int]) -> np.ndarray:
+        """The current model's top-ranked unpinned rows — the ones it would deploy INSTEAD of a verified
+        config, so exactly the rows the loss needs to push down. A uniform draw over a 78k-row pool almost never
+        lands here, which is why one uniform round is not enough. The window widens by the pin count so a pool
+        whose pins all rank high still yields ``negatives`` rows."""
+        pins = set(pinned)
         order = np.argsort(-scores, kind="stable")
-        return np.array([i for i in order[: self.negatives + 1] if i != golden][: self.negatives])
+        return np.array([i for i in order[: self.negatives + len(pins)] if i not in pins][: self.negatives])
 
     def _fit_once(self, pools, groups: list[Group], sampled) -> CatBoostModel:
-        """One CatBoost fit over the assembled groups — the golden first in each, then its sampled negatives."""
+        """One CatBoost fit over the assembled groups — the pinned rows first in each, then its sampled
+        negatives."""
         from catboost import Pool  # noqa: PLC0415
 
         x, y, gid = [], [], []
         for i, (mat, g, neg) in enumerate(zip(pools, groups, sampled, strict=True)):
-            rows = np.concatenate(([g.pinned_idx], np.asarray(neg, dtype=int)))
+            rows = np.concatenate((np.asarray(g.pinned, dtype=int), np.asarray(neg, dtype=int)))
             x.append(mat[rows])
-            y.append(np.concatenate(([1.0], np.zeros(len(rows) - 1))))
+            y.append(np.concatenate((np.ones(len(g.pinned)), np.zeros(len(rows) - len(g.pinned)))))
             gid.append(np.full(len(rows), i))
         booster = new_ranker(
             loss_function="QuerySoftMax",

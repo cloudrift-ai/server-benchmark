@@ -348,6 +348,13 @@ What a newcomer needs to know about the fit:
   `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
   fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
   the metrics header, along with the loss — two fits are only comparable under the same one.
+- **A case is a candidate pool, and it may have more than one right answer.** `Group.pinned` is the set of rows in
+  that pool a golden verified — usually one, several when the builder matched several goldens onto one pool (the
+  same shape recorded under two names, or one name recorded twice). The per-case term is then the BEST rank over
+  that set (`fit/rank.best_rank`), because deploy ships one config: any acceptable one ranked first is the win, and
+  a mean would spend weights pushing up the runner-up. At one positive it is the single-golden rank exactly, so the
+  supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
+  tree fit's negatives, which had been teaching it that a measured-good config was bad.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
   each case counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink

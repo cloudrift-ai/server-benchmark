@@ -411,7 +411,10 @@ class TwoLevelStrategy:
                     )
                 )
                 if work.enrolled:
-                    logger.info("[tune] enrolled minted kernel %s: Σ best %.2f us", name, best_total if best_total is not None else -1.0)
+                    if best_total is not None:
+                        logger.info("[tune] enrolled minted kernel %s: Σ best %.2f us", name, best_total)
+                    else:
+                        logger.info("[tune] enrolled minted kernel %s: no clean measurement", name)
                     return
                 best = db.best_per_op_time(ctx_key, work.key, backend=backend_name)
                 searched_knobs = searched_us = searched_cuda_ops = None

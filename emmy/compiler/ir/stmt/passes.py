@@ -31,6 +31,7 @@ from emmy.compiler.ir.stmt.leaves import (
     SelectBranch,
     Unpack,
     Write,
+    ZeroPrologue,
 )
 
 Rename = Callable[[str], str]
@@ -171,6 +172,14 @@ def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
     # the fold's ``Accum`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
+
+
+@rewrite.register
+def _(s: ZeroPrologue, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    # Buffer name + word count only — like ``Write.output``, ``dst`` is a buffer, and buffers
+    # are not SSA names this rewrite renames. Identity, so a body carrying a delegated
+    # zero-init can normalize (``structural_key`` / ``cache_key`` on the carrying kernel).
+    return s
 
 
 @rewrite.register

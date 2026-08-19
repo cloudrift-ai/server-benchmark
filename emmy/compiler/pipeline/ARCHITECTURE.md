@@ -236,7 +236,7 @@ Two binding scopes share the protocol:
   computed function, not a stamp others wait on. Build-scoped instances are shared across runs and candidates:
   immutable config plus content-keyed caches only, never trajectory state.
 - **Run-scoped** (`Run.strategies`, also `tune_async(strategies=…)`): instances with per-run state — e.g. the
-  two-level tuner's `KernelInventory` — installed by the caller that owns the run, notified after the discovered
+  two-level tuner's minted-kernel watcher — installed by the caller that owns the run, notified after the discovered
   set.
 
 The two discovered strategies: **`ProvenanceStrategy`** owns op provenance end to end (`seed` at run start,
@@ -845,7 +845,7 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
 - **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
   outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
-- **Minted kernels are enrolled as first-class targets.** A `KernelInventory` observer (`search/inventory.py`)
+- **Minted kernels are enrolled as first-class targets.** The strategy's private splice watcher (`_KernelInventory`, in `two_level.py`)
   rides every inner run and reports each genuinely NEW kernel a splice mints (a cut's fragments, a split's
   pieces), deduped by structural identity across the whole session, outer kernels included. Each reported kernel
   is enrolled in a wave after the current wave completes: tuned in its own slice cut from the minting fragment,

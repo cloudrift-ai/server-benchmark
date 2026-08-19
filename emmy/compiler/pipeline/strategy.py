@@ -15,7 +15,7 @@ Two binding scopes share the protocol:
   (class-name sort) but MUST NOT be load-bearing: no strategy may depend on another having
   handled an event first.
 - **Run-scoped** (``Run.strategies``): instances with per-run state (e.g. the two-level tuner's
-  ``KernelInventory``), installed by the caller that owns the run and notified after the
+  minted-kernel watcher), installed by the caller that owns the run and notified after the
   discovered set.
 
 Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,

@@ -13,8 +13,8 @@
   Tile-dialect structural forks (a ``PLACE`` cut, a cross-CTA split) are part of a kernel's
   independent measurement — a slice whose kernel set changed benches as the Σ over the pieces it
   minted.
-- **Minted kernels become first-class targets**: a :class:`KernelInventory` observer rides every
-  inner run; each genuinely new kernel it reports (deduped by structural identity across the
+- **Minted kernels become first-class targets**: the strategy's private splice watcher
+  (:class:`_KernelInventory`) rides every inner run; each genuinely new kernel it reports (deduped by structural identity across the
   whole session, outer kernels included) is ENROLLED — tuned in its own slice, its rows keyed
   under its own identity — in waves, until no inner run mints anything new. Enrolled kernels are
   evidence, not reward terms: the parent slice's Σ already priced them, so they stay out of
@@ -36,10 +36,10 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy import SearchStrategy
+from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -178,6 +178,38 @@ class _Work:
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
     count: int  # graph multiplicity (0 for enrolled — never a reward term)
     enrolled: bool
+
+
+class _KernelInventory(PipelineStrategy):
+    """TwoLevelStrategy's PRIVATE splice watcher — not a composable component: the strategy
+    installs one instance on every inner run so kernels minted during lowering (a cut's
+    fragments, a split's pieces) can be enrolled as tuning targets. Reports each new
+    loop-dialect kernel — one whose structural identity has not been seen — to
+    ``on_kernel(node_id, op, fragment)``. Cross-trajectory by design: the MCTS re-minting the
+    same cut on every variant reports it once, and the seen-set is seeded with the outer
+    terminal's kernels so pieces structurally identical to an outer kernel are not re-enrolled.
+    Identity is COMPUTED through the IdentityStrategy's read API, so nothing here depends on a
+    stamp having happened or on strategy dispatch order. It derives from PipelineStrategy only
+    because ``Run.strategies`` is the channel the engine notifies — the event protocol is how a
+    search shape hears about splices."""
+
+    def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None) -> None:
+        self.identity = identity
+        self.on_kernel = on_kernel
+        self.seen = seen if seen is not None else set()
+
+    def on_splice(self, e: SpliceEvent) -> None:
+        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+
+        for nid, node in e.fragment.nodes.items():
+            op = node.op
+            if not isinstance(op, LoopOp):
+                continue
+            key = self.identity.op_sig(op, e.fragment)
+            if key in self.seen:
+                continue
+            self.seen.add(key)
+            self.on_kernel(nid, op, e.fragment)
 
 
 class TwoLevelStrategy(SearchStrategy):
@@ -337,7 +369,7 @@ class TwoLevelStrategy(SearchStrategy):
         # piece structurally identical to an outer kernel is not re-enrolled; installed on every
         # inner run, so an enrolled kernel's own cuts/splits feed the next wave.
         minted: list[tuple[str, object, Graph]] = []
-        inventory = KernelInventory(
+        inventory = _KernelInventory(
             identity,
             lambda nid, op, frag: minted.append((nid, op, frag)),
             seen={identity.op_sig(op) for _, op, _ in unique.values()},

@@ -25,8 +25,7 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.inventory import KernelInventory
-from emmy.compiler.pipeline.search.two_level import InnerReward, OpResult
+from emmy.compiler.pipeline.search.two_level import InnerReward, OpResult, _KernelInventory
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake
@@ -143,7 +142,7 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:
-    """A pinned cross-CTA split mints pieces inside the inner loops; the KernelInventory reports
+    """A pinned cross-CTA split mints pieces inside the inner loops; the splice watcher reports
     them and the strategy enrolls each — tuned in its own slice, logged as enrolled — while the
     terminal reward keeps only the OUTER kernel (pieces are evidence, not reward terms)."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
@@ -167,7 +166,7 @@ def test_inventory_dedups_by_structural_identity() -> None:
     identity = next(s for s in discovered_strategies() if type(s).__name__ == "IdentityStrategy")
     loop_node = next(nid for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp))
     reported: list[str] = []
-    inventory = KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
+    inventory = _KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
     event = SpliceEvent(match=None, fragment=fused, root_op=fused.nodes[loop_node].op, pass_name="lowering/tile", graph=fused)
     inventory.on_splice(event)
     assert reported == [loop_node], "first sighting reported"

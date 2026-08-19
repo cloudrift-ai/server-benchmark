@@ -689,7 +689,7 @@ class Run:
     rejections: list[tuple[str, str, str]] | None = None
     # Run-scoped strategies — ``PipelineStrategy`` instances (the same protocol as the
     # pipeline's discovered set; the base class declares every event as a
-    # no-op) with per-run state, e.g. the two-level tuner's ``KernelInventory``.
+    # no-op) with per-run state, e.g. the two-level tuner's minted-kernel watcher.
     # Notified by :meth:`emit` after the discovered set.
     strategies: tuple = ()
     # Count of search candidates dropped by :meth:`drive`'s per-variant

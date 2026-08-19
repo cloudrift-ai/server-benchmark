@@ -88,14 +88,15 @@ The [canonical V100 golden](golden/v100_sm70.yaml) contains 279 exact Loop reali
 positive deployable O3 and reference timings. Coverage spans the layer paths and the non-layer seams (`layer0`,
 `layer2`, `layer3`, `layer4`, and `model-seam` targets).
 
-Verified on 2026-08-19 against the exact target hardware:
+This run reverified that committed golden. It did **not** retrace the model and did **not** retune any kernel: the
+inventory, knobs, and recorded timings are unchanged from the 2026-08-11 tuning run, and the file is byte-identical.
 
-| Gate | Result |
-| --- | --- |
-| Repository-level validation | passes |
-| Strict decode of every realization | 279 / 279 |
-| Paired positive O3 / reference timings | 279 / 279 |
-| Whole-file replay on Tesla V100-SXM3-32GB (sm_70) | all 279 targets reconstructed and lowered, exit 0 |
+| Gate | Checked against | Result |
+| --- | --- | --- |
+| Repository-level validation | committed file | passes |
+| Strict decode of every realization | committed file | 279 / 279 |
+| Paired positive O3 / reference timings, recorded 2026-08-11 | committed file | 279 / 279 present and positive |
+| Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0 |
 
 `emmy run --golden recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml` completed in 4 min 19 s with no compile,
 lowering, or execution failure, using the CUDA 12.9 toolchain (CUDA 13 cannot target sm_70). Emmy serving eligibility

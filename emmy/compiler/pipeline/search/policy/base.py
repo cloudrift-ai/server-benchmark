@@ -80,3 +80,15 @@ class Search(ABC):
         measured-candidate budget. Policies without such a budget ignore this
         hook.
         """
+
+    async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
+        """Value one terminal the engine's loop yielded — WHOLLY policy: what a terminal is
+        worth (benching, caching, persistence, the training feed) is a search decision, and the
+        engine only awaits it. The default benches the terminal's kernels (cache/stub-aware) and
+        feeds :meth:`observe`; :class:`~.mcts.TuningSearch` extends it with the deployable -O3
+        re-bench and the prior's row protocol."""
+        from emmy.compiler.pipeline.search.terminal_bench import bench_terminal_async  # noqa: PLC0415
+
+        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+        self.note_bench(measured=measured)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)

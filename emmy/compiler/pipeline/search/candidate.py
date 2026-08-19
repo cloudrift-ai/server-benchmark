@@ -178,14 +178,17 @@ class Candidate:
         own ancestor into ``source``, and honoring that copy would
         skip the replaced op in the chain (and silently disable the
         knob merge, which is idempotent for rules that already merged
-        manually). A
-        lowering-tier ``Graph`` splice of a loop-dialect kernel (a
-        structural decomposition — the placement realizer's cut)
-        stamps the consumed root op as each fragment kernel's
-        ``source``, so the chain also records *which op a decomposition
-        came from*. Knobs are NOT merged
-        forward on this path — fragment kernels carry their own
-        restamped structural features."""
+        manually). Knobs are NOT merged forward on the ``Graph`` path —
+        fragment kernels carry their own structural identity.
+
+        What a splice MEANS in any dialect is strategy business, not
+        the engine's: ``on_splice`` fires before the splice (fragment
+        op identities stable — where the identity strategy stamps
+        minted kernels and threads attribution) and ``on_spliced``
+        after it, carrying the splice's receipt (where the provenance
+        strategy threads op provenance). See ``pipeline.strategy``."""
+        from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent  # noqa: PLC0415
+
         self._log_apply(match, option)
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
@@ -195,22 +198,20 @@ class Candidate:
             self.graph.nodes[match.root_node_id].op = option
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
-            # Decomposition expands one op into many distinct pieces (mint);
-            # every other fragment splice aggregates the consumed pieces.
             pass_ = match.rule.pass_
-            mint_pieces = pass_ is not None and pass_.name.startswith("frontend/decomposition")
-            if pass_ is not None and pass_.name.startswith("lowering/"):
-                root_op = self.graph.nodes[match.root_node_id].op
-                if root_op.dialect == "loop":
-                    for frag_node in option.nodes.values():
-                        if frag_node.op.source is None and frag_node.op.dialect == "loop":
-                            frag_node.op.source = root_op
-            self.graph.splice(
-                option,
-                consumed=match.consumed,
-                output=match.output or match.root_node_id,
-                mint_pieces=mint_pieces,
+            pass_name = pass_.name if pass_ is not None else ""
+            self.run.emit(
+                "on_splice",
+                SpliceEvent(
+                    match=match,
+                    fragment=option,
+                    root_op=self.graph.nodes[match.root_node_id].op,
+                    pass_name=pass_name,
+                    graph=self.graph,
+                ),
             )
+            receipt = self.graph.splice(option, consumed=match.consumed, output=match.output or match.root_node_id)
+            self.run.emit("on_spliced", SplicedEvent(graph=self.graph, pass_name=pass_name, receipt=receipt))
             self.cursor.n_applied += 1
         self._advance_if_last(match)
 

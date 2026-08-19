@@ -418,6 +418,35 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 _SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
 
 
+@dataclass
+class SpliceReceipt:
+    """What one :meth:`Graph.splice` did — pure graph-surgery bookkeeping handed to whoever
+    cares about what the splice MEANT (the engine emits it as ``SplicedEvent``; the provenance
+    strategy threads op provenance from it). The graph itself carries no such knowledge.
+
+    * ``redirected`` — ``{consumed node id: final (post-promotion) buffer id}`` per redirected
+      node (the multi-output splice's old return value).
+    * ``output_map`` — the ``{graph_node_id: fragment_output_id}`` redirection request as given.
+    * ``new_compute_ids`` — post-promotion graph ids of the freshly added non-boundary fragment
+      nodes. Orphan removal may since have dropped some; check membership before dereferencing.
+    * ``consumed_hints`` — each consumed node's hints object, snapshotted before removal (hint
+      merges mutate the surviving outputs' hints, never these).
+    * ``single`` — whether the splice was the single-output form.
+    """
+
+    redirected: dict[str, str]
+    output_map: dict[str, str]
+    new_compute_ids: tuple[str, ...]
+    consumed_hints: dict[str, Hints]
+    single: bool
+
+    @property
+    def output(self) -> str:
+        """The single-output form's new output id (post-rename)."""
+        assert self.single, "output is the single-output convenience; use redirected for multi"
+        return next(iter(self.redirected.values()))
+
+
 class Graph:
     """Directed acyclic compute graph of tensor operations.
 
@@ -610,9 +639,10 @@ class Graph:
         *,
         consumed: Iterable[str],
         output: str | dict[str, str],
-        mint_pieces: bool = False,
-    ) -> str | dict[str, str]:
-        """Splice ``fragment`` into this graph in place of ``consumed``.
+    ) -> SpliceReceipt:
+        """Splice ``fragment`` into this graph in place of ``consumed``. Pure graph surgery —
+        what a splice MEANS (provenance threading, identity, attribution) is strategy business,
+        served by the returned :class:`SpliceReceipt` (the engine emits it as ``SplicedEvent``).
 
         Fragment ``InputOp`` nodes alias existing graph nodes by id (no
         copy); every other fragment node is added with its original id
@@ -623,28 +653,21 @@ class Graph:
         redirected onto fragment output(s):
 
         - **single** (``str``) — the one node whose consumers redirect to
-          the fragment's sole output (``fragment.outputs[0]``). Returns the
-          new output's id (post-rename). Hints from every consumed node
-          merge onto that output.
+          the fragment's sole output (``fragment.outputs[0]``). The receipt's
+          ``output`` is the new output's id (post-rename). Hints from every
+          consumed node merge onto that output.
         - **multi** (``dict[str, str]``) — a ``{graph_node_id:
           fragment_output_id}`` map redirecting several graph nodes to
           distinct fragment outputs in one splice. Used to inline one
           producer into *all* its consumers at once (``005_split_shared_indexmap``):
-          each consumer is replaced by its own fused fragment node. Returns
-          ``{old_id: new_id}`` (post-rename). Each redirected node's hints
-          merge onto its own new output; other consumed nodes' hints (e.g.
-          the dissolved shared producer) are dropped.
-
-        ``mint_pieces`` selects how op provenance threads through (see
-        :mod:`emmy.compiler.provenance`): ``True`` for decomposition (each
-        new fragment node is a fresh piece of the consumed origins), ``False``
-        for fusion / lifting / folds (fragment outputs aggregate the consumed
-        pieces). The prov hint is overwritten after the generic hint merge so
-        union semantics win over last-writer."""
-        from emmy.compiler import provenance  # noqa: PLC0415
-
+          each consumer is replaced by its own fused fragment node. The
+          receipt's ``redirected`` maps ``{old_id: new_id}`` (post-rename).
+          Each redirected node's hints merge onto its own new output; other
+          consumed nodes' hints (e.g. the dissolved shared producer) are
+          dropped."""
         consumed = list(consumed)
-        consumed_prov = {nid: provenance.get(self.nodes[nid]) for nid in consumed if nid in self.nodes}
+        consumed_hints = {nid: self.nodes[nid].hints for nid in consumed if nid in self.nodes}
+        new_compute: list[str] = []
         id_map: dict[str, str] = {}
         buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
         for frag_id in fragment.topological_order():
@@ -668,6 +691,8 @@ class Graph:
             )
             if frag_node.hints:
                 self.nodes[new_id].hints = frag_node.hints
+            if not isinstance(frag_node.op, ConstantOp):
+                new_compute.append(new_id)
             id_map[frag_id] = new_id
             buf_map[frag_id] = new_id
             for t in frag_node.outputs[1:]:
@@ -702,37 +727,30 @@ class Graph:
             if old_id in self.nodes:
                 self.remove_node(old_id)
 
-        # Thread op provenance onto the new fragment nodes (mint fresh pieces
-        # for decomposition, aggregate consumed pieces otherwise). Runs after
-        # the generic hint merge so its union semantics win for the prov key.
-        new_compute_ids = [id_map[fid] for fid, fn in fragment.nodes.items() if not provenance.is_boundary(fn.op)]
-        provenance.propagate(
-            self,
-            consumed_prov=consumed_prov,
-            new_compute_ids=new_compute_ids,
-            # Prov hints live on nodes — resolve each redirected buffer to its
-            # producing node id (identity for primary outputs).
-            new_by_old={old: self._producers[new][0] for old, new in new_by_old.items()},
-            output_map=output_map,
-            mint_pieces=mint_pieces,
-        )
-
         # Promote each new node's id to its friendly output.name once consumed
         # nodes are gone — keeps kernel buf names (which embed the node id)
         # readable. Falls back silently if the friendly name is taken. A
         # non-primary redirected buffer keeps its own name — nothing to promote.
         result: dict[str, str] = {}
+        renamed: dict[str, str] = {}
         for old_id, new_out in new_by_old.items():
             node = self.nodes.get(new_out)
             if node is not None:
                 desired = node.output.name
                 if desired and desired != new_out and desired not in self.nodes and desired not in self._producers:
                     self.rename_node(new_out, desired)
+                    renamed[new_out] = desired
                     new_out = desired
             result[old_id] = new_out
 
         self.remove_orphans()
-        return result[output] if single else result
+        return SpliceReceipt(
+            redirected=result,
+            output_map=output_map,
+            new_compute_ids=tuple(renamed.get(nid, nid) for nid in new_compute),
+            consumed_hints=consumed_hints,
+            single=single,
+        )
 
     def remove_orphans(self) -> None:
         """Remove nodes with zero consumers that aren't graph inputs/outputs."""
@@ -1255,7 +1273,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     ``LoopOp`` body from ``old`` to ``new`` (recursively into nested Loops).
     Pass-through for op types without internal buf refs. Preserves the op's
     ``name`` / ``knobs`` / ``source`` identity — a rename after
-    ``991_stamp_loop_names`` / ``992_stamp_structural_features`` (e.g. the
+    the name stamp / the IdentityStrategy's ``S_*`` row (e.g. the
     splice id-promotion of a lowering-phase fragment like the demoted-matmul
     split) must not strip the stamped kernel name, the ``S_*`` features, or
     the decomposition attribution link (``Candidate.apply`` stamps the

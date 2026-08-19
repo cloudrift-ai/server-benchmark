@@ -143,35 +143,32 @@ def run_inner_reward(
     prior=None,
     run_id="",
 ):
-    """Synchronously run the async per-op inner reward for tests."""
+    """Synchronously run the two-level strategy's separable terminal scoring for tests."""
     from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.two_level import _inner_reward_async
+    from emmy.compiler.pipeline.search.two_level import TwoLevelStrategy
 
     if ucb_c is None:
         ucb_c = TuningSearch.DEFAULT_UCB_C
-    pool = list(backends) if backends else [backend]
-    return asyncio.run(
-        _inner_reward_async(
-            fused_graph,
-            ctx=ctx,
-            db=db,
-            pool=pool,
-            patience=patience,
-            ucb_c=ucb_c,
-            explore_eps=explore_eps,
-            seed=seed,
-            progress=progress,
-            prior=prior,
-            run_id=run_id,
-        )
+    strategy = TwoLevelStrategy(
+        db=db,
+        patience=patience,
+        backend=backend,
+        backends=backends,
+        ucb_c=ucb_c,
+        explore_eps=explore_eps,
+        progress=progress,
+        prior_seed=seed,
+        run_id=run_id,
+        prior=prior,
     )
+    return asyncio.run(strategy._evaluate_terminal(fused_graph, ctx))
 
 
-def run_two_level(graph, **kwargs):
-    """Synchronously run the async :func:`two_level.run_two_level_tune` for tests."""
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+def run_two_level(graph, *, ctx, **kwargs):
+    """Synchronously run :class:`two_level.TwoLevelStrategy` for tests."""
+    from emmy.compiler.pipeline.search.two_level import TwoLevelStrategy
 
-    return asyncio.run(run_two_level_tune(graph, **kwargs))
+    return asyncio.run(TwoLevelStrategy(**kwargs).run(graph, ctx))
 
 
 def dyn_M(mode: str, M: int):

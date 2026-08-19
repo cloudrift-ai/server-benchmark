@@ -270,14 +270,18 @@ def test_tune_one_measures_proposals_before_mcts_and_deducts_reserved_slots(monk
         events.append(("proposals", len(proposals), kwargs["max_candidates"], kwargs["prior"]))
         return [{"status": "ok"}] * len(proposals)
 
-    async def fake_two_level(_graph, **kwargs):
-        events.append(("mcts", kwargs["max_candidates"], kwargs["prior"]))
-        return SimpleNamespace(n_terminals=1, prior_summaries=[], best_reward=None, assembled=None)
+    class FakeStrategy:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def run(self, _graph, _ctx):
+            events.append(("mcts", self.kwargs["max_candidates"], self.kwargs["prior"]))
+            return SimpleNamespace(n_terminals=1, prior_summaries=[], best_reward=None, assembled=None)
 
     monkeypatch.setattr(tune, "measure_proposals", fake_measure)
     monkeypatch.setattr(tune, "load_or_trace", lambda _args: (object(), None, None))
     monkeypatch.setattr("emmy.compiler.pipeline.search.prior.load_prior", lambda seed: prior)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.run_two_level_tune", fake_two_level)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.TwoLevelStrategy", FakeStrategy)
     args = SimpleNamespace(
         patience=10,
         explore_eps=0.0,
@@ -333,17 +337,22 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
     async def fake_measure(*_args, **_kwargs):
         return []
 
-    async def fake_two_level(_graph, **kwargs):
-        nonlocal active, max_active
-        seen_prior.append(kwargs["prior"])
-        seen_queues.append(kwargs["backend_slots"])
-        backend = await kwargs["backend_slots"].get()
-        active += 1
-        max_active = max(max_active, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        kwargs["backend_slots"].put_nowait(backend)
-        return SimpleNamespace(prior_summaries=[], best_reward=None, assembled=None)
+    class FakeStrategy:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def run(self, _graph, _ctx):
+            nonlocal active, max_active
+            kwargs = self.kwargs
+            seen_prior.append(kwargs["prior"])
+            seen_queues.append(kwargs["backend_slots"])
+            backend = await kwargs["backend_slots"].get()
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            kwargs["backend_slots"].put_nowait(backend)
+            return SimpleNamespace(prior_summaries=[], best_reward=None, assembled=None)
 
     target_dirs = []
 
@@ -356,7 +365,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
     monkeypatch.setattr(tune, "measure_proposals", fake_measure)
     monkeypatch.setattr(tune, "persist_tune_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("emmy.compiler.pipeline.search.prior.load_prior", lambda seed: prior)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.run_two_level_tune", fake_two_level)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.TwoLevelStrategy", FakeStrategy)
     args = SimpleNamespace(
         code=None,
         input=None,

@@ -122,10 +122,14 @@ def propagate(
 ) -> None:
     """Thread provenance across one ``Graph.splice``.
 
+    Called by the provenance STRATEGY from the post-splice event (``on_spliced``), off the
+    splice's receipt — the graph itself carries no provenance knowledge. Node ids are looked up
+    defensively: orphan removal runs inside the splice, so a receipt id may no longer exist.
+
     ``consumed_prov`` is ``{consumed_node_id: prov}`` snapshotted before the
     consumed nodes were removed; ``new_compute_ids`` are the graph ids of the
     freshly-added non-boundary fragment nodes; ``new_by_old`` maps each
-    redirected consumed node to its fragment output.
+    redirected consumed node to its fragment output's producing NODE id.
 
     - **mint** (``mint_pieces=True``, decomposition): each new fragment node
       becomes a fresh piece of the consumed origins — one op expanding into
@@ -143,22 +147,27 @@ def propagate(
     would inflate :func:`totals` and make every other kernel of the origin read
     as partial coverage)."""
     for new_out in new_by_old.values():
-        node = graph.nodes[new_out]
-        if is_boundary(node.op):
+        node = graph.nodes.get(new_out)
+        if node is not None and is_boundary(node.op):
             node.hints.remove(PROV)
     if mint_pieces:
         origins_kind = origins(union(*consumed_prov.values())) if consumed_prov else {}
         for nid in new_compute_ids:
-            put(graph.nodes[nid], mint(origins_kind, nid))
+            node = graph.nodes.get(nid)
+            if node is not None:
+                put(node, mint(origins_kind, nid))
         return
 
     shared = union(*[p for cid, p in consumed_prov.items() if cid not in output_map])
     for old_id, new_out in new_by_old.items():
-        put(graph.nodes[new_out], union(consumed_prov.get(old_id, {}), shared))
+        node = graph.nodes.get(new_out)
+        if node is not None:
+            put(node, union(consumed_prov.get(old_id, {}), shared))
     outputs = set(new_by_old.values())
     for nid in new_compute_ids:
-        if nid not in outputs:
-            put(graph.nodes[nid], union(shared))
+        node = graph.nodes.get(nid)
+        if node is not None and nid not in outputs:
+            put(node, union(shared))
 
 
 def coverage(node_prov: dict, all_totals: dict[str, set[str]]) -> dict[str, tuple[int, int, bool]]:

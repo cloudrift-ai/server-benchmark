@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 # Env-overridable via ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
 O3_REBENCH_TOL = 2.0
 
-# The nvcc flags of that deployable re-bench (``pipeline._rebench_o3_async``) — also
+# The nvcc flags of that deployable re-bench (``terminal_bench.rebench_o3_async``) — also
 # the regime the re-bench's node rows are keyed under (``two_level`` derives their
 # ``context_key`` from the tune context with these flags substituted).
 O3_NVCC_FLAGS = "-Xcicc -O3"
@@ -210,6 +210,32 @@ class TuningSearch(Search):
         """
         if measured:
             self.measurements += 1
+
+    def prepare_ctx(self, ctx):
+        """Policy-owned ctx setup, applied by the engine's run construction: the tune search is
+        exempt from the strict knob-pin validator — it explores tier-foreign forks and steers
+        heterogeneous multi-op graphs with a union pin vector (each op takes its tier's subset).
+        A per-op contradiction is a pruned branch here, not the loud user error the greedy
+        compile wants."""
+        from dataclasses import replace  # noqa: PLC0415
+
+        return replace(ctx, validate_pins=False) if ctx.validate_pins else ctx
+
+    async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
+        """Value one terminal the engine's loop yielded — the whole of what a terminal is worth
+        is policy: bench every CudaOp (or serve the cache / stub), persist the per-kernel
+        ``perf`` / inventory / lowering rows, feed the tree and the prior (:meth:`observe`), and
+        re-bench near-best winners at the deployable -O3 regime. The engine awaits this and
+        nothing else."""
+        from emmy.compiler.pipeline.search.terminal_bench import bench_terminal_async, rebench_o3_async  # noqa: PLC0415
+
+        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+        self.note_bench(measured=measured)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
+        if backend is not None and self.last_o3_worthy:
+            o3_us = await rebench_o3_async(cand, backend)
+            if o3_us is not None:
+                self.observe_o3(token, o3_us)
 
     def observe(
         self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None

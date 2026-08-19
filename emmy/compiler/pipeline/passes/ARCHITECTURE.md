@@ -540,11 +540,11 @@ grammar it read).
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
   accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
 
-**Every piece is a BRAND-NEW kernel — and no rule has to remember that.** A rewrite that returns DIFFERENT NODES
-is a kernel-set change, so the ENGINE clears the knobs of every KERNEL it splices before they land
-(`candidate._strip_minted`; `Op.cache_key` is the is-this-a-kernel test, so the pre-lowering ops a decomposition
-or the checkpoint loader splices keep the data they carry). A rule cannot leak a decision or an identity across a
-kernel boundary by forgetting to clear one, and no pass has to assert that it didn't.
+**Every piece is a BRAND-NEW kernel.** A rewrite that returns DIFFERENT NODES is a kernel-set change, and the
+minting rule states it by consuming the replaced kernel's row on the pieces it builds
+(`knob.consume_kernel_row` — every SCHEDULE family and every `S_*`/`H_*` feature stripped, the rule's own decision
+stamp kept): a piece arrives with neither the row it was scheduled with nor the identity of the body it no longer
+has, and is stamped and scheduled on its own, from its own body.
 
 The DECISION is cleared along with everything else, because **a decision is consumed by the rewrite that realizes
 it** — the same rule the cross-CTA split follows. Once a cut has happened the graph holds two kernels where it
@@ -552,8 +552,8 @@ held one, and that is the record; a surviving `PLACE@<seam>: cut` knob would be 
 node set already says. The stamp still goes on the OPTION, which is what a recorded routing golden matches
 (`greedy._verified_pick`) — it is consumed at the splice, not before.
 
-What happens next is the ordinary pass scan. `005_stamp_structural_features` gives each piece its own `S_*`
-because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
+What happens next is the ordinary pass scan. The `IdentityStrategy` gives each piece its own `S_*` at the splice
+event because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
 neither is called, and neither is told what a piece is. **No pass can tell a split piece from a fresh kernel**,
 and no pass tries. The invariant holds in both directions: nothing downstream reads split provenance, and nothing
 upstream is told what the pieces are for.
@@ -603,24 +603,18 @@ engine says *the same kernel, decided further*, so it merges the replaced op's k
 pass scan — the piece would inherit the very row it was minted to shed and would never reach its own fork (`_one`).
 
 The fragment idiom's re-entry semantics are shared, not per-rule: every rule hands its fragment back to the pass
-scan, and `005_stamp_structural_features` / `010_recognize` / `020_schedule` pick up whatever is un-stamped,
-un-recognized or unmapped. The shared fixpoint is what lets such rules compose without knowing about each other.
+scan, and `010_recognize` / `020_schedule` pick up whatever is un-recognized or unmapped (identity was stamped at
+the splice event before the fragment entered the graph). The shared fixpoint is what lets such rules compose
+without knowing about each other.
 
-**A piece is stamped before it is recognized, and that order is enforced by `010_recognize`, not by the scan.** The
-scan returns to rule 0 only when it wraps past the LAST rule, and a fork's option is applied by the caller
-(`Candidate.apply`), which advances the rule cursor only if the applied match closed its batch. A cut taken at an
-UNPINNED placement fork with another kernel still pending therefore leaves the cursor on `010_recognize`, which
-re-matches its own fresh pieces on the next step — ahead of `005`. So `010` DEFERS an unstamped `LoopOp`
-(`RuleSkipped`); the batch ends, the scan wraps, and the piece is stamped first. Without that guard the piece lifts
-with no `S_*` and `020_schedule` asserts on the empty structural identity — which is what a whole-model compile with a
-discovered (rather than pinned) cut hit.
-
-`005_stamp_structural_features` duplicates `loop/stamp/020_stamp_structural_features` rather than replacing it,
-because a kernel is stamped in the pass where it is BORN. The loop-dialect pass owns the kernels the fusion end
-produces; it cannot reach one minted later, since `Cursor.advance` only restarts a scan WITHIN the current pass and
-never returns to an earlier one. Moving it is not an option either: the OUTER search's terminals are finalized
-`LoopOp`s, handed over before tile lowering runs, so `two_level`'s `op_sig` would digest an empty set for every
-kernel in every model. Two registrations of one work function, each idempotent, is the whole design.
+**A piece is stamped before it is recognized — by construction, not by scan ordering.** Identity is the
+`IdentityStrategy`'s (`passes/identity.py`): computed from the body and materialized into knobs exactly once, at
+birth. Fusion-born kernels stamp at the loop dialect's end (`PassEndEvent` of `loop/stamp` — the fused body is
+final there, so one logical kernel never carries two identities); minted pieces stamp at the SPLICE EVENT, before
+the fragment enters the graph — so no rule, whatever the cursor position, can observe an unstamped kernel. There
+is no stamp rule to race, no scan-order dependence, and nothing a new minting rule has to remember: the stamp
+rides the engine's splice event, which every fragment goes through. (The historical design — twin stamp rules in
+`loop/stamp` and `lowering/tile` plus a recognize-time deferral guarding their ordering — is gone with it.)
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`

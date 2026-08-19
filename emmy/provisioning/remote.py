@@ -25,6 +25,7 @@ async def provision_remote(
        (reboots and waits for the host to come back if anything was installed)
     4. Install NVIDIA Container Toolkit if not found
     5. Add user to docker group
+    6. Start NVIDIA Fabric Manager if the host has NVSwitches
     """
     dry_run = bool(getattr(host, "dry_run", False))
 
@@ -73,6 +74,10 @@ async def provision_remote(
 
     # 5. Add user to docker group
     await host.run("groups | grep -q docker || sudo usermod -aG docker $(whoami)")
+
+    # 6. Start Fabric Manager on NVSwitch hosts
+    if not skip_nvidia and not dry_run:
+        await _ensure_fabric_manager(host)
 
 
 async def _ensure_nvidia_versions(
@@ -158,6 +163,55 @@ async def _ensure_nvidia_versions(
         installed = True
 
     return installed
+
+
+async def _ensure_fabric_manager(host: Host) -> None:
+    """Install and start NVIDIA Fabric Manager when the host exposes NVSwitches.
+
+    On NVSwitch-connected baseboards (V100 SXM3 / DGX-2, and the SXM A100/H100
+    HGX boards) the switch fabric has to be trained before CUDA will initialize.
+    Until then every process dies at ``cudaGetDeviceCount()`` with ``error 802:
+    system not yet initialized`` even though ``nvidia-smi`` lists all GPUs
+    happily — so the failure only surfaces deep inside engine worker startup,
+    where it reads like a model or engine bug rather than a missing host
+    service. Fabric Manager refuses to run against a mismatched driver, so the
+    package is pinned to the running driver's exact version.
+    """
+    rc, _ = await host.run("ls /proc/driver/nvidia-nvswitch/devices/ 2>/dev/null | grep -q .", capture=True)
+    if rc != 0:
+        return
+
+    rc, _ = await host.run("systemctl is-active --quiet nvidia-fabricmanager", capture=True)
+    if rc == 0:
+        logger.info(f"{host.name}: NVIDIA Fabric Manager already running")
+        return
+
+    driver = await _current_driver_version(host)
+    if not driver:
+        raise RuntimeError(f"{host.name}: host has NVSwitches but the NVIDIA driver version could not be read")
+
+    logger.info(f"{host.name}: NVSwitch host detected, installing Fabric Manager {driver}")
+    await _setup_nvidia_cuda_repo(host)
+    # Ubuntu's archive and NVIDIA's cuda repo use different revision suffixes
+    # ("-1", "-1ubuntu1", "-0ubuntu0.24.04.1"), so resolve the packaged version
+    # that matches this driver instead of guessing one.
+    script = (
+        "set -e; "
+        f'driver="{driver}"; '
+        "ver=$(apt-cache madison nvidia-fabricmanager | cut -d'|' -f2 | tr -d ' ' "
+        '| grep -m1 "^${driver}-" || true); '
+        'if [ -z "$ver" ]; then echo "no nvidia-fabricmanager package matching driver $driver" >&2; exit 1; fi; '
+        'DEBIAN_FRONTEND=noninteractive apt-get install -y "nvidia-fabricmanager=$ver"; '
+        "systemctl enable --now nvidia-fabricmanager"
+    )
+    rc, out = await host.run(script, sudo=True, timeout=900, capture=True)
+    if rc != 0:
+        tail = "\n".join(out.splitlines()[-20:]) if out else ""
+        raise RuntimeError(f"{host.name}: installing Fabric Manager {driver} failed (rc={rc}). Last lines:\n{tail}")
+
+    rc, _ = await host.run("systemctl is-active --quiet nvidia-fabricmanager", capture=True)
+    if rc != 0:
+        raise RuntimeError(f"{host.name}: Fabric Manager {driver} installed but the service is not active")
 
 
 async def _purge_existing_nvidia(host: Host) -> None:

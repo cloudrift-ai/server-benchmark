@@ -136,6 +136,19 @@ Both providers swallow termination errors and log them — the original failure 
 Mismatches leave the GPU unusable because the wrong kernel-module flavor is on disk. The proprietary-driver image
 mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `brand_short` matches `/\bV100|P100\b/`.
 
+## NVSwitch hosts need Fabric Manager
+
+On NVSwitch-connected baseboards — V100 SXM3 (DGX-2/HGX-2) and the SXM A100/H100 HGX boards — the switch fabric must
+be trained before CUDA will initialize. Until it is, `nvidia-smi` cheerfully lists every GPU while each process dies
+at `cudaGetDeviceCount()` with `error 802: system not yet initialized`, so the failure surfaces deep inside engine
+worker startup and reads like a model or engine bug rather than a missing host service.
+
+`remote._ensure_fabric_manager` closes that gap as the last `provision_remote` step. It detects an NVSwitch host from a
+non-empty `/proc/driver/nvidia-nvswitch/devices/` and is a no-op everywhere else, including when the service is already
+running. Fabric Manager refuses to run against a mismatched driver, so the package is pinned to the running driver's
+exact version, resolved out of `apt-cache madison` rather than guessed — Ubuntu's archive and NVIDIA's CUDA repo
+publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for the same driver.
+
 ## CloudRift API protocol version
 
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public

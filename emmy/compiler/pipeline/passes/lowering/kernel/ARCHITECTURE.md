@@ -235,6 +235,20 @@ The chained fill takes one of two forms, and the first is preferred wherever it 
   contracts a slice while its statistic still spans the whole axis, so each partition divides by the whole
   denominator) or the cone does not read as the exp family's weight times state-only factors.
 
+The nested score's OWN operands stage like any other, through the same transports and the same `LdmatrixLoad` drain
+(`_atom.score_key_operand` / `score_query_operand`), so it crosses L1 once per CTA instead of once per warp. The two
+axes swap the roles the enclosing operands give them: what advances per chunk is the score's N (which is the
+contraction's K — the keys), and the score's own K (the head dim) is stationary and stages whole. So the KEY slab is
+`chunk × <score K>`, N-major, refilled per chunk; the QUERY slab is `tile_m × <score K>`, loop-INVARIANT
+(`SyncTransport.invariant_operands` — one fill ahead of the loop, no ring, no live range to schedule). The scheduler
+reserves both whenever a cone composes a score (`_legality.resolve_sync_stage`), so a tile that fits the budget still
+fits once realized.
+
+That is also why a chained fill is its own pipeline SEGMENT (`_stage.LeadSegment`) instead of running inside the
+transport's fill: the key slab's live range ends before the drain, so `pipelined_kloop` waits for it ahead of the
+score, barriers after it, and refills it under the P·V drain — while the drain's own group refills the values under the
+next chunk's score. The alternating pipeline falls out of the two live ranges; nothing about it is attention-specific.
+
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
 masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by

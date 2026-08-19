@@ -27,32 +27,36 @@ softmax reduce. This file pins every tier of it:
   (``carrier.exp_rescale``) advances the enclosing drain's output tile per KV chunk. Where that
   cannot read — a split-K partition, whose statistic spans keys the contraction does not — the
   TWO-PASS pair stands instead (``_atom.chain_stat_fill``'s ``FragmentRowReduce`` + ``exp_merge`` at
-  a BLOCK singleton, bridged through smem, then ``_atom.chain_a_fill``). Measured on a
+  a BLOCK singleton, bridged through smem, then ``_atom.chain_a_fill``). The nested score's own
+  operands STAGE like any other (``_atom.score_key_operand`` / ``score_query_operand``): keys per
+  chunk, queries once, both drained by the ordinary ``ldmatrix``, so the score crosses L1 once per
+  CTA instead of once per warp. Measured on a
   5090 at f16, ``(1, 8, S, D)``, against the two-kernel graph the fusion refusal preserves and torch:
 
-  | shape        | torch | two-kernel | fused single-pass |
-  | ------------ | ----- | ---------- | ----------------- |
-  | S=512 D=16   |  10.5 |       35.4 | **8.6**           |
-  | S=512 D=32   |  10.5 |       22.7 | **8.1**           |
-  | S=512 D=64   |  12.5 |       25.6 | 14.3              |
-  | S=512 D=128  |  19.3 |       19.5 | 35.1              |
-  | S=2048 D=16  |  33.3 |      163.8 | **42.1**          |
-  | S=2048 D=32  |  30.9 |      170.2 | 60.1              |
-  | S=2048 D=64  |  60.6 |      140.8 | 148.3             |
-  | S=2048 D=128 | 135   |      162   | 273               |
+  | shape        | torch | two-kernel | fused | (gmem-direct score) |
+  | ------------ | ----- | ---------- | ----- | ------------------- |
+  | S=512 D=16   |  10.5 |       35.4 | **7.5** |                 8.6 |
+  | S=512 D=32   |  10.5 |       22.7 | **6.9** |                 8.1 |
+  | S=512 D=64   |  12.5 |       25.6 | **11.4** |               14.3 |
+  | S=512 D=128  |  18.9 |       19.5 | 22.2  |                35.1 |
+  | S=1024 D=128 |  41.2 |       64.0 | 84.4  |               125.8 |
+  | S=2048 D=16  |  33.0 |      163.8 | 36.1  |                42.1 |
+  | S=2048 D=32  |  30.9 |      170.2 | 47.7  |                60.1 |
+  | S=2048 D=64  |  60.6 |      140.8 | 97.0  |               148.3 |
+  | S=2048 D=128 | 117   |      162   | 190.8 |               273   |
 
   So the fused arm beats the graph the refusal preserves at every ``D ≤ 64`` and beats torch at
-  ``D ≤ 32``, and still loses at ``D = 128`` — which is why loop fusion continues to refuse the
-  merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no ``PLACE`` cut puts
-  a two-consumer producer back together).
+  every ``D`` at ``S = 512``, and still loses at ``D = 128`` — which is why loop fusion continues to
+  refuse the merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no
+  ``PLACE`` cut puts a two-consumer producer back together).
 
   The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
   of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
-  ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (w8x2 498 vs
-  w4x1 273 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left
-  after them is the nested score's gmem-direct operands: at S=2048 D=128 the kernel runs at 96%
-  L1 throughput against 19% compute, 255 registers per thread, 15% occupancy. The reference kernel
-  below is the target form's spec.
+  ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (323 cold vs
+  190.8 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left after
+  them at ``D = 128`` is no longer the score's memory path — staging took L1/TEX from 96% to 89% —
+  but the tile itself: 254 registers per thread and four slabs cap the kernel at ONE block per SM,
+  and compute utilization sits at 16%. The reference kernel below is the target form's spec.
 - **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
   future through-the-contraction-path tensor-core flash tier must reproduce.
 - **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →
@@ -285,6 +289,44 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"single-pass fused sdpa{cfg} vs torch max_diff={md:.6e}"
+
+
+@requires_cuda
+def test_fused_sdpa_stages_the_nested_score(monkeypatch):
+    """The nested score reads its OWN operands out of smem — the keys refilled per chunk, the
+    queries filled once ahead of the sweep — not through the per-lane gmem fragment loaders.
+
+    Every warp of the CTA needs the whole key chunk, so gmem-direct made it cross L1 once per warp;
+    staged, it crosses once per CTA and the read is one ``ldmatrix`` where it was four scalar loads
+    per lane. Measured on a 5090 that is 35.1 → 22.2 µs at ``(1, 8, 512, 128)`` and 148.3 → 97.0 at
+    ``(1, 8, 2048, 64)``.
+
+    Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
+    no gmem fragment loader is CALLED (the helper definitions always ship)."""
+    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
+
+    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
+    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    torch.manual_seed(0)
+    B, H, S, D = 1, 2, 64, 16
+    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {n: torch.from_numpy(a).cuda() for n, a in feed.items()}
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
+
+    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "_s_b_smem" in src, "the nested score's keys are not staged"
+    assert "_s_a_smem" in src, "the nested score's queries are not staged"
+    for loader in ("emmy_mma_load_a_gmem(", "emmy_mma_load_b_gmem_trans("):
+        assert src.count(loader) == src.count(f"void {loader}"), f"{loader} is still called — an operand stayed gmem-direct"
+    md = _max_diff(backend, compiled, feed, ref)
+    assert md < 4e-3, f"staged-score fused sdpa vs torch max_diff={md:.6e}"
 
 
 @requires_cuda

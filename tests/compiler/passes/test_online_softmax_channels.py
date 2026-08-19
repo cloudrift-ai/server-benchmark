@@ -285,7 +285,7 @@ def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> No
     assert src.count("expf") >= 2, "the streaming merge and the cone's exp both survive into the kernel"
 
 
-def _sdpa_graph(heads: int = 4, seq: int = 64, head_dim: int = 128):
+def _sdpa_graph(heads: int = 1, seq: int = 32, head_dim: int = 128):
     """One fp16 attention program — the shape whose QK/PV kernels stage through the compute fill."""
     from emmy.compiler.ir.frontend.ir import SdpaOp
 
@@ -332,12 +332,12 @@ def test_fill_decline_names_the_gate_it_actually_hit(monkeypatch) -> None:
     target_mod.set_target((8, 0))
     try:
         with pytest.raises(ValueError) as excinfo:
-            Pipeline.build(CUDA_PASSES).run(_sdpa_graph(seq=64))
+            Pipeline.build(CUDA_PASSES).run(_sdpa_graph(seq=32))
     finally:
         target_mod.set_target(None)
     message = str(excinfo.value)
     assert "whole K chunks" in message, message
-    assert "K=64" in message, message
+    assert "K=32" in message, message
 
 
 def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:

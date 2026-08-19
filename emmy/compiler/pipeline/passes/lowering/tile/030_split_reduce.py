@@ -24,9 +24,9 @@ the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBR
 **Every piece is a BRAND-NEW kernel, minted in the LOOP dialect.** Each leaves here as a plain
 ``LoopOp`` (:func:`_piece`) — the term lowered to per-cell stmts with its boundary stores put back,
 re-nested under its free axes — carrying nothing of the kernel it replaces, not even its name. It
-re-enters at the door a freshly fused kernel comes through: ``005_stamp_structural_features``
-stamps it, ``010_recognize`` lifts it, ``020_schedule`` offers it a fork. The same three rules in
-the same order that handle a placement cut's fragments. No pass can tell a piece from a fresh
+re-enters at the door a freshly fused kernel comes through: the ``IdentityStrategy`` stamps it
+at the splice event, ``010_recognize`` lifts it, ``020_schedule`` offers it a fork. The same
+path that handles a placement cut's fragments. No pass can tell a piece from a fresh
 kernel, and none tries — the dialect is not a special case either.
 
 The pre-split row decided THAT the split happens; it decides nothing about how either piece runs,
@@ -185,7 +185,7 @@ def _piece(op, free, *, stores: tuple = ()) -> LoopOp:
 
     The term is lowered to its per-cell stmts with the boundary stores put back
     (:func:`effect_tail`) and re-nested under the piece's free axes, which is exactly the body a
-    ``LoopOp`` holds. ``005_stamp_structural_features`` then stamps it, ``010_recognize`` lifts it
+    ``LoopOp`` holds. The ``IdentityStrategy`` stamps it at the splice event, ``010_recognize`` lifts it
     and ``020_schedule`` schedules it — the same three rules, in the same order, that handle a
     placement cut's fragments and every kernel the fusion end produced. Nothing about this piece is
     a special case, including its dialect.

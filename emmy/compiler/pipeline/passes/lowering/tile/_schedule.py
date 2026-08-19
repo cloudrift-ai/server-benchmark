@@ -92,7 +92,7 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Placement, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
@@ -704,11 +704,35 @@ def _splittable_axis(term: _Term, node) -> bool:
     64 → 32 → … → 1)."""
     if node.axis is None:
         return False
-    for site in sites(term.tile.op):
-        ax = getattr(site.node, "axis", None)
+    return not _carries_partition(term.tile.op)
+
+
+def _carries_partition(op) -> bool:
+    """Whether this kernel's IR already records a realized cross-CTA split — the ``Window``
+    receipt :func:`_splittable_axis` reads.
+
+    The receipt sits on the sliced axis, and that axis is not always a NODE: on a computed-A cone
+    the stored map view keeps its sliced contraction inside the lift as a plain ``Loop``, so a
+    ``sites``-only scan misses it and the ambient pin splits the piece a second time — the
+    statistic fold, which no partition ever touched (measured on the gate⊗up twin: three kernels
+    from one ``g4k``, the doubly-split partial off the mma tier). Scan the loop bodies too; the
+    receipt is in the IR either way."""
+
+    def loops(stmts):
+        for s in stmts:
+            if isinstance(s, Loop):
+                yield s
+                yield from loops(s.body)
+
+    for site in sites(op):
+        node = site.node
+        ax = getattr(node, "axis", None)
         if ax is not None and ax.window is not None and ax.window.partition:
-            return False  # this kernel already realized a cross-CTA split
-    return True
+            return True
+        bodies = [node.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
+        if any(lp.axis.window is not None and lp.axis.window.partition for b in bodies for lp in loops(b)):
+            return True
+    return False
 
 
 def _consumed_split(term: _Term, node, plan: ReducePlan) -> ReducePlan:
@@ -1469,7 +1493,14 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     reconstruct the absolute index; distinct names are what avoid a double-reduce."""
     legal.enforce(legal.splitk_width(k_axis, w), pinned=True)
     b = k_axis.extent.as_static() // w
-    ksplit = Axis(name=f"{k_axis.name}_ks", extent=Dim(w))
+    # LEADING UNDERSCORE, and it is load-bearing: ``normalize_body``'s ``canonicalize_free_axis_order``
+    # sorts a body's outer free-loop chain by axis NAME, so a partition axis spelled ``a3_ks`` sorts
+    # BELOW the row / column axes it must dominate and ``hoist_loop_invariants`` then sinks it between
+    # the column sweep and the K fold — a shape ``bind_prologue_contraction`` cannot parse, which
+    # costs a re-recognized split piece its computed-A binding (and its warp rows). ``_`` sorts ahead
+    # of every ``aN``, keeping the partition a LEAD grid axis, the same convention the residual path's
+    # ``_ksplit`` already relies on.
+    ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     # The slice carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes
     # it, and an axis that is already a window of a parent is one nothing may partition again.
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))

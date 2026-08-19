@@ -354,8 +354,10 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     statistic is addressable and cuttable in its own right instead of hiding inside an operand body —
     with one :class:`Channel` ``(b, acc)`` per ⊗-fold (sharing is the node's arity; the node carries
     a **deferred** ``TilePlan()``); the ``body`` is the PURE
-    projection (the combine tail + any stat-free prefix defs it reads) and the root ``Write`` a
-    boundary :class:`~emmy.compiler.ir.tile.ir.Store` (1q). Returns ``(node, column axis, stores)``
+    projection (the combine tail + any stat-free prefix defs it reads) and each trailing ``Write`` a
+    boundary :class:`~emmy.compiler.ir.tile.ir.Store` (1q) — one for the ⊗-combined output, or one
+    per CHANNEL when there is no combine tail (a split partial storing each fold's raw state).
+    Returns ``(node, column axis, stores)``
     — the scheduler adds the axis to the grid and the stores to the ``TileOp`` —
     or ``None`` (not this shape; the reduce zero-axis ``Fold`` form stands alone).
 
@@ -378,8 +380,15 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
     inner = list(nloop.body)
     if len(inner) < 2 or not isinstance(inner[0], Loop) or not inner[0].is_reduce or not isinstance(inner[-1], Write):
         return None
-    kloop, tail_ops, write = inner[0], inner[1:-1], inner[-1]
-    if not all(isinstance(s, Assign) for s in tail_ops):
+    # The boundary stores are the TRAILING RUN of Writes: one for the ⊗-combined output, and one per
+    # CHANNEL when there is nothing to combine — a split partial writes each fold's raw state to its
+    # own workspace slot, so the N-channel piece arrives with N Writes and an empty tail.
+    kloop, rest = inner[0], inner[1:]
+    cut = len(rest)
+    while cut and isinstance(rest[cut - 1], Write):
+        cut -= 1
+    tail_ops, writes = rest[:cut], rest[cut:]
+    if not writes or not all(isinstance(s, Assign) for s in tail_ops):
         return None  # the combine tail is a pure pointwise chain (Loads ride the stat-free prefix)
     k_ax = kloop.axis
     kbody = list(kloop.body)
@@ -439,7 +448,11 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
             if id(st) not in seen:
                 seen.add(id(st))
                 prefix.append(st)
-    if not write.is_scalar or write.values != ((tail_ops[-1].name,) if tail_ops else (folds[0][1],)):
+    # A combine tail projects the channels to ONE value, so it stores once; with no tail every fold's
+    # accumulator is stored raw, each exactly once — anything else is not this shape.
+    stored = [w.values for w in writes]
+    expect = [(tail_ops[-1].name,)] if tail_ops else [(acc,) for _, acc in folds]
+    if not all(w.is_scalar for w in writes) or sorted(stored) != sorted(expect):
         return None
     # B-layout agreement is a GROUP-FORMATION gate, not a node assert: channels whose B is stored
     # the other way round were never legally fusable (one shared A fragment, one slab orientation),
@@ -458,7 +471,7 @@ def bind_prologue_contraction(op, free: tuple) -> tuple[Fold, Axis, tuple] | Non
         a=make_cone(list(cone), k_ax.name, stat=red, sweep=tuple(stat_epi)),
         channels=tuple(Channel(b=bl, acc=acc) for bl, acc in folds),
     )
-    return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, (Store(write=write),)
+    return Fold.projection(body=Body((*prefix, *tail_ops)), operands=(node,)), n_ax, tuple(Store(write=w) for w in writes)
 
 
 __all__ = ["bind_contraction", "bind_prologue_contraction", "make_cone", "map_cone"]

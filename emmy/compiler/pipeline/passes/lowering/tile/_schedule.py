@@ -787,7 +787,7 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 # --- the contraction: tile x stage x reduce ---
 
 
-def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Stage | None:
+def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: list[str] | None = None) -> Stage | None:
     """The ONE transport-resolver dispatch — which operand edges and tier select.
 
     Any COMPUTED contraction operand takes the smem compute fill, which is MANDATORY (no byte
@@ -805,10 +805,16 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None) -> Sta
     if _needs_fill(term, node, tile):
         # A computed (or converting materialized) edge takes only the ``smem`` compute fill — a
         # want naming an asynchronous byte transport declines rather than silently resolving to
-        # the fill.
+        # the fill. The fill IS asynchronous on its B slabs; that ring is its own depth 2, so the
+        # decline names that spelling instead of leaving the caller hunting a smem budget.
         if want is not None and want.transport != "smem":
+            legal.decline(
+                why,
+                f"the smem compute fill has no {want.transport} sibling: a computed operand cannot ride a byte "
+                f"transport, and the fill's own asynchronous B-slab prefetch ring is spelled d2/smem",
+            )
             return None
-        return legal.resolve_fill_stage(node, tile, budget, want.depth if want is not None else 1, inputs=term.tile.inputs)
+        return legal.resolve_fill_stage(node, tile, budget, want.depth if want is not None else 1, inputs=term.tile.inputs, why=why)
     if want is None or (want.transport == "smem-tma" and not term.ctx.has_tma):
         return None
     if tile.is_warp:
@@ -844,14 +850,27 @@ def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
     :func:`_legality.resolve_fill_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
     pin = term.pin("STAGE", node)
+    if pin:
+        # A pinned spelling names a kernel, so its TRANSPORT cannot be quietly dropped and read as
+        # depth alone: the fill has no byte-transport sibling, and its own asynchronous B-slab
+        # prefetch ring is the depth-2 ``smem`` row, not ``smem-async``.
+        pinned_stage = Stage.parse(pin)
+        if pinned_stage.transport != "smem":
+            legal.enforce(
+                f"the smem compute fill has no {pinned_stage.transport} sibling: a computed operand cannot ride a "
+                f"byte transport (nothing but the fill can evaluate a producer cone). Its own asynchronous B-slab "
+                f"prefetch ring is spelled d2/smem.",
+                pinned=True,
+            )
     depths = [Stage.parse(pin).depth] if pin else [1, 2]
 
     def resolve(st: Stage) -> Stage | None:
-        r = _resolve_stage(term, node, tile, st)
-        if r is None:  # per DECLINED depth, so a pin that fits no depth names its own budget
+        why: list[str] = []
+        r = _resolve_stage(term, node, tile, st, why=why)
+        if r is None:  # per DECLINED depth, so a pin that fits no depth names the gate it hit
             legal.enforce(
-                f"the smem compute fill does not resolve at depth {st.depth}: its slabs must fit the "
-                f"{term.ctx.max_dynamic_smem} B smem budget and its K chunk must tile the contraction K",
+                f"the smem compute fill does not resolve at depth {st.depth}: "
+                + (why[-1] if why else f"its slabs must fit the {term.ctx.max_dynamic_smem} B smem budget"),
                 pinned=pin is not None,
             )
         return r

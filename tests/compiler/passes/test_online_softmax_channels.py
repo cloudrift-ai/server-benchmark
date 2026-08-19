@@ -285,6 +285,61 @@ def test_twisted_statistic_contraction_realizes_the_warp_tier(monkeypatch) -> No
     assert src.count("expf") >= 2, "the streaming merge and the cone's exp both survive into the kernel"
 
 
+def _sdpa_graph(heads: int = 1, seq: int = 32, head_dim: int = 128):
+    """One fp16 attention program — the shape whose QK/PV kernels stage through the compute fill."""
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+
+    g = Graph()
+    for name in ("q", "k", "v"):
+        g.add_node(InputOp(), [], Tensor(name, (1, heads, seq, head_dim), dtype=F16), node_id=name)
+    g.add_node(SdpaOp(), ["q", "k", "v"], Tensor("o", (1, heads, seq, head_dim), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["q", "k", "v"], ["o"]
+    return g
+
+
+def test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring(monkeypatch) -> None:
+    """A computed operand can only ride the smem compute fill, so a pin naming a byte transport must
+    be refused rather than silently read as its depth alone. The fill IS asynchronous on its B slabs,
+    but that ring is its own ``d2/smem`` depth, so the refusal names that spelling."""
+    import pytest
+
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.backend import CUDA_PASSES
+
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem-async")  # the per-knob var: the aggregate splats at import time
+    target_mod.set_target((8, 0))
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            Pipeline.build(CUDA_PASSES).run(_sdpa_graph())
+    finally:
+        target_mod.set_target(None)
+    message = str(excinfo.value)
+    assert "no smem-async sibling" in message, message
+    assert "d2/smem" in message, message
+    assert "smem budget" not in message, f"the budget was never the gate here: {message}"
+
+
+def test_fill_decline_names_the_gate_it_actually_hit(monkeypatch) -> None:
+    """The depth declines carry their own reason too. K=64 against a 128-element slab chunk is the
+    whole-K-chunk rule, not the smem budget — the catch-all message used to blame the budget and
+    send a reader hunting a capacity limit the pin never reached."""
+    import pytest
+
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.backend import CUDA_PASSES
+
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    target_mod.set_target((8, 0))
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            Pipeline.build(CUDA_PASSES).run(_sdpa_graph(seq=32))
+    finally:
+        target_mod.set_target(None)
+    message = str(excinfo.value)
+    assert "whole K chunks" in message, message
+    assert "K=32" in message, message
+
+
 def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:
     # The readable-seam refusals live in ``_merge``, the splice both merge passes share; the rule
     # modules are thin predicates over it, so a plain import reaches them (no digit-led module name).

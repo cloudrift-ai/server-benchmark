@@ -206,6 +206,8 @@
  "tests/compiler/passes/test_move_catalog.py::test_two_site_rows_are_distinct_and_materialize_both_sites": 0.19,
  "tests/compiler/passes/test_move_catalog.py::test_two_site_term_merges_both_sites_under_one_inventory": 0.19,
  "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget": 3.56,
+ "tests/compiler/passes/test_online_softmax_channels.py::test_fill_decline_names_the_gate_it_actually_hit": 8.5,
+ "tests/compiler/passes/test_online_softmax_channels.py::test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring": 9.1,
  "tests/compiler/passes/test_online_softmax_channels.py::test_twisted_statistic_contraction_realizes_the_warp_tier": 1.93,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade": 5.05,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_score_cone_keeps_its_predicate_per_cell": 1.47,

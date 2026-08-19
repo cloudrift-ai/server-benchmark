@@ -94,6 +94,33 @@ stamp-hole reason as BF16. So the FP8 corpus exhibits the same two compiler gaps
 fragmentation. No proposal lane was run — the hybrid-vs-MCTS question was already answered on the BF16 corpus,
 and fp8-tier knob spellings were not evidenced enough to propose without wasting reserved slots.
 
+Per-kernel FP8 detail (5090; baseline at `-O3`, tuned best at `-O1` ranking with the tier it reached —
+`scalar`/`knobless` means the tensor-core tier was never reached):
+
+| kernel | eager | tcompile | emmy cold | tuned best (tier) |
+| --- | ---: | ---: | ---: | --- |
+| `k_linear_0edae7` | 182 | 29 | 33 | 5626 (scalar) |
+| `k_linear_a32aed` | 128 | 21 | 852 | 7760 (knobless) |
+| `k_linear_aa889a` | 125 | 21 | 23 | 1818 (scalar) |
+| `k_linear_eae85b` | 72 | 13 | 435 | 2511 (knobless) |
+| `k_linear_reduce_b17b94` | 278 | — | 7274 | 30422 (knobless) |
+| `k_linear_reduce_fca85d` | 45 | 12 | 14 | 682 (scalar) |
+| `k_mean_20f978` | 111 | 6 | 4 | 35 (scalar) |
+| `k_mul_11_dynamic_fp8_bits_pointwise` | 27 | 2 | 1 | 2 (scalar) |
+| `k_mul_11_dynamic_fp8_scale_reduce` | 29 | 2 | 2 | 20 (scalar) |
+| `k_mul_12_dynamic_fp8_bits_pointwise` | 45 | 2 | 2 | 4 (scalar) |
+| `k_mul_12_dynamic_fp8_scale_reduce` | 33 | 2 | 2 | 57 (scalar) |
+| `k_mul_1_dynamic_fp8_bits_pointwise` | 27 | 2 | 1 | 2 (scalar) |
+| `k_mul_1_dynamic_fp8_scale_reduce` | 29 | 2 | 2 | 20 (scalar) |
+| `k_mul_1_dynamic_fp8_value_pointwise` | 30 | 2 | 1 | 2 (scalar) |
+| `k_reshape_dynamic_fp8_bits_pointwise` | 37 | — | 1 | 3 (scalar) |
+| `k_reshape_dynamic_fp8_scale_reduce` | 31 | 2 | 3 | 38 (scalar) |
+| `k_sdpa_linear_reduce_616dc9` | 70 | 35 | 4816 | no result (stamp hole) |
+| `k_sdpa_mean_reduce_29d3df` | 419 | — | 23501 | no result (stamp hole) |
+
+**Scope note:** FP8 ran on the RTX 5090 only. The recipe's `fp8-common` matrix also lists the RTX 4090; that row
+was NOT run in this session (the 4090 host carried only the BF16 corpus) and remains open work.
+
 **Watchdog rejections** (2 s bench cap on some fused computed-A candidates) are the tuner working as intended,
 listed only for completeness.
 

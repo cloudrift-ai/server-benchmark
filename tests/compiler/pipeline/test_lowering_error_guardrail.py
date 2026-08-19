@@ -32,7 +32,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule
-from emmy.compiler.pipeline.search.policy.greedy import _raise_on_unlowered
+from emmy.compiler.pipeline.search.strategy.greedy import _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
 
 

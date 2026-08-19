@@ -281,7 +281,7 @@ def test_tune_one_measures_proposals_before_mcts_and_deducts_reserved_slots(monk
     monkeypatch.setattr(tune, "measure_proposals", fake_measure)
     monkeypatch.setattr(tune, "load_or_trace", lambda _args: (object(), None, None))
     monkeypatch.setattr("emmy.compiler.pipeline.search.prior.load_prior", lambda seed: prior)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.TwoLevelStrategy", FakeStrategy)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.strategy.TwoLevelStrategy", FakeStrategy)
     args = SimpleNamespace(
         patience=10,
         explore_eps=0.0,
@@ -365,7 +365,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
     monkeypatch.setattr(tune, "measure_proposals", fake_measure)
     monkeypatch.setattr(tune, "persist_tune_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("emmy.compiler.pipeline.search.prior.load_prior", lambda seed: prior)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.two_level.TwoLevelStrategy", FakeStrategy)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.strategy.TwoLevelStrategy", FakeStrategy)
     args = SimpleNamespace(
         code=None,
         input=None,

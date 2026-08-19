@@ -25,7 +25,7 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.two_level import InnerReward, OpResult, _KernelInventory
+from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _KernelInventory
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake
@@ -148,7 +148,7 @@ def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog)
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     fused = _fuse(_graph(("x", 64, 512, 48)))
     backend = _CountingBackend()
-    with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.two_level"):
+    with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):
         reward = run_inner_reward(fused, ctx=Context.from_target((8, 0)), db=SearchDB(), backends=[backend], patience=_PATIENCE, prior=None)
     enrolled = [rec.message for rec in caplog.records if "enrolled minted kernel" in rec.message]
     assert len(enrolled) >= 2, f"the split's partial + finalize must both enroll, saw: {enrolled}"

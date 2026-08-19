@@ -44,7 +44,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
     ``Pipeline.build`` (see module docstring); run-scoped instances are installed via
     ``Run.strategies``. Deliberately no abstract methods: every handler below is a concrete
     no-op, since each strategy cares about a subset — override the events you act on. Contrast
-    ``search.strategy.SearchStrategy`` (a search SHAPE over the engine's loop) and
+    ``search.strategy.base.SearchStrategy`` (a search SHAPE over the engine's loop) and
     ``search.policy.Search`` (the frontier policy inside one loop)."""
 
     def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default

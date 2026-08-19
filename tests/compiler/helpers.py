@@ -145,7 +145,7 @@ def run_inner_reward(
 ):
     """Synchronously run the two-level strategy's separable terminal scoring for tests."""
     from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.two_level import TwoLevelStrategy
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     if ucb_c is None:
         ucb_c = TuningSearch.DEFAULT_UCB_C
@@ -166,7 +166,7 @@ def run_inner_reward(
 
 def run_two_level(graph, *, ctx, **kwargs):
     """Synchronously run :class:`two_level.TwoLevelStrategy` for tests."""
-    from emmy.compiler.pipeline.search.two_level import TwoLevelStrategy
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     return asyncio.run(TwoLevelStrategy(**kwargs).run(graph, ctx))
 

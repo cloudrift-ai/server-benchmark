@@ -38,7 +38,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, Tun
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
-from emmy.compiler.pipeline.search.strategy import SearchStrategy
+from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent
 
 if TYPE_CHECKING:

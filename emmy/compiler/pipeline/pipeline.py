@@ -525,7 +525,7 @@ class Pipeline:
         POLICY, owned by
         :class:`~emmy.compiler.pipeline.search.policy.greedy.GreedyStrategy` —
         this method is the thin engine entry point."""
-        from emmy.compiler.pipeline.search.policy.greedy import GreedyStrategy  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.strategy import GreedyStrategy  # noqa: PLC0415
 
         return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 

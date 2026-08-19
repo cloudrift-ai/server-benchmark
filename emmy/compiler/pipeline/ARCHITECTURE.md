@@ -159,7 +159,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/db.py` | `SearchDB`, the persistent SQLite store (Part 6). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
-| `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
+| `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
@@ -215,7 +215,7 @@ by what the loop is doing when they act:
 - **`Search`** (`search/policy/base.py`) — answers what ONE loop ASKS during exploration: frontier ranking
   (`push`/`pop`) and terminal valuation (`evaluate`); `TuningSearch` is the realization, and `greedy_decide`'s
   decide callback is the deterministic sibling for `Run.resolve`.
-- **`SearchStrategy`** (`search/strategy.py`) — the search SHAPES above the loop: how many loops, over which pass
+- **`SearchStrategy`** (`search/strategy/base.py`) — the search SHAPES above the loop: how many loops, over which pass
   lists, with which policy inside, and what the results mean together (`GreedyStrategy`, `TwoLevelStrategy`; each
   implements `run(graph, ctx)`).
 

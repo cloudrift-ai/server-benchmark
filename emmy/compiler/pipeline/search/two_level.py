@@ -449,6 +449,14 @@ class TwoLevelStrategy:
                 await asyncio.gather(*tasks)
                 # Enrollment wave: everything the inventory reported while this wave ran. Waves
                 # terminate because cut/split trees strictly shrink and the seen-set dedups.
+                # A minting fragment carries InputOp boundary nodes but no ``Graph.inputs``
+                # registration (the splice never needed one) — declare them so the slice cut
+                # from it feeds them bench data instead of treating them as unproduced scratch.
+                from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+
+                for _nid, _op, frag in minted:
+                    if not frag.inputs:
+                        frag.inputs = [i for i, n in frag.nodes.items() if isinstance(n.op, InputOp)]
                 wave = [
                     _Work(key=key, nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
                     for nid, op, frag in minted

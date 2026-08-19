@@ -38,16 +38,24 @@ if TYPE_CHECKING:
 
 
 class Strategy:
-    """Base class for engine-event strategies. Subclasses defined in a ``passes/`` top-level
-    module are DISCOVERED and instantiated at ``Pipeline.build`` (see module docstring);
-    run-scoped instances are installed via ``Run.observers``. Implement any subset of:
+    """Base class for engine-event strategies — the event protocol's one authoritative
+    declaration. Subclasses defined in a ``passes/`` top-level module are DISCOVERED and
+    instantiated at ``Pipeline.build`` (see module docstring); run-scoped instances are
+    installed via ``Run.observers``. Every handler below is a concrete no-op (never abstract:
+    each strategy cares about a subset) — override the events you act on."""
 
-    - ``on_run_start(e: RunStartEvent)`` — a loop starts driving a graph.
-    - ``on_splice(e: SpliceEvent)`` — before a ``Graph`` fragment splices in (op identities
-      stable, pre-id-promotion).
-    - ``on_spliced(e: SplicedEvent)`` — after the splice, with its receipt.
-    - ``on_pass_end(e: PassEndEvent)`` — a named pass completed (quiescent scan).
-    """
+    def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """A loop (``Run.drive`` / ``Run.resolve``) starts driving a graph."""
+
+    def on_splice(self, e: SpliceEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """Before a ``Graph`` fragment splices in (op identities stable, pre-id-promotion).
+        Handlers may mutate fragment OPS — never the graph or the cursor."""
+
+    def on_spliced(self, e: SplicedEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """After the splice, with its :class:`~emmy.compiler.graph.SpliceReceipt`."""
+
+    def on_pass_end(self, e: PassEndEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """A named pass completed (quiescent scan)."""
 
 
 @dataclass
@@ -124,8 +132,8 @@ def discovered_strategies() -> tuple[Strategy, ...]:
 
 
 def emit(strategies, event_name: str, event) -> None:
-    """Notify every strategy in ``strategies`` that implements ``event_name``."""
+    """Notify every strategy in ``strategies``. Strategies derive from :class:`Strategy`, so
+    every event method exists (a no-op unless overridden) — a missing attribute is a loud
+    error, not a silently ignored observer."""
     for strat in strategies:
-        fn = getattr(strat, event_name, None)
-        if fn is not None:
-            fn(event)
+        getattr(strat, event_name)(event)

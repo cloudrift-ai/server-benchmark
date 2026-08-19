@@ -687,10 +687,10 @@ class Run:
     backend: object | None = None
     dump: CompilerDump | None = None
     rejections: list[tuple[str, str, str]] | None = None
-    # Run-scoped engine-event observers (the same protocol as the pipeline's
-    # discovered strategies — see ``strategy.py``): instances with per-run
-    # state, e.g. the two-level tuner's ``KernelInventory``. Notified by
-    # :meth:`emit` after the discovered set.
+    # Run-scoped engine-event observers — ``Strategy`` instances (the same
+    # protocol as the pipeline's discovered strategies; the base class declares
+    # every event as a no-op) with per-run state, e.g. the two-level tuner's
+    # ``KernelInventory``. Notified by :meth:`emit` after the discovered set.
     observers: tuple = ()
     # Count of search candidates dropped by :meth:`drive`'s per-variant
     # containment (un-lowerable forks that raised during lowering). Tune-only;

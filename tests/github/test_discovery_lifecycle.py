@@ -149,6 +149,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Remove archived task-local raw results")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
+    qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
 
     assert "lfs_version=3.7.1" in lfs_script
     assert "sha256sum --check" in lfs_script
@@ -162,14 +163,14 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "tmpfs|ramfs" in host_setup_script
     assert "8388608" in host_setup_script
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
-    assert "results_<gpu-short>x<gpu-count>.tar.gz" in agent_script
-    assert "preserve every other platform archive" in agent_script
-    assert "do not retain those records as" in agent_script
-    assert "onboard-investigator subagent" in agent_script
+    assert "results_<gpu-short>x<gpu-count>.tar.gz" in qualify
+    assert "preserve every other platform" in qualify
+    assert "do not\nretain those records as top-level files" in qualify
+    assert "`onboard-investigator` subagent" in qualify
+    assert "do not modify or list `.gitattributes`" in qualify
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
-    assert "do not modify or list .gitattributes" in agent_script
     assert 'tarfile.open(temporary_archive, "w:gz")' in cleanup_script
     assert "temporary_roots = verify_archive(temporary_archive)" in cleanup_script
     assert "os.replace(temporary_archive, archive)" in cleanup_script
@@ -203,7 +204,9 @@ def test_onboarding_uses_bounded_read_only_investigator():
         "webfetch": "allow",
         "websearch": "allow",
     }
-    assert "Use at most four public-web calls" in " ".join(investigator.splitlines())
+    prompt = " ".join((workspace / "prompts" / "onboard-model" / "investigate.md").read_text().split())
+    assert "Use at most four public-web calls" in prompt
+    assert "never modify a file, invoke another agent, use credentials, or run a remote workload" in prompt
 
 
 def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_path):
@@ -442,6 +445,32 @@ def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
         scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
         assert any('--file "$WORKFLOW_SOURCE/prompts/model-fit.md"' in script for script in scripts)
     assert "vram_mib" not in Path(lifecycle).read_text()
+
+
+def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
+    workspace = Path(__file__).parents[2]
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
+    job = document["jobs"]["onboard"]
+    script = next(step["run"] for step in job["steps"] if step.get("name") == "Run onboard-model agent")
+    qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
+    investigate = (workspace / "prompts" / "onboard-model" / "investigate.md").read_text()
+    skill = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
+    investigator = (workspace / ".opencode" / "agents" / "onboard-investigator.md").read_text()
+
+    assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
+    assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/qualify.md"' in script
+    assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/investigate.md"' in script
+    assert '--file "$AGENT_TASK"' in script
+    assert "jq -n \\" in script
+    assert "Path(os.environ" not in script
+    assert "prompts/onboard-model/qualify.md" in skill
+    assert "prompts/onboard-model/investigate.md" in skill
+    for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
+        assert f"{field}:" in script
+        assert f"`{field}`" in qualify
+    assert "Do not select a model or GPU, provision or delete the VM, commit, push" in qualify
+    assert "Use at most four public-web calls" in investigate
+    assert "Apply the investigation prompt" in investigator
 
 
 def test_fit_subagent_sizes_each_onboarding_model_alone():

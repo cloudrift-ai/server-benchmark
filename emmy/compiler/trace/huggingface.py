@@ -1782,6 +1782,12 @@ def load_quantized_split(
                 if qc4 is not None and k + "_scale" in index and k + "_scale_2" in index and not _is_skipped(k, patterns4):
                     t = f.get_tensor(k)
                     if t.dtype == torch.uint8:  # the NVFP4 packed trio
+                        if compress_trunk:
+                            # The serving lane: leave the trio coded and let the caller re-source
+                            # it from the checkpoint, so the packed bits reach the speller instead
+                            # of a decoded tile. Same contract the AWQ and EXL3 arms above follow.
+                            coded_trunk.add(_checkpoint_to_model_key(k, rename))
+                            continue
                         vals = dequantize_nvfp4(
                             t.numpy(),
                             _sibling(k + "_scale").view(torch.uint8).numpy(),

@@ -341,6 +341,14 @@ def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray,
     return (integers - zeros) * scale_values
 
 
+def is_nvfp4_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint declares the supported NVFP4 packed-trio scheme.
+
+    Same narrow purpose as :func:`is_awq_checkpoint` and :func:`is_exl3_checkpoint`: serving asks
+    only whether the dense trunk may stay coded."""
+    return _fp4_quant_config(Path(model_dir)) is not None
+
+
 def is_exl3_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the EXL3 scheme.
 

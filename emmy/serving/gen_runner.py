@@ -797,13 +797,14 @@ class EmmyGenRunner:
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
+                is_nvfp4_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ reconstruction algebra is dissolved before lowering, so its
+            # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
             # checkpoint sources can stay coded on the card. FP8 keeps the existing value-trunk
             # lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir)
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.

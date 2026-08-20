@@ -59,9 +59,7 @@ rely on this field until an upstream parser lands.
 ## Emmy eligibility: ineligible
 
 The blocking gate is compiler coverage. Qwen3.8 is a hybrid checkpoint: 48 of its 64 layers are `linear_attention`
-(`Qwen3_5GatedDeltaNet`) and 16 are `full_attention`. The Gated DeltaNet path opens with a depthwise causal
-convolution, and Emmy's frontend has no mapping for `aten.conv1d` — there is no convolution operation anywhere in the
-Tensor IR, so the operation falls through to the elementwise fallback and raises.
+(`Qwen3_5GatedDeltaNet`) and 16 are `full_attention`. The linear-attention path does not lower.
 
 Traced against the real modules built from the pinned configuration, at FP16 and sequence length 512:
 
@@ -72,37 +70,27 @@ Traced against the real modules built from the pinned configuration, at FP16 and
 | `lm_head` | traces (3 nodes) |
 | dense MLP | traces (9 nodes) |
 | decoder layer 3 — full attention, 16 of 64 layers | traces (196 nodes) |
-| decoder layer 0 — linear attention, 48 of 64 layers | **fails** on `aten.conv1d` |
-
-Reproducer, which needs no GPU because the gap is in the frontend:
-
-```bash
-emmy compile --ir torch -c "F.conv1d(torch.randn(1,10240,512), torch.randn(10240,1,4), groups=10240, padding=3)"
-```
-
-```
-ValueError: cannot map fallback aten.conv1d as elementwise for output shape (1, 10240, 515)
-```
-
-The shape is the model's own: `conv_dim` is 10,240 (`2 x 16 x 128` key channels plus `48 x 128` value channels) and
-the kernel is 4 wide with padding 3.
+| decoder layer 0 — linear attention, 48 of 64 layers | **fails** in the chunked delta rule |
 
 Coverage is therefore **partial**, so this recipe intentionally has no `golden/` directory — a partial inventory is
-not repository evidence. Because gate 4 fails, gates 3 and 5 (the W4A16 loader path and representative kernel
+not repository evidence. Because that gate fails, gates 3 and 5 (the W4A16 loader path and representative kernel
 correctness) were not evaluated for this checkpoint.
 
-### Second, independent gap
+### Where the path stops
 
-`aten.einsum` is not decomposed into permute plus matmul, so it fails broadcasting even for a plain batched product,
-while the identical contraction written as `torch.matmul` traces. This one is a missing decomposition rather than a
-missing capability:
+The two operations the layer opens with — a depthwise causal `conv1d` and the delta-rule `einsum` — used to stop the
+tracer outright and now decompose; see `compiler/pipeline/passes/frontend/decomposition/`. What remains is not
+another missing operation of the same kind:
 
-```bash
-emmy compile --ir torch -c "torch.einsum('bij,bjk->bik', torch.randn(48,512,128), torch.randn(48,128,512))"
-```
+- `torch.triu` / `Tensor.tril` have no tracer mapping, and the chunked delta rule builds its per-chunk causal masks
+  with them.
+- Behind that, the rule unrolls a sequential recurrence over the 64-wide chunk in Python, reading and writing
+  overlapping slices each step. That is an algorithm the frontend would have to absorb, not an operation to add.
+- This is the pure-torch reference path, which is what traces when `flash-linear-attention` is absent. With the fast
+  path installed the same layer dispatches to an opaque custom CUDA kernel instead, which `torch.export` does not see
+  through at all. Closing the reference path therefore does not by itself make the deployed path traceable.
 
-Both gaps sit on the linear-attention path, so closing `conv1d` alone may not be sufficient to qualify the model;
-closing it is the prerequisite that unblocks measuring what follows.
+Treat the remaining work as qualifying Gated DeltaNet as a whole, not as finishing a short list of operators.
 
 ## Reproduce
 

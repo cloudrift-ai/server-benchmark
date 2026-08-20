@@ -461,6 +461,8 @@ def test_fit_subagent_sizes_each_onboarding_model_alone():
     assert "Never substitute a sibling, quantized, or same-family repository" in prompt
     assert "Return an empty `deployments` array when the checkpoint cannot be sized" in prompt
     assert "never infer size from the model ID" in prompt
+    assert "`deploy.gpu_count` is 1, 2, 4, 8, or 16" in prompt
+    assert "5 GPUs and 12 GPUs are arithmetic, not platforms" in prompt
 
 
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1, heat=50):

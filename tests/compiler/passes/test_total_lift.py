@@ -40,13 +40,15 @@ def _matmul_body(epilogue=(), k_extent: int = 128) -> Body:
     return Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),))
 
 
-def test_matmul_cell_lifts_to_a_typed_fold_with_split_store():
+def test_matmul_cell_lifts_and_classifies_as_contraction():
     tile = _tile(_matmul_body())
     # ``LoopOp`` normalization renames axes; the output-ordered free pair is (m, n) by extent.
     assert [a.extent for a in tile.place.free] == [Dim(32), Dim(64)]
     node = tile.op
     assert isinstance(node, Fold) and node.axis is not None, "the bare reduce IS the root node"
-    assert node.role is AxisRole.PLANAR, "loads stay inline — contraction is classification, not lift"
+    assert node.role is AxisRole.CONTRACTION, "the tree-level binder rebinds the lifted fold"
+    assert isinstance(node.a, Load) and node.a.input == "x"
+    assert isinstance(node.b, Load) and node.b.input == "w"
     assert len(tile.stores) == 1 and tile.stores[0].sweep is None
 
 
@@ -100,10 +102,13 @@ def test_two_pass_softmax_lifts_both_folds_with_cross_operand_read():
     tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None
-    assert len(node.operands) == 2, "both passes lift; the projection holds them in body order"
-    assert all(op.axis is not None for op in node.operands)
-    ops = [str(op.combine.body[0].op) for op in node.operands]
-    assert "maximum" in ops[0] and "add" in ops[1]
+    # Both passes lift; legalize then keeps ONE hoisted operand (materialization stamps one root
+    # site tree) and restores the second verbatim at the body head — the pairing stage will
+    # consume the sibling pair into one TWISTED fold ahead of that demotion once it lands.
+    assert len(node.operands) == 1 and node.operands[0].axis is not None
+    assert "maximum" in str(node.operands[0].combine.body[0].op)
+    restored = [s for s in node.body if isinstance(s, Loop) and s.is_reduce]
+    assert len(restored) == 1, "the sum-exp pass restored to its verbatim loop, order preserved"
 
 
 def test_unliftable_reduce_stays_a_verbatim_raw_loop():

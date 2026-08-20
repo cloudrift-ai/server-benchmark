@@ -25,9 +25,10 @@ from dataclasses import replace
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import Placement, TileOp, split_effects
+from emmy.compiler.pipeline.passes.lowering.tile._classify import classify
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +112,18 @@ def _rewrite_deep(stmt: Stmt, rename) -> Stmt:
     return stmt.rewrite(rename)
 
 
+def _stamp_axes(loop: Loop) -> Loop:
+    """Stamp each axes-less ``Accum`` with its OWN loop's axis, deep — the canonical dissolved
+    spelling the parser's gate re-derives. Pipeline-lowered IR arrives stamped; hand-lowered IR
+    (and some minted pieces) omits it, and the omission is spelling, not semantics: an ``Accum``
+    folds over exactly the loop it sits in."""
+    body = tuple(
+        replace(s, axes=(loop.axis.name,)) if isinstance(s, Accum) and not s.axes else (_stamp_axes(s) if isinstance(s, Loop) else s)
+        for s in loop.body
+    )
+    return replace(loop, body=Body(body))
+
+
 def _lift_cell(cell: list[Stmt]) -> list:
     """The bottom-up total lift of the per-cell stmts: every reduce ``Loop`` — at cell level or
     inside a free sweep — goes through :func:`fold_from_loop` and, on success, is replaced by its
@@ -122,7 +135,7 @@ def _lift_cell(cell: list[Stmt]) -> list:
     for i, s in enumerate(cell):
         if isinstance(s, Loop) and s.is_reduce:
             suffix_reads = deep_reads(cell[i + 1 :])
-            routed, kept = _route_prologue(out, s, suffix_reads)
+            routed, kept = _route_prologue(out, _stamp_axes(s), suffix_reads)
             fold = fold_from_loop(routed)
             if fold is None:
                 out.append(s)
@@ -202,4 +215,5 @@ def recognized_tile(op: LoopOp, output_name: str, name: str = "") -> TileOp:
         # asserts ``sweep is None``) — wrap the bare fold in its empty projection.
         node = Fold.projection(body=Body(()), operands=(node,))
     ordered = _order_free_by_output(node, free, stores)
+    node = classify(node, ordered)
     return TileOp(op=node, name=name, place=Placement(free=ordered), inputs=dict(op.inputs), stores=stores)

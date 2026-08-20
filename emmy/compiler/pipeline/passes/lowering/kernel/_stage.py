@@ -278,11 +278,32 @@ _SWIZZLE_SLAB_ALIGN = {"NONE": TMA_SLAB_ALIGN, "B32": 256, "B64": 512, "B128": 1
 
 
 def _swizzle_align(swizzle: str) -> int:
-    """The slab base alignment a SOFTWARE-filled slab needs — the same swizzle-atom alignment the
-    TMA table gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` keeps
-    the NATURAL alignment (``0``), not the TMA entry: nothing faults on an unaligned software fill,
-    so an unswizzled slab packs exactly where it did before this table reached the sync path."""
+    """The slab base alignment the SWIZZLE asks for — the same swizzle-atom alignment the TMA table
+    gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` asks for nothing
+    (``0``), so an unswizzled slab packs where it did before this table reached the sync path.
+
+    This is only half of a copied slab's requirement; :func:`_fill_align` adds the other half."""
     return 0 if swizzle == "NONE" else _SWIZZLE_SLAB_ALIGN[swizzle_base(swizzle)]
+
+
+def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
+    """The base alignment a VECTOR-FILLED slab needs: its swizzle atom, or its fill chunk, whichever
+    is stricter. EVERY staged slab is vector-filled — the copies through ``cp.async`` / the blocking
+    vector store, the compute fill through the ``v``-element runs :meth:`SyncTransport.fill` emits —
+    so every one of them answers here.
+
+    The chunk is the requirement that is easy to miss, because it does not follow the element
+    width. :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B
+    for any 16 B-divisible row, f16 as much as fp8 — and a vector store faults on a shared address
+    that is not chunk-aligned. Aligning to the ELEMENT would leave an f16 slab 2 B-aligned and its
+    16 B writes free to land at 8 mod 16, which is a real fault and not a theoretical one: it is
+    what a packed weight's odd-sized companion slabs first shifted a neighbouring slab into
+    (compute-sanitizer, ``Invalid __shared__ write of size 16 bytes ... Access to 0x2c58 is
+    misaligned``).
+
+    The row STRIDE keeps every later row aligned once the base is: the byte slab's ``BYTE_SLAB_PAD``
+    is 16-divisible and the staging legality already requires 16-divisible inner spans."""
+    return max(_swizzle_align(swizzle), _cp_async_width(cols, elem_bytes) * elem_bytes)
 
 
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
@@ -527,25 +548,23 @@ class SyncTransport:
         # peers only the per-chunk ones allocate the ring — the loop-invariant peers never advance,
         # so one slot holds them. Each peer is sized by its OWN element width and row pad: a copied
         # peer here is a copied operand there (a packed-pair weight's byte slab beside an f16 A),
-        # so a byte slab keeps its 16 B alignment and its padded rows.
-        #
-        # Two alignment rules meet on the base, and the stricter wins. A SWIZZLED slab pins its
-        # swizzle atom, so the drain's from-base XOR matches what the fill wrote. A 1-BYTE slab
-        # pins 16 B, which its natural alignment does not give and both the cp.async chunk and the
-        # drain's vector reads need. They never both apply — a byte slab is NONE-swizzle by
-        # construction — so the max is exact, never a compromise between two live constraints.
+        # so a byte slab keeps its 16 B alignment and its padded rows. Every copied peer aligns
+        # through :func:`_fill_align` — its swizzle atom or its fill chunk, whichever is stricter.
         def peer(op: Operand, rows: int) -> Stmt:
-            byte_align = 16 if (op.elem_bytes or self.elem_bytes) == 1 else 0
+            eb = op.elem_bytes or self.elem_bytes
             return slab_smem(
                 op.slab,
                 rows,
                 op.shape[1] + op.pad_cols,
                 op.dtype or self.slab_dtype,
-                align=max(_swizzle_align(op.swizzle), byte_align),
+                align=_fill_align(op.shape[1], eb, op.swizzle),
             )
 
         return [
-            *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_swizzle_align(op.swizzle)) for op in self.operands),
+            *(
+                slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_fill_align(op.shape[1], self.elem_bytes, op.swizzle))
+                for op in self.operands
+            ),
             *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
             *(peer(op, op.shape[0]) for op in self.invariant_operands),
         ]
@@ -752,16 +771,18 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        # A 1-byte (fp8) slab pins an explicit 16 B alignment: its natural (1 B) alignment
-        # satisfies neither the 16 B cp.async chunks nor the drain's vector (u32 / fp8x2)
-        # reads; 16 B keeps both, and the padded row stride is 16-divisible by legality.
+        # Every slab here is cp.async-filled, so each aligns to its copy chunk or its swizzle atom,
+        # whichever is stricter (:func:`_fill_align`). The chunk half is what a 1-byte (fp8) slab's
+        # natural 1 B alignment misses, and equally what an f16 slab's 2 B alignment misses — the
+        # chunk follows the row span, not the element. The padded row stride is 16-divisible by
+        # legality, so aligning the base keeps every later row aligned too.
         return [
             slab_smem(
                 op.slab,
                 ring * op.shape[0],
                 op.shape[1] + op.pad_cols,
                 op.dtype or self.slab_dtype,
-                align=16 if (op.elem_bytes or self.elem_bytes) == 1 else 0,
+                align=_fill_align(op.shape[1], op.elem_bytes or self.elem_bytes, op.swizzle),
             )
             for op in self.operands
         ]

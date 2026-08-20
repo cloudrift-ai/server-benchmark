@@ -116,12 +116,12 @@ def _enumerated(graph, monkeypatch) -> tuple[list[tuple[tuple[str, ...], list[di
     original = _schedule._enumerate
 
     def spy(terms, *args, **kwargs):
-        rows, keys = original(terms, *args, **kwargs)
+        rows, keys, total = original(terms, *args, **kwargs)
         pools.append((tuple(keys), [dict(r) for r in rows]))
-        return rows, keys
+        return rows, keys, total
 
     monkeypatch.setattr(_schedule, "_enumerate", spy)
-    deploy = enumerate_graph(graph, Context.from_target(_CC))
+    deploy = enumerate_graph(graph, Context.from_target(_CC)).rows
     return pools, deploy
 
 

@@ -76,7 +76,7 @@ def _ctx() -> Context:
 
 
 def _recorded_row(graph) -> dict:
-    rows = enumerate_graph(graph.copy(), _ctx())
+    rows = enumerate_graph(graph.copy(), _ctx()).rows
     row = next(r for r in rows if str(r.get("WORK", "")).startswith("w") and r.get("STAGE") == "d2/smem-async")
     return stamp_schedule_families(row)
 
@@ -246,7 +246,7 @@ def test_fused_record_holds_the_placement_fork(monkeypatch):
     """A SCHEDULE record for the fused identity keeps the fused side of the placement fork — a
     verified fused µs must not lose the kernel set to a prediction."""
     graph = _norm_linear_graph()
-    rows = enumerate_graph(graph.copy(), _ctx())
+    rows = enumerate_graph(graph.copy(), _ctx()).rows
     fused_row = stamp_schedule_families(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
     records = load_golden_records(_document(graph, fused_row, name="probe.fused"))
     assert decode_record(records[0]) is None, decode_record(records[0])

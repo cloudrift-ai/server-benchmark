@@ -33,6 +33,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
 from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -77,6 +78,13 @@ def register_fit_command(subparsers) -> None:
         help="catboost only: fit rounds — the first draws negatives uniformly, each further one mines hard negatives.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--pool-sample",
+        type=int,
+        default=DEFAULT_SAMPLE,
+        help=f"Candidates drawn per pool during enumeration (default {DEFAULT_SAMPLE}; 0 enumerates every row). "
+        "Recorded in the metrics header and the artifact provenance - two fits are comparable only when it matches.",
+    )
     parser.add_argument(
         "--folds",
         type=int,
@@ -132,7 +140,34 @@ def _pool_identity(group: Group) -> tuple:
     return (group.gpu, group.tier, group.shape, group.dynamic, group.feat_names, hashlib.blake2b(group.feats, digest_size=16).digest())
 
 
-def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Group], list[tuple[str, str, str]]]:
+def _pool_bucket(g) -> tuple:
+    """The bucket a golden's candidate pool can only be shared inside: its card and its pins.
+
+    A SUPERSET of pool identity by construction - both fields are inputs to the scheduler's pool
+    key - so two goldens that could share a pool always land in one bucket. That direction is the
+    one that matters: an over-broad bucket costs a few extra retained rows, while a too-narrow one
+    would hand two goldens over one pool different keep-sets, retain different rows, and stop them
+    merging into a single training case."""
+    return (g.gpu_name, tuple(g.compute_cap), tuple(sorted((k, str(v)) for k, v in g.pin_map.items())))
+
+
+def _keep_sets(records) -> dict[tuple, frozenset]:
+    """Each bucket's union of recorded ``tile_signature`` values - the rows a sample may not drop.
+
+    Membership must survive sampling EXACTLY: the builder locates a golden by scanning its pool for
+    that signature and drops the golden when it misses, and ``eval golden`` reads the same miss as a
+    pin or dtype mismatch. A draw that could lose the row would turn a real defect signal into
+    noise."""
+    out: dict[tuple, set] = {}
+    for g in records:
+        if g.knobs:
+            out.setdefault(_pool_bucket(g), set()).add(features.tile_signature(g.knobs))
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def build_golden_groups(
+    features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
+) -> tuple[list[Group], list[tuple[str, str, str]]]:
     """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, pinned rows,
     per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
@@ -157,6 +192,12 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     schedule fork's rows (``_snippet_rows``); a regime the live tree doesn't fork
     (pointwise) reports un-enumerable rather than reconstructing a search space that no longer exists.
 
+    ``sample`` draws that many candidates per pool DURING enumeration (0 enumerates every row).
+    The draw is a pure function of ``(pool size, sample, seed)`` and never looks at a row, so two
+    goldens over one pool retain identical rows and still merge into one case; every recorded
+    config survives it whatever the draw picks (:func:`_keep_sets`), so a golden that misses its
+    pool still means what it always meant - a pin or dtype mismatch.
+
     Each golden is reconstructed under its OWN card's context
     (``Context.from_target(cap, gpu_name=…)``, mirroring ``Sample.from_golden``):
     the multi-GPU golden set spans cards that differ in compute capability AND in
@@ -177,6 +218,9 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
     # dataset build pays each pool once. The fm-pinned enumeration keys apart on its own: the
     # precision gate rides the pool key's pin fingerprint.
     ctxs: dict[tuple, Context] = {}
+    # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
+    # corpus: the pool a golden opens may also carry a later golden's recorded row.
+    keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
     for g in GOLDEN_RECORDS:
         card = (tuple(g.compute_cap), g.gpu_name)
         ctx = ctxs.get(card)
@@ -185,8 +229,14 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         base = {**ctx.features(), **g.structural_features}
         from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
+        # The sample rides a REPLACED Context, which shares the session cache with the card's own:
+        # the pool memo keys on the sample too, so the two can share one cache and a sampled pool
+        # can never be served to a live compile.
+        keep_set = keeps.get(_pool_bucket(g), frozenset())
+        enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_set))
         with pinned_knobs(g.pin_map):
-            rows = enumerate_graph(g.target_program.copy(), ctx)
+            candidates = enumerate_graph(g.target_program.copy(), enum_ctx)
+        rows = candidates.rows
         tier = "dyn" if g.dynamic else (g.shape_key.kind or ("warp" if g.shape_key.is_warp else "thread"))
         if not rows:
             logger.info("  !! %s: nothing enumerated — skipping", g.name)
@@ -209,7 +259,7 @@ def build_golden_groups(features_spec: str = DEFAULT_FEATURES) -> tuple[list[Gro
         # ``feature_view`` keeps the routing features whatever the spec says, so a narrower
         # ``--features`` cannot silently misroute a symbolic-axis pool.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
-        group = Group.from_dicts(f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), gidx, feats)
+        group = Group.from_dicts(f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), gidx, feats, total=candidates.total)
         at = by_pool.get(identity := _pool_identity(group))
         if at is not None:
             # Same pool as an earlier golden: this one is another verified answer to it, not a second case.
@@ -335,7 +385,7 @@ def handle_fit(args) -> None:
     view = args.features or default_view
 
     logger.info("Building golden dataset (each golden under its own card's context) ...")
-    cases, skipped = build_golden_groups(view)
+    cases, skipped = build_golden_groups(view, sample=args.pool_sample, seed=args.seed)
     names = sorted({n for c in cases for n in c.feat_names})
     n_dyn = sum(1 for c in cases if c.dynamic)
     # A case is a candidate pool and may carry several verified rows, so the case count alone no longer says
@@ -361,6 +411,9 @@ def handle_fit(args) -> None:
         "feat_ver": features.FEATURIZER_VERSION,
         "features": view,
         "folds": args.folds,
+        # Two fits are comparable only when they drew the same way: a sampled fit's ranks are RAW
+        # ranks within the draw, and ``per_golden`` prints the true pool size beside them.
+        "pool_sample": args.pool_sample,
         # Cases are candidate pools, positives the verified rows pinned in them. Recorded so a metrics file
         # whose case count dropped against an earlier fit says why, instead of looking like lost data.
         "cases": {"groups": len(cases), "positives": positives, "merged": positives - len(cases)},
@@ -387,6 +440,7 @@ def handle_fit(args) -> None:
         "script": "emmy fit",
         "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
         "features": view,
+        "pool_sample": args.pool_sample,
         "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
         "positives": positives,
         "notes": notes,

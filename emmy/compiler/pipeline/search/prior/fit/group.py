@@ -184,13 +184,29 @@ class Group:
     pinned: tuple[int, ...]
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
+    # The size of the candidate pool ``feats`` was drawn from, equal to ``len(feats)`` unless the
+    # builder sampled. Two things need it and neither can recover it from the matrix: a report,
+    # which must print the raw sample rank BESIDE the true total rather than scaling it, and the
+    # linear trainer, whose z-scored moments are over the whole pool and are ESTIMATED from a
+    # sample - so each group's rows carry weight ``total / len(feats)`` in those two passes.
+    # Without it a 5-row pool and a 325k one would weigh the same under fixed-size sampling, which
+    # silently changes the standardization and with it the raw-space L2 the artifact ships.
+    total: int = 0
     # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
     # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
     _cache: tuple | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_dicts(
-        cls, key: str, name: str, tier: str, gpu: str, shape: str, pinned: int | Sequence[int], feats: list[dict[str, float]]
+        cls,
+        key: str,
+        name: str,
+        tier: str,
+        gpu: str,
+        shape: str,
+        pinned: int | Sequence[int],
+        feats: list[dict[str, float]],
+        total: int | None = None,
     ) -> Group:
         """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
         union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
@@ -198,7 +214,8 @@ class Group:
 
         ``pinned`` is the pool's positive row index, or several of them; either spelling normalizes to a sorted
         duplicate-free tuple. A bare int is accepted because most callers have exactly one row to pin and
-        wrapping it would say nothing.
+        wrapping it would say nothing. ``total`` is the size of the pool ``feats`` was drawn from, defaulting
+        to "nothing was sampled" - see :attr:`total`.
 
         The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
         :attr:`dynamic` and then LEFT OUT of ``feat_names``, so a weight-set selector can never
@@ -219,7 +236,8 @@ class Group:
         rows = (pinned,) if isinstance(pinned, int) else pinned
         names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
         positives = tuple(sorted({int(i) for i in rows}))
-        return cls(key, name, tier, gpu, shape, dynamic, positives, names, feature_matrix(feats, list(names), fill=np.nan))
+        matrix = feature_matrix(feats, list(names), fill=np.nan)
+        return cls(key, name, tier, gpu, shape, dynamic, positives, names, matrix, len(feats) if total is None else total)
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``

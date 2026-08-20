@@ -70,7 +70,7 @@ def _install_square_goldens(monkeypatch):
     ]
     monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", records)
     monkeypatch.setattr(golden_mod, "live_recorded_goldens", lambda: None)
-    monkeypatch.setattr(golden_eval, "evaluate_record", lambda *_args, **_kwargs: (None, 0, 1, None))
+    monkeypatch.setattr(golden_eval, "evaluate_record", lambda *_args, **_kwargs: golden_eval.Ranked({}, 0, 1, None))
     return records
 
 

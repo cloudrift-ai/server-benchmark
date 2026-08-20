@@ -632,6 +632,21 @@ merged, and every `per_golden` row carries `positives`, so a case count that dro
 instead of looking like lost data. A golden whose signature matches no row in its pool is unchanged: it is skipped
 and counted per card as `unranked`.
 
+**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
+that many candidates per pool while the pool is still an addressable space, before a candidate dict exists —
+the corpus is millions of rows and tens of gigabytes otherwise, and one golden's pool alone is past the
+scheduler's materialization budget, so an unsampled `--data golden` fit does not finish. The draw is a pure
+function of `(pool size, N, --seed)` and never looks at a row, so a refit of the same corpus is byte-identical
+and two goldens over one pool still retain identical rows and still merge into one case. Every recorded
+config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
+always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the
+draw with the true pool size beside them (`per_golden` carries both `pool` and `sampled`), never scaled: a
+sample's rank resolution floor is `pool / N`. The setting is recorded in the metrics header and the artifact
+provenance, so two fits are only comparable when it matches. `catboost`'s `--negatives` is a SECOND uniform
+draw from whatever pool it is handed, and a uniform draw from a uniform draw is a uniform draw from the
+original — the two nest by construction, and the trainer warns when `--negatives` reaches the size of the
+pools it is given and therefore selects nothing.
+
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is

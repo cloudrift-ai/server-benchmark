@@ -130,9 +130,15 @@ def fit_weights(
     # peaked near 70 GB and died. Same values — the second pass is the population variance
     # ``allf.std(0)`` computed, and identical rows stay identical under an affine map, so the
     # rank ties this objective counts (``>=``) are exactly the ties it counted before.
-    n = sum(len(m) for m in mats)
-    mu = sum(m.sum(0) for m in mats) / n
-    sd = np.sqrt(sum(((m - mu) ** 2).sum(0) for m in mats) / n)
+    #
+    # IMPORTANCE-WEIGHTED, because a pool may be a SAMPLE of itself: each group's rows carry weight
+    # ``g.total / len(m)``, so what is standardized is still the full pools' moments, now estimated
+    # from the sample rather than counted. Unsampled every weight is exactly 1.0 and the arithmetic
+    # is bit-identical to the unweighted spelling, so a full-pool refit reproduces byte for byte.
+    weights = [g.total / len(m) for g, m in zip(groups, mats, strict=True)]
+    n = sum(w * len(m) for w, m in zip(weights, mats, strict=True))
+    mu = sum(w * m.sum(0) for w, m in zip(weights, mats, strict=True)) / n
+    sd = np.sqrt(sum(w * ((m - mu) ** 2).sum(0) for w, m in zip(weights, mats, strict=True)) / n)
     sd[sd == 0] = 1.0
     # BEFORE the scaling, and as copies: the interaction compares a raw split COUNT against a raw
     # threshold, and the in-place pass below would otherwise both standardize those values and

@@ -108,10 +108,12 @@ candidate is simply not in `values(site, work)`".
 pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
 MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the views re-bind per op,
 so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
-identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
-cache's home: one `Context`, one fact set. Pool rows are read-only mappings; they carry no resolved slices and no
-view ownership, so a shared pool cannot be corrupted by one consumer for another — materialization re-resolves
-every slice from the row's own spellings.
+identity deliberately excludes — the symbolic-axis hints and the live schedule pins — plus `ctx.pool_sample`, and
+the ctx facts ride the cache's home: one `Context`, one fact set. The sample belongs in the KEY rather than merely
+on the Context because `dataclasses.replace` SHARES the session cache: a sampled Context and the live one it was
+derived from sit on one memo, so a Context-only flag would let a sampled pool reach a live compile. Pool rows are
+read-only mappings; they carry no resolved slices and no view ownership, so a shared pool cannot be corrupted by one
+consumer for another — materialization re-resolves every slice from the row's own spellings.
 
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its

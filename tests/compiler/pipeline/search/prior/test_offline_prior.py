@@ -37,6 +37,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline.search import golden_eval
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.base import normalize_policy
 from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
@@ -163,7 +164,7 @@ def _matmul_graph(M: int, N: int, K: int, dtype: str) -> Graph:
 
 
 def _enumerate(M: int, N: int, K: int, dtype: str, ctx: Context) -> list[dict]:
-    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE")
+    return enumerate_graph(_matmul_graph(M, N, K, dtype), ctx, family="TILE").rows
 
 
 def test_qualities_past_the_old_clip_stay_strictly_ordered():
@@ -222,13 +223,14 @@ def test_evaluate_record_rank_is_tie_pessimistic(monkeypatch):
         {"TILE@a0": "f4x8", "WORK": "t32x16"},  # the golden, emitted third
         {"TILE@a0": "f4x8", "WORK": "t64x16"},
     ]
-    monkeypatch.setattr(golden_eval, "enumerate_graph", lambda graph, ctx: rows)
+    monkeypatch.setattr(golden_eval, "enumerate_graph", lambda graph, ctx: Candidates(rows, len(rows)))
     golden = {"TILE": "f4x8", "WORK": "t32x16"}
     from types import SimpleNamespace
 
     record = SimpleNamespace(knobs=golden, target_program=Graph(), pin_map={"FAST_MATH": False})
 
-    _, rank_tied, pool, rank_opt = golden_eval.evaluate_record(record, ctx=None, scorer=lambda r: 1.0)
+    tied = golden_eval.evaluate_record(record, ctx=None, scorer=lambda r: 1.0)
+    rank_tied, pool, rank_opt = tied.rank, tied.pool, tied.rank_optimistic
     assert pool == 4
     assert rank_tied == 2, "two earlier-emitted ties must count against the golden"
     assert rank_opt == 0, "the optimistic count forgives the whole tie plateau"
@@ -237,7 +239,8 @@ def test_evaluate_record_rank_is_tie_pessimistic(monkeypatch):
     def favors_golden(r):
         return 2.0 if r is rows[2] else 1.0
 
-    _, rank_best, _, rank_best_opt = golden_eval.evaluate_record(record, ctx=None, scorer=favors_golden)
+    best = golden_eval.evaluate_record(record, ctx=None, scorer=favors_golden)
+    rank_best, rank_best_opt = best.rank, best.rank_optimistic
     assert rank_best == 0, "a strict winner still ranks 0"
     assert rank_best_opt == 0, "no plateau, no gap"
 

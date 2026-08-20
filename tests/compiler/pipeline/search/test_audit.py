@@ -32,7 +32,7 @@ def _fixture() -> tuple:
     graph = trace_inline_code("torch.matmul(torch.randn(64,128, dtype=torch.float16), torch.randn(128,64, dtype=torch.float16))")["graph"]
     with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
         ctx = Context.from_target(_CAP, gpu_name=_GPU)
-    rows = enumerate_graph(graph.copy(), ctx)
+    rows = enumerate_graph(graph.copy(), ctx).rows
     row = next(r for r in rows if str(r.get("WORK", "")).startswith("w") and r.get("STAGE") == "d2/smem-async")
     return graph, stamp_schedule_families(row)
 

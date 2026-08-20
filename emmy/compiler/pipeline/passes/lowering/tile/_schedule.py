@@ -1378,25 +1378,36 @@ def _space(terms: list[_Term]) -> PoolSpace:
     return PoolSpace.build(*_decided(keys, base, segments))
 
 
-def _enumerate(terms: list[_Term]) -> tuple[list[dict], list[str]]:
-    """The space MATERIALIZED - every legal schedule row in the site value grammar, plus the fork's
-    site keys. An empty result is the guardrail contract, never a raise: the caller leaves the term
-    unmapped.
+def _enumerate(terms: list[_Term], sample=None) -> tuple[list[dict], list[str], int]:
+    """The space MATERIALIZED - every legal schedule row in the site value grammar, the fork's site
+    keys, and the EXACT size of the space they came from. An empty result is the guardrail
+    contract, never a raise: the caller leaves the term unmapped.
 
-    This is where :data:`MAX_ROWS` belongs, and the space is what lets it be asked before the answer
-    is built: an over-budget term now fails on a prefix-sum lookup instead of after 400k dicts."""
+    ``sample`` is the Context's ``search.pool.PoolSample``, ``None`` on every live compile. It
+    draws its rows out of the space rather than materializing it, which is only possible because
+    the space knows its own size and can address a member without building its neighbours.
+
+    This is where :data:`MAX_ROWS` belongs, and the space is what lets it be asked before the
+    answer is built: an over-budget term fails on a prefix-sum lookup instead of after 400k dicts.
+    A SAMPLED enumeration materializes nothing, so the budget has nothing to bind - but a widened
+    product is a real finding, so the size is reported instead of swallowed. The abort dies there;
+    the signal does not."""
     space = _space(terms)
-    if len(space) > MAX_ROWS:
-        raise ValueError(
-            f"schedule enumeration for {terms[0].tile.name!r} exceeds the {MAX_ROWS}-row budget "
-            f"({len(space)} rows over {len(terms)} views and {len(space.keys)} site keys) - the product "
-            f"across sites widened; narrow a catalog or add the legality predicate that bounds it, never truncate."
+    total = len(space)
+    if total > MAX_ROWS:
+        why = (
+            f"schedule enumeration for {terms[0].tile.name!r} offers {total} rows, past the {MAX_ROWS}-row "
+            f"budget ({len(terms)} views, {len(space.keys)} site keys) - the product across sites widened; "
+            f"narrow a catalog or add the legality predicate that bounds it, never truncate"
         )
-    rows = list(space)
+        if sample is None:
+            raise ValueError(why)
+        logger.warning("%s. Sampling %d of them.", why, sample.rows)
+    rows = list(space) if sample is None else sample.take(space)
     for term in terms:
         if not rows and term.pin_error is not None and not term.pin_spelled:
             raise term.pin_error  # NO inventory could spell the pin - a pin names a specific kernel
-    return rows, list(space.keys)
+    return rows, list(space.keys), total
 
 
 def _decided(keys: list[str], base: dict, segments: list[Segment]) -> tuple[list[str], dict, list[Segment]]:
@@ -1763,10 +1774,14 @@ class _Pool:
 
     keys: tuple[str, ...]
     rows: tuple
+    #: The size of the SPACE the rows came from - ``len(rows)`` unless the Context asked for a
+    #: sample. Memoized with them because it is the same pure function of the term, and because a
+    #: rank is only interpretable next to what it was ranked among.
+    total: int
 
     @classmethod
-    def build(cls, rows: list[dict], keys: list[str]) -> _Pool:
-        return cls(tuple(keys), tuple(MappingProxyType(r) for r in rows))
+    def build(cls, rows: list[dict], keys: list[str], total: int) -> _Pool:
+        return cls(tuple(keys), tuple(MappingProxyType(r) for r in rows), total)
 
 
 def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
@@ -1837,18 +1852,23 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     empty pool is cached too, so the guardrail answers from the memo on repeat).
 
     The enumeration itself is memoized in ``ctx.session_cache`` (:class:`_Pool`): the rows are a
-    pure function of ``(term, ctx, pins, hints)``, so N same-shape ops — and every tune trajectory
+    pure function of ``(term, ctx, pins, hints, ctx.pool_sample)``, so N same-shape ops — and every tune trajectory
     after the first — pay one enumeration. Only the VIEWS re-bind per op (:func:`_views` is
     cheap), so materialization always stamps against THIS op's placement and stores."""
     terms, warp_view = _views(tile, ctx)
     cache = getattr(ctx, "session_cache", None)
-    key = pool_key(tile) if cache is not None else None
+    sample = getattr(ctx, "pool_sample", None)
+    # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES the
+    # session cache, so a sampled Context and the live one it came from sit on one memo and a
+    # Context-only flag would serve a sampled pool to a live compile.
+    key = digest(pool_key(tile), sample.key if sample is not None else "") if cache is not None or sample is not None else None
     pool = cache.get(key) if cache is not None else None
     if pool is None:
-        rows, keys = _enumerate(terms)
-        pool = _Pool.build(rows, keys)
+        pool = _Pool.build(*_enumerate(terms, sample))
         if cache is not None:
             cache.put(key, pool)
+    if sample is not None:
+        sample.totals[key] = pool.total  # the sampled rows cannot carry it; the caller reads it here
     if not pool.rows:
         return []
 

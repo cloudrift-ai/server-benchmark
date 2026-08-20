@@ -757,7 +757,8 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
         gold = dict(tuning_knob_items(g.knobs))
         try:
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
-            got, rank, pool, _ = evaluate_record(g, ctx)
+            ranked = evaluate_record(g, ctx)
+            got, rank, pool = ranked.best, ranked.rank, ranked.pool
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue

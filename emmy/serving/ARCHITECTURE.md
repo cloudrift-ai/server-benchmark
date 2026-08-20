@@ -79,7 +79,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
   (each floor is a true lower bound for its regime, both calibrations undershoot peak, quantized weights only
   underestimate the compute floor, and FAST_MATH kernels can only sit *under* the f32-acc-calibrated compute floor),
-  advisory only (never raises, never blocks boot). Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
+  advisory only (never raises, never blocks boot). A measurement failure is swallowed to debug, but an unusable
+  `EMMY_GPU_LOCK` path is not — taking the lock is setup, not measurement, so that WARNs and an environment fault
+  never reads as a clean audit. Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
   served a fused-norm kernel ~150x off the floor (54x TPOT gap) with zero boot-time signal.
   **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
   class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it

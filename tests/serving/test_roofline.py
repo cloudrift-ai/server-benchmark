@@ -3,10 +3,21 @@ Pure CPU: the CUDA-touching measurement helpers are stubbed."""
 
 import logging
 
+import pytest
+
+from emmy.compiler.backend import gpu_lock as gpu_lock_mod
 from emmy.serving import roofline
 from emmy.serving.roofline import audit_boot_programs, flag_ratio
 
 GB = 1e9
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_gpu_lock(monkeypatch):
+    """These tests audit decision logic, not locking. ``tests/conftest.py`` exports
+    ``EMMY_GPU_LOCK`` suite-wide; an unusable path there (a stale lock file owned by another user on
+    a shared runner) would otherwise skip every audit and read as a decision-logic regression."""
+    monkeypatch.delenv("EMMY_GPU_LOCK", raising=False)
 
 
 class _Prog:
@@ -108,6 +119,19 @@ def test_audit_degrades_to_weight_floor_without_matmul_calibration(monkeypatch, 
         audit_boot_programs([("L0.post.decode.m8", _Prog(100_000_000), 8)])
     assert len(caplog.records) == 1
     assert "L0.post.decode.m8" in caplog.text
+
+
+def test_audit_warns_when_gpu_lock_unusable(monkeypatch, caplog):
+    """An unusable lock path is an environment fault, not a clean audit — it must be visible at
+    warning level (the CI incident: a stale ``/tmp/emmy-gpu.lock`` owned by another user)."""
+    monkeypatch.setattr(
+        gpu_lock_mod, "gpu_lock", lambda: (_ for _ in ()).throw(PermissionError(13, "Permission denied", "/tmp/emmy-gpu.lock"))
+    )
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
+        audit_boot_programs([("L0.post.decode.m8", _Prog(100_000_000), 8)])
+    assert len(caplog.records) == 1
+    assert "GPU lock" in caplog.text
 
 
 def test_audit_never_raises(monkeypatch, caplog):

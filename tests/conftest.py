@@ -24,7 +24,10 @@ import yaml
 # without this serialization, peer-worker CUDA activity interleaves
 # with our kernels and the per-position fp32 rounding drift breaks
 # the accuracy comparison.
-os.environ.setdefault("EMMY_GPU_LOCK", "/tmp/emmy-gpu.lock")
+# Per-uid path: on a multi-user runner the first user's lock file (mode 0644, sticky /tmp)
+# is unopenable by everyone else, so a shared path fails the run with PermissionError
+# instead of serializing (CI run 32339655489). Cross-user serialization was never real.
+os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 
 
 # ── CUDA context poisoning containment ──────────────────────────────

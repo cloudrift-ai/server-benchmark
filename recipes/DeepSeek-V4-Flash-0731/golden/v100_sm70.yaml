@@ -91836,13 +91836,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: g2a
+      REDUCE: coop
       STAGE: ''
-      TILE: mma_m8n8k4_f16_f32/f1x8/k8
-      WORK: w8x1
+      TILE: ''
+      WORK: t128
     measurements:
-      emmy_us: 2480.128049850464
-      reference_us: 328.92597348939205
+      emmy_us: 1014.8
+      reference_us: 2860.0
       reference_backend: emmy-greedy
 - program: 12
   target:

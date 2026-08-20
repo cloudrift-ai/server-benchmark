@@ -84,33 +84,91 @@ benchmark run.
 
 ## Compiler qualification
 
-The [canonical V100 golden](golden/v100_sm70.yaml) contains 279 exact Loop realizations across 13 programs, each with
-positive deployable O3 and reference timings. Coverage spans the layer paths and the non-layer seams (`layer0`,
-`layer2`, `layer3`, `layer4`, and `model-seam` targets).
+### Coverage
 
-This run reverified that committed golden. It did **not** retrace the model and did **not** retune any kernel: the
-inventory, knobs, and recorded timings are unchanged from the 2026-08-11 tuning run, and the file is byte-identical.
+All 43 decoder layers reduce to three distinct traced graphs, set by `compress_ratios` in the model config. Tracing
+seven layers and comparing Graph IR node counts closes the manifest empirically:
+
+| Class | `compress_ratio` | Representative | Graph IR nodes | Verified identical |
+| --- | ---: | --- | ---: | --- |
+| layers 0–1 | 0 | layer 0 | 945 | layer 1 |
+| even layers 2–42 | 4 | layer 2 | 1,156 | layers 4, 42 |
+| odd layers 3–41 | 128 | layer 3 | 1,087 | layer 41 |
+
+Layer 41 and layer 42 are `dspark_target_layer_ids`, and they trace identically to their ordinary siblings, so the
+dspark specialization is not visible as a distinct architecture path. The committed golden's fourth representative
+(layer 4) is redundant with layer 2. Non-layer seams are covered by the `model-seam` targets.
+
+One path is **not** covered: the model declares `num_nextn_predict_layers: 1`, but the MTP head is not exposed as a
+decoder layer — `emmy trace --layer 43` fails with "layer 43 not found (model has 43 layers)" — so it cannot be
+traced through this interface. The committed golden does not contain it either.
+
+A whole-model architecture trace is not bounded on this checkpoint: it grew past 830 GiB of host RAM, climbing about
+45 GiB/minute, before it was stopped. Per-layer tracing is bounded (about 1 GiB), which is why the inventory is built
+from representatives. Per-layer tracing is nonetheless dominated by merge-region dependency resolution in the Loop
+splicer (`ir/loop/splicer.py`, `_ensure_dep` under `build_merged_region`); three representative layers ran 4h45m in
+that phase without emitting a post-fusion inventory, confirming the 2026-08-11 report's attribution. The tuning below
+therefore ran against the committed inventory rather than a freshly re-derived one.
+
+### Verification on the target GPU
 
 | Gate | Checked against | Result |
 | --- | --- | --- |
 | Repository-level validation | committed file | passes |
 | Strict decode of every realization | committed file | 279 / 279 |
-| Paired positive O3 / reference timings, recorded 2026-08-11 | committed file | 279 / 279 present and positive |
-| Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0 |
+| Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0, 3 min 54 s |
 
-`emmy run --golden recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml` completed in 4 min 19 s with no compile,
-lowering, or execution failure, using the CUDA 12.9 toolchain (CUDA 13 cannot target sm_70). Emmy serving eligibility
-is unchanged, and this compiler evidence does not establish an Emmy serving path for the checkpoint.
+### `REDUCE=g2a` was a recorded pessimization, and no longer realizes at all
 
-Reaching that verdict required fixing the replay itself. `emmy run --golden` re-read and re-validated the whole
-document once per target; at roughly 15 s per load for this 3.4 MB inventory, a 279-target replay spent over an hour
-re-parsing the same file before doing any useful work. That is consistent with the 2026-08-11 note that the in-model
-audit returned no verdict within a bounded 106-minute replay, which was attributed to the Loop splicer. The replay now
-parses the document once and shares it across targets.
+Every one of the 9 realizations the golden pinned to `REDUCE=g2a` measured slower than Emmy's own greedy pick, with a
+median ratio of 0.549× against 1.009× for `REDUCE=coop` and 1.425× for the default — about 27.6 ms of recorded but
+avoidable latency. Under the current compiler those pins do not reproduce at all: an exact `--ab` pin reports
+`unreproducible pin: REDUCE=g2a realized (off)`, so the planner silently selects a different schedule and the recorded
+`emmy_us` values for those rows cannot be measured today.
 
-Two host conditions also matter for anyone reproducing this: Emmy needs `nvcc` on `PATH`, and the CUDA 12.9 toolkit
-must be selected because CUDA 13 dropped Volta; and PyYAML silently falls back to its pure-Python loader when
-`libyaml` is absent, which alone cost more than 13 minutes per parse on this host before it was corrected.
+### Tuning: equal-budget hybrid versus MCTS-only
+
+Scope: the 9 `g2a` realizations. The other 270 are at or above greedy and carry no headroom, and a full 279-target arm
+measured out at roughly ten hours per arm. This is a scoped kernel result, not a whole-model performance claim.
+
+Both arms started from the same inventory-only base (no knobs, timings, or ranking), an empty tune DB and online prior,
+separate empty cubin caches, `--max-candidates 8`, `--patience 4`, `--seed 731`, 9 GPUs, same compiler revision, MCTS
+arm first. The hybrid arm added 4 knob proposals per target, each reserving a candidate slot before MCTS. MCTS
+completed 9/9 targets with 145 benches; hybrid 9/9 with 171. On the O1 ranking lane MCTS produced the better candidate
+on 6 targets, hybrid on 1, with 2 ties.
+
+The O1 ranking lane misranks this model badly, so every conclusion below is from repeated deployable O3 measurement:
+
+| Target | Candidate | O3 run 1 | O3 run 2 |
+| --- | --- | ---: | ---: |
+| `model-seam.k_linear_db1eb0` | greedy (isolated) | 2,854.9 µs | 2,855.9 µs |
+| | MCTS winner `TILE=f2x8, WORK=t64x8` | 2,804.7 µs | 2,510.8 µs |
+| | **hybrid proposal `REDUCE=coop, WORK=t128`** | **1,014.8 µs** | **902.1 µs** |
+| `layer0.i003.k_linear_reduce_f6a146` | greedy (isolated) | 910.3 µs | 910.3 µs |
+| | MCTS winner `TILE=f1x2, WORK=t32x8` | 2,526.2 µs | 2,520.1 µs |
+| | hybrid `REDUCE=coop, TILE=f2x2, WORK=t16x8` | 2,367.5 µs | 2,487.3 µs |
+| `layer3.i064.k_linear_reduce_f6a146` | greedy (isolated) | 912.4 µs | 909.3 µs |
+| | MCTS winner `TILE=f1x2, WORK=t32x8` | 2,401.3 µs | 2,522.1 µs |
+
+The hybrid proposal wins decisively on the one target with real headroom — 2.8–3.2× faster than greedy and about
+2.5× faster than the MCTS-only winner — and it is exactly the hypothesis the `g2a` evidence suggested: drop `g2a`
+and use the cooperative reduce with a thread work inventory. It is promoted into the golden with its two O3
+measurements.
+
+The eight `k_linear_reduce_f6a146` realizations are deliberately **not** repinned. Greedy already beats every
+searched and proposed candidate there by roughly 2.7×, and pinning greedy's own displayed knobs (`TILE=f2x2,
+WORK=t16x8`) measures 1,641 µs against greedy's 909 µs at a different grid — so no knob spelling in this schema
+faithfully records what greedy actually does. Their recorded `g2a` knobs remain unreproducible and should be
+re-derived by a compiler-side fix rather than hand-edited.
+
+### Reproducing the compiler work
+
+Emmy needs `nvcc` on `PATH`, and the CUDA **12.9** toolkit specifically: CUDA 13 dropped Volta. Two further host
+conditions cost hours before they were found. PyYAML silently falls back to its pure-Python loader without `libyaml`,
+which alone cost more than 13 minutes per parse of this 3.4 MB golden. And `torch 2.13` installs
+`nvidia-cuda-nvrtc 13.0.88`, which `cupy-cuda12x` then resolves in preference to any CUDA 12 NVRTC; because CUDA 13
+has no Volta support, every CuPy JIT path dies with `invalid value for --gpu-architecture` and all benchmarking fails.
+Running with `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12` restores it.
 
 ## Reproduce
 

@@ -24,7 +24,10 @@ IGNORED_FILES = [
 
 # Exact node ids xfailed (strict) until their subsystem is rebuilt.
 XFAIL_NODES = {
-    "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp",
+    "tests/compiler/e2e/test_fused_edge.py::test_sdpa_consumer_projection_reaches_mma",
+    "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
+    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_the_kernels",
+    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_degenerate_m1",
     "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_sdpa_over_symbolic_seq_len",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b2",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b32",
@@ -47,14 +50,6 @@ XFAIL_NODES = {
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_lift_partitions_independent_reduce_and_epilogue_preamble",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_lift_recognizes_contraction_between_views_of_same_packed_buffer",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_score_cone_keeps_its_predicate_per_cell",
-    "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_sdpa_reaches_the_computed_a_contraction[False]",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_sdpa_reaches_the_computed_a_contraction[True]",
-    "tests/compiler/passes/test_recognize_boundary_rules.py::test_mlp_gate_up_nodifies_as_two_channel_product_contraction",
-    "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_cone_is_an_inline_node_tree",
-    "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows",
-    "tests/compiler/passes/test_recognize_boundary_rules.py::test_norm_linear_symbolic_m_offers_warp_rows",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_online_softmax_pairs_two_composed_passes",
-    "tests/compiler/passes/test_volta_mma.py::test_modern_computed_a_edge_keeps_the_cp_async_peer_copy",
-    "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d1/smem]",
-    "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d2/smem]",
 }

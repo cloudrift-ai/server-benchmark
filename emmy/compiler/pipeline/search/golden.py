@@ -661,6 +661,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     any-of, no classified shape."""
     from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
 
     try:
@@ -673,9 +674,10 @@ def decode_record(record: GoldenRecord) -> str | None:
         verdicts = store.setdefault("verdicts", {})
         if verdict_key in verdicts:
             return verdicts[verdict_key]
-        # The fused (monoid-producer) reference tree is gone with the old recognize-time binder —
-        # until classification rebuilds it, routing keys resolve against the lifted tree alone.
-        route_tree, route_free, route_stores = (tile.op, tile.place.free, tile.stores)
+        pro = fused_view(tile)
+        route_tree, route_free, route_stores = (
+            (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
+        )
         seams = cuttable_seams(route_tree, route_stores, route_free)
         all_sites = sites(route_tree)
         for key, value in record.knobs.items():

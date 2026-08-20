@@ -15,12 +15,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, component_ops
 from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Select
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select
 from emmy.compiler.ir.tile.ops import _cone_canon, make_cone, split_invariant_factors
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def classify(node, free):
@@ -33,10 +35,13 @@ def classify(node, free):
     node = pair_softmax(node)
     if len(free) >= 2:
         m_name, n_name = free[-2].name, free[-1].name
+        axes = frozenset(a.name for a in free)
         if isinstance(node, Fold) and node.axis is not None:
-            node = bind_bilinear(node, m_name, n_name) or node
+            node = bind_bilinear(node, m_name, n_name, axes) or node
         elif isinstance(node, Fold) and node.axis is None and node.operands:
-            ops = tuple((bind_bilinear(f, m_name, n_name) or f) if isinstance(f, Fold) and f.axis is not None else f for f in node.operands)
+            ops = tuple(
+                (bind_bilinear(f, m_name, n_name, axes) or f) if isinstance(f, Fold) and f.axis is not None else f for f in node.operands
+            )
             if any(a is not b for a, b in zip(ops, node.operands, strict=True)):
                 # The rebound channels keep their accumulator names, so the projection's λ params
                 # (bound positionally to the operands' result components) are unchanged.
@@ -237,19 +242,229 @@ def _pair(fmax, rest: list) -> tuple[Fold, int, list] | None:
     return merged, consumed, epilogue
 
 
+def fused_view(tile) -> tuple[Fold, object, tuple] | None:
+    """B3 — the MONOID-PRODUCER composition, read off the lifted tree: a root projection whose one
+    operand is a per-row statistic fold (PLANAR Σx² — RMSNorm; TWISTED ``(m, l)`` — softmax·V) and
+    whose body is the statistic's scalar epilogue + ONE raw column contraction loop (restored by
+    root formation exactly because its cone reads the epilogue), the column axis riding the sweep
+    :class:`Store`. That tree ALSO reads as ONE computed-A product contraction: the k-varying cone
+    on the ``a`` edge with the statistic as its SOURCE (``make_cone`` — the K seam on the node),
+    one :class:`Channel` per ⊗-fold, the column axis joining the grid.
+
+    Returns the same ``(Fold, column Axis, stores)`` the old recognize-time binder returned — or
+    ``None`` (not this shape). A VIEW, not a rewrite: ``classify`` stores the canonical projection
+    tree; this derivation runs on demand at the schedule (``_views``) and the golden decode,
+    because which of the two readings a fork row realizes is a decision about the SCHEDULE.
+
+    The statistic's OWN composed score binds too (the old ``bound_producer``): a single fold edge
+    on the statistic re-binds through :func:`bind_bilinear` — tried against each free axis as the
+    row; its columns are the statistic's own axis — so the schedule sees a contraction in both
+    places or the statistic stays a scalar sweep while the weight reaches the tensor core."""
+    node, free, stores = tile.op, tuple(tile.place.free), tuple(tile.stores)
+    if not (isinstance(node, Fold) and node.axis is None and len(node.operands) == 1):
+        return None
+    stat = node.operands[0]
+    if not isinstance(stat, Fold) or stat.axis is None or stat.composed is not None:
+        return None
+    if stat.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
+        return None  # the statistic is a projected reduce; a contraction there is another shape
+    if len(stores) != 1 or stores[0].sweep is None:
+        return None
+    n_ax, write = stores[0].sweep, stores[0].write
+    if not write.is_scalar:
+        return None
+    body = list(node.body)
+    loops = [i for i, s in enumerate(body) if isinstance(s, Loop) and s.is_reduce]
+    if len(loops) != 1:
+        return None
+    stat_epi, kloop, tail = body[: loops[0]], body[loops[0]], body[loops[0] + 1 :]
+    if not all(isinstance(s, (Load, Assign)) for s in stat_epi) or not all(isinstance(s, Assign) for s in tail):
+        return None
+    if stat.operands:
+        if len(stat.operands) != 1 or not isinstance(stat.operands[0], Fold) or stat.operands[0].axis is None:
+            return None
+        axes = frozenset(a.name for a in free) | {stat.axis.name}
+        score = next((b for ax in free if (b := bind_bilinear(stat.operands[0], ax.name, stat.axis.name, axes)) is not None), None)
+        if score is None or not isinstance(score.a, Load) or not isinstance(score.b, Load):
+            return None  # a composed score the binder cannot read — the base rows stand
+        stat = replace(stat, operands=(score,))
+    # The statistic prologue must be row-local: its reads may index (m, its own reduce axis) but
+    # never the column / contraction axes.
+    fcol = fold_from_loop(kloop)
+    if fcol is None or fcol.operands:
+        return None
+    k_name = fcol.axis.name
+    banned = {n_ax.name, k_name}
+    if banned & {v for s in (*stat_epi, *stat.lower()) for e in s.exprs() for v in e.free_vars()}:
+        return None
+    stat_defs = set(_operand_result_names(stat)) | {nm for s in stat_epi for nm in s.defines()}
+    bound = _bind_stat_channels(fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name})
+    if bound is None:
+        return None
+    cone, channels = bound
+    # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE
+    # epilogue defs (their cones prepended so the store-side epilogue can re-evaluate them); a
+    # stat-DERIVED read would need the reduce's state at the store, which that path has no
+    # channel for. The one Write stores the tail's projected scalar (or the bare primary acc).
+    derived = set(_operand_result_names(stat))
+    for s in stat_epi:
+        if set(s.deps()) & derived:
+            derived |= set(s.defines())
+    accs = {ch.acc for ch in channels}
+    tail_defs = {s.name for s in tail}
+    prefix_needs = []
+    for s in tail:
+        for a in s.args:
+            if a in accs or a in tail_defs:
+                continue
+            if a in stat_defs - derived:
+                prefix_needs.append(a)
+                continue
+            return None
+    prefix: list = []
+    seen: set[int] = set()
+    for nm in prefix_needs:
+        for st in Body(tuple(stat_epi)).backward_cone([nm]).members:
+            if id(st) not in seen:
+                seen.add(id(st))
+                prefix.append(st)
+    expect = (tail[-1].name,) if tail else (channels[0].acc,)
+    if tuple(write.values) != expect:
+        return None
+    con = Fold.contraction(
+        k_axis=fcol.axis,
+        a=make_cone(cone, k_name, stat=stat, sweep=tuple(stat_epi)),
+        channels=channels,
+        product=_channel_product(fcol),
+        fold_op=component_ops(fcol.combine)[0],
+    )
+    from emmy.compiler.ir.tile.ir import Store  # noqa: PLC0415
+
+    return Fold.projection(body=Body((*prefix, *tail)), operands=(con,)), n_ax, (Store(write=write),)
+
+
+def _cone_value_key(name: str, defs: dict) -> tuple:
+    """The canonical value tree of SSA ``name`` within a λ body — Loads keyed by (buffer, index),
+    Assigns by (op, child keys), a name defined outside the body by itself. Two channels share
+    one A operand iff their lift values have EQUAL keys (a commutative op's children are sorted,
+    so ``x̂·s`` and ``s·x̂`` key equal)."""
+    st = defs.get(name)
+    if st is None:
+        return ("free", name)
+    if isinstance(st, Load):
+        return ("load", st.input, tuple(e.pretty() for e in st.index))
+    children = tuple(_cone_value_key(a, defs) for a in st.args)
+    if st.op.commutative:
+        children = tuple(sorted(children))
+    return ("op", st.op.name, children)
+
+
+def _channel_product(f: Fold) -> object:
+    """The fold's shared ⊗ — the lift stmt op behind its first result (callers run after the
+    bilinear read has already verified one shared product)."""
+    defs = {s.name: s for s in f.lift.body if isinstance(s, Assign)}
+    return defs[f.lift.results[0]].op
+
+
+def _bind_stat_channels(f: Fold, n_name: str, stat_defs: set, axes: frozenset) -> tuple[list, tuple] | None:
+    """The computed-A channel read for the fused view: per additive component, a two-arg ⊗
+    (distributing over the carrier's one commutative-monoid ⊕) whose directly-named B load is
+    ``(n, k)``-indexed, all components sharing ONE A value whose cone reads the statistic —
+    every free SSA read of the cone must land in ``stat_defs`` (a stat-FREE cone is the demoted
+    option's shape, not this one). Returns ``(cone stmts, channels)`` or ``None``."""
+    ops = component_ops(f.combine)
+    if ops is None or len(set(ops)) != 1:
+        return None
+    plus = ops[0]
+    if not (plus.associative and plus.commutative and plus.has_identity):
+        return None
+    k_name = f.axis.name
+    body = list(f.lift.body)
+    defs = {s.name: s for s in body if isinstance(s, Assign)}
+    loads = {s.names[0]: s for s in body if isinstance(s, Load)}
+    reads: list[tuple[Assign, Load, str]] = []
+    for res in f.lift.results:
+        lift = defs.get(res) if isinstance(res, str) else None
+        if lift is None or len(lift.args) != 2 or not lift.op.distributes_over(plus):
+            return None
+        b_arg = next(
+            (a for a in lift.args if (ld := loads.get(a)) is not None and {n_name, k_name} <= _idx_vars(ld)),
+            None,
+        )
+        a_arg = next((a for a in lift.args if a != b_arg), None)
+        if b_arg is None or a_arg is None:
+            return None
+        reads.append((lift, loads[b_arg], a_arg))
+    if len({lift.op for lift, _, _ in reads}) != 1:
+        return None
+    # ONE shared A value across channels, by VALUE-TREE equality: fusion duplicates the cone SSA
+    # per channel (fresh names, interleaved order, per-copy operand order), so name equality is
+    # too strict but value-tree equality is exact.
+    alldefs = {nm: s for s in body for nm in s.defines()}
+    if len({_cone_value_key(a, alldefs) for _, _, a in reads}) != 1:
+        return None
+    consumed = {id(lift) for lift, _, _ in reads} | {id(b) for _, b, _ in reads}
+    stmts = None
+    for _, _, a_arg in reads:
+        cone = Body(tuple(body)).backward_cone([a_arg])
+        members = list(cone.members)
+        if not members or any(not isinstance(s, (Load, Assign, Select)) for s in members):
+            return None
+        ext = set(cone.external_reads) - axes - {k_name}
+        if not ext or not ext <= stat_defs:
+            return None  # a stat-free cone is the demoted option's shape, not ours
+        consumed |= {id(s) for s in members}
+        if stmts is None:
+            stmts = members  # the first copy IS the cone — the others are value-equal duplicates
+    if any(isinstance(s, Load) and n_name in _idx_vars(s) for s in stmts):
+        return None  # the cone must be (m, k)-indexed — an n-dependent producer isn't the A tile
+    if not any(isinstance(s, Load) and k_name in _idx_vars(s) for s in stmts):
+        return None
+    if any(id(s) not in consumed for s in body):
+        return None  # an unaccounted λ stmt — a shape this binding does not understand
+    if len({k_name in b.index[-1].free_vars() for _, b, _ in reads}) != 1:
+        return None  # B-layout agreement: one shared A fragment, one slab orientation
+    return stmts, tuple(Channel(b=b, acc=acc) for (_, b, _), acc in zip(reads, f.combine.results, strict=True))
+
+
 def _legalize(node):
     """Demote what a NAMED downstream capability cannot consume — an explicit list that shrinks
-    as stages land, never a parity list. Today's one entry: **multi-operand root projections** —
-    materialization stamps ONE root site tree (``_schedule._materialize``) and the materializer
-    recurses into ``operands[0]`` only, so the first operand stays hoisted and the rest are
-    restored to their verbatim loops at the body head, in order. Scope holds by construction: a
-    restored loop may read the kept operand's carried state (operands lower first), never the
-    reverse — hoisting required reading nothing the body defines. The online-softmax pairing
-    will CONSUME the sibling pair into one TWISTED fold ahead of this demotion once it lands."""
+    as stages land, never a parity list. Two entries today:
+
+    - **multi-operand root projections** — materialization stamps ONE root site tree
+      (``_schedule._materialize``) and the materializer recurses into ``operands[0]`` only, so
+      the first operand stays hoisted and the rest are restored to their verbatim loops at the
+      body head, in order. Scope holds by construction: a restored loop may read the kept
+      operand's carried state (operands lower first), never the reverse — hoisting required
+      reading nothing the body defines. The online-softmax pairing consumes the sibling pair
+      into one TWISTED fold ahead of this demotion.
+    - **a Fold nested inside a RAW body stmt** — a term below a non-Fold stmt is not a stored
+      form (the structural key and the scalar render walk stmts, not terms), reached when
+      ``split_effects`` declines a sweep whose members the lift had typed. The member lowers
+      back to its verbatim loop (the parser's gate makes that byte-exact); the fused reading of
+      that sweep is :func:`fused_view`'s to re-derive."""
     if isinstance(node, Fold) and node.axis is None and len(node.operands) > 1:
         keep, rest = node.operands[0], node.operands[1:]
-        return Fold.projection(body=Body((*(f.loop for f in rest), *node.body)), operands=(keep,))
+        node = Fold.projection(body=Body((*(f.loop for f in rest), *node.body)), operands=(keep,))
+    if isinstance(node, Fold) and node.axis is None and any(isinstance(s, Loop) for s in node.body):
+        lowered = tuple(_lower_nested_folds(s) if isinstance(s, Loop) else s for s in node.body)
+        if any(a is not b for a, b in zip(lowered, node.body, strict=True)):
+            node = replace(node, lift=_replace_body(node.lift, Body(lowered)))
     return node
+
+
+def _lower_nested_folds(s: Loop) -> Loop:
+    """``s`` with every ``Fold`` member below it lowered to its verbatim loop, deep."""
+    members = tuple(m.loop if isinstance(m, Fold) else (_lower_nested_folds(m) if isinstance(m, Loop) else m) for m in s.body)
+    return s if all(a is b for a, b in zip(members, s.body, strict=True)) else replace(s, body=Body(members))
+
+
+def _replace_body(lift: Lambda, body: Body) -> Lambda:
+    """``lift`` with ``body`` swapped in — through the raw-loop-IR formation arm (the escape
+    body is impure by definition)."""
+    from emmy.compiler.ir.pure.fold import _loop_ir_fn  # noqa: PLC0415
+
+    return _loop_ir_fn(lift.params, body, lift.results)
 
 
 def _idx_vars(load: Load) -> set[str]:
@@ -257,17 +472,18 @@ def _idx_vars(load: Load) -> set[str]:
     return {v for e in load.index or () for v in e.free_vars()}
 
 
-def _cone(body: list, arg: str, avoid_name: str, k_name: str) -> list | None:
+def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset) -> list | None:
     """The backward cone of ``arg`` within a λ body, when it reads as a pure MAP producer for one
     contraction side: every member a ``Load`` / ``Assign`` / ``Select``, self-contained (no free
-    SSA reads — a cross-operand read is another stage's shape), no member load indexed by the
-    OTHER side's grid axis, and at least one K-indexed load (a k-invariant value is a hoistable
-    factor, not an operand). ``None`` when the cone is not this shape."""
+    SSA reads — a cross-operand read is another stage's shape; an AXIS var is an iteration
+    coordinate, not a read), no member load indexed by the OTHER side's grid axis, and at least
+    one K-indexed load (a k-invariant value is a hoistable factor, not an operand). ``None`` when
+    the cone is not this shape."""
     cone = Body(tuple(body)).backward_cone([arg])
     stmts = list(cone.members)
     if not stmts or any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
         return None
-    if cone.external_reads:
+    if set(cone.external_reads) - axes - {k_name}:
         return None
     loads = [s for s in stmts if isinstance(s, Load)]
     if any(avoid_name in _idx_vars(ld) for ld in loads) or not any(k_name in _idx_vars(ld) for ld in loads):
@@ -275,7 +491,7 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str) -> list | None:
     return stmts
 
 
-def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
+def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset()) -> Fold | None:
     """Rebind a lifted fold as the bilinear contraction — the ONE contraction reading, off the λ
     spelling and stated on the ALGEBRAIC TRAITS, never op names: the carrier must be a product of
     ONE commutative-monoid ⊕ (associative + commutative + identity — the reassociation license
@@ -336,7 +552,7 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
         if a_edge is not None:
             consumed.add(id(a_edge))
         else:
-            cone = _cone([s for s in body if id(s) not in consumed], a_arg, n_name, k_name)
+            cone = _cone([s for s in body if id(s) not in consumed], a_arg, n_name, k_name, axes)
             if cone is None:
                 return None  # a computed A that does not read cleanly — the fold stays PLANAR
             consumed.update(id(s) for s in cone)
@@ -349,7 +565,7 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
         consumed.add(id(a_edge))
         lift = reads[0][0]
         b_arg = next(a for a in lift.args if a != a_arg)
-        cone = _cone([s for s in body if id(s) not in consumed], b_arg, m_name, k_name)
+        cone = _cone([s for s in body if id(s) not in consumed], b_arg, m_name, k_name, axes)
         if cone is None:
             return None
         consumed.update(id(s) for s in cone)

@@ -161,6 +161,12 @@ independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
 
+`run --golden PATH` without `--target` replays every embedded target in one process. It parses and validates the
+document once and hands that object to each target's resolution step, because a whole-model inventory is large
+enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
+15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
+read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
+
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
 per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.

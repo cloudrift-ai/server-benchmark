@@ -465,7 +465,8 @@ def _run_golden_targets(args) -> None:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        records = load_golden_records(load_golden_file(args.golden))
+        document = load_golden_file(args.golden)
+        records = load_golden_records(document)
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
@@ -485,6 +486,7 @@ def _run_golden_targets(args) -> None:
     for index, name in enumerate(names):
         target_args = copy(args)
         target_args.golden_file = args.golden
+        target_args._golden_document = document
         target_args.golden = name
         target_args.golden_target = None
         if output_dir is not None:

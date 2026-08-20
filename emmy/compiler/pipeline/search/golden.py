@@ -361,6 +361,11 @@ def validate_golden_file(
     configs = document.get("configs")
     if not isinstance(configs, list) or not configs:
         raise ValueError("configs must be a non-empty list")
+    # A whole-model inventory points many configs at the same few programs (279 configs
+    # over 13 programs here), and decoding one is the expensive part of this check. Decode
+    # each distinct program once per call: `tune` re-validates the whole document on every
+    # incremental persist, so the redundancy is quadratic in the number of targets.
+    decoded_programs: dict[int, None] = {}
     strict = validation in (GoldenFileValidation.PROMOTION, GoldenFileValidation.REPOSITORY)
     for index, entry in enumerate(configs):
         where = f"configs[{index}]"
@@ -372,10 +377,12 @@ def validate_golden_file(
         program_ref = entry.get("program")
         if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
-        try:
-            graph_from_wire(programs[program_ref])
-        except ValueError as exc:
-            raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+        if program_ref not in decoded_programs:
+            try:
+                graph_from_wire(programs[program_ref])
+            except ValueError as exc:
+                raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+            decoded_programs[program_ref] = None
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:

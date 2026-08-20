@@ -24,14 +24,8 @@ IGNORED_FILES = [
 
 # Exact node ids xfailed (strict) until their subsystem is rebuilt.
 XFAIL_NODES = {
-    "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_pv-16]",
-    "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_pv-31]",
-    "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_pv-130]",
-    "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_pv-512]",
-    "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_pv-700]",
     "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp",
     "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_sdpa_over_symbolic_seq_len",
-    "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_softmax_over_symbolic_seq_len",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b2",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b32",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_batched_dynamic_matches_eager_b4",

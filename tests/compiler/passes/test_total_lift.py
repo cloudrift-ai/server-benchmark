@@ -102,13 +102,102 @@ def test_two_pass_softmax_lifts_both_folds_with_cross_operand_read():
     tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None
-    # Both passes lift; legalize then keeps ONE hoisted operand (materialization stamps one root
-    # site tree) and restores the second verbatim at the body head — the pairing stage will
-    # consume the sibling pair into one TWISTED fold ahead of that demotion once it lands.
-    assert len(node.operands) == 1 and node.operands[0].axis is not None
-    assert "maximum" in str(node.operands[0].combine.body[0].op)
-    restored = [s for s in node.body if isinstance(s, Loop) and s.is_reduce]
-    assert len(restored) == 1, "the sum-exp pass restored to its verbatim loop, order preserved"
+    # The pairing consumes the sibling pair into ONE TWISTED fold — the exp/LSE carrier; the
+    # normalize projection reads its two carried states.
+    assert len(node.operands) == 1
+    tw = node.operands[0]
+    assert tw.role is AxisRole.TWISTED and len(tw.combine.results) == 2
+    assert not any(isinstance(s, Loop) for s in node.body)
+
+
+def test_paired_twisted_fold_round_trips_the_loop_dialect():
+    """The closure property: cut fragments and split partials re-enter recognition as lowered
+    loop IR, so whatever spelling ``Fold.loop`` emits must re-lift to the same node."""
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    tile = _tile(_softmax_body())
+    tw = tile.op.operands[0]
+    assert tw.role is AxisRole.TWISTED
+    assert fold_from_loop(tw.loop) == tw
+
+
+def test_expectation_channel_joins_the_pair_as_a_third_component():
+    """A sibling additive fold whose value factors as the pair's exp weight × a value cone joins
+    the same TWISTED fold as an EXPECTATION component (flash's P·V shape)."""
+    m = Axis("m", Dim(8))
+    k1, k2, k3 = (Axis(nm, Dim(16)) for nm in ("k", "k2", "k3"))
+    pass1 = Loop(
+        axis=k1,
+        body=Body(
+            (
+                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                Accum(name="mx", value="xv", op=ElementwiseImpl("maximum"), axes=("k",)),
+            )
+        ),
+    )
+    pass2 = Loop(
+        axis=k2,
+        body=Body(
+            (
+                Load(name="xw", input="x", index=(Var("m"), Var("k2"))),
+                Assign(name="sh", op=ElementwiseImpl("subtract"), args=("xw", "mx")),
+                Assign(name="ex", op=ElementwiseImpl("exp"), args=("sh",)),
+                Accum(name="den", value="ex", op=ElementwiseImpl("add"), axes=("k2",)),
+            )
+        ),
+    )
+    chan = Loop(
+        axis=k3,
+        body=Body(
+            (
+                Load(name="xu", input="x", index=(Var("m"), Var("k3"))),
+                Assign(name="sh2", op=ElementwiseImpl("subtract"), args=("xu", "mx")),
+                Assign(name="ex2", op=ElementwiseImpl("exp"), args=("sh2",)),
+                Load(name="vv", input="v", index=(Var("m"), Var("k3"))),
+                Assign(name="pv", op=ElementwiseImpl("multiply"), args=("ex2", "vv")),
+                Accum(name="o", value="pv", op=ElementwiseImpl("add"), axes=("k3",)),
+            )
+        ),
+    )
+    cell = (
+        pass1,
+        pass2,
+        chan,
+        Assign(name="outv", op=ElementwiseImpl("divide"), args=("o", "den")),
+        Write(output="out", index=(Var("m"),), value="outv"),
+    )
+    tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
+    node = tile.op
+    assert len(node.operands) == 1
+    tw = node.operands[0]
+    assert tw.role is AxisRole.TWISTED and len(tw.combine.results) == 3
+    assert {s.input for s in tw.lift.body if isinstance(s, Load)} == {"x", "v"}
+
+
+def _softmax_body() -> Body:
+    m, k1, k2 = Axis("m", Dim(8)), Axis("k", Dim(16)), Axis("k2", Dim(16))
+    pass1 = Loop(
+        axis=k1,
+        body=Body(
+            (
+                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                Accum(name="mx", value="xv", op=ElementwiseImpl("maximum"), axes=("k",)),
+            )
+        ),
+    )
+    pass2 = Loop(
+        axis=k2,
+        body=Body(
+            (
+                Load(name="xw", input="x", index=(Var("m"), Var("k2"))),
+                Assign(name="sh", op=ElementwiseImpl("subtract"), args=("xw", "mx")),
+                Assign(name="ex", op=ElementwiseImpl("exp"), args=("sh",)),
+                Accum(name="den", value="ex", op=ElementwiseImpl("add"), axes=("k2",)),
+            )
+        ),
+    )
+    cell = (pass1, pass2, Write(output="out", index=(Var("m"),), value="den"))
+    return Body((Loop(axis=m, body=Body(cell)),))
 
 
 def test_unliftable_reduce_stays_a_verbatim_raw_loop():

@@ -26,19 +26,23 @@ set. Every unselected complete recipe defaults to best-effort; do not return bes
 derives them mechanically.
 
 Propose an obsolete recipe only when a named all-around better complete replacement for the same task is available at
-a comparable or lower practical VRAM footprint, or when a concrete technical limitation means the recipe should no
-longer be used. Before proposing a replacement, read both recipe files and confirm that the old recipe retains no
-advantage in configured context, concurrency, quantization, hardware support, model capability, latency, throughput,
-operating cost, modality, or licensing. A replacement that is merely comparable is not all-around better. Low demand,
-age, and exclusion from the maintained set are not sufficient. Existing obsolete tags are prior proposals, not
-evidence; reassess them under this policy. Put the exact replacement ID and VRAM comparison in the obsolete model's
-score rationale. When no successor is appropriate, the rationale must state the concrete technical limitation.
+a comparable or lower practical VRAM footprint sized by the attached `model-fit.md`, or when a concrete technical
+limitation means the recipe should no longer be used. Before proposing a replacement, read both recipe files and
+confirm that the old recipe retains no advantage in configured context, concurrency, quantization, hardware support,
+model capability, latency, throughput, operating cost, modality, or licensing. A replacement that is merely comparable
+is not all-around better. Low demand, age, and exclusion from the maintained set are not sufficient. Existing obsolete
+tags are prior proposals, not evidence; reassess them under this policy. Put the exact replacement ID and VRAM
+comparison in the obsolete model's score rationale. When no successor is appropriate, the rationale must state the
+concrete technical limitation.
 
 Add every genuinely promising newly discovered model to `new_onboarding_models`; there is no candidate-count limit.
 Use task `embed` only for embedding models. Give each new model one to three useful deployments containing only
-canonical `deploy.gpu` and positive `deploy.gpu_count` values. Do not claim an onboarding shell was deployed or
-benchmarked. Never put an existing recipe ID in `new_onboarding_models`, including an existing onboarding shell; an
-existing ID appears only in `scores`.
+canonical `deploy.gpu` and positive `deploy.gpu_count` values. Derive every deployment from the attached
+`model-fit.md`: read the checkpoint's total parameters, size the footprint, and compare it against that platform's
+real capacity. No repository code checks this, so an unservable deployment reaches rented hardware unchallenged. Put
+the total parameter count, the quantization, and the resulting footprint in the model's rationale. Do not claim an
+onboarding shell was deployed or benchmarked. Never put an existing recipe ID in `new_onboarding_models`, including an
+existing onboarding shell; an existing ID appears only in `scores`.
 
 ## Output
 

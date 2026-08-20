@@ -80,6 +80,10 @@ fail instead of overwriting it.
 Use the model card, `config.json`, and current primary engine documentation to record:
 
 - architecture, modality, total and active parameter counts, dtype and quantization;
+- the VRAM footprint on the requested platform, following [`prompts/model-fit.md`](../../../prompts/model-fit.md) —
+  the shared fit contract `discover-models` also follows, so the platform a recipe proposes and the platform measured
+  here mean the same thing. Record the arithmetic it requires; when the weights cannot fit the requested GPU name and
+  count, report the failed fit gate with those numbers instead of deploying;
 - the immutable Hugging Face commit resolved for this run;
 - native context length and any documented practical cap;
 - current vLLM or SGLang support and the first pinned image version that supports it;

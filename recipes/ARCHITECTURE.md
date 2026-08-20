@@ -42,13 +42,13 @@ Discovery keeps exactly ten fully configured recipes tagged `maintained` for per
 useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
 work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
 lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical
-reason the recipe should no longer be used. Discovery compares the smallest qualified deployment targets when a
-replacement is named and demotes an invalid obsolete proposal to `best-effort`; it cannot obsolete a recipe in favor
-of one that needs more total physical GPU memory. Each lifecycle decision records its current rationale directly under
-`model`. Discovery also refreshes each recipe's 0-100 `model.heat`, which ranks current onboarding interest without
-changing serving behavior. Obsolete recipes are retained rather than deleted, so their configuration and evidence
-stay available and a later reassessment can return one to the maintained or best-effort set. New discoveries start as
-minimal shells:
+reason the recipe should no longer be used. Discovery demotes an invalid obsolete proposal to `best-effort` when the
+named replacement is inactive or serves a different task; the memory comparison itself is agent reasoning under the
+shared `prompts/model-fit.md` contract, not a repository check. Each lifecycle decision records its current rationale
+directly under `model`. Discovery also refreshes each recipe's 0-100 `model.heat`, which ranks current onboarding
+interest without changing serving behavior. Obsolete recipes are retained rather than deleted, so their configuration
+and evidence stay available and a later reassessment can return one to the maintained or best-effort set. New
+discoveries start as minimal shells:
 
 ```yaml
 tags:

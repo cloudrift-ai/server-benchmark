@@ -183,18 +183,19 @@ The validated manifest tags the ten selected complete recipes `maintained`, keep
 `best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
 best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
 reason the recipe should no longer be used. The manifest must classify and score every complete recipe exactly once.
-For decisions with a replacement, the validator compares
-qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
-and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. A
-replacement described as merely comparable, or whose recipe reduces configured context or concurrency, also defaults
-to `best-effort` while retaining the supplied heat. Unknown or malformed lower-priority model IDs cannot stand in for
-an omitted recipe because every real recipe must still be scored. A checkpoint name is normalized across a missing or
-incorrect organization only when it uniquely identifies one existing recipe; ambiguous or unknown maintained IDs
-still fail validation because all ten selections must resolve exactly. The agent must use
-`best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
-the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be
-deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort
-set.
+For decisions with a replacement, the validator demotes the proposal to `best-effort` unless the replacement is active
+and serves the same task. A replacement described as merely comparable, or whose recipe reduces configured context or
+concurrency, also defaults to `best-effort` while retaining the supplied heat. No repository code estimates whether a
+checkpoint fits a platform: memory footprint depends on total parameters, quantization, and context, which the recipe
+does not record. `prompts/model-fit.md` is the shared contract where that reasoning happens, attached to both the
+discovery and onboarding agents so a proposed platform and a measured one mean the same thing. Unknown or malformed
+lower-priority model IDs cannot stand in for an omitted recipe because every real recipe must still be scored. A
+checkpoint name is normalized across a missing or incorrect organization only when it uniquely identifies one existing
+recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections must resolve exactly. The
+agent must use `best-effort` when the old model retains any material capability or operating advantage. Every complete
+recipe stores the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but
+cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or
+best-effort set.
 
 The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
 `emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate

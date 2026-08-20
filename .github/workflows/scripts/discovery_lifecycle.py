@@ -9,11 +9,9 @@ import os
 import sys
 from pathlib import Path
 
-from emmy import gpu as gpu_registry
 from emmy.recipe.catalog import (
     HF_ID,
     create_recipe_stub,
-    deployment_setups,
     recipe_catalog,
     validate_model_heat,
     validate_stub_deployments,
@@ -161,18 +159,6 @@ def _retain_best_effort(decision: dict, records: dict[str, dict]) -> dict:
     return {"model_id": model_id, "rationale": _existing_rationale(records[model_id]), "heat": decision["heat"]}
 
 
-def _deployment_footprints(config: dict) -> tuple[int, ...]:
-    """Return total physical VRAM in MiB for every known deployment variant."""
-
-    footprints = []
-    for setup in deployment_setups(config):
-        spec = gpu_registry.by_name(setup["deploy.gpu"])
-        if spec is None or spec.vram_mib is None:
-            continue
-        footprints.append(spec.vram_mib * setup["deploy.gpu_count"])
-    return tuple(footprints)
-
-
 def _serving_capacity(config: dict) -> tuple[object, object]:
     llm = (config.get("engine") or {}).get("llm") or {}
     return llm.get("context_length"), llm.get("max_concurrent_requests")
@@ -267,16 +253,6 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
         model_task = (records[model_id]["config"].get("model") or {}).get("task", "generate")
         replacement_task = (records[replacement]["config"].get("model") or {}).get("task", "generate")
         if model_task != replacement_task:
-            best_effort.append(_retain_best_effort(decision, records))
-            continue
-        model_footprints = _deployment_footprints(records[model_id]["config"])
-        replacement_footprints = _deployment_footprints(records[replacement]["config"])
-        if not model_footprints or not replacement_footprints:
-            best_effort.append(_retain_best_effort(decision, records))
-            continue
-        model_min = min(model_footprints)
-        replacement_min = min(replacement_footprints)
-        if replacement_min > model_min:
             best_effort.append(_retain_best_effort(decision, records))
             continue
         if "comparable" in decision["rationale"].casefold():

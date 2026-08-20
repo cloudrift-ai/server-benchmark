@@ -510,6 +510,7 @@ jobs:
             --model cloudrift/agent \
             --format json \
             --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
             --file "$AGENT_PROMPT" > "$AGENT_EVENTS"

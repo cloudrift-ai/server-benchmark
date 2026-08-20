@@ -80,6 +80,7 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     assert '"$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq"' in agent_script
     assert '"$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md"' in agent_script
+    assert '--file "$WORKFLOW_SOURCE/prompts/model-fit.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md"' in agent_script
     assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md"' in agent_script
     assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
@@ -362,8 +363,9 @@ def test_discovery_counts_lifecycle_with_recipe_query():
 
 
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
-    prompt = (Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text()
+    prompt = " ".join((Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text().split())
 
+    assert "Derive every deployment from the attached `model-fit.md`" in prompt
     assert "A replacement that is merely comparable is not" in prompt
     assert "read both recipe files" in prompt
     assert "configured context, concurrency, quantization, hardware support, model capability" in prompt
@@ -423,6 +425,22 @@ def test_discovery_uses_source_subagents_and_scores_every_model():
     assert "prompts/discover-models/lifecycle.md" in skill
     assert "prompts/discover-models/score-recipes.md" in skill
     assert "Path(os.environ" not in script
+
+
+def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
+    workspace = Path(__file__).parents[2]
+    fit_prompt = (workspace / "prompts" / "model-fit.md").read_text()
+    lifecycle = discovery_lifecycle.__file__
+
+    assert "TOTAL parameters" in fit_prompt
+    assert "emmy/gpu.py" in fit_prompt
+    for skill_name in ("discover-models", "onboard-model"):
+        assert "prompts/model-fit.md" in (workspace / ".agents" / "skills" / skill_name / "SKILL.md").read_text()
+    for workflow_name in ("discover-model.yml", "onboard-model.yml"):
+        document = yaml.safe_load((workspace / ".github" / "workflows" / workflow_name).read_text())
+        scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
+        assert any('--file "$WORKFLOW_SOURCE/prompts/model-fit.md"' in script for script in scripts)
+    assert "vram_mib" not in Path(lifecycle).read_text()
 
 
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1, heat=50):
@@ -856,29 +874,6 @@ def test_obsolete_recipe_with_other_task_replacement_defaults_to_best_effort(tmp
 
     assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/old"]
     assert manifest["obsolete_models"] == []
-
-
-def test_obsolete_recipe_with_larger_replacement_defaults_to_best_effort(tmp_path):
-    _recipe(tmp_path, "ready", "org/ready", gpu=GPU)
-    _recipe(tmp_path, "old", "org/old", gpu="NVIDIA GeForce RTX 4090")
-    selection = tmp_path / "selection.json"
-    _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
-
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
-
-    assert [decision["model_id"] for decision in manifest["best_effort_models"]] == ["org/old"]
-    assert manifest["obsolete_models"] == []
-
-
-def test_obsolete_recipe_replacement_may_use_less_total_vram(tmp_path):
-    _recipe(tmp_path, "ready", "org/ready", gpu="NVIDIA GeForce RTX 4090")
-    _recipe(tmp_path, "old", "org/old", gpu=GPU)
-    selection = tmp_path / "selection.json"
-    _manifest(selection, ["org/ready"], obsolete=[_obsolete("org/old", "org/ready")])
-
-    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
-
-    assert manifest["obsolete_models"][0]["model_id"] == "org/old"
 
 
 def test_comparable_replacement_defaults_to_best_effort(tmp_path):

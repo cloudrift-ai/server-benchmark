@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
+# Neptune lane: tune + Nsight-profile one operator's sequence sweep inside the pinned artifact
+# image. One operator per invocation so a failed or timed-out operator costs only its own row.
 set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 OPERATOR" >&2
+  exit 2
+fi
+
+operator=$1
 
 source /workspace/venv/bin/activate
 cd /workspace/neptune
@@ -45,60 +54,46 @@ printf "operator\tsequence_length\ttune\tprofile\n" > "$status_file"
 successful_profiles=0
 tune_timeout=30m
 profile_timeout=15m
-operators=(
-  prefill_global
-  prefill_causal
-  prefill_gqa
-  decode_causal
-  decode_gqa
-  prefill_alibi
-  decode_alibi
-  prefill_softcap
-  decode_softcap
-  prefill_windowed
-)
 sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)
 
-for operator in "${operators[@]}"; do
-  for sequence_length in "${sequence_lengths[@]}"; do
-    setup="${operator}-b1-s${sequence_length}"
-    if timeout --signal=TERM --kill-after=1m "$tune_timeout" \
-      python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
-      2>&1 | tee "/results/tune-logs/$setup.log"; then
-      tune_status=ok
-      if grep -Fq "Top 0 schedules" "/results/tune-logs/$setup.log"; then
-        tune_status=ok:no-valid-schedule
-      fi
-    else
-      tune_rc=$?
-      if [ "$tune_rc" -eq 124 ]; then
-        tune_status=timed-out
-      else
-        tune_status="failed:$tune_rc"
-      fi
+for sequence_length in "${sequence_lengths[@]}"; do
+  setup="${operator}-b1-s${sequence_length}"
+  if timeout --signal=TERM --kill-after=1m "$tune_timeout" \
+    python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
+    2>&1 | tee "/results/tune-logs/$setup.log"; then
+    tune_status=ok
+    if grep -Fq "Top 0 schedules" "/results/tune-logs/$setup.log"; then
+      tune_status=ok:no-valid-schedule
     fi
-    if timeout --signal=TERM --kill-after=1m "$profile_timeout" \
-      nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary \
-      python -u /experiment/run_neptune.py profile "$operator" "1,$sequence_length" --repeat 15 \
-      2>&1 | tee "/results/profile-logs/$setup.log"; then
-      profile_status=ok
-      if grep -Fq "result mismatch against" "/results/profile-logs/$setup.log"; then
-        profile_status="$profile_status:mismatch"
-      fi
-      if grep -Fq "failed with exception" "/results/profile-logs/$setup.log"; then
-        profile_status="$profile_status:runner-failure"
-      fi
-      successful_profiles=$((successful_profiles + 1))
+  else
+    tune_rc=$?
+    if [ "$tune_rc" -eq 124 ]; then
+      tune_status=timed-out
     else
-      profile_rc=$?
-      if [ "$profile_rc" -eq 124 ]; then
-        profile_status=timed-out
-      else
-        profile_status="failed:$profile_rc"
-      fi
+      tune_status="failed:$tune_rc"
     fi
-    printf "%s\t%s\t%s\t%s\n" "$operator" "$sequence_length" "$tune_status" "$profile_status" >> "$status_file"
-  done
+  fi
+  if timeout --signal=TERM --kill-after=1m "$profile_timeout" \
+    nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary \
+    python -u /experiment/run_neptune.py profile "$operator" "1,$sequence_length" --repeat 15 \
+    2>&1 | tee "/results/profile-logs/$setup.log"; then
+    profile_status=ok
+    if grep -Fq "result mismatch against" "/results/profile-logs/$setup.log"; then
+      profile_status="$profile_status:mismatch"
+    fi
+    if grep -Fq "failed with exception" "/results/profile-logs/$setup.log"; then
+      profile_status="$profile_status:runner-failure"
+    fi
+    successful_profiles=$((successful_profiles + 1))
+  else
+    profile_rc=$?
+    if [ "$profile_rc" -eq 124 ]; then
+      profile_status=timed-out
+    else
+      profile_status="failed:$profile_rc"
+    fi
+  fi
+  printf "%s\t%s\t%s\t%s\n" "$operator" "$sequence_length" "$tune_status" "$profile_status" >> "$status_file"
 done
 
 cp -a logs/neptune-tuning /results/neptune-tuning

@@ -36,7 +36,7 @@ from emmy import config
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
-# ``loop/stamp/020_stamp_structural_features`` — distinct from any tuning Knob
+# the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
 # name, so ``format_tuning_knobs`` drops them from the tuning view and
 # ``knob_features`` passes them through as-is. Declared here (rather than with
 # the producing pass, which is loaded under a bare module stem) so every
@@ -575,7 +575,7 @@ def format_tuning_knobs(knobs: dict) -> str:
     ``BINMASK`` values are already stored as binary strings in
     ``op.knobs`` (rules stamp via ``Knob.pretty``), so ``str(v)`` here
     round-trips correctly. ``STRUCT_PREFIX`` knobs (the structural-feature
-    stamp from ``992_stamp_structural_features``) are facts about the kernel, not
+    stamp from the ``IdentityStrategy``) are facts about the kernel, not
     tuning decisions, so they are dropped from this tuning-knob view.
     """
     items = tuning_knob_items(knobs)

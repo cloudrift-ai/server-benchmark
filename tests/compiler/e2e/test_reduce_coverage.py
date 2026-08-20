@@ -33,7 +33,8 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
+from emmy.compiler.pipeline.passes.lowering.tile._classify import pair_softmax
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import requires_cuda
 
@@ -440,19 +441,20 @@ def test_exp_family_generator_builds_asymmetric_monoid() -> None:
 
 @pytest.mark.parametrize("kind,should_fuse", [("softmax_pair", True), ("unrelated_pair", False)])
 def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
-    """``_fuse`` collapses the decomposed two-pass softmax (row-max + ``Σ exp(x − max)``) into one
-    online-softmax loop (the body's merge keeps the original ``acc`` names), and is a no-op on an
-    unrelated row-max + plain-sum pair."""
+    """The pairing collapses the decomposed two-pass softmax (row-max + ``Σ exp(x − max)``) into
+    ONE TWISTED fold (the carrier keeps the original ``acc`` names), and is a no-op on an
+    unrelated row-max + plain-sum pair — read off the lifted Fold tree."""
+    from emmy.compiler.ir.pure.fold import Fold
+
     body = _softmax_body() if should_fuse else _unrelated_reduce_pair()
-    fused, changed = _fuse(body)
-    assert changed == should_fuse
+    folds = tuple(fold_from_loop(_stamp_axes(s)) for s in body)
+    assert all(f is not None for f in folds)
+    node = pair_softmax(Fold.projection(body=Body(()), operands=folds))
+    assert (len(node.operands) == 1) == should_fuse
     if should_fuse:
-        loops = [s for s in fused if isinstance(s, Loop)]
-        assert len(loops) == 1, "the two reduce loops fuse into one online-softmax loop"
-        fused_loop = loops[0]
-        assert fused_loop.role is AxisRole.TWISTED, "the fused loop is TWISTED"
-        accums = {a.name for a in fused_loop.body if isinstance(a, Accum)}
-        assert accums == {"acc0", "acc1"}, "the body's merge keeps the original acc names"
+        tw = node.operands[0]
+        assert tw.role is AxisRole.TWISTED, "the pair is the TWISTED carrier"
+        assert set(tw.combine.results) == {"acc0", "acc1"}, "the carrier keeps the original acc names"
 
 
 @requires_cuda
@@ -466,11 +468,13 @@ def test_online_softmax_matches_torch(shape) -> None:
     backend = CudaBackend()
     compiled = backend.compile(graph)
 
-    # The recognizer must have fired: a single fused kernel streaming one online-softmax loop
-    # (the ``<rowmax>__osin`` fused-score input is the recognizer's signature, stable across the
-    # carrier's internal temp naming).
+    # The pairing must have fired: a single fused kernel streaming the TWISTED carrier — the
+    # dissolved exp-family merge's rescale temps (``<state>__tN = expf(...)``) are its signature
+    # (exp_merge namespaces them on the carried state, stable across SSA renaming).
+    import re as _re
+
     srcs = [getattr(compiled.nodes[n].op, "kernel_source", "") for n in compiled.nodes]
-    assert any("__osin" in src for src in srcs), "online-softmax fusion did not fire"
+    assert any(_re.search(r"__t\d+ = expf\(", src) for src in srcs), "online-softmax pairing did not fire"
 
     run_result, eager = backend.run(compiled, input_data={"x": x.numpy()}, pre_run=lambda: _Softmax()(x).numpy())
     got = list(run_result.outputs.values())[0]
@@ -575,7 +579,7 @@ def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeyp
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
-    rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0)))
+    rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0))).rows
     offered = {str(v) for r in rows for k, v in r.items() if k.startswith("REDUCE")}
     assert any(s.endswith("coop-t") for s in offered), offered
 

@@ -1539,7 +1539,7 @@ class _AsyncBenchWorker:
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
     workers benching concurrently — the per-kernel multi-GPU autotune path
-    (``two_level._inner_reward_async``). The deployable ``--bench`` comparison awaits
+    (``two_level.TwoLevelStrategy``). The deployable ``--bench`` comparison awaits
     ``benchmark_compare_isolated_async`` over a one-shot instance (via
     ``_run_job_oneshot``); the autotune sweep awaits a persistent instance per GPU
     directly via ``benchmark_program_isolated_async``.

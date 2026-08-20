@@ -1,13 +1,14 @@
 """Tile-IR lowering: ``LoopOp`` → ``TileOp``.
 
-1. **Recognize** (``010_recognize``) — the Loop-IR → Tile-IR boundary. Fuse online softmax,
-   annotate each reduce ``Loop`` with its ``AxisRole`` (the algebra is the body), then **lift**
-   the kernel to a ``TileOp`` carrying ONE op-tree — a ``Fold`` / contraction term — with an
-   **unmapped** placement (its parallel ``free`` axes). After this nothing downstream traffics
-   in ``LoopOp``. The ``_softmax`` helper holds the streaming-softmax fusion, ``_atomize`` the
-   algebra→atom binding, ``_cut`` the placement cut. An UNSTAMPED ``LoopOp`` is deferred — a kernel
-   minted here reaches ``005`` before anything recognizes it, which the scan alone does not
-   guarantee.
+1. **Lift** (``010_recognize``) — the Loop-IR → Tile-IR boundary, ONE total algorithm
+   (``_lift.recognized_tile``): peel the free axes, lift every parseable reduce ``Loop`` to a
+   typed ``Fold`` in place (``_fromloop`` is the one parser, byte-identity gated), and wrap the
+   cell in a ``TileOp`` with an **unmapped** placement. A declined loop stays a verbatim raw-loop
+   subtree. After this nothing downstream traffics in ``LoopOp``. Recognition — which algebra a
+   fold realizes — is CLASSIFICATION of the lifted tree (``_classify``: the online-softmax
+   pairing, the semiring contraction binding with its mul-hoist arm, legalize; the fused
+   computed-A composition is a derived VIEW shared with the schedule and the golden decode);
+   ``_cut`` holds the placement cut, resolved over the fused reference tree.
 2. **Schedule** (``020_schedule``) — decide that op's ``place`` (free axes → grid) and its per-node
    ``schedule`` slices, and offer them as a fork. ONE generic row enumerator (``_schedule``): the
    kernel's single ``WORK`` inventory is CHOSEN first, then a recursive walk of the site tree hands
@@ -27,7 +28,7 @@
 **The schedule step is INCOMPLETE.** It covers every term whose operand edges are all MATERIALIZED —
 the pointwise cell + the register-strip term reading, the reduce partition, and the contraction
 (scalar + warp tiers, staging, split-K, raster) — plus the COMPUTED operand edge (the fused
-norm→linear / gate⊗up cone), which arrives as a ``_site_values`` entry under the term-reading union
+norm→linear / gate⊗up cone), which arrives as a ``_site_blocks`` entry under the term-reading union
 rather than as an emitter of its own — the flash streaming pair included, whose two sites
 (the hoisted score edge and the derived P@V) enumerate their own halves of the twisted geometry and
 reconcile at the stream. A term the enumeration cannot schedule yields NO rows and ``020`` leaves it

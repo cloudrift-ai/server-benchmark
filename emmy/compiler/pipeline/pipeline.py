@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork, OptionFork
 from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
+from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -45,13 +46,6 @@ if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.policy import Search
 
 logger = logging.getLogger("emmy.compiler.pipeline")
-
-# Greedy compile validity-fallback cap: how many times ``Pipeline.run``
-# re-resolves blocklisting a tile that failed ``validate(ctx)``. Each retry
-# blocks ≥1 fresh tile or stops, so this only bounds pathological cases (every
-# sibling unviable).
-_MAX_GREEDY_RETRIES = 8
-
 
 _PASSES_DIR = Path(__file__).resolve().parent / "passes"
 _RULE_PREFIX_RE = re.compile(r"^\d+[a-z]?_")
@@ -410,6 +404,14 @@ class Cursor:
                 logger.debug("compile: %-18s done (%d nodes)", pass_.name, len(graph.nodes))
                 if self.run.dump is not None:
                     self.run.dump.on_pass(pass_, graph)
+                event = PassEndEvent(
+                    pass_name=pass_.name,
+                    graph=graph,
+                    ctx=self.run.ctx,
+                    passes=tuple(p.name for p in self.run.pipeline.passes),
+                )
+                for strat in self.run.pipeline.strategies:
+                    strat.on_pass_end(event)
             self.pass_idx += 1
 
 
@@ -426,6 +428,13 @@ class Pipeline:
     """
 
     passes: list[Pass]
+    # Engine-event strategies (``PipelineStrategy`` instances): the discovered,
+    # stateless set (``strategy.discovered_strategies``) plus whatever a caller
+    # composed in via :meth:`with_strategies`. Empty for ``from_pattern`` test
+    # shims. A pipeline composed with STATEFUL strategies (e.g. the two-level
+    # tuner's minted-kernel watcher) serves ONE run — sharing across runs is
+    # only safe when every strategy is stateless.
+    strategies: tuple = ()
 
     def match(self, graph: Graph, rule: Rule) -> list[Match]:
         """Enumerate every live pattern match for ``rule`` against
@@ -460,7 +469,13 @@ class Pipeline:
         rules whose stem (with or without numeric prefix) appears in
         the set."""
         select_set = set(select) if select is not None else None
-        return cls(passes=[Pass.load(name, i, select_set) for i, name in enumerate(passes)])
+        return cls(passes=[Pass.load(name, i, select_set) for i, name in enumerate(passes)], strategies=discovered_strategies())
+
+    def with_strategies(self, *extra) -> Pipeline:
+        """This pipeline with ``extra`` engine-event strategies composed after the existing
+        set — how a caller installs PER-RUN strategies (e.g. the two-level tuner's minted-kernel
+        watcher). The returned pipeline serves one run when any composed strategy holds state."""
+        return replace(self, strategies=(*self.strategies, *extra))
 
     def run(
         self,
@@ -486,7 +501,7 @@ class Pipeline:
 
         ``backend`` (typically :class:`CudaBackend`) opts the run into
         real GPU measurement: the terminal graph's per-kernel latency is
-        recorded to ``db`` (via :func:`_bench_terminal`, once after the
+        recorded to ``db`` (via :func:`search.policy.terminal_bench.bench_terminal_async`, once after the
         resolution settles) and attributed to every ancestor along the
         ``Op.source`` chain. ``db`` defaults to a fresh in-memory store;
         pass an explicit :class:`SearchDB` to persist measurements
@@ -512,83 +527,31 @@ class Pipeline:
           blocklisted at the fork site (the splice minted fresh node
           ids).
 
-        Installs a per-run ``rejections`` sink (on the :class:`Run`) so
-        :func:`Candidate.try_rewrite` records any rewrite whose every
-        option failed ``validate(ctx)``. After the resolution settles,
-        :func:`_raise_on_unlowered` turns a recorded rejection that left
-        its node un-lowered into a loud :class:`LoweringError` instead
-        of a downstream ``CudaBackend`` mystery."""
-        from emmy.compiler.context import Context as _Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.db import SearchDB as _SearchDB  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.policy.greedy import greedy_decide  # noqa: PLC0415
+        Retry orchestration, the ``rejections`` sink, and the loud
+        :class:`LoweringError` on an un-lowered node are greedy search
+        POLICY, owned by
+        :class:`~emmy.compiler.pipeline.search.policy.greedy.GreedyStrategy` —
+        this method is the thin engine entry point."""
+        from emmy.compiler.pipeline.search.strategy import GreedyStrategy  # noqa: PLC0415
 
-        if ctx is None:
-            ctx = _Context.probe()
-        backend_name = getattr(backend, "name", "cuda")
-        if ctx.backend_name != backend_name:
-            ctx = replace(ctx, backend_name=backend_name)
-        db = db if db is not None else _SearchDB()
-        t_start = time.monotonic()
-
-        blocked: dict[str, set[frozenset]] = {}
-        allow_structural = True
-        for _attempt in range(_MAX_GREEDY_RETRIES):
-            rejections: list[tuple[str, str, str]] = []
-            run = Run(pipeline=self, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            decide = greedy_decide(blocked=blocked, price_structural=allow_structural, db=db)
-            terminal, trace = run.resolve(graph.copy(), decide)
-            failed = _unlowered_tiles(terminal, rejections)
-            if not failed:
-                break
-            if allow_structural and any(d.chosen_kind == "graph" for d in trace):
-                allow_structural = False
-                continue
-            new = {nid: ident for nid, ident in failed.items() if ident not in blocked.get(nid, set())}
-            if not new:  # no fresh info to retry on → report below
-                break
-            for nid, ident in new.items():
-                blocked.setdefault(nid, set()).add(ident)
-        # The prior-ranked tiles all overflowed ``validate(ctx)`` within the
-        # retry budget — an *online* prior can extrapolate a large tile onto a
-        # small shape (e.g. one trained on big square matmuls picking an
-        # over-smem-cap tile for a tiny projection), and the blocklist retry
-        # exhausts before reaching an in-budget leaf. Before giving up, re-resolve
-        # WITHOUT the prior (``greedy_decide(prior=None)``, the emission-order
-        # pick): the point is dropping the extrapolation that overflowed, not the
-        # quality of what emission order lands on — the enumeration promises no
-        # particular leaf and this fallback makes no claim about speed. The card's
-        # recorded goldens still floor this resolve (they are prior-independent
-        # evidence — one over-budget node must not cost every OTHER kernel its
-        # verified golden), and ``blocked`` rides along so the floor can never
-        # re-pick a tile that already failed ``validate(ctx)``. When that leaf
-        # overflows too (the over-budget rule genuinely has no in-budget
-        # option — e.g. the single-option guardrail) the re-resolve stays
-        # un-lowered and ``_raise_on_unlowered`` fires below, exactly as before.
-        if _unlowered_tiles(terminal, rejections):
-            rejections = []
-            run = Run(pipeline=self, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, price_structural=False))
-        _raise_on_unlowered(terminal, rejections, ctx)
-        logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
-        return terminal
+        return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
     def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections) -> Run:
-        """Build the :class:`Run` shared by :meth:`tune_async` (and the deterministic
-        :meth:`run`):
-        seed provenance, probe / align ``ctx``, and wire the run-scoped sinks."""
-        from emmy.compiler import provenance  # noqa: PLC0415
+        """Build the :class:`Run` for :meth:`tune_async`: probe / align ``ctx`` — letting the
+        search policy prepare it (``Search.prepare_ctx``, e.g. the tune search relaxing the
+        strict knob-pin validator) — and wire the run-scoped sinks. Graph seeding is strategy
+        business, fired from the loop entry (``RunStartEvent``)."""
         from emmy.compiler.context import Context as _Context  # noqa: PLC0415
         from emmy.compiler.pipeline.search.db import SearchDB as _SearchDB  # noqa: PLC0415
 
-        # Seed op provenance on the input graph before any pass runs — the one
-        # universal entry both ``run`` and ``tune`` funnel through. Idempotent,
-        # so a graph reloaded mid-pipeline keeps whatever prov it carried.
-        provenance.seed(graph)
         if ctx is None:
             ctx = _Context.probe()
         backend_name = getattr(backend, "name", "cuda")
         if ctx.backend_name != backend_name:
             ctx = replace(ctx, backend_name=backend_name)
+        prepare = getattr(search, "prepare_ctx", None)
+        if prepare is not None:
+            ctx = prepare(ctx)
         return Run(
             pipeline=self,
             ctx=ctx,
@@ -610,12 +573,16 @@ class Pipeline:
         dump: CompilerDump | None = None,
         rejections: list[tuple[str, str, str]] | None = None,
     ):
-        """Async-generator mirror of :meth:`tune` for the multi-GPU tune driver.
+        """Async-generator tune driver: ONE loop, terminal valuation owned by the policy.
 
-        The lowering (``run.drive``) stays a synchronous generator — only the
-        per-terminal bench is awaited (:func:`_bench_terminal_async`), so N
-        kernels' benches overlap across device-pinned workers on one event loop
-        while the (light) Python lowering runs cooperatively between awaits."""
+        The lowering (``run.drive``) stays a synchronous generator — only the per-terminal
+        ``search.evaluate`` is awaited (benching, DB persistence, the -O3 re-bench and the
+        observe protocol all live on the policy — what a terminal is worth is search policy,
+        not engine mechanics), so N kernels' benches overlap across device-pinned workers on
+        one event loop while the (light) Python lowering runs cooperatively between awaits.
+
+        Per-run engine-event strategies are COMPOSED into the pipeline
+        (:meth:`Pipeline.with_strategies`), never threaded through here."""
         run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections)
         t_start = time.monotonic()
         n_terminals = 0
@@ -623,13 +590,7 @@ class Pipeline:
             n_terminals += 1
             if backend is not None:
                 logger.info("[tune] variant #%d  [%s]", n_terminals, variant_label(cand.graph))
-            stats, status, measured, per_kernel = await _bench_terminal_async(cand, backend=backend, db=run.db)
-            search.note_bench(measured=measured)
-            search.observe(token, stats, status, candidate=cand, kernels=per_kernel)
-            if backend is not None and getattr(search, "last_o3_worthy", False):
-                o3_us = await _rebench_o3_async(cand, backend)
-                if o3_us is not None:
-                    search.observe_o3(token, o3_us)
+            await search.evaluate(token, cand, backend=backend, db=run.db)
             yield cand
         dropped = run._dropped_candidates
         logger.info(
@@ -709,7 +670,7 @@ class Run:
     * ``search`` — the policy ordering an exploration (:meth:`drive`);
       ``None`` for a deterministic resolution (:meth:`resolve`), which
       has no frontier to rank.
-    * ``db`` — the autotune store ``_bench_terminal`` persists into (the
+    * ``db`` — the autotune store terminal valuation persists into (the
       training data for the online prior).
     * ``backend`` — optional measurement backend (``None`` = stub bench,
       no persistence).
@@ -810,10 +771,11 @@ class Run:
         accumulated policy state. Inline replays of an already-decided
         structural offer site (see :meth:`_step`) are not decisions and
         don't trace."""
-        from emmy.compiler import provenance  # noqa: PLC0415
         from emmy.compiler.pipeline.search.candidate import Candidate  # noqa: PLC0415
 
-        provenance.seed(graph)
+        event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
+        for strat in self.pipeline.strategies:
+            strat.on_run_start(event)
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
         while not cand.cursor.is_done:
@@ -871,12 +833,9 @@ class Run:
 
         search = self.search
         assert search is not None, "Run.drive needs a search policy; use Run.resolve for deterministic resolution"
-        # The tune search is exempt from the strict knob-pin validator: it explores
-        # tier-foreign forks and steers heterogeneous multi-op graphs with a union pin
-        # vector (each op takes its tier's subset). A per-op contradiction is a pruned
-        # branch here, not the loud user error the greedy compile wants (``_validate``).
-        if self.ctx.validate_pins:
-            self.ctx = replace(self.ctx, validate_pins=False)
+        event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
+        for strat in self.pipeline.strategies:
+            strat.on_run_start(event)
         # Seed candidate: no parent token — the policy roots it itself.
         search.push(Candidate(run=self, graph=graph, cursor=Cursor(run=self)).lazy())
 
@@ -1024,67 +983,6 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     return matches[0] if len(matches) == 1 else None
 
 
-def _unlowered_tiles(graph: Graph, rejections: list[tuple[str, str, str]]) -> dict[str, frozenset]:
-    """``{node_id: tile_identity}`` for every node a ``validate(ctx)`` rejection
-    left un-lowered (still a pre-final ``LoopOp`` / ``TileOp`` at the terminal — the
-    over-budget tile→kernel drop leaves a knob-stamped ``TileOp``, a pre-tile drop a
-    ``LoopOp``, mirroring :func:`_raise_on_unlowered`'s stuck set). The
-    ``tile_identity`` is the offending op's knobs — what ``Pipeline.run`` blocklists
-    so the greedy retry falls back to the next prior-ranked sibling."""
-    if not rejections:
-        return {}
-    from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.greedy import tile_identity  # noqa: PLC0415
-
-    out: dict[str, frozenset] = {}
-    for nid, _pass_label, _reason in rejections:
-        node = graph.nodes.get(nid)
-        if node is not None and isinstance(node.op, (LoopOp, TileOp)):
-            # Key through ``tile_identity`` — the SAME canonicalization ``greedy._tile_blocked``
-            # applies to a leaf's fork knobs, so the blocklist actually matches on retry.
-            out[nid] = tile_identity(getattr(node.op, "knobs", None) or {})
-    return out
-
-
-def _raise_on_unlowered(graph: Graph, rejections: list[tuple[str, str, str]], ctx: Context) -> None:
-    """Fail a greedy compile loudly when a recorded ``validate(ctx)``
-    rejection (see :func:`Candidate.try_rewrite`) left its node un-lowered.
-
-    ``rejections`` is ``[(node_id, pass_label, reason), ...]``. A node is
-    "stuck" iff it still holds a pre-final dialect op (``LoopOp`` or ``TileOp``)
-    at the terminal — if a later rule lowered it anyway the op is a ``KernelOp`` /
-    ``CudaOp`` and we stay silent (the rejection was a harmless intermediate
-    filter). The over-budget-tile drop leaves a ``TileOp`` (its only
-    tile→kernel lowering was filtered); a pre-tile drop leaves a ``LoopOp``. Only
-    nodes with a recorded rejection are checked, so partial pipelines that
-    legitimately terminate at the loop / tile stage (no lowering pass to drop
-    anything) never trip this."""
-    if not rejections:
-        return
-    from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-
-    # Last recorded reason / pass wins (the final pass that tried to lower it).
-    reason_by_node: dict[str, str] = {}
-    pass_by_node: dict[str, str] = {}
-    for nid, pass_label, reason in rejections:
-        reason_by_node[nid] = reason
-        pass_by_node[nid] = pass_label
-
-    stuck = [nid for nid in reason_by_node if (node := graph.nodes.get(nid)) is not None and isinstance(node.op, (LoopOp, TileOp))]
-    if not stuck:
-        return
-    lines = [f"  - {nid!r}: {pass_by_node[nid]} rejected its only lowering — {reason_by_node[nid]}" for nid in stuck]
-    raise LoweringError(
-        f"compile: {len(stuck)} node(s) left un-lowered — the chosen tile shape produced a kernel that "
-        f"failed validate(ctx) and the deterministic compile had no fallback:\n"
-        + "\n".join(lines)
-        + "\nPin a fitting tile via EMMY_KNOBS, raise the smem budget, or adjust tile-geometry "
-        "scoring so an in-budget variant ranks first."
-    )
-
-
 def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     nid: str | None = start
     nodes: dict[str, str] = {}
@@ -1123,313 +1021,6 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
         consumed=consumed,
         _identities=identities,
     )
-
-
-# ---------------------------------------------------------------------------
-# Bench + DB persistence for autotune terminals (used by Pipeline.tune_async)
-# ---------------------------------------------------------------------------
-
-
-async def _rebench_o3_async(cand, backend):
-    """Re-bench an already-lowered tune winner at ``-Xcicc -O3`` (deployable codegen)
-    for a clean prior sample, awaiting the device-pinned worker. Returns the -O3
-    median latency in µs, or ``None`` when the sweep is already at -O3 or the bench
-    errors (best-effort — a re-bench hiccup must never abort the sweep). The winner
-    already benched OK at -O1, so the only added cost is one -O3 compile (cubin-cached)."""
-    from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
-
-    if "-O3" in config.nvcc_flags():
-        return None
-    try:
-        result = await backend.benchmark_async(cand.graph, nvcc_flags=O3_NVCC_FLAGS)
-    except Exception:  # noqa: BLE001 — a re-bench failure is non-fatal to tuning
-        return None
-    return result.time_ms * 1000.0 if result.time_ms else None
-
-
-class _TerminalBench:
-    """Shared machinery for benching one terminal candidate's ``CudaOp``s and
-    persisting per-kernel ``perf`` / inventory / lowering rows.
-
-    :func:`_bench_terminal_async` drives it: the no-cuda / cache-hit / stub
-    short-circuits (:meth:`prelude`) and every DB write (:meth:`finalize_result` /
-    :meth:`finalize_exc`) live here, so the only awaited step is the device bench."""
-
-    def __init__(self, cand, *, backend, db) -> None:
-        from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-
-        self.backend = backend
-        self.db = db
-        self.graph = cand.graph
-        self.context_key = cand.ctx.structural_key()
-        order = self.graph.topological_order()
-        self.cuda_nodes = [self.graph.nodes[nid] for nid in order if isinstance(self.graph.nodes[nid].op, CudaOp)]
-        # Kernel-bearing nodes a rewrite left un-lowered (a validation-filtered rewrite under
-        # tune — see ``Candidate.try_rewrite``). The same membership test as the backend's
-        # ``_launches`` walk, so anything the backend would refuse is known BEFORE the bench:
-        # summing only ``cuda_nodes`` prices the un-lowered kernel at zero, and the cache-hit
-        # path would then report the residual kernels' Σ as an ``ok`` terminal measurement (the
-        # issue-#327 "impossibly fast" split-K rows — a finalize kernel's cached µs standing in
-        # for the whole matmul).
-        self.unlowered = [nid for nid in order if not isinstance(self.graph.nodes[nid].op, (CudaOp, InputOp, ConstantOp))]
-        self.backend_name = getattr(backend, "name", "stub")
-        #: Per-KERNEL measurements, ``[(knobs, median_us, status), ...]`` in launch order — what
-        #: the search trains its prior on. A terminal is a Σ over its kernels; when a structural
-        #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
-        #: the total to. Each kernel carries its own decisions and earns its own sample.
-        self.per_kernel: list[tuple[dict, float, str]] = []
-
-    def _note(self, op, stats, status: str) -> None:
-        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
-
-    @staticmethod
-    def _point_stats(us: float):
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
-
-        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
-
-    @classmethod
-    def _stats_from_launch(cls, lt):
-        import statistics as _statistics  # noqa: PLC0415
-
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
-
-        if lt.samples and len(lt.samples) >= 1:
-            us = [s * 1000.0 for s in lt.samples]
-            return PerfStats(
-                median=_statistics.median(us),
-                min=min(us),
-                max=max(us),
-                mean=_statistics.fmean(us),
-                variance=_statistics.pvariance(us) if len(us) > 1 else 0.0,
-                n_samples=len(us),
-            )
-        return cls._point_stats(lt.time_ms * 1000.0)
-
-    @staticmethod
-    def _body_json(op, dialect: str) -> str:
-        import json as _json  # noqa: PLC0415
-
-        return _json.dumps(
-            {
-                "dialect": dialect,
-                "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
-                "body_repr": repr(op.body),
-            },
-            default=str,
-        )
-
-    def _record_op_inventory(self, op) -> None:
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-        from emmy.compiler.ir.kernel.ir import KernelOp  # noqa: PLC0415
-        from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
-
-        key = op.cache_key()
-        if key is None:
-            return
-        if isinstance(op, CudaOp):
-            self.db.record_cuda_op(
-                key,
-                kernel_source=op.kernel_source,
-                arg_order=list(op.arg_order),
-                grid=list(op.grid),
-                block=list(op.block),
-                smem_bytes=op.smem_bytes,
-                pretty=op.kernel_source,
-            )
-        elif isinstance(op, KernelOp):
-            self.db.record_kernel_op(key, self._body_json(op, "kernel"), op.pretty_body())
-        elif isinstance(op, LoopOp):
-            self.db.record_loop_op(key, self._body_json(op, "loop"), op.pretty_body())
-
-    def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        cuda_key = cuda_op.cache_key()
-        if cuda_key is None:
-            return
-        chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
-        for op in chain:
-            self._record_op_inventory(op)
-        for parent_op, child_op in zip(chain[1:], chain[:-1], strict=False):
-            p_dialect = parent_op.dialect
-            c_dialect = child_op.dialect
-            if p_dialect is None or c_dialect is None:
-                continue
-            if p_dialect == c_dialect == "loop":
-                # loop→loop source hops are structural/decision hops, not
-                # lowering rewrites: the splice attribution stamped by
-                # ``Candidate.apply`` (a decomposition's kernels → the
-                # pre-split op), 005's keep-vs-split rebind, name stamps.
-                # A ``lowering`` row holds ONE best child per parent, so
-                # recording a multi-kernel decomposition's hops would let
-                # ``best_per_op_time``'s chain walk resolve the pre-split
-                # op to a single fragment kernel's median — half the work
-                # masquerading as the whole op. The decomposition's cost
-                # is a Σ, owned by the two-level tuner, never this table.
-                continue
-            p_key = parent_op.cache_key()
-            c_key = child_op.cache_key()
-            if p_key is None or c_key is None:
-                continue
-            p_knobs = getattr(parent_op, "knobs", None) or {}
-            c_knobs = getattr(child_op, "knobs", None) or {}
-            knobs_delta = {k: v for k, v in c_knobs.items() if p_knobs.get(k) != v}
-            self.db.record_lowering(
-                p_key,
-                p_dialect,
-                c_key,
-                c_dialect,
-                knobs=knobs_delta,
-                measured_median_us=stats.median if status == "ok" else None,
-            )
-        knobs = getattr(cuda_op, "knobs", None) or {}
-        self.db.record_perf(
-            self.context_key, cuda_key, backend=self.backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error
-        )
-        logger.info("[tune]   %s @ %.2f us  (%s)", getattr(cuda_op, "kernel_name", "?"), stats.median, status)
-
-    def _accumulate(self, acc, s):
-        from emmy.compiler.pipeline.search.db import PerfStats  # noqa: PLC0415
-
-        if acc is None:
-            return s
-        return PerfStats(
-            median=acc.median + s.median,
-            min=acc.min + s.min,
-            max=acc.max + s.max,
-            mean=acc.mean + s.mean,
-            variance=acc.variance + s.variance,
-            n_samples=min(acc.n_samples, s.n_samples) if acc.n_samples and s.n_samples else (acc.n_samples or s.n_samples),
-        )
-
-    def prelude(self):
-        """Resolve everything that needs no live bench. Returns ``("done", (stats,
-        status))`` when no measurement is needed (no CudaOps / full cache hit /
-        stub backend), else ``("bench", None)`` — the caller obtains a
-        ``BenchmarkResult`` and calls :meth:`finalize_result` / :meth:`finalize_exc`."""
-        # An un-lowered kernel-bearing node is a bench_fail terminal, decided here — never a
-        # backend call (it would raise the opaque ``non-CudaOp`` TypeError) and never the
-        # cache-hit / no-CudaOp paths below (they see only the RESIDUAL kernels and would report
-        # a partial Σ as ``ok``). Nothing is persisted: the residual kernels' own perf rows are
-        # honest, and the fail is the terminal's, not theirs.
-        if self.unlowered:
-            logger.warning(
-                "[tune] %d node(s) left un-lowered (%s) — bench_fail without benching",
-                len(self.unlowered),
-                ", ".join(f"{nid}: {type(self.graph.nodes[nid].op).__name__}" for nid in self.unlowered),
-            )
-            fail_s = self.backend.bench_run_timeout_s if self.backend is not None else 1.0
-            return "done", (self._point_stats(float(fail_s) * 1_000_000.0), "bench_fail")
-
-        if not self.cuda_nodes:
-            return "done", (self._point_stats(0.0), "ok")
-
-        # Cache lookup: if every CudaOp already has a perf row for this
-        # (context, backend), skip the benchmark entirely and rebuild the
-        # aggregate stats from the DB. Per-kernel partial caching isn't
-        # useful here because ``backend.benchmark`` runs the whole graph.
-        cached_rows = []
-        for node in self.cuda_nodes:
-            key = node.op.cache_key()
-            row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
-            if row is None:
-                cached_rows = None
-                break
-            cached_rows.append(row)
-        if cached_rows is not None:
-            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(self.cuda_nodes))
-            agg = None
-            status = "ok"
-            for node, row in zip(self.cuda_nodes, cached_rows, strict=True):
-                if row.status != "ok":
-                    status = row.status
-                agg = self._accumulate(agg, row.stats)
-                self._note(node.op, row.stats, row.status)
-                logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
-            return "done", (agg or self._point_stats(0.0), status)
-
-        if self.backend is None:
-            # No real measurement → do NOT persist. Writing the 1.0us stub
-            # to a shared DB used to clobber tuned ``best_median_us`` values
-            # (record_lowering / record_perf keep the minimum), so any plain
-            # ``emmy run`` (which routes through ``Pipeline.run`` without
-            # a backend) was overwriting real autotune rows with 1.0us stubs.
-            # Tests that need lowering edges in stub mode should pass an
-            # explicit stub backend.
-            agg = None
-            for node in self.cuda_nodes:
-                agg = self._accumulate(agg, self._point_stats(1.0))
-                self._note(node.op, self._point_stats(1.0), "ok")
-            return "done", (agg or self._point_stats(0.0), "ok")
-
-        logger.info("[tune] benching %d kernel(s) in graph", len(self.cuda_nodes))
-        return "bench", None
-
-    def finalize_exc(self, exc):
-        fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
-        logger.warning(
-            "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d kernel(s)",
-            exc,
-            fail_us,
-            len(self.cuda_nodes),
-        )
-        s = self._point_stats(fail_us)
-        agg = None
-        for node in self.cuda_nodes:
-            self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
-            self._note(node.op, s, "bench_fail")
-            agg = self._accumulate(agg, s)
-        return agg or self._point_stats(0.0), "bench_fail"
-
-    def finalize_result(self, result):
-        agg = None
-        per_launch = result.per_launch or []
-        if len(per_launch) != len(self.cuda_nodes):
-            logger.warning(
-                "[tune] per_launch count (%d) != CudaOp node count (%d); falling back to graph time_ms / N",
-                len(per_launch),
-                len(self.cuda_nodes),
-            )
-            avg_us = (result.time_ms * 1000.0) / max(len(self.cuda_nodes), 1)
-            s = self._point_stats(avg_us)
-            for node in self.cuda_nodes:
-                self._persist(node.op, stats=s, status="ok", captured=result.captured)
-                self._note(node.op, s, "ok")
-                agg = self._accumulate(agg, s)
-        else:
-            for node, lt in zip(self.cuda_nodes, per_launch, strict=True):
-                s = self._stats_from_launch(lt)
-                self._persist(node.op, stats=s, status="ok", captured=result.captured)
-                self._note(node.op, s, "ok")
-                agg = self._accumulate(agg, s)
-        try:
-            import cupy as _cp  # noqa: PLC0415
-
-            _cp.cuda.runtime.deviceSynchronize()
-            _cp.get_default_memory_pool().free_all_blocks()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            pass
-        return agg or self._point_stats(0.0), "ok"
-
-
-async def _bench_terminal_async(cand, *, backend, db):
-    """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
-    rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
-    ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
-    backend measurement was required, and ``per_kernel`` the ``(knobs, median_us, status)`` of each
-    kernel — the terminal's Σ decomposed into the rows that earned it. The
-    only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
-    event loop; cache-hit / stub / persistence semantics live in :class:`_TerminalBench`."""
-    b = _TerminalBench(cand, backend=backend, db=db)
-    kind, payload = b.prelude()
-    if kind == "done":
-        return *payload, False, b.per_kernel
-    try:
-        result = await backend.benchmark_async(b.graph, num_iters="auto")
-    except Exception as exc:  # noqa: BLE001
-        return *b.finalize_exc(exc), True, b.per_kernel
-    return *b.finalize_result(result), True, b.per_kernel
 
 
 __all__ = ["Decision", "ForkPoint", "LoweringError", "Match", "Pass", "Pattern", "Pipeline", "Rule", "RuleSkipped"]

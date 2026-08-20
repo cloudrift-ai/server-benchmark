@@ -20,13 +20,19 @@ walk over its three tagged segments) — driven by a :class:`Transport` strategy
 (:class:`SyncTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
 producers put behind one ``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
-(synchronous copy / cp.async / TMA) filled it. A modern slab feeding an mma drain is **swizzled** (:func:`pick_swizzle_atom`
-per operand): TMA permutes the 16 B chunks in hardware during the box copy, a cp.async fill applies
-the identical XOR in software on its destination index, and each staged ``LdmatrixLoad`` reads back
-through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
+(synchronous copy / cp.async / TMA) filled it. A modern slab feeding an mma drain is **swizzled** (per operand): TMA
+permutes the 16 B chunks in hardware during the box copy (:func:`pick_swizzle_atom`), every other producer applies the
+identical XOR in software on its destination index (:func:`software_swizzle`), and each staged ``LdmatrixLoad`` reads
+back through the matching address XOR — which is what keeps the ldmatrix drain free of smem bank
 conflicts (the unswizzled cp path was 4-way conflicted on 64 B rows / 8-way on 128 B ones — the
-sm_89 gap to cuBLAS). The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
-vector store per 16 B run), and its per-cell producer-cone replication is planned by
+sm_89 gap to cuBLAS). The two derivations differ in ONE place, and only for a slab whose row is
+wider than the swizzle atom: the XOR must read the slab's ROW index, so a software fill shifts by
+the slab's own stride while a TMA slab keeps the atom's (its descriptor already splits the box down
+to the atom). Shifting by the atom on a two-atom row collapses consecutive rows onto a quarter of
+the chunk positions — the 7.8-way flash drain conflict at ``D = 128`` that vanished at ``D = 64``.
+The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
+vector store per 16 B run) and on the fragment ``RegStore``\\ s of a chained fill, and its per-cell
+producer-cone replication is planned by
 :meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
 ``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
 row-major (NONE-swizzle, linear writes and reads).
@@ -58,6 +64,7 @@ from emmy.compiler.ir.kernel.ir import (
     Sync,
     TmaDescriptor,
     TmaLoad,
+    swizzle_base,
 )
 from emmy.compiler.ir.pure.fold import deep_defines
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
@@ -269,6 +276,15 @@ def sync_stat_fill(
 TMA_SLAB_ALIGN = 128
 _SWIZZLE_SLAB_ALIGN = {"NONE": TMA_SLAB_ALIGN, "B32": 256, "B64": 512, "B128": 1024}
 
+
+def _swizzle_align(swizzle: str) -> int:
+    """The slab base alignment a SOFTWARE-filled slab needs — the same swizzle-atom alignment the
+    TMA table gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` keeps
+    the NATURAL alignment (``0``), not the TMA entry: nothing faults on an unaligned software fill,
+    so an unswizzled slab packs exactly where it did before this table reached the sync path."""
+    return 0 if swizzle == "NONE" else _SWIZZLE_SLAB_ALIGN[swizzle_base(swizzle)]
+
+
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
 # slab's inner-row byte span wins (best bank-conflict spread on the ldmatrix drain).
 _SWIZZLE_BY_BYTES: tuple[tuple[int, str], ...] = ((128, "B128"), (64, "B64"), (32, "B32"))
@@ -292,6 +308,26 @@ def pick_swizzle_atom(inner_elems: int, elem_bytes: int) -> tuple[int, str]:
         if 1 <= we <= inner_elems and inner_elems % we == 0 and inner_bytes % wb == 0:
             return we, mode
     return inner_elems, "NONE"
+
+
+def software_swizzle(inner_elems: int, elem_bytes: int) -> str:
+    """The swizzle mode for a slab a SOFTWARE fill writes (``cp.async`` / the sync compute fill's
+    ``Write`` / ``RegStore``) and an ``ldmatrix`` drain reads back.
+
+    Same atom derivation as :func:`pick_swizzle_atom`, plus the shift the XOR must read the ROW
+    index at: the default shift is ``log2(atom elems)``, which IS the row only while a slab row is
+    exactly one atom. A wider row (a 128-elem fp16 head-dim row is two 128 B atoms) must shift by
+    its own stride or consecutive rows collapse onto a quarter of the chunk positions — the
+    measured 7.8-way ldmatrix conflict at ``D = 128`` that vanishes at ``D = 64``. A row that is
+    one atom (or not a power of two, where no row bit is extractable) keeps the plain spelling, so
+    every slab that already drained conflict-free emits byte-identically.
+
+    Hardware (TMA) slabs are NOT this: the copy engine fixes their permutation, and their
+    descriptor already splits its box down to the atom — they keep :func:`pick_swizzle_atom`."""
+    atom, mode = pick_swizzle_atom(inner_elems, elem_bytes)
+    if mode == "NONE" or inner_elems == atom or inner_elems & (inner_elems - 1):
+        return mode
+    return f"{mode}@{inner_elems.bit_length() - 1}"
 
 
 def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swizzle: str = "NONE", elem_bytes: int = 4) -> TmaDescriptor:
@@ -492,17 +528,24 @@ class SyncTransport:
         # so one slot holds them. Each peer is sized by its OWN element width and row pad: a copied
         # peer here is a copied operand there (a packed-pair weight's byte slab beside an f16 A),
         # so a byte slab keeps its 16 B alignment and its padded rows.
+        #
+        # Two alignment rules meet on the base, and the stricter wins. A SWIZZLED slab pins its
+        # swizzle atom, so the drain's from-base XOR matches what the fill wrote. A 1-BYTE slab
+        # pins 16 B, which its natural alignment does not give and both the cp.async chunk and the
+        # drain's vector reads need. They never both apply — a byte slab is NONE-swizzle by
+        # construction — so the max is exact, never a compromise between two live constraints.
         def peer(op: Operand, rows: int) -> Stmt:
+            byte_align = 16 if (op.elem_bytes or self.elem_bytes) == 1 else 0
             return slab_smem(
                 op.slab,
                 rows,
                 op.shape[1] + op.pad_cols,
                 op.dtype or self.slab_dtype,
-                align=16 if (op.elem_bytes or self.elem_bytes) == 1 else 0,
+                align=max(_swizzle_align(op.swizzle), byte_align),
             )
 
         return [
-            *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype) for op in self.operands),
+            *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_swizzle_align(op.swizzle)) for op in self.operands),
             *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
             *(peer(op, op.shape[0]) for op in self.invariant_operands),
         ]
@@ -788,6 +831,8 @@ class TmaTransport:
             for op in self.operands
         ]
         decls += [
+            # TMA keeps the full table, NONE included: the box copy faults on an unaligned
+            # destination, so an unswizzled TMA slab still pins 128 B (:data:`TMA_SLAB_ALIGN`).
             slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
             for op in self.operands
         ]

@@ -17,8 +17,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from emmy import config, gpu
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.pool import PoolSample
 
 # GPU hardware facts live in the common :mod:`emmy.gpu` registry; these are
 # aliases so the long-standing context-local names keep working.
@@ -179,6 +183,14 @@ class Context:
     # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
     # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
+    # The candidate-pool sample this compile enumerates under, or ``None`` for a LIVE compile,
+    # which always sees the whole pool. Set by the offline dataset builders (``emmy fit``), never
+    # by a deploy. It is part of the Context's VALUE and rides the schedule pool's cache key,
+    # because ``dataclasses.replace`` shares the session cache below: a sampled Context and the
+    # live one it was derived from sit on one memo, so a flag that did not key the cache would
+    # serve a sampled pool to a live compile. NOT in ``structural_key`` — it decides which rows are
+    # OFFERED, never what a chosen row compiles to.
+    pool_sample: PoolSample | None = None
     # The session memo (:class:`SessionCache`) — ambient, mutable-inside, shared across
     # ``dataclasses.replace`` copies. NOT in ``structural_key`` and ``compare=False``:
     # caching must never change identity or context equality.
@@ -190,8 +202,20 @@ class Context:
         device-physical features to that card's **memorized** specs from the
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
         context so it featurizes with its own card's SM count / smem (not the live
-        device's). Default ``None`` → the live device (the live-compile path)."""
+        device's). Default ``None`` → the live device (the live-compile path).
+
+        A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
+        named a specific card, so substituting the live device's properties would featurize that
+        card's records as some other card and report nothing. The failure is silent by
+        construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
+        misresolved name produces H_* features identical to a correct one on a GPU-less host.
+        Recording goldens on a card before adding it to the registry is exactly when this fires."""
         spec = gpu.by_name(gpu_name) if gpu_name else None
+        if gpu_name and spec is None:
+            raise ValueError(
+                f"unknown GPU {gpu_name!r} — no entry in the emmy.gpu registry, so its device-physical "
+                f"features cannot be reconstructed. Add it to KNOWN_GPUS; do not fall back to the live device."
+            )
         props = spec.device_features() if spec else {}
         sm = int(props.get("sm_count") or _live_sm_count())
         return cls(

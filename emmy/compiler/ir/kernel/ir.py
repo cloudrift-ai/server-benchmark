@@ -23,7 +23,7 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
@@ -479,7 +479,7 @@ class CpAsyncCopy(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         src_idx = ", ".join(e.pretty() for e in self.src_index)
-        swz = f" swz={self.swizzle}" if self.swizzle in LDMATRIX_SWIZZLE_XOR else ""
+        swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
         return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{swz} <- {self.src}[{src_idx}]"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
@@ -487,8 +487,8 @@ class CpAsyncCopy(Stmt):
 
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
-        if self.swizzle in LDMATRIX_SWIZZLE_XOR:
-            smem_flat = f"emmy_swizzle_{self.swizzle.lower()}({smem_flat})"
+        if swizzle_xor(self.swizzle):
+            smem_flat = f"{swizzle_fn(self.swizzle)}({smem_flat})"
         pad = _pad(ctx.indent)
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
         # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
@@ -1362,6 +1362,40 @@ LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B32": (6, 0x1),
 }
 
+#: A SOFTWARE-swizzled mode may override the element shift, spelled ``<mode>@<shift>``. The shift
+#: above is ``log2(atom elems)``, which reads the row index only while a slab row IS one swizzle
+#: atom. A WIDER row (the flash slabs: a 128-elem fp16 head-dim row is two 128 B atoms) leaves the
+#: atom bit inside the shifted field, so consecutive rows collapse onto a quarter of the chunk
+#: positions and an ``ldmatrix`` over 16 rows drains multi-way bank-conflicted (measured 7.8-way at
+#: ``D = 128``, none at ``D = 64``). Taking the shift from the slab's OWN row stride restores
+#: row-mod-8, hence the full chunk spread. Hardware (TMA) slabs keep the plain spelling: there the
+#: copy engine fixes the permutation, and the descriptor already splits its box down to the atom.
+_SWIZZLE_SHIFT_SEP = "@"
+
+
+def swizzle_xor(mode: str) -> tuple[int, int] | None:
+    """``(element shift, row mask)`` for a swizzle mode spelling, or ``None`` when the mode carries
+    no XOR (``"NONE"`` / an unknown spelling). Accepts the plain mode and the software
+    ``<mode>@<shift>`` override."""
+    base, _, shift = mode.partition(_SWIZZLE_SHIFT_SEP)
+    xor = LDMATRIX_SWIZZLE_XOR.get(base)
+    if xor is None:
+        return None
+    return (int(shift), xor[1]) if shift else xor
+
+
+def swizzle_base(mode: str) -> str:
+    """The hardware mode name behind a (possibly shift-overridden) spelling — what the swizzle's
+    slab alignment and TMA descriptor are keyed on."""
+    return mode.partition(_SWIZZLE_SHIFT_SEP)[0]
+
+
+def swizzle_fn(mode: str) -> str:
+    """The ``emmy_swizzle_*`` helper name for a mode spelling — one helper per distinct
+    ``(mask, shift)`` pair, so two slabs sharing a spelling share the emitted function."""
+    base = swizzle_base(mode)
+    return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
+
 
 @dataclass(frozen=True)
 class LdmatrixLoad(Stmt):
@@ -1646,12 +1680,12 @@ class LdmatrixLoad(Stmt):
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
     def _swizzled_addr(self, elem: str) -> str:
-        if self.swizzle not in LDMATRIX_SWIZZLE_XOR:
+        if not swizzle_xor(self.swizzle):
             return f"&{self.src_buffer}[{elem}]"
         # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
         # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
         # index once instead of inlining it twice around the XOR.
-        return f"&{self.src_buffer}[emmy_swizzle_{self.swizzle.lower()}({elem})]"
+        return f"&{self.src_buffer}[{swizzle_fn(self.swizzle)}({elem})]"
 
 
 @dataclass(frozen=True)
@@ -1866,6 +1900,14 @@ class RegStore(Stmt):
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
     fragment_layout: str = "m16n8k16"
+    # Software smem slab swizzle mode ("NONE"/"B32"/"B64"/"B128") — the fragment fill's producer
+    # side, when this store's destination is a swizzled smem SLAB rather than the kernel's output
+    # (the fused flash weight tile: the score's C fragments land in the A slab the ``ldmatrix``
+    # drain reads). The flattened store address passes through ``emmy_swizzle_<mode>`` exactly like
+    # a :class:`CpAsyncCopy` fill, so the drain's identical XOR reads the tile back. The lane's two
+    # columns are contiguous and even-based, so the XOR (which passes intra-chunk bits 0..2
+    # through) keeps a vectorized pair inside its relocated 16-byte chunk. "NONE" is inert.
+    swizzle: str = "NONE"
 
     def deps(self) -> tuple[str, ...]:
         extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
@@ -1903,10 +1945,15 @@ class RegStore(Stmt):
         acc = " (atomic)" if self.atomic else ""
         return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
 
+    def _swz(self, addr: str) -> str:
+        """The store address, XOR-permuted through the slab's swizzle helper when this store
+        targets a swizzled smem slab — inert at the default ``"NONE"``."""
+        return addr if not swizzle_xor(self.swizzle) else f"{swizzle_fn(self.swizzle)}({addr})"
+
     def _pair_store(self, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
         """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
         ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
-        tgt = f"reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{addr}])"
+        tgt = f"reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{self._swz(addr)}])"
         if self.atomic:
             return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
         return f"*{tgt} = {packer}({v0}, {v1});"
@@ -1918,7 +1965,7 @@ class RegStore(Stmt):
         if self.atomic:
             conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
             return f"atomicAdd(&{self.dst_buffer}[{addr}], {conv.format(val)});"
-        return f"{self.dst_buffer}[{addr}] = {val};"
+        return f"{self.dst_buffer}[{self._swz(addr)}] = {val};"
 
     def _element_coords(self) -> list[tuple[str, str, Expr, Expr]]:
         """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
@@ -2631,20 +2678,19 @@ def _(s: RegStore, rename, sigma, axis_fn):
     def _sub_guard(g):  # noqa: ANN001, ANN202 — tuple[Expr, Expr] | None
         return None if g is None else (sigma.apply(g[0]), sigma.apply(g[1]))
 
-    return RegStore(
-        dst_buffer=s.dst_buffer,
+    # ``replace`` — NOT a field-by-field rebuild. Every field this rewrite does not touch is a
+    # POLICY the store carries, and defaulting one silently produces a numerically-wrong kernel with
+    # no loud failure: a dropped ``atomic`` degraded a rewritten (e.g. loopify-rolled) split-K store
+    # to racing plain assigns, and a dropped ``swizzle`` left the flash weight tile stored
+    # row-major under a drain that reads it XOR-permuted. Naming only what changes cannot regress
+    # that way when a field is added.
+    return replace(
+        s,
         dst_index=tuple(sigma.apply(e) for e in s.dst_index),
         frag=rename(s.frag),
-        shape=s.shape,
-        ldm=s.ldm,
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
-        # ``atomic`` MUST thread through: dropping it here silently degraded a rewritten (e.g.
-        # loopify-rolled) atomic split-K store to racing plain assigns — the partitions then
-        # clobber instead of accumulate, a numerically-wrong kernel with no loud failure.
-        atomic=s.atomic,
-        fragment_layout=s.fragment_layout,
     )
 
 

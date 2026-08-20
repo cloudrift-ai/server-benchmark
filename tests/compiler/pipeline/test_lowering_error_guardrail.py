@@ -31,7 +31,8 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LoweringError
-from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, _raise_on_unlowered
+from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule
+from emmy.compiler.pipeline.search.strategy.greedy import _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
 
 
@@ -150,7 +151,7 @@ def test_tuning_does_not_raise_and_prunes_branch():
 def _terminal_bench(graph, *, backend, db):
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.pipeline import _TerminalBench
+    from emmy.compiler.pipeline.search.policy.terminal_bench import TerminalBench as _TerminalBench
 
     return _TerminalBench(SimpleNamespace(graph=graph, ctx=_small_smem_ctx()), backend=backend, db=db)
 

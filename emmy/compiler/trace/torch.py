@@ -20,6 +20,8 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
+    Conv1dOp,
+    EinsumOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -1032,6 +1034,115 @@ def _handle_max_dim_values(
     node_map[fx_node.name] = (value_id,)
 
 
+def _normalize_einsum(equation: str, ranks: list[int]) -> tuple[list[str], str]:
+    """Split an einsum equation into its operand terms and an explicit output term.
+
+    torch's implicit form (no ``->``) outputs every label appearing exactly once, in
+    alphabetical order; spelling it out here keeps the op's stored equation explicit.
+    """
+    eq = equation.replace(" ", "")
+    if "..." in eq:
+        raise NotImplementedError("aten.einsum with an ellipsis is not supported; write the batch labels explicitly")
+    if "->" in eq:
+        lhs, out_labels = eq.split("->")
+    else:
+        lhs = eq
+        counts: dict[str, int] = {}
+        for label in lhs.replace(",", ""):
+            counts[label] = counts.get(label, 0) + 1
+        out_labels = "".join(sorted(label for label, count in counts.items() if count == 1))
+    terms = lhs.split(",")
+    if len(terms) != len(ranks):
+        raise NotImplementedError(f"aten.einsum equation {equation!r} declares {len(terms)} operands for {len(ranks)} tensors")
+    for term, rank in zip(terms, ranks, strict=True):
+        if len(term) != rank:
+            raise NotImplementedError(f"aten.einsum term {term!r} does not match its rank-{rank} operand")
+        if len(set(term)) != len(term):
+            raise NotImplementedError(f"aten.einsum term {term!r} repeats a label (a diagonal), which has no contraction form")
+    return terms, out_labels
+
+
+def _handle_einsum(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture a two-operand einsum whose contraction is a plain permute-and-matmul."""
+    equation = fx_node.args[0]
+    if not isinstance(equation, str):
+        raise NotImplementedError("aten.einsum requires a static equation string")
+    operands = fx_node.args[1] if len(fx_node.args) > 1 else []
+    if not isinstance(operands, (list, tuple)):
+        operands = list(fx_node.args[1:])
+    input_ids = [node_map[o.name] for o in operands if hasattr(o, "name") and o.name in node_map]
+    if len(input_ids) != 2:
+        raise NotImplementedError(f"aten.einsum supports exactly two operands, got {len(input_ids)}")
+
+    ranks = [len(g.nodes[i].output.shape) for i in input_ids]
+    terms, out_labels = _normalize_einsum(equation, ranks)
+    a_labels, b_labels = terms
+    contracted = [c for c in a_labels if c in b_labels and c not in out_labels]
+    free_a = [c for c in a_labels if c not in b_labels]
+    free_b = [c for c in b_labels if c not in a_labels]
+    unknown = [c for c in out_labels if c not in a_labels and c not in b_labels]
+    if unknown:
+        raise NotImplementedError(f"aten.einsum output label {unknown[0]!r} appears in no operand")
+    if len(contracted) != 1 or len(free_a) != 1 or len(free_b) != 1:
+        raise NotImplementedError(
+            f"aten.einsum {equation!r} needs exactly one contracted and one free label per operand to lower without a "
+            f"reshape (got {len(contracted)} contracted, {len(free_a)}/{len(free_b)} free)"
+        )
+    if any(c not in out_labels for c in free_a + free_b):
+        raise NotImplementedError(f"aten.einsum {equation!r} drops a free label, which is a reduction rather than a contraction")
+
+    name = fx_node.name
+    nid = g.add_node(
+        op=EinsumOp(equation=f"{a_labels},{b_labels}->{out_labels}"),
+        inputs=input_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+    node_map[name] = nid
+
+
+def _conv_attr(fx_node: Any, index: int, key: str, default: int) -> int:
+    """Read a conv attribute that torch spells as either a scalar or a one-element list."""
+    raw = fx_node.args[index] if len(fx_node.args) > index else (fx_node.kwargs or {}).get(key, default)
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 1:
+            raise NotImplementedError(f"aten.conv1d expects a 1-D {key}, got {raw!r}")
+        raw = raw[0]
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise NotImplementedError(f"aten.conv1d requires a static integer {key}, got {raw!r}")
+    return raw
+
+
+def _handle_conv1d(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture conv1d in the two forms the decomposition can lower: dense and depthwise."""
+    args = fx_node.args
+    tensor_ids = [node_map[a.name] for a in args[:3] if hasattr(a, "name") and a.name in node_map]
+    if len(tensor_ids) < 2:
+        raise ValueError("aten.conv1d requires an input and a weight")
+    groups = _conv_attr(fx_node, 6, "groups", 1)
+    in_channels = g.nodes[tensor_ids[0]].output.shape[-2]
+    in_channels = in_channels.as_static() if hasattr(in_channels, "as_static") else in_channels
+    if groups != 1 and groups != in_channels:
+        raise NotImplementedError(
+            f"aten.conv1d supports dense (groups=1) and depthwise (groups=C_in={in_channels}) convolutions; "
+            f"grouped convolutions with groups={groups} have no decomposition yet"
+        )
+
+    name = fx_node.name
+    nid = g.add_node(
+        op=Conv1dOp(
+            stride=_conv_attr(fx_node, 3, "stride", 1),
+            padding=_conv_attr(fx_node, 4, "padding", 0),
+            dilation=_conv_attr(fx_node, 5, "dilation", 1),
+            groups=groups,
+        ),
+        inputs=tensor_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+    node_map[name] = nid
+
+
 def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
     """Handle call_function nodes — faithful 1:1 capture of FX ops."""
     if fx_node.target is operator.getitem:
@@ -1047,6 +1158,12 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
     if op_name == "unbind":
         _handle_unbind(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "einsum":
+        _handle_einsum(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name in ("conv1d", "convolution") and len(_get_shape(fx_node, sym_rename)) == 3:
+        _handle_conv1d(g, fx_node, node_map, sym_rename=sym_rename)
         return
     if op_name == "max" and isinstance(fx_node.meta.get("val"), (list, tuple)):
         _handle_max_dim_values(g, fx_node, node_map, sym_rename=sym_rename)

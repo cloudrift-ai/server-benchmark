@@ -806,7 +806,9 @@ class Write(Stmt):
         """The flattened store index, XOR-permuted through the slab's swizzle helper when this
         Write targets a swizzled smem slab (the sync compute-fill's producer side) — inert at
         the default ``"NONE"``."""
-        return flat if self.swizzle == "NONE" else f"emmy_swizzle_{self.swizzle.lower()}({flat})"
+        from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor  # noqa: PLC0415 — kernel IR imports this module
+
+        return flat if not swizzle_xor(self.swizzle) else f"{swizzle_fn(self.swizzle)}({flat})"
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)

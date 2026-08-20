@@ -59,7 +59,7 @@ There is no `step` sequence. The composed evaluations DERIVE:
   contraction synthesized and memoized (`_twisted_derived_step`) — `Fold.step_stmts()` is the one consumer read; no
   recognizer builds the operand-edge form today (the online-softmax pairing's `(m, d, o…)` expectation channels keep
   their value loads inline in the lift body, and a fused `softmax·V` region reaches the contraction catalog as a
-  computed-A contraction over the pair instead — `_atomize.bind_prologue_contraction`);
+  computed-A contraction over the pair instead — `_classify.fused_view`);
 - split-K's outer reduce is the identity-lift composition — `Fold.composed` is the one read.
 
 `Fold.from_loop` reconstructs the algebra from the loop BODY alone (degenerate facts off its `Accum`s; a twisted merge
@@ -76,7 +76,7 @@ positionally per scope with the cross-scope aliasing pattern kept). Consumed by 
 
 ## An operand edge has two inhabitants
 
-MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `_atomize.make_cone`).
+MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `ops.make_cone`).
 
 **Edge iff closed** holds BY CONSTRUCTION — operands bind positionally, so a subtree that reads a name from its
 enclosing body cannot be one. The closure SCAN survives only as the validation reading, living with its one consumer

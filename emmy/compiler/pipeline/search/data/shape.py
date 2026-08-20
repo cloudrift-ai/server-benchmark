@@ -98,7 +98,7 @@ class ShapeKey:
         (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
         ``dtype_class="f8"`` (see the field doc). ``dynamic`` marks the M
         axis symbolic (the only symbolic-axis golden form today): the key then
-        MIRRORS what ``992_stamp_structural_features`` puts on the op — symbolic
+        MIRRORS what the ``IdentityStrategy`` stamps on the op — symbolic
         axes are **excluded** from the extent products (``free_prod = N``, not the
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't

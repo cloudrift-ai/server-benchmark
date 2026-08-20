@@ -682,7 +682,7 @@ def _emit_golden_features(kernel_filter: str | None) -> None:
     :class:`OnlinePrior` regresses on — ``features.knob_features(merged)`` where
     ``merged`` is the ``H_*`` host/regime features + the ``S_*`` structural/shape
     features (obtained by compiling the shape to the loop dialect, where
-    ``992_stamp_structural_features`` runs) + the golden tuning knobs. This is
+    the IdentityStrategy stamps at the loop terminal) + the golden tuning knobs. This is
     the model's *input* for that shape+config — note the shape enters only as the
     coarse ``S_ext_*`` extent products/maxes; the occupancy / CTA-count / reuse
     terms that drive matmul perf (the engineered ``D_*`` features) are NOT here."""
@@ -757,7 +757,8 @@ def _emit_offline_eval(kernel_filter: str | None) -> None:
         gold = dict(tuning_knob_items(g.knobs))
         try:
             ctx = Context.from_target(g.compute_cap, gpu_name=g.gpu_name)  # the golden's own card, not the live host's
-            got, rank, pool, _ = evaluate_record(g, ctx)
+            ranked = evaluate_record(g, ctx)
+            got, rank, pool = ranked.best, ranked.rank, ranked.pool
         except Exception as e:  # noqa: BLE001 — one shape's error shouldn't abort the report
             entries.append(("err", g.name, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
             continue

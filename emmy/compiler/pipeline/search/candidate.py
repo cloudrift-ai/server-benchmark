@@ -13,15 +13,16 @@ copy the inner's graph once, replay ``pending`` through
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Tensor, _fmt_op
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_inputs
 from emmy.compiler.pipeline.fork import Fork, OptionFork
-from emmy.compiler.pipeline.pipeline import Cursor
-from emmy.compiler.pipeline.rule_diff import display_name, render_rule_diff
+from emmy.compiler.pipeline.pipeline import Cursor, RuleSkipped
+from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
+from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent
 
 # Use the engine logger so the existing debug-emit toggles (rule-
 # skipped lines under ``compile -vv``) keep working without callers
@@ -79,9 +80,6 @@ class Candidate:
         is skipped by the rule's own idempotence guard. The
         multi-option return path is the one exception: the cursor
         advance is left to the eventual fork's apply on resolve."""
-        from emmy.compiler.pipeline.pipeline import RuleSkipped  # noqa: PLC0415
-        from emmy.compiler.pipeline.rule_diff import emit, format_skipped  # noqa: PLC0415
-
         if not match.is_alive():
             # Earlier applies in this batch invalidated the match's
             # consumed nodes. Skip the rewrite, but still advance the
@@ -178,14 +176,15 @@ class Candidate:
         own ancestor into ``source``, and honoring that copy would
         skip the replaced op in the chain (and silently disable the
         knob merge, which is idempotent for rules that already merged
-        manually). A
-        lowering-tier ``Graph`` splice of a loop-dialect kernel (a
-        structural decomposition — the placement realizer's cut)
-        stamps the consumed root op as each fragment kernel's
-        ``source``, so the chain also records *which op a decomposition
-        came from*. Knobs are NOT merged
-        forward on this path — fragment kernels carry their own
-        restamped structural features."""
+        manually). Knobs are NOT merged forward on the ``Graph`` path —
+        fragment kernels carry their own structural identity.
+
+        What a splice MEANS in any dialect is strategy business, not
+        the engine's: ``on_splice`` fires before the splice (fragment
+        op identities stable — where the identity strategy stamps
+        minted kernels and threads attribution) and ``on_spliced``
+        after it, carrying the splice's receipt (where the provenance
+        strategy threads op provenance). See ``pipeline.strategy``."""
         self._log_apply(match, option)
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
@@ -195,22 +194,22 @@ class Candidate:
             self.graph.nodes[match.root_node_id].op = option
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
-            # Decomposition expands one op into many distinct pieces (mint);
-            # every other fragment splice aggregates the consumed pieces.
             pass_ = match.rule.pass_
-            mint_pieces = pass_ is not None and pass_.name.startswith("frontend/decomposition")
-            if pass_ is not None and pass_.name.startswith("lowering/"):
-                root_op = self.graph.nodes[match.root_node_id].op
-                if root_op.dialect == "loop":
-                    for frag_node in option.nodes.values():
-                        if frag_node.op.source is None and frag_node.op.dialect == "loop":
-                            frag_node.op.source = root_op
-            self.graph.splice(
-                option,
-                consumed=match.consumed,
-                output=match.output or match.root_node_id,
-                mint_pieces=mint_pieces,
+            pass_name = pass_.name if pass_ is not None else ""
+            strategies = self.run.pipeline.strategies
+            event = SpliceEvent(
+                match=match,
+                fragment=option,
+                root_op=self.graph.nodes[match.root_node_id].op,
+                pass_name=pass_name,
+                graph=self.graph,
             )
+            for strat in strategies:
+                strat.on_splice(event)
+            receipt = self.graph.splice(option, consumed=match.consumed, output=match.output or match.root_node_id)
+            spliced = SplicedEvent(graph=self.graph, pass_name=pass_name, receipt=receipt)
+            for strat in strategies:
+                strat.on_spliced(spliced)
             self.cursor.n_applied += 1
         self._advance_if_last(match)
 
@@ -218,8 +217,6 @@ class Candidate:
         """Render a per-rule diff at DEBUG and route a structured
         record to ``run.dump`` when set. Returns early when
         neither sink is active."""
-        from emmy.compiler.pipeline.rule_diff import emit  # noqa: PLC0415
-
         rule = match.rule
         pass_ = rule.pass_
         dump = self.run.dump
@@ -307,8 +304,6 @@ class LazyCandidate:
 
         Raises if called when :meth:`is_expandable` would return False —
         the search loop dispatches on that predicate."""
-        from dataclasses import replace  # noqa: PLC0415
-
         assert self.pending is not None and not self.pending[1].is_leaf, "expand() requires branch Fork pending"
         match, fork = self.pending
         children_options = fork.expand()

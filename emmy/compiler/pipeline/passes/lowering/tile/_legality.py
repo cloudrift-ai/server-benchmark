@@ -40,7 +40,7 @@ from emmy.compiler.ir.stmt import Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import match_packed_b_node
+from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank

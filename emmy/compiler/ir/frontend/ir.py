@@ -11,8 +11,10 @@ Two groups:
 1. **Layout-only ops** — ``TransposeOp``, ``ReshapeOp``, ``SliceOp``,
    ``CatOp``, ``UnsqueezeOp``. Rewritten to a single ``IndexMapOp`` each.
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
-   ``MeanOp``. Rewritten to elementwise/reduce chains (sometimes with
-   inserted ``IndexMapOp`` unsqueezes so the broadcast contraction works).
+   ``MeanOp``, ``EinsumOp``, ``Conv1dOp``. Rewritten to elementwise/reduce chains
+   (sometimes with inserted ``IndexMapOp`` unsqueezes so the broadcast contraction
+   works). The last two are captured only in the forms their rules can lower, so the
+   tracer rejects the rest rather than leaving an op with no decomposition.
 """
 
 from __future__ import annotations
@@ -380,3 +382,86 @@ class SoftmaxOp(Op):
         m = np.max(x, axis=self.axis, keepdims=True)
         e = np.exp(x - m)
         return e / np.sum(e, axis=self.axis, keepdims=True)
+
+
+@dataclass
+class EinsumOp(Op):
+    """PyTorch ``aten.einsum`` over exactly two operands.
+
+    ``equation`` is the normalized explicit form (``"bij,bjk->bik"``): whitespace
+    stripped and torch's implicit output spelled out. The decomposition reads the
+    label sets rather than the string, so the only thing stored is the contract.
+
+    The tracer admits only the shape this op promises to decompose — one contracted
+    label, one free label per side, any number of shared batch labels. That subset is
+    a pure permute-and-contract, so the rule is transposes plus one ``MatmulOp`` and
+    never a reshape, which is what keeps it correct under symbolic dimensions.
+    """
+
+    equation: str = ""
+
+    def _terms(self) -> tuple[str, str, str]:
+        lhs, rhs = self.equation.split("->")
+        a, b = lhs.split(",")
+        return a, b, rhs
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        a_labels, b_labels, out_labels = self._terms()
+        sizes: dict[str, object] = {}
+        for labels, shape in ((a_labels, input_shapes[0]), (b_labels, input_shapes[1])):
+            for label, extent in zip(labels, shape, strict=True):
+                sizes.setdefault(label, extent)
+        return tuple(sizes[label] for label in out_labels)
+
+    def forward(self, *inputs):
+        return np.einsum(self.equation, inputs[0], inputs[1])
+
+
+@dataclass
+class Conv1dOp(Op):
+    """PyTorch ``aten.conv1d`` over ``(N, C_in, L)`` with a ``(C_out, C_in / groups, K)`` weight.
+
+    Captured whole so the decomposition can pick its form from ``groups``. The two
+    forms are genuinely different shapes of computation, not one with a special case:
+
+    * ``groups == 1`` is the im2col identity — gather the ``K`` shifted windows into a
+      ``(N, C_in * K, L_out)`` matrix and contract it with the flattened weight in one
+      ``MatmulOp``, so the convolution reaches the same GEMM path as any projection.
+    * ``groups == C_in`` (depthwise) has no shared reduction across channels, so im2col
+      would build a block-diagonal weight that is ``C_in`` times mostly zero. It lowers
+      instead to ``K`` shifted slices scaled by their per-channel tap and summed.
+
+    Anything between those two is rejected at trace time rather than silently lowered.
+    """
+
+    stride: int = 1
+    padding: int = 0
+    dilation: int = 1
+    groups: int = 1
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        x_shape, w_shape = input_shapes[0], input_shapes[1]
+        length = x_shape[-1]
+        span = self.dilation * (int(w_shape[-1]) - 1)
+        static = length.as_static() if isinstance(length, Dim) and length.is_static else (length if isinstance(length, int) else None)
+        if static is None:
+            return tuple(x_shape[:-2]) + (w_shape[0], length)
+        return tuple(x_shape[:-2]) + (w_shape[0], (static + 2 * self.padding - span - 1) // self.stride + 1)
+
+    def forward(self, *inputs):
+        x, w = inputs[0], inputs[1]
+        bias = inputs[2] if len(inputs) > 2 else None
+        if self.padding:
+            x = np.pad(x, ((0, 0), (0, 0), (self.padding, self.padding)))
+        n, _, _ = x.shape
+        c_out, c_in_per_group, k = w.shape
+        length = (x.shape[-1] - self.dilation * (k - 1) - 1) // self.stride + 1
+        out = np.zeros((n, c_out, length), dtype=x.dtype)
+        per_group_out = c_out // self.groups
+        for g in range(self.groups):
+            x_g = x[:, g * c_in_per_group : (g + 1) * c_in_per_group, :]
+            w_g = w[g * per_group_out : (g + 1) * per_group_out]
+            for tap in range(k):
+                window = x_g[:, :, tap * self.dilation : tap * self.dilation + length * self.stride : self.stride]
+                out[:, g * per_group_out : (g + 1) * per_group_out, :] += np.einsum("ncl,oc->nol", window, w_g[:, :, tap])
+        return out if bias is None else out + bias.reshape(1, -1, 1)

@@ -180,7 +180,7 @@ A contraction (the matmul-shaped node) consuming that cone reads two ways, both 
 tier. The general one is the computed-B reading every producer cone gets: loop fusion merges the decode into the
 contraction's own loop nest and the sync compute-fill evaluates it per shared-memory cell, so no decoded weight
 materializes between kernels, but the weight crosses global memory as 16-bit values. The specialized one is the
-**packed byte-slab stage**, and it is where the format's size advantage survives to the fragment: `_atomize`
+**packed byte-slab stage**, and it is where the format's size advantage survives to the fragment: `_packed`
 recognizes the cone (a packed-pair bits load feeding a value-pair gather, times a factor whose every contraction-axis
 reference is block-guarded), the weight's bits then copy VERBATIM into a byte slab at half a 16-bit slab's traffic,
 its block scales decode once per block into a small companion slab, and one fragment loader reads both — decoding

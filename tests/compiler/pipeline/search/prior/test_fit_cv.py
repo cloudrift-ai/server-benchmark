@@ -1,16 +1,21 @@
 """The ``emmy fit`` cross-validation harness (``search/prior/fit/cv``) and run harness
 (``search/prior/fit/run``): shape-grouped fold partitioning, the fittability-exclusion
-guard, dual-rank tie semantics, metrics-file determinism, and the trainer-callable seam
+guard, dual-rank tie semantics, several positives per candidate pool, metrics-file
+determinism, the golden case builder's pool merge, and the trainer-callable seam
 — all on synthetic cases, no tracing, no GPU."""
 
 import argparse
 import json
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from emmy.commands.fit import TRAINERS, register_fit_command
+from emmy.commands import fit as fit_cmd
+from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
 from emmy.compiler.pipeline.search import features
+from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
@@ -18,8 +23,11 @@ from emmy.compiler.pipeline.search.prior.fit import (
     Group,
     LinearFit,
     LinearTrainer,
+    best_dual_rank,
+    best_rank,
     dual_rank,
     feature_view,
+    rank_of_golden,
 )
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
@@ -78,33 +86,199 @@ def test_dual_rank_tie_plateau():
     assert dual_rank([1.0, 1.0, 1.0], 2) == (2, 0)  # emitted last, the whole plateau deploys first
 
 
+# --- several positives per candidate pool ------------------------------------------
+
+
+def test_best_rank_collapses_to_the_single_golden_functions_at_one_positive():
+    """THE compatibility guard. A pool with one positive must score exactly what it scored before the field
+    became a set — otherwise every fitted artifact moves, which is what the byte-identity tests in
+    ``test_prior_fit`` fail on. Checked at every index, so the tie conventions are covered on both sides of a
+    plateau, not just at the winner."""
+    scores = np.array([5.0, 3.0, 5.0, 5.0, 7.0])
+    for i in range(len(scores)):
+        assert best_rank(scores, (i,)) == rank_of_golden(scores, i)
+        assert best_dual_rank(scores, (i,)) == dual_rank(scores, i)
+
+
+def test_best_rank_takes_the_minimum_over_the_positives():
+    """Deploy ships ONE config, so a pool with several verified-good rows is scored on whichever of them the
+    model ranks highest — a mean would spend weights pushing up the runner-up, which changes nothing that
+    ships. The reported dual rank comes from that same row, keeping the emission-order tiebreak honest."""
+    scores = np.array([5.0, 3.0, 5.0, 5.0, 7.0])
+    assert (rank_of_golden(scores, 1), rank_of_golden(scores, 4)) == (4, 0)  # worst and best row of the pool
+    assert best_rank(scores, (1, 4)) == 0
+    assert best_dual_rank(scores, (1, 4)) == dual_rank(scores, 4) == (0, 0)
+    # Positives that TIE on the objective resolve to the earliest-emitted one — the row greedy would deploy,
+    # so the pessimistic count is the smaller of the two rather than an arbitrary pick.
+    tied = np.array([1.0, 1.0, 1.0])
+    assert best_rank(tied, (1, 2)) == rank_of_golden(tied, 1) == 2
+    assert best_dual_rank(tied, (1, 2)) == dual_rank(tied, 1) == (1, 0)
+
+
+def test_from_dicts_normalizes_one_or_many_positives():
+    """A bare int and a sequence are the same input — most callers pin one row and wrapping it would say
+    nothing. Either way the stored tuple is sorted and duplicate-free, which is what lets the builder grow a
+    group's pins without the trainers having to re-sort or de-duplicate them."""
+    rows = [{"D_a": float(i)} for i in range(5)]
+    assert Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).pinned == (2,)
+    assert Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).pinned == (1, 3)
+
+
+def test_a_merged_case_reports_its_positive_count():
+    """A case is a candidate pool, so a merged one is one row in ``per_golden`` where two goldens used to be
+    two. ``positives`` is what makes that visible: without it a metrics file with fewer cases looks like lost
+    data rather than a pool that gained a second verified answer."""
+    cases = [_case("m.512", "warp", "gpuA", pinned=1), _case("m.1024", "warp", "gpuA", pinned=(0, 2))]
+    model = LinearFit(LinearModel(weights={"D_a": -1.0}, weights_dynamic=None, scale=0.1, **SEED_PARAMS), [0], None)
+    rows = fit_cv.evaluate_full_train(cases, model)["per_golden"]
+    assert rows["gpuA/m.512"]["positives"] == 1
+    assert rows["gpuA/m.1024"]["positives"] == 2
+    # The merged case scores on its BEST positive: D_a descends, so row 0 wins and the pool ranks top-1.
+    assert rows["gpuA/m.1024"]["rank"] == 0 and rows["gpuA/m.512"]["rank"] == 1
+    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=2)
+    assert out["holdout"]["per_golden"]["gpuA/m.1024"]["positives"] == 2
+    assert out["train"]["per_golden"]["gpuA/m.1024"]["positives"] == 2
+
+
+# --- the golden case builder's pool merge ------------------------------------------
+
+
+class _StubRecord:
+    """The slice of a ``GoldenRecord`` the case builder reads, with the candidate pool handed in directly
+    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads."""
+
+    def __init__(self, name, knobs, rows):
+        self.name, self.knobs, self.target_program = name, knobs, rows
+        self.gpu_name, self.compute_cap, self.pin_map = "gpuA", (12, 0), {}
+        self.structural_features, self.dynamic = {}, False
+        self.shape_key = SimpleNamespace(kind="", is_warp=True)
+
+
+@dataclass(frozen=True)
+class _StubContext:
+    """A dataclass because the builder ``replace``s it to attach a sample - the same shape the real
+    Context has, so the plumbing under test is the real plumbing."""
+
+    pool_sample: object = None
+
+    @classmethod
+    def from_target(cls, cap, gpu_name=None):  # noqa: ARG003 — the stub needs no card facts
+        return cls()
+
+    def features(self):
+        return {}
+
+
+def _build(records, monkeypatch, **kwargs):
+    """``build_golden_groups`` over stub records: the pool arrives as the record's ``target_program``, a row
+    is ``{"TILE": tag}``, and its one feature is the tag's position in the alphabet — enough for two pools to
+    featurize differently whenever their rows differ. The stub enumerator honours ``ctx.pool_sample``: a list
+    IS a space as far as the draw is concerned (it asks only for a length and a member)."""
+
+    def enumerate_stub(rows, ctx):
+        sample = ctx.pool_sample
+        return Candidates(rows if sample is None else sample.take(rows), len(rows))
+
+    monkeypatch.setattr(fit_cmd, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(fit_cmd, "Context", _StubContext)
+    monkeypatch.setattr(fit_cmd, "enumerate_graph", enumerate_stub)
+    monkeypatch.setattr(fit_cmd, "_shape_group", lambda g: "S(free=512,red=512)")  # noqa: ARG005
+    monkeypatch.setattr(fit_cmd.features, "tile_signature", lambda knobs: knobs["TILE"])
+    monkeypatch.setattr(fit_cmd.features, "knob_features", lambda row: {"D_a": float(ord(row["TILE"][0]))})
+    return build_golden_groups(**kwargs)
+
+
+def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
+    """Membership is decided by CONSTRUCTION — two goldens share a group only when the featurized pool they
+    enumerate is the same one — never by a metadata key.
+
+    That distinction is the whole point: most same-name duplicates are ``FAST_MATH`` siblings whose pools are
+    genuinely disjoint (the fast-math enumeration offers an atom the standard one never emits), so merging on
+    the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded twice —
+    once against the standard pool and once against the fast-math one — and only the two goldens that really
+    do share a pool merge."""
+    std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
+    fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
+    cases, skipped = _build(
+        [
+            _StubRecord("m.512", {"TILE": "b"}, std),
+            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name over the SAME pool: merges
+            _StubRecord("m.512", {"TILE": "f"}, fastmath),  # same name, disjoint pool: stays its own case
+            _StubRecord("m.512.absent", {"TILE": "zz"}, std),  # matches no row: skipped, as before
+        ],
+        monkeypatch,
+    )
+    assert [(c.key, c.pinned, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
+    assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
+    # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
+    # key that ``cv.run_folds`` accumulates train ranks under.
+    assert len({c.key for c in cases}) == len(cases)
+
+
+def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
+    """Sampling must not break the merge, and the merge is what makes two verified answers to one
+    question one training case instead of two.
+
+    ``_pool_identity`` digests the packed feature matrix, so two goldens over one pool merge only if they
+    RETAIN identical rows. They do because the draw is a pure function of ``(pool size, sample, seed)`` and
+    both goldens are bucketed onto the same keep-set. Both recorded rows survive the draw even though neither
+    was picked by it: the pool's first and last rows are exactly the positions a 4-of-26 draw is least likely
+    to reach."""
+    pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
+    cases, skipped = _build(
+        [
+            _StubRecord("m.512", {"TILE": "a"}, list(pool)),  # the FIRST row
+            _StubRecord("m.512.alias", {"TILE": "z"}, list(pool)),  # and the LAST
+        ],
+        monkeypatch,
+        sample=4,
+    )
+    assert skipped == []
+    assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
+    (case,) = cases
+    assert len(case.pinned) == 2, "both recorded rows survive the draw and pin into the case"
+    assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
+    kept = {chr(int(v)) for v in case.feats[:, 0]}
+    assert {"a", "z"} <= kept
+
+
+def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
+    """Two recordings of the same config over the same pool are ONE fact. They pin the same row, so the pin
+    set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
+    metric."""
+    std = [{"TILE": "a"}, {"TILE": "b"}]
+    cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
+    assert [(c.key, c.pinned) for c in cases] == [("gpuA/m.512", (1,))]
+
+
 # --- synthetic cases ---------------------------------------------------------------
 
 
-def _case(name, tier, gpu, gidx=1, n_rows=6, key=None, shape=None):
+def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
     """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. A ``dyn``
     case carries the routing stamp on every row, exactly as the golden case builder writes it —
     that stamp, not the tier label, is what puts the group on the dynamic weight set.
 
-    ``shape`` is the fold group. It defaults to the name with any ``.dynM`` suffix stripped, which
-    mirrors what the builder does for real: a dynamic golden enumerates its static twin's pool, so
-    the twins share a group."""
+    ``pinned`` is the pool's positive row, or several of them (a pool the builder matched more than
+    one golden into). ``shape`` is the fold group; it defaults to the name with any ``.dynM`` suffix
+    stripped, which mirrors what the builder does for real: a dynamic golden enumerates its static
+    twin's pool, so the twins share a group."""
     stamp = {"S_ext_n_symbolic_axis": 1.0} if tier == "dyn" else {}
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
     shape = shape or name.removesuffix(".dynM")
-    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, gidx, feats)
+    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
 
 
 def _cases():
     return [
         _case("matmul.square.512", "thread", "gpuA"),
-        _case("matmul.square.1024", "thread", "gpuA", gidx=2),
-        _case("matmul.qkv.h4096", "warp", "gpuA", gidx=0),
-        _case("matmul.qkv.h4096.dynM", "dyn", "gpuA", gidx=3),
+        _case("matmul.square.1024", "thread", "gpuA", pinned=2),
+        _case("matmul.qkv.h4096", "warp", "gpuA", pinned=0),
+        _case("matmul.qkv.h4096.dynM", "dyn", "gpuA", pinned=3),
         _case("matmul.square.512", "thread", "gpuB"),
-        _case("matmul.square.512.dynM", "dyn", "gpuB", gidx=2),
-        _case("matmul.qkv.h4096", "warp", "gpuB", gidx=4),
-        _case("reduce.k2048", "reduce", "gpuB", gidx=0),
+        _case("matmul.square.512.dynM", "dyn", "gpuB", pinned=2),
+        _case("matmul.qkv.h4096", "warp", "gpuB", pinned=4),
+        _case("reduce.k2048", "reduce", "gpuB", pinned=0),
     ]
 
 
@@ -298,8 +472,8 @@ def test_fittability_guard_excludes_fold_loudly():
     goldens are visibly missing from the pooled holdout."""
     cases = [
         _case("matmul.square.512", "thread", "gpuA"),
-        _case("matmul.qkv.h4096", "warp", "gpuA", gidx=0),
-        _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", gidx=3),  # the ONLY dyn case
+        _case("matmul.qkv.h4096", "warp", "gpuA", pinned=0),
+        _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", pinned=3),  # the ONLY dyn case
         _case("matmul.square.512", "thread", "gpuB"),
     ]
     out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=4)
@@ -420,7 +594,7 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     """The command layer end to end on a synthetic dataset — trainer wiring, artifact assembly and
     both output files — without tracing a single golden. ``--artifact`` is absent, so the run writes
     only into its own directory and never touches the shipped weights."""
-    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec: (_cases(), []))  # noqa: ARG005
+    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec, **_kw: (_cases(), []))  # noqa: ARG005
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
     args = parser.parse_args(["fit", "--folds", "3", "--out", str(tmp_path / "run")])
@@ -431,8 +605,11 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     # The two seeding policies stay recorded: without them two fits are not comparable.
     assert metrics["header"]["trainer_params"]["fold_seed_weights"] == "zeros"
     assert set(metrics["cv"]) == {"shape"}
+    # Cases are candidate pools now, so the header carries how many verified rows they hold between them —
+    # otherwise a case count that fell because two goldens shared a pool reads as lost data.
+    assert metrics["header"]["cases"] == {"groups": 8, "positives": 8, "merged": 0}
 
     artifact = json.loads((tmp_path / "run" / "weights.json").read_text())
     assert artifact["kind"] == "linear" and artifact["weights"] and artifact["weights_dynamic"]
-    assert artifact["provenance"]["cases"] == {"static": 6, "dynamic": 2}
+    assert artifact["provenance"]["cases"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "static top1=" in artifact["provenance"]["notes"]

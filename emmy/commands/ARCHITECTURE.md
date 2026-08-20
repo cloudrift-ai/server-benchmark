@@ -611,14 +611,41 @@ be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the other.
 `linear` fits weights by random search + coordinate descent: `--samples N` (default 0: coordinate-descent-from-seed,
 the incumbent practice) and `--l2 λ` (the raw-space L2 penalty strength in the fit loss — default the declared
 tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude identified, the
-D_pow2_threads 686 incident). `catboost` fits a `QuerySoftMax` ranker, one group per candidate pool with the golden
-as its single positive: `--iterations N`, `--negatives K` (sampled negatives per pool per round — the full corpus is
-~38 M rows, so training samples while the rank metric still covers whole pools) and `--rounds R` (the first draws
-negatives uniformly, each further one mines hard negatives from what the current model ranks near the golden —
-**default 1, so mining is off**: the one measurement of it moved top-1 from 545 to 517 over the 1278-case golden
-dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is the expected direction when the negatives
-are unlabeled rather than known-bad). Its fits are not byte-reproducible — CatBoost's histogram build is threaded —
-so two fits are compared by their metrics files rather than by a checksum.
+D_pow2_threads 686 incident). `catboost` fits a `QuerySoftMax` ranker, one group per candidate pool with every
+golden matched into that pool as a positive: `--iterations N`, `--negatives K` (sampled negatives per pool per round,
+drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still covers
+whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from what
+the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
+from 545 to 517 over the 1278-case golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
+the expected direction when the negatives are unlabeled rather than known-bad). Its fits are not byte-reproducible
+— CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a
+checksum.
+
+**A case is a candidate pool, not a golden.** The case builder enumerates each golden's pool and joins a golden to
+an existing case when the featurized pool it enumerates is byte-identical to that case's — so a shape recorded under
+two names, or one name recorded twice, becomes ONE case carrying several verified rows, and its rank is the best of
+them. Membership is decided that way rather than by any metadata key, because most same-name duplicates are
+`FAST_MATH` siblings whose pools are genuinely disjoint (the fast-math enumeration offers an f16-accumulate atom the
+standard one never emits): merging them on the name would pin row indices that do not exist in the other pool. The
+realized merge count is therefore an output of the run — the header's `cases` block records groups, positives and
+merged, and every `per_golden` row carries `positives`, so a case count that dropped against an earlier fit says why
+instead of looking like lost data. A golden whose signature matches no row in its pool is unchanged: it is skipped
+and counted per card as `unranked`.
+
+**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
+that many candidates per pool while the pool is still an addressable space, before a candidate dict exists —
+the corpus is millions of rows and tens of gigabytes otherwise, and one golden's pool alone is past the
+scheduler's materialization budget, so an unsampled `--data golden` fit does not finish. The draw is a pure
+function of `(pool size, N, --seed)` and never looks at a row, so a refit of the same corpus is byte-identical
+and two goldens over one pool still retain identical rows and still merge into one case. Every recorded
+config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
+always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the
+draw with the true pool size beside them (`per_golden` carries both `pool` and `sampled`), never scaled: a
+sample's rank resolution floor is `pool / N`. The setting is recorded in the metrics header and the artifact
+provenance, so two fits are only comparable when it matches. `catboost`'s `--negatives` is a SECOND uniform
+draw from whatever pool it is handed, and a uniform draw from a uniform draw is a uniform draw from the
+original — the two nest by construction, and the trainer warns when `--negatives` reaches the size of the
+pools it is given and therefore selects nothing.
 
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in

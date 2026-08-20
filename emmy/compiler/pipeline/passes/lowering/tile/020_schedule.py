@@ -46,11 +46,11 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     # This pass DECIDES, so it requires the kernel's identity. Every row it enumerates carries the
     # ``S_*`` stamp forward, and that is what the prior ranks on, what a recorded golden matches by,
     # and what the measurement is later filed under — decide without it and the fork's pick is made
-    # against an empty signature that matches every kernel and identifies none. ``005_stamp`` runs
+    # against an empty signature that matches every kernel and identifies none. the ``IdentityStrategy`` stamps at birth
     # ahead of this rule for exactly that reason, so an unstamped kernel here is a pass-order
     # break, not a case to handle.
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
-        f"{tile.name!r}: scheduling a kernel with no structural identity — 005_stamp must run first"
+        f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
     rows = schedule(tile, tile.name, tile.knobs, ctx)
     options = rows if isinstance(rows, list) else [rows]

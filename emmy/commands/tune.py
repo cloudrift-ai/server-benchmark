@@ -281,7 +281,11 @@ def _context_for_device(device_id: int | None, *, target: str | None = None):
     raw_name = str(raw_name) if raw_name is not None else None
     spec = gpu.by_name(raw_name) if raw_name else None
     gpu_name = spec.name if spec else raw_name
-    ctx = Context.from_target(cap, gpu_name=gpu_name)
+    # Only a REGISTERED name goes to ``from_target`` — it raises on one it cannot resolve, and here
+    # that is the wrong answer: the card is physically present, so the live probe below supplies its
+    # real properties and the registry is only a fallback base. An unregistered card keeps its raw
+    # name on the returned context; it just does not pretend to have memorized specs.
+    ctx = Context.from_target(cap, gpu_name=spec.name if spec else None)
     fallback = ctx.device_props
     feature_keys = {
         "sm_count": "multiProcessorCount",
@@ -327,7 +331,7 @@ def _tune_one(
     import time
 
     from emmy.commands.tune_progress import TuneProgress
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     graph, _, bench_bundle = load_or_trace(args)
     if dump:
@@ -362,9 +366,7 @@ def _tune_one(
             proposal_ranking_callback(rankings)
         budget = getattr(args, "max_candidates", None)
         remaining = None if budget is None else max(0, budget - min(len(proposals), budget))
-        result = await run_two_level_tune(
-            graph,
-            ctx=ctx,
+        strategy = TwoLevelStrategy(
             db=db,
             backends=backends,
             patience=patience,
@@ -377,6 +379,7 @@ def _tune_one(
             max_candidates=remaining,
             prior=prior,
         )
+        result = await strategy.run(graph, ctx)
         return result, rankings
 
     try:
@@ -470,7 +473,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     """
     from emmy.commands.tune_progress import TuneProgress
     from emmy.compiler.pipeline.search.prior import load_prior
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     prepared = []
     temp_dumps: list[Path] = []
@@ -517,9 +520,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
         async def tune_target(index, target, graph, dump):
             budget = getattr(args, "max_candidates", None)
             remaining = None if budget is None else max(0, budget - min(len(target.proposals), budget))
-            return await run_two_level_tune(
-                graph,
-                ctx=ctx,
+            return await TwoLevelStrategy(
                 db=db,
                 backends=backends,
                 patience=patience,
@@ -534,7 +535,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 manage_prior=False,
                 backend_slots=slots,
                 close_backends=False,
-            )
+            ).run(graph, ctx)
 
         try:
             results = await asyncio.gather(
@@ -651,7 +652,7 @@ def handle_tune(args):
     # One session id per CLI invocation (a golden sweep = one collection session) —
     # stamped on every node row this run writes, so cross-run keep-min drift in the
     # node store is traceable to its tune session.
-    from emmy.compiler.pipeline.search.two_level import _mint_run_id
+    from emmy.compiler.pipeline.search.strategy.two_level import _mint_run_id
 
     run_id = _mint_run_id()
 

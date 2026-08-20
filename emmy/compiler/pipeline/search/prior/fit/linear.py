@@ -27,13 +27,13 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.prior.fit.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import rank_of_golden, topk_table
+from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,
     GATE_DEFAULTS,
@@ -60,13 +60,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_L2 = 1e-6
 
 
-def eval_weights(mats, gidx: list[int], gates, w: np.ndarray, params: np.ndarray) -> list[int]:
-    """Each pool's golden rank under a candidate weight vector. Scores through
+def eval_weights(mats, pinned: list[Sequence[int]], gates, w: np.ndarray, params: np.ndarray) -> list[int]:
+    """Each pool's best golden rank under a candidate weight vector. Scores through
     :func:`~..linear_model.quality_columns` — the same arithmetic ``OfflinePrior`` deploys — so the fit's
-    objective is the deployed ranking itself rather than a proxy that omits the interaction term."""
+    objective is the deployed ranking itself rather than a proxy that omits the interaction term.
+
+    A pool with several verified-optimum rows contributes ONE term, the best of them
+    (:func:`~.rank.best_rank`), so the loss keeps its units: still one int rank per group."""
     return [
-        rank_of_golden(quality_columns(m, w, g, weight=params[0], threshold=params[1]), gi)
-        for m, g, gi in zip(mats, gates, gidx, strict=True)
+        best_rank(quality_columns(m, w, g, weight=params[0], threshold=params[1]), pin)
+        for m, g, pin in zip(mats, gates, pinned, strict=True)
     ]
 
 
@@ -116,7 +119,7 @@ def fit_weights(
     # projection. Copying here is what it has always done — the difference is that the projection it copies
     # from is now built once for the whole run instead of once per fold.
     mats = [g.matrix(names).copy() for g in groups]
-    gidx = [g.pinned_idx for g in groups]
+    pinned = [g.pinned for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
     # Two streaming passes (mean, then squared deviation) and an IN-PLACE scaling, rather than
@@ -127,9 +130,15 @@ def fit_weights(
     # peaked near 70 GB and died. Same values — the second pass is the population variance
     # ``allf.std(0)`` computed, and identical rows stay identical under an affine map, so the
     # rank ties this objective counts (``>=``) are exactly the ties it counted before.
-    n = sum(len(m) for m in mats)
-    mu = sum(m.sum(0) for m in mats) / n
-    sd = np.sqrt(sum(((m - mu) ** 2).sum(0) for m in mats) / n)
+    #
+    # IMPORTANCE-WEIGHTED, because a pool may be a SAMPLE of itself: each group's rows carry weight
+    # ``g.total / len(m)``, so what is standardized is still the full pools' moments, now estimated
+    # from the sample rather than counted. Unsampled every weight is exactly 1.0 and the arithmetic
+    # is bit-identical to the unweighted spelling, so a full-pool refit reproduces byte for byte.
+    weights = [g.total / len(m) for g, m in zip(groups, mats, strict=True)]
+    n = sum(w * len(m) for w, m in zip(weights, mats, strict=True))
+    mu = sum(w * m.sum(0) for w, m in zip(weights, mats, strict=True)) / n
+    sd = np.sqrt(sum(w * ((m - mu) ** 2).sum(0) for w, m in zip(weights, mats, strict=True)) / n)
     sd[sd == 0] = 1.0
     # BEFORE the scaling, and as copies: the interaction compares a raw split COUNT against a raw
     # threshold, and the in-place pass below would otherwise both standardize those values and
@@ -145,13 +154,13 @@ def fit_weights(
 
     best_w = seed_w * sd / sd_ref  # re-scale the seed into this pool's z-space
     best_p = np.asarray(seed_params, dtype=float)
-    best_ranks = eval_weights(matsz, gidx, gates, best_w, best_p)
+    best_ranks = eval_weights(matsz, pinned, gates, best_w, best_p)
     best_obj = loss(best_w, best_ranks)
     logger.info("  seed: %s", topk_table(best_ranks))
 
     for _ in range(samples):
         w = rng.standard_normal(len(names))
-        ranks = eval_weights(matsz, gidx, gates, w, best_p)
+        ranks = eval_weights(matsz, pinned, gates, w, best_p)
         ob = loss(w, ranks)
         if ob < best_obj:
             best_obj, best_w, best_ranks = ob, w, ranks
@@ -172,7 +181,7 @@ def fit_weights(
                 else:
                     p = best_p.copy()
                     p[j - len(names)] += delta
-                ranks = eval_weights(matsz, gidx, gates, w, p)
+                ranks = eval_weights(matsz, pinned, gates, w, p)
                 ob = loss(w, ranks)
                 if ob < best_obj:
                     best_obj, best_w, best_p, best_ranks, improved = ob, w, p, ranks, True

@@ -8,6 +8,7 @@ An experiment answers a comparison or qualification question. It uses the recipe
 ```text
 experiments/<model>/<workload_or_question>/
   recipe.yaml
+  golden/                                   # optional pre-tuned goldens the recipe replays
   <YYYY-MM-DD_HH-MM-SS>/                    # temporary ignored raw output
   results_<gpu-short>x<gpu-count>.tar.gz    # one Git LFS archive per exact platform, including row records
   RESULTS.md                                # one interpretation across all platforms
@@ -17,6 +18,22 @@ Use the model's established repository slug and a short `snake_case` experiment 
 `emmy.hardware.gpu_short_name`; `results_rtx4090x1.tar.gz` is the archive for one RTX 4090. Keep one protocol in one
 recipe when platforms differ only by hardware allocation or a small control; use a zipped matrix rather than copied
 command bodies. Split directories only when the workload or raw evidence set differs.
+
+## Pre-tuned goldens as a recipe input
+
+An experiment that measures tuned Emmy does not tune: searching a schedule is judgment work owned by the
+`tune-kernels` skill, and a recipe that scripted it would encode that judgment in the harness. Instead the skill
+produces the golden files, they are committed under `golden/`, and the recipe replays them. The recipe still owns the
+program definition — a checked-in snippet or trace input the skill reads — so the tuned program and the benched
+program cannot drift apart.
+
+The committed files remain search state, so the measuring lane re-measures every schedule they pin and its own
+records stay the experiment's evidence. They are per-card and are retuned when the platform changes, which is why a
+compiler change is re-measured by rerunning the recipe alone.
+
+Give each lane and each measured operator (or other workload split) its own matrix parameter so `--filter` can
+re-measure one slice. Command rows for one GPU share a single execution group and therefore a single VM, so splitting
+a long sweep into rows costs staging, not hardware.
 
 ## Last-run artifacts
 

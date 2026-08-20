@@ -36,6 +36,31 @@ def _input(g: Graph, name: str, shape: tuple) -> str:
     return g.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape), node_id=name)
 
 
+def _lift_tree(body: Body):
+    """The lift + classify read over a hand-built body, axis names preserved (``recognized_tile``
+    goes through ``LoopOp`` normalization, which renames) — the same sequence the pass runs."""
+    from emmy.compiler.ir.tile import split_effects
+    from emmy.compiler.pipeline.passes.lowering.tile import _lift as L
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import classify
+
+    free, cell = L._peel(Body(tuple(body)))
+    cell = L._lift_cell(list(cell))
+    split = split_effects(tuple(cell))
+    cell, stores = (list(split[0]), split[1]) if split is not None else (cell, ())
+    node = L._form_root(cell)
+    free = L._order_free_by_output(node, free, stores)
+    return classify(node, free), free, stores
+
+
+def _fused(node, free):
+    """The fused computed-A view over a hand-built tree — the derivation the schedule and the
+    golden decode run (``fused_view`` reads a ``TileOp``)."""
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+
+    return fused_view(TileOp(op=node, place=Placement(free=tuple(free)), stores=()))
+
+
 def test_recognize_fires_on_pointwise(recording_dump):
     g = Graph()
     _input(g, "x", (4, 8))
@@ -65,8 +90,6 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
     inside K, while the linear bias feeds only the accumulator epilogue. Grouping the
     whole preamble together demotes the contraction to a scalar ``Map``.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
-
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 64), ("k", 128)))
     body = Body(
         (
@@ -103,12 +126,12 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
         )
     )
 
-    node, free, stores = lift_mod._lift(list(body), "out")
+    node, free, stores = _lift_tree(body)
 
     assert [axis.name for axis in free] == ["m", "n"]
-    # The λ-era spelling: a projecting Map over the stored role=CONTRACTION fold whose shared A
-    # is the computed cone (the GELU-constant preamble folded INSIDE K), the bias load riding the
-    # projection body — the preamble split kept the two independent feeds apart.
+    # A projecting fold over the stored contraction whose shared A is the computed cone (the
+    # GELU-constant preamble folded INSIDE K), the bias load riding the projection body — the
+    # prologue routing kept the two independent feeds apart.
     from emmy.compiler.ir.pure.fold import operand_body
 
     assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
@@ -122,8 +145,6 @@ def test_lift_partitions_independent_reduce_and_epilogue_preamble():
 
 def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
     """Q and K can occupy different affine regions of one load-time-packed QKV buffer."""
-    from emmy.compiler.pipeline.passes.lowering.tile import _lift as lift_mod
-
     m, n, k = (Axis(name, Dim(extent)) for name, extent in (("m", 32), ("n", 32), ("k", 64)))
     body = Body(
         (
@@ -160,7 +181,7 @@ def test_lift_recognizes_contraction_between_views_of_same_packed_buffer():
         )
     )
 
-    node, free, stores = lift_mod._lift(list(body), "score")
+    node, free, stores = _lift_tree(body)
 
     assert [axis.name for axis in free] == ["m", "n"]
     # Both views of the packed buffer hoist as materialized operand edges of the stored node.
@@ -515,13 +536,15 @@ def test_online_softmax_pairs_two_composed_passes():
     """The pairing compares the two passes' score cones by CONTENT, so two separately-traced copies
     of one score — different bound axis, different temps — pair and fuse into ONE twisted stream.
     Without that the fused attention cell keeps three passes over the score instead of two."""
-    from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import pair_softmax
 
-    fused, changed = _fuse(Body((_composed_rowmax(), _composed_sumexp())))
-    assert changed, "the composed pair did not fuse"
-    loops = [s for s in fused if isinstance(s, Loop)]
-    assert len(loops) == 1 and loops[0].role is AxisRole.TWISTED, "the pair must collapse to one TWISTED stream"
-    assert any(isinstance(s, Loop) and s.is_reduce for s in loops[0].body), "the fused stream keeps ONE score producer"
+    fmax, fsum = fold_from_loop(_composed_rowmax()), fold_from_loop(_composed_sumexp())
+    assert fmax is not None and fsum is not None
+    node = pair_softmax(Fold.projection(body=Body(()), operands=(fmax, fsum)))
+    assert len(node.operands) == 1, "the pair must collapse to one TWISTED stream"
+    tw = node.operands[0]
+    assert tw.role is AxisRole.TWISTED
+    assert len(tw.operands) == 1 and tw.operands[0].axis is not None, "the fused stream keeps ONE score producer"
 
 
 def test_split_k_reindexes_the_cones_producer_edge():
@@ -611,16 +634,16 @@ def _normed_sdpa_graph():
 
 def test_bind_contraction_declined_cone_raises_not_positional():
     """When the ⊗ lift names a COMPUTED A whose cone declines the bind (here: an n-indexed
-    load riding the cone), ``bind_contraction`` must raise ``LoweringError`` — the recognizer
-    then demotes the cell to PLANAR, which computes the full body. Falling through to the
-    positional first-(m,k)-load rule instead binds a cone-INTERNAL load as A and silently
-    drops the rest of the cone (the gemma GeGLU wrong-kernel class the lift binding fixed)."""
+    load riding the cone), the binder DECLINES — the fold keeps its PLANAR reading, which
+    computes the full body. Falling through to the positional first-(m,k)-load rule instead
+    binds a cone-INTERNAL load as A and silently drops the rest of the cone (the gemma GeGLU
+    wrong-kernel class the lift binding fixed)."""
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
-    from emmy.compiler.pipeline.pipeline import LoweringError
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes
 
     m, n, k = Var("m"), Var("n"), Var("k")
     body = Body(
@@ -634,9 +657,11 @@ def test_bind_contraction_declined_cone_raises_not_positional():
             Accum(name="acc", op=ElementwiseImpl("add"), value="pv"),
         )
     )
-    loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body, role=AxisRole.CONTRACTION)
-    with pytest.raises(LoweringError, match="computed cone"):
-        bind_contraction(loop, "m", "n", Body(()))
+    loop = Loop(axis=Axis(name="k", extent=Dim(64)), body=body)
+    fold = fold_from_loop(_stamp_axes(loop))
+    assert fold is not None
+    assert bind_bilinear(fold, "m", "n", frozenset({"m", "n"})) is None
+    assert fold.role is AxisRole.PLANAR
 
 
 # --------------------------------------------------------------------------- #
@@ -702,10 +727,8 @@ def _prologue_shape(*, b_layouts, cone_per_channel=False):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-
     node, free = _prologue_shape(b_layouts=(False, False))
-    bound = bind_prologue_contraction(node, free)
+    bound = _fused(node, free)
     assert bound is not None
     c_map, _, _stores = bound
     (product,) = c_map.operands  # the stored contraction node
@@ -717,10 +740,8 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
 def test_channels_with_disagreeing_b_layouts_never_group():
     """A group-formation GATE, not a node assert: the composition declines and the caller keeps the
     reduce ``Map`` form, rather than building a node whose channels cannot share a slab."""
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-
     node, free = _prologue_shape(b_layouts=(False, True))
-    assert bind_prologue_contraction(node, free) is None
+    assert _fused(node, free) is None
 
 
 def test_duplicated_cone_with_commuted_args_still_shares_one_a():
@@ -728,10 +749,8 @@ def test_duplicated_cone_with_commuted_args_still_shares_one_a():
     copy may spell a commutative op's args the other way round (``x̂·s`` vs ``s·x̂``). Value-tree
     equality must key both copies equal, or the composition declines and the fused kernel demotes
     to the scalar tier (found live: the gemma-4 geglu edge's recorded goldens drifted in-model)."""
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-
     node, free = _prologue_shape(b_layouts=(False, False), cone_per_channel=True)
-    bound = bind_prologue_contraction(node, free)
+    bound = _fused(node, free)
     assert bound is not None, "the per-channel cone copies key equal — ONE shared A operand"
     c_map, _, _stores = bound
     (product,) = c_map.operands

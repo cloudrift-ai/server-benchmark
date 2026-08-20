@@ -3,11 +3,17 @@
 These are shared by every consumer of a score vector (the linear trainer's objective, the CV harness, the
 golden evals) and deliberately know nothing about any model class: they take scores, they return ranks. The
 tie conventions are the load-bearing part — see :func:`rank_of_golden` vs :func:`dual_rank`.
+
+Each single-index function has a SET counterpart (:func:`best_rank`, :func:`best_dual_rank`) for a pool that
+carries several positives. Both take the best over the set, and at one positive both are the single-index
+function itself, bit for bit — which is what keeps a one-positive fit byte-identical to the one before the set
+existed.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -39,6 +45,23 @@ def dual_rank(scores, gidx: int) -> tuple[int, int]:
     g = s[gidx]
     optimistic = int((s > g).sum())
     return optimistic + int((s[:gidx] == g).sum()), optimistic
+
+
+def best_rank(scores: np.ndarray, pinned: Sequence[int]) -> int:
+    """The best :func:`rank_of_golden` over a pool's positive rows — the FIT OBJECTIVE's per-group term
+    when a pool has several verified-optimum configs.
+
+    Minimum, not mean: deploy ships one config, so any acceptable one ranked first is a win, while a mean
+    would spend weights pushing up the fifth-best config, which changes nothing that ships."""
+    return min(rank_of_golden(scores, i) for i in pinned)
+
+
+def best_dual_rank(scores, pinned: Sequence[int]) -> tuple[int, int]:
+    """The reported ``(rank, rank_optimistic)`` for a pool with several positives: :func:`dual_rank` of
+    whichever positive attains :func:`best_rank`, so the pessimistic count still uses the deploy tiebreak
+    against THAT positive's own emission position. Positives arrive ascending, so a tie on ``best_rank``
+    resolves to the earliest-emitted one — the row greedy would actually deploy."""
+    return dual_rank(scores, min(pinned, key=lambda i: rank_of_golden(scores, i)))
 
 
 def topk_table(ranks: list[int], ks=(1, 5, 10, 25, 50, 100)) -> str:

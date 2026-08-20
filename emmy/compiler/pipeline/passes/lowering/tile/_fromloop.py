@@ -1,7 +1,7 @@
 """Loop IR → term: reconstructing a :class:`Fold`'s algebra from a reduce ``Loop``.
 
 This is a PARSER, not part of the term vocabulary — it belongs with the passes that consume it
-(``010_recognize``, ``ops.nodify_reduce``), not on the node. Every algebra fact reads off the loop
+(the total lift, ``_classify``, ``nodify_reduce``), not on the node. Every algebra fact reads off the loop
 body's own ``Accum``\\s, so a loop carries no side-band algebra; the byte-identity gate in
 :func:`fold_from_loop` is what lets the extractors stay shape-strict without a correctness burden
 — a shape that does not read off cleanly returns ``None`` and the caller keeps the raw-loop-IR
@@ -52,6 +52,26 @@ def _same_program(a, b) -> bool:
     happened to name the temps."""
     a, b = Body(_unannotated(a)), Body(_unannotated(b))
     return a == b or rename_ssa_sequential(a) == rename_ssa_sequential(b)
+
+
+def _stamp_axes(loop: Loop) -> Loop:
+    """Stamp each axes-less ``Accum`` with its OWN loop's axis, deep — the canonical dissolved
+    spelling the parser's gate re-derives. Pipeline-lowered IR arrives stamped; hand-lowered IR
+    (and some minted pieces) omits it, and the omission is spelling, not semantics: an ``Accum``
+    folds over exactly the loop it sits in.
+
+    A level carrying a ``base``-``Accum`` is the dissolved exp-family merge (a 030 split partial,
+    a cut fragment of a twisted cell) and is left VERBATIM: its parser
+    (``_extract_twisted_self``) proves the algebra by regenerating the merge and comparing, so
+    any re-spelling here — including an axes stamp — breaks the proof against the generator's
+    own spelling."""
+    if any(isinstance(s, Accum) and s.base is not None for s in loop.body):
+        return replace(loop, body=Body(tuple(_stamp_axes(s) if isinstance(s, Loop) else s for s in loop.body)))
+    body = tuple(
+        replace(s, axes=(loop.axis.name,)) if isinstance(s, Accum) and not s.axes else (_stamp_axes(s) if isinstance(s, Loop) else s)
+        for s in loop.body
+    )
+    return replace(loop, body=Body(body))
 
 
 def _hoist_step_nodes(prefix: list[Stmt]) -> tuple[tuple, list[Stmt]] | None:
@@ -180,7 +200,9 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | N
             return None
         other = tuple(f"{n}__o" for n in names)
         combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-        return lift, (float("-inf"),) + (0.0,) * len(adds), combine, edges
+        # The pivot seeds the max op's IDENTITY (−1e30), never −inf: an all-masked carrier slice
+        # would rescale ``subtract(−inf, −inf)`` — NaN; at the finite identity it is 0.
+        return lift, (maxes[0].op.identity,) + (0.0,) * len(adds), combine, edges
     return None
 
 
@@ -216,7 +238,7 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
         lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=terms)
     except ValueError:
         return None
-    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), like.combine, ()
+    return lift, like.init, like.combine, ()
 
 
 def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold | None:

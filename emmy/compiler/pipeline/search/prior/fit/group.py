@@ -1,12 +1,12 @@
 """``Group`` — the fit pipeline's dataset representation: one candidate pool plus its labels.
 
 A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. Today
-that supervision is a single pinned verified-optimum row (``pinned_idx`` — the golden's index in the pool);
-the planned measurement-freeze datasets add per-row measured labels when they land, so builders other than the
-golden case builder can populate groups from measurement sources. Groups are built by plain functions (the golden builder
-lives in ``emmy/commands/fit.py`` — case building needs the snippet tracer, which ``pipeline/`` must not
-import) and consumed by trainers and the CV harness through this one shape; there is no iterator/batching
-layer — the whole dataset is a small in-memory list.
+that supervision is a SET of pinned verified-optimum rows (``pinned`` — the row indices of every golden the
+builder matched into this pool); the planned measurement-freeze datasets add per-row measured labels when they
+land, so builders other than the golden case builder can populate groups from measurement sources. Groups are
+built by plain functions (the golden builder lives in ``emmy/commands/fit.py`` — case building needs the snippet
+tracer, which ``pipeline/`` must not import) and consumed by trainers and the CV harness through this one shape;
+there is no iterator/batching layer — the whole dataset is a small in-memory list.
 
 Rows are ndarray-backed, not dict-backed: ``feats`` is one float64 matrix (rows × ``feat_names``), packed
 once by :meth:`Group.from_dicts` from the builder's transient per-row feature dicts. A per-row dict of ~63
@@ -18,16 +18,19 @@ means by "absent": ``0.0`` for the linear model (reproducing ``feats.get(k, 0.0)
 for a tree, which can branch on not-decided as a state of its own. The dataset stores the more informative of
 the two so neither model constrains the other.
 
-``key`` is ``"<gpu>/<name>"``, disambiguated by the builder when one name records several parity entries
-(``#2``, ``#3``, … in dataset order). ``tier`` is the fit's case tier (``thread`` / ``warp`` / ``dyn`` /
-``reduce`` / ``pointwise``) and is a REPORT LABEL only — it decides nothing. The weight set a group scores
-under is ``dynamic``, read off the routing stamp exactly as the deployed prior reads it. ``shape`` is the
-cross-validation fold group, and is the one identity here that decides something structural: two goldens
-sharing it enumerate the same candidates, so a fold that separated them would train on the answer.
+``key`` is ``"<gpu>/<name>"`` of the FIRST golden that opened the pool, disambiguated by the builder when one
+name opens several distinct pools (``#2``, ``#3``, … in dataset order); goldens that join an already-open pool
+become further entries in ``pinned`` rather than a group of their own. ``tier`` is the fit's case tier
+(``thread`` / ``warp`` / ``dyn`` / ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it decides nothing.
+The weight set a group scores under is ``dynamic``, read off the routing stamp exactly as the deployed prior
+reads it. ``shape`` is the cross-validation fold group, and is the one identity here that decides something
+structural: two goldens sharing it enumerate the same candidates, so a fold that separated them would train on
+the answer.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -174,18 +177,45 @@ class Group:
     # ``tier`` (a label) it is load-bearing.
     shape: str
     dynamic: bool
-    pinned_idx: int
+    # The verified-optimum rows of this pool, ascending: every golden the builder matched into it. Deploy ships
+    # ONE config, so any of them ranked first is a win — which is why the fit's per-group term is the best rank
+    # over this set (:func:`~.rank.best_rank`) and the reported one the matching dual rank
+    # (:func:`~.rank.best_dual_rank`). At one positive both collapse to the single-golden functions exactly.
+    pinned: tuple[int, ...]
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
+    # The size of the candidate pool ``feats`` was drawn from, equal to ``len(feats)`` unless the
+    # builder sampled. Two things need it and neither can recover it from the matrix: a report,
+    # which must print the raw sample rank BESIDE the true total rather than scaling it, and the
+    # linear trainer, whose z-scored moments are over the whole pool and are ESTIMATED from a
+    # sample - so each group's rows carry weight ``total / len(feats)`` in those two passes.
+    # Without it a 5-row pool and a 325k one would weigh the same under fixed-size sampling, which
+    # silently changes the standardization and with it the raw-space L2 the artifact ships.
+    total: int = 0
     # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
     # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
     _cache: tuple | None = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def from_dicts(cls, key: str, name: str, tier: str, gpu: str, shape: str, pinned_idx: int, feats: list[dict[str, float]]) -> Group:
+    def from_dicts(
+        cls,
+        key: str,
+        name: str,
+        tier: str,
+        gpu: str,
+        shape: str,
+        pinned: int | Sequence[int],
+        feats: list[dict[str, float]],
+        total: int | None = None,
+    ) -> Group:
         """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
         union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
         drop the dicts after this — the matrix is the stored representation.
+
+        ``pinned`` is the pool's positive row index, or several of them; either spelling normalizes to a sorted
+        duplicate-free tuple. A bare int is accepted because most callers have exactly one row to pin and
+        wrapping it would say nothing. ``total`` is the size of the pool ``feats`` was drawn from, defaulting
+        to "nothing was sampled" - see :attr:`total`.
 
         The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
         :attr:`dynamic` and then LEFT OUT of ``feat_names``, so a weight-set selector can never
@@ -203,8 +233,11 @@ class Group:
                 f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
                 f"the source record's flag and its featurized rows disagree about the weight set"
             )
+        rows = (pinned,) if isinstance(pinned, int) else pinned
         names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
-        return cls(key, name, tier, gpu, shape, dynamic, pinned_idx, names, feature_matrix(feats, list(names), fill=np.nan))
+        positives = tuple(sorted({int(i) for i in rows}))
+        matrix = feature_matrix(feats, list(names), fill=np.nan)
+        return cls(key, name, tier, gpu, shape, dynamic, positives, names, matrix, len(feats) if total is None else total)
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``

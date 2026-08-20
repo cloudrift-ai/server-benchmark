@@ -53,9 +53,10 @@ Allowed areas are `recipes/` (including the model's `golden/` subdirectory), `ex
 `docker/vllm-emmy-serve/models/`, and a bounded small fix under `emmy/` with its focused tests and nearest
 `ARCHITECTURE.md` updates.
 
-Every platform shares one serving experiment root, `experiments/<model>/serving/`; reuse it when it exists and
-never create a platform-suffixed root. The platform appears in the archive filename, not in a directory name. The
-summary's `experiment` field is that root's `recipe.yaml` path, never a directory.
+Reuse this model's existing serving experiment root when it already represents the protocol; many models keep a
+platform-named root such as `serving_v100_sxm2_16gb`. Create `experiments/<model>/serving/` only when the model has
+no such root, and never add a second root for a platform an existing one already covers. The summary's `experiment`
+field is that root's `recipe.yaml` path, never a directory.
 
 Replace only this platform's `results_<gpu-short>x<gpu-count>.tar.gz` archive and preserve every other platform
 archive and `RESULTS.md` section. The archive must contain the platform's system-only experiment records; do not

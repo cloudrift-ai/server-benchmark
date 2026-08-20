@@ -469,7 +469,7 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
         assert f"{field}:" in script
         assert f"`{field}`" in qualify
     assert "Do not select a model or GPU, provision or delete the VM, commit, push" in qualify
-    assert "never create a platform-suffixed root" in qualify
+    assert "never add a second root for a platform an existing one already covers" in qualify
     assert "`recipe.yaml` path, never a directory" in qualify
     assert "Use at most four public-web calls" in investigate
     assert "Apply the investigation prompt" in investigator

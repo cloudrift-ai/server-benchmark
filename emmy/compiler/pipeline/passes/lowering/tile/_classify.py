@@ -6,9 +6,13 @@ stored params (``lift`` / ``combine`` / ``operands``), never a raw loop stmt. A 
 declines rewrites nothing — the fold already derives its fallback role (PLANAR) structurally,
 so demotion is a no-op by construction, not a raise/catch.
 
-Stage here today: **contraction binding** (:func:`bind_bilinear`). Pending (the rebuild
-registry's other casualty classes): online-softmax pairing, the monoid-producer composition,
-the placement cut fork.
+Stages, in order: **online-softmax pairing** (:func:`pair_softmax` — the monoid merge),
+**contraction binding** (:func:`bind_bilinear` — the semiring read), **legalize**
+(:func:`_legalize` — the explicit downstream-capability list). The **monoid-producer
+composition** (:func:`fused_view`) is a VIEW, not a stage: the canonical tree stays stored and
+the fused computed-A reading is re-derived on demand at the schedule and the golden decode.
+Pending (the rebuild registry's remaining casualty classes): the placement cut fork, the
+fp8/W8A8 mul-hoist arm, the split partial's per-channel-Write store shape.
 """
 
 from __future__ import annotations

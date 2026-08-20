@@ -36,6 +36,11 @@ provisioning/
    * **CloudRift** → one candidate per base type.
    * **GCP** → one candidate per zone in `hardware.GPU_GCP_ZONES[gpu_name]` (falls back to `DEFAULT_GCP_ZONE`); all zones for the current base type before advancing to the next entry.
 
+A GPU missing from `GPU_INSTANCE_TYPES`, or mapped only to base types the provider no longer stocks, is
+unreachable: `iter_candidates()` raises or yields instance types with no nodes, and the recipe-query availability
+annotation quietly reports the deployment as unavailable rather than failing. Every GPU a recipe declares must
+therefore have a current entry, and the entries stay ordered with the stocked base type first.
+
 The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.

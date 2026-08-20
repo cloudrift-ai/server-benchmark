@@ -11,8 +11,6 @@ asserted without a device (GPU accuracy is covered by the e2e smoke on the 5090 
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import replace
 
 from emmy.compiler.context import Context
@@ -105,14 +103,22 @@ def test_is_routing_reads_place_only_knob_dicts() -> None:
 
 
 def test_place_sites_are_the_non_root_nodes() -> None:
+    from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tile.path import family_sites, resolve, sites, spell
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-    from test_recognize_boundary_rules import _prologue_shape
-
-    node, free = _prologue_shape(b_layouts=(False, False))
-    c_map, _n_ax, _stores = bind_prologue_contraction(node, free)
+    # The fused computed-A reading, derived exactly as the pass derives it: lift the lowered
+    # norm→linear kernel to its Fold tree, then take the fused view — the reference tree whose
+    # seams a ``PLACE`` key spells.
+    lowered = Pipeline.build(LOOP_PASSES).run(_norm_linear_graph())
+    node = next(n for n in lowered.nodes.values() if isinstance(n.op, LoopOp))
+    node.op.populate_io(lowered, node)
+    tile = recognized_tile(node.op, node.output.name, name=node.op.name)
+    pro = fused_view(tile)
+    assert pro is not None, "the norm→linear tile must derive its fused computed-A view"
+    c_map, _n_ax, _stores = pro
     all_sites = sites(c_map)
     seams = family_sites("PLACE", all_sites)
     assert seams and all(s.depth > 1 for s in seams)

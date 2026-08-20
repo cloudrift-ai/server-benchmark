@@ -25,17 +25,10 @@ IGNORED_FILES = [
 # Exact node ids xfailed (strict) until their subsystem is rebuilt.
 XFAIL_NODES = {
     "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
-    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_the_kernels",
-    "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_degenerate_m1",
     "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_layer_dynamic_compiles_and_matches_eager",
     "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
     "tests/compiler/passes/test_fp8_staged.py::test_k32_staged_bit_identical_to_gmem_direct_cuda",
     "tests/compiler/passes/test_fp8_staged.py::test_w8a16_staged_bit_identical_to_gmem_direct_cuda",
-    "tests/compiler/passes/test_placement_routing.py::test_a_cut_taken_at_a_fork_mid_batch_still_reaches_the_stamp",
-    "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade",
-    "tests/compiler/passes/test_placement_routing.py::test_place_sites_are_the_non_root_nodes",
-    "tests/compiler/passes/test_placement_routing.py::test_rms_norm_place_cut_splits_stat_and_scale",
-    "tests/compiler/passes/test_placement_routing.py::test_scoped_place_pin_from_replay_context_cuts_the_cone",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_bind_contraction_declined_cone_raises_not_positional",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_channels_with_agreeing_b_layouts_form_one_product_node",
     "tests/compiler/passes/test_recognize_boundary_rules.py::test_channels_with_disagreeing_b_layouts_never_group",

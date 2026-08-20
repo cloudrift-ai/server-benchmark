@@ -15,11 +15,10 @@ engine:
     context_length: 32768
     max_concurrent_requests: 8
     vllm:
-      image: "cloudriftai/1cat-vllm-sm70@sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be"
+      image: "cloudriftai/1cat-vllm-sm70:1.0.0"
       extra_args: >-
         --dtype half
-        --language-model-only
-        --attention-backend FLASH_ATTN_V100
+        --attention-backend TRITON_ATTN
         --max-num-batched-tokens 4096
         --enable-auto-tool-choice
         --tool-call-parser llama3_json

@@ -441,7 +441,7 @@ def _bound_producer(e: Fold, free: tuple, n_name: str) -> Fold | None:
     for ax in free:
         if ax.name == n_name:
             continue
-        b = bind_bilinear(e, ax.name, n_name, axes)
+        b = bind_bilinear(e, ax.name, n_name, axes, producer=True)
         if b is not None and not b[1] and isinstance(b[0].a, Load) and isinstance(b[0].b, Load):
             return b[0]  # an edge carries no projection epilogue — a hoisted producer declines
     return None
@@ -569,6 +569,17 @@ def _idx_vars(load: Load) -> set[str]:
     return {v for e in load.index or () for v in e.free_vars()}
 
 
+def _role_pure(load: Load, on: str, axes: frozenset) -> bool:
+    """Per-expr role purity: every index expr of ``load`` that mentions the role axis ``on``
+    mentions no OTHER free (grid) axis. The mma emitters address an operand slab by its role
+    axis and the reduce axis alone — a third grid axis in a *separate* dim is a batch offset
+    the grid absorbs, but one composed into the SAME expr as the role axis (a split-axis
+    composite index) has no slab address, and binding it emits code that references an
+    undefined iteration var. Checking here turns that miscompile into a decline."""
+    others = axes - {on}
+    return not any(e.free_vars() & others for e in load.index or () if on in e.free_vars())
+
+
 def _deep_idx_vars(stmts) -> set[str]:
     """Every free Var name across the coordinate exprs reachable in ``stmts`` (deep) — index
     exprs and ``Select`` predicates alike (``Stmt.exprs``)."""
@@ -599,7 +610,7 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset) -
     return stmts
 
 
-def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset()) -> tuple[Fold, tuple] | None:
+def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset(), producer: bool = False) -> tuple[Fold, tuple] | None:
     """Rebind a lifted fold as the bilinear contraction — the ONE contraction reading, off the λ
     spelling and stated on the ALGEBRAIC TRAITS, never op names: the carrier must be a product of
     ONE commutative-monoid ⊕ (associative + commutative + identity — the reassociation license
@@ -608,6 +619,13 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
     registered-semiring table; ``(multiply, add)`` is the matmul). The ⊗ args classify by their
     loads' grid-axis indexing — B is the ``(n, k)``-indexed side and never reads ``m``, A the
     mirror (role-exclusive: a load carrying both axes is neither, and the fold stays PLANAR).
+    Role purity is per index EXPR (:func:`_role_pure`): another free axis may ride a separate
+    dim (a batch offset), never the same expr as the role axis — the DIRECT slab loaders
+    template an operand address over the bare role Var and cannot spell a composite, so it
+    declines instead of reaching an emitter that miscompiles it. ``producer=True``
+    (:func:`_bound_producer` — a composed edge the chained A fill consumes) waives the check:
+    the fill σ-substitutes whole index exprs, and the split-KV reindex legitimately spells the
+    absolute key as ``ordinal·B + local`` in one expr.
     One side may be a pure MAP cone (the computed operand: A rides :func:`make_cone`, which
     fixes the K seam on the node; B a plain projection evaluated per slab cell). N channels must
     share ONE A value — sharing is the node's arity. Every λ body stmt must be consumed by a
@@ -634,7 +652,9 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
 
     def role_load(name: str, on: str, off: str) -> Load | None:
         ld = loads.get(name)
-        return ld if ld is not None and on in _idx_vars(ld) and off not in _idx_vars(ld) else None
+        if ld is None or on not in _idx_vars(ld) or off in _idx_vars(ld):
+            return None
+        return ld if producer or _role_pure(ld, on, axes) else None
 
     # The per-channel ⊗ reads: each result's two-arg multiply, its directly-named B load (or
     # ``None`` when B rides a computed value), and the other argument — the channel's A value.
@@ -660,7 +680,15 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
         # decode cone wraps is not named by the ⊗ lift, so it is found positionally, as the old
         # binder found it.
         return next(
-            (s for s in body if isinstance(s, Load) and k_name in _idx_vars(s) and on in _idx_vars(s) and off not in _idx_vars(s)),
+            (
+                s
+                for s in body
+                if isinstance(s, Load)
+                and k_name in _idx_vars(s)
+                and on in _idx_vars(s)
+                and off not in _idx_vars(s)
+                and (producer or _role_pure(s, on, axes))
+            ),
             None,
         )
 

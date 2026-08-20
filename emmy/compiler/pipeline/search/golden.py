@@ -361,11 +361,6 @@ def validate_golden_file(
     configs = document.get("configs")
     if not isinstance(configs, list) or not configs:
         raise ValueError("configs must be a non-empty list")
-    # A whole-model inventory points many configs at the same few programs (279 configs
-    # over 13 programs here), and decoding one is the expensive part of this check. Decode
-    # each distinct program once per call: `tune` re-validates the whole document on every
-    # incremental persist, so the redundancy is quadratic in the number of targets.
-    decoded_programs: dict[int, None] = {}
     strict = validation in (GoldenFileValidation.PROMOTION, GoldenFileValidation.REPOSITORY)
     for index, entry in enumerate(configs):
         where = f"configs[{index}]"
@@ -377,12 +372,8 @@ def validate_golden_file(
         program_ref = entry.get("program")
         if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
-        if program_ref not in decoded_programs:
-            try:
-                graph_from_wire(programs[program_ref])
-            except ValueError as exc:
-                raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
-            decoded_programs[program_ref] = None
+        # The pool check above already decoded every program. A whole-model inventory points
+        # hundreds of configurations at a handful of programs, so do not decode again per config.
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
@@ -878,23 +869,56 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     return result
 
 
+_POOL_KEYS = ("programs", "loops")
+_POOL_CACHE: tuple[list, dict[str, str]] | None = None
+
+
+def _dump_block(key: str, value: object) -> str:
+    """One top-level key as YAML. Block-style keys concatenate into exactly the document
+    ``yaml.dump`` writes for the whole mapping, so a block can be reused verbatim."""
+    return yaml.dump({key: value}, Dumper=_GoldenDumper, sort_keys=False, width=140)
+
+
+def _pool_blocks(document: Mapping, *, reuse: bool) -> dict[str, str]:
+    """The serialized program and loop pools, kept across repeated persists of one document.
+
+    Keyed by pool identity, and the cache holds the pools it serialized: a document whose pools
+    are the very objects that were dumped last has the same bytes for them.
+    """
+    global _POOL_CACHE
+
+    pools = [document.get(key) for key in _POOL_KEYS]
+    if reuse and _POOL_CACHE is not None and all(cached is pool for cached, pool in zip(_POOL_CACHE[0], pools, strict=True)):
+        return _POOL_CACHE[1]
+    blocks = {key: _dump_block(key, [_style_program(program) for program in document[key]]) for key in _POOL_KEYS if key in document}
+    if reuse:
+        _POOL_CACHE = (pools, blocks)
+    return blocks
+
+
 def dump_golden_file(
     document: Mapping,
     path: str | Path,
     *,
     validation: GoldenFileValidation = GoldenFileValidation.WORKING,
     overwrite: bool = False,
+    incremental: bool = False,
 ) -> Path:
+    """Write one golden document, atomically.
+
+    ``incremental`` is for the repeated working-golden persists of a single loaded document that
+    ``tune`` makes as it records ranking feedback per target: those persists mutate realizations
+    only, so the program and loop pools keep the text they were serialized to instead of being
+    reserialized once per target. The whole document is still validated, and the bytes written are
+    the ones a full dump writes. Canonical and promotion dumps leave it off and reserialize everything.
+    """
     validate_golden_file(document, validation=validation)
     destination = Path(path)
     if destination.exists() and not overwrite:
         raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    styled = dict(document)
-    styled["programs"] = [_style_program(program) for program in document["programs"]]
-    if "loops" in document:
-        styled["loops"] = [_style_program(program) for program in document["loops"]]
-    payload = yaml.dump(styled, Dumper=_GoldenDumper, sort_keys=False, width=140)
+    blocks = _pool_blocks(document, reuse=incremental)
+    payload = "".join(blocks[key] if key in blocks else _dump_block(key, value) for key, value in document.items())
     temporary = None
     mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
     try:

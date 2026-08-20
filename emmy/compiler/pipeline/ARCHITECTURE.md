@@ -924,6 +924,14 @@ rows feed the shared prior immediately, so the following MCTS can use their evid
 the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
 only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
 
+Each of those per-target persists rewrites the whole file, so its cost is the size of the inventory rather than of
+the entry that changed, and a whole-model sweep pays it once per target. They are written **incrementally**: the
+program and loop pools are nearly all of such a file by size and no persist mutates them, so an incremental write
+keeps the text they were already serialized to and reserializes only the configurations. The document is still
+validated in full and the bytes written are the ones a full dump writes; canonical and promotion dumps simply
+reserialize everything. On the 279-target DeepSeek V4 Flash V100 inventory a persist is 2.5 s before and 0.24 s
+after — the sweep's write path was most of its wall time.
+
 `--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
 already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without

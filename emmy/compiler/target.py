@@ -19,6 +19,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -131,3 +132,44 @@ def live_compute_capability() -> tuple[int, int]:
     except Exception as e:  # pragma: no cover
         _logger.debug("live_compute_capability query failed (%s)", e)
         return (0, 0)
+
+
+# Lowest compute capability each NVRTC major version can compile for. CUDA 13
+# removed every architecture below sm_75 — Maxwell, Pascal (P100, sm_60) and
+# Volta (V100, sm_70) alike; CUDA 12 still targets sm_50 and up. A major absent
+# here is not checked.
+_NVRTC_MIN_CC: dict[int, tuple[int, int]] = {12: (5, 0), 13: (7, 5)}
+
+
+def check_nvrtc_supports_live_device() -> None:
+    """Abort when the NVRTC cupy loaded is too new to compile for the live GPU.
+
+    ``torch`` depends on ``nvidia-cuda-nvrtc`` 13.x and cupy resolves NVRTC to
+    that in preference to any CUDA 12 build, so on a pre-Turing card every cupy
+    runtime compile dies with ``NVRTC_ERROR_INVALID_OPTION`` (``invalid value
+    for --gpu-architecture``). Left undetected that surfaces as hundreds of
+    unrelated-looking bench failures instead of one setup problem. No-op
+    without cupy, without a visible device, or on an unrecorded NVRTC major.
+    """
+    cap = live_compute_capability()
+    if cap == (0, 0):
+        return  # no device to compile for
+    try:
+        import cupy as cp
+
+        nvrtc_major = cp.cuda.nvrtc.getVersion()[0]
+    except Exception as e:  # noqa: BLE001 — no cupy / no NVRTC ⇒ nothing to check
+        _logger.debug("NVRTC version query failed (%s)", e)
+        return
+    floor = _NVRTC_MIN_CC.get(nvrtc_major)
+    if floor is None or cap >= floor:
+        return
+    preload = next(iter(sorted(Path("/usr/local").glob("cuda-12*/lib64/libnvrtc.so.12"), reverse=True)), None)
+    raise SystemExit(
+        f"NVRTC {nvrtc_major}.x cannot target this GPU (sm_{cap[0]}{cap[1]}): CUDA {nvrtc_major} dropped every "
+        f"architecture below sm_{floor[0]}{floor[1]}, so every cupy runtime compile fails with "
+        "NVRTC_ERROR_INVALID_OPTION.\n"
+        f"torch depends on nvidia-cuda-nvrtc {nvrtc_major}.x and cupy prefers it over any CUDA 12 NVRTC, so "
+        "installing nvidia-cuda-nvrtc-cu12 does not help.\n"
+        f"Remedy: run emmy with LD_PRELOAD={preload or '/usr/local/cuda-12.x/lib64/libnvrtc.so.12'}"
+    )

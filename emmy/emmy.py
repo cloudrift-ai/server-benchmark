@@ -23,7 +23,15 @@ from emmy.commands.teardown import register_teardown_command
 from emmy.commands.trace import register_trace_command
 from emmy.commands.tune import register_tune_command
 from emmy.commands.vm import register_vm_command
+from emmy.compiler.target import check_nvrtc_supports_live_device
 from emmy.logging_setup import setup_cli_logging
+
+# Subcommands that never compile or launch a kernel on the local card, so they
+# stay usable on a host whose NVRTC cannot target it (deploying to a REMOTE GPU,
+# listing recipes, tearing down a run). Everything else is guarded. The list is
+# opt-out on purpose: a new command that forgets to name itself here fails with
+# one explanation, which beats failing with a wall of NVRTC errors.
+_NO_GPU_COMMANDS = frozenset({"bench", "compare", "deploy", "publish", "pull", "recipe", "teardown", "trace", "vm"})
 
 
 def _package_version():
@@ -69,6 +77,8 @@ def main():
 
     args = parser.parse_args()
     setup_cli_logging()
+    if args.command not in _NO_GPU_COMMANDS:
+        check_nvrtc_supports_live_device()
     args.func(args)
 
 

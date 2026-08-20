@@ -2071,7 +2071,9 @@ def _atom_ops(
     ):
         from emmy.compiler.ir.tile.ops import make_cone  # noqa: PLC0415 — decode-boundary import
 
-        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels)
+        # Rebuilds thread the node's OWN semiring — never the constructor default.
+        mul, plus = c.semiring
+        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels, product=mul, fold_op=plus)
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
 

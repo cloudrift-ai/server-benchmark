@@ -606,6 +606,12 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
 
     This is the CHOICE half of the dtype rule; a ``TILE`` pin bypasses the choice layer by design, so
     it re-asks the same question as a CHECK (``_legality.warp_operand_dtype``)."""
+    # The mma atom realizes ONLY the (·, +) semiring instance — the bilinear reading is
+    # semiring-generic (``Fold.semiring``), so any other registered instance takes the
+    # scalar / reduce tiers rather than silently reaching a tensor core that sums products.
+    ring = node.semiring
+    if ring is None or tuple(o.name for o in ring) != ("multiply", "add"):
+        return ()
     inputs = term.tile.inputs
     # Boundary stores are outside the algebraic term. Reconstitute them before asking whether
     # the projection is a straight-line fragment epilogue, or a swept stack tail reaches RegStore.
@@ -1540,20 +1546,24 @@ def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: s
     # carry must raise rather than silently mis-lower.
     legal.enforce(legal.splitk_computed_b_site(node), pinned=True)
     ksplit, kslice, sigma = _factor_k(node.axis, rplan.cta)
+    mul, plus = node.semiring
     inner = Fold.contraction(
         k_axis=kslice,
         a=_sliced_edge(node.a, sigma, node.axis.name),
         channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma, node.axis.name)) for ch in node.channels),
+        product=mul,
+        fold_op=plus,
     )
     # ONE composition rule: the outer reduce is the IDENTITY lift over the sliced contraction
-    # operand, its combine the componentwise additive ⊕ over the same accumulator names — the
-    # reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``.
+    # operand, its combine the componentwise ⊕ (the node's OWN semiring ⊕ — the reassociation
+    # ``fold_k = fold_{ksplit} ∘ fold_{kslice}`` is licensed by that monoid's associativity)
+    # over the same accumulator names.
     accs = tuple(inner.defines())
     outer = Fold(
         axis=ksplit,
         operands=(inner,),
         lift=Lambda(params=(ksplit.name, *accs), body=Body(()), results=accs),
-        **dict(zip(("init", "combine"), M(*(["add"] * len(accs)), names=accs), strict=True)),
+        **dict(zip(("init", "combine"), M(*([plus] * len(accs)), names=accs), strict=True)),
     )
     op = Fold.projection(body=term.proj, operands=(outer,)) if len(term.proj) else outer
     return _stamp(term, op, name, knobs, [("REDUCE", outer, rplan), ("TILE", inner, plan.placed_on(term.place)), *nested])

@@ -194,6 +194,42 @@ def test_fold_reading_a_body_defined_name_is_restored_verbatim():
     assert len(raw_loops) == 2, "the consumer restored beside the escape, order preserved"
 
 
+def test_non_distributing_lift_declines_to_planar():
+    """The contraction reading is stated on the semiring traits: ``maximum`` is not a registered
+    ⊗ over ``add`` (``distributes_over`` says no), so the fold keeps its PLANAR reduce reading
+    with loads inline — no op-name list anywhere in the decision."""
+    m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(128))
+    inner = Body(
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="prod", op=ElementwiseImpl("maximum"), args=("xv", "wv")),
+            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+        )
+    )
+    cell = (Loop(axis=k, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc"))
+    tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
+    node = tile.op
+    assert isinstance(node, Fold) and node.axis is not None and node.role is AxisRole.PLANAR
+    assert node.semiring is None
+
+
+def test_contraction_formation_gates_on_the_semiring():
+    """``Fold.contraction`` asserts the laws its consumers rely on — an unregistered (⊗, ⊕) pair
+    is a formation error, and a built node exposes its instance via ``semiring``."""
+    import pytest
+
+    from emmy.compiler.ir.pure.fold import Channel
+
+    k = Axis("k", Dim(16))
+    a = Load(name="av", input="a", index=(Var("m"), Var("k")))
+    b = Load(name="bv", input="b", index=(Var("n"), Var("k")))
+    with pytest.raises(ValueError, match="semiring"):
+        Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),), product="maximum")
+    node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
+    assert tuple(o.name for o in node.semiring) == ("multiply", "add")
+
+
 def test_recognize_fires_through_the_pipeline():
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 8)), node_id="x")

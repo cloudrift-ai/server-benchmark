@@ -79,24 +79,33 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str) -> list | None:
 
 
 def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
-    """Rebind a lifted additive fold as the bilinear contraction — the ONE contraction reading,
-    off the λ spelling: each ``lift.results[i]`` must name a two-arg ``multiply``; its args
-    classify by their loads' grid-axis indexing — B is the ``(n, k)``-indexed side and never
-    reads ``m``, A the mirror (role-exclusive: a load carrying both axes is neither, and the
-    fold stays PLANAR). One side may be a pure MAP cone (the computed operand: A rides
-    :func:`make_cone`, which fixes the K seam on the node; B a plain projection evaluated per
-    slab cell). N channels must share ONE A value — sharing is the node's arity. Every λ body
-    stmt must be consumed by a lift or a cone (:meth:`Fold.contraction` REGENERATES the lift, so
-    an unaccounted stmt would be silently dropped — decline instead). ``None`` when any
-    condition fails; the caller keeps the PLANAR fold unchanged.
+    """Rebind a lifted fold as the bilinear contraction — the ONE contraction reading, off the λ
+    spelling and stated on the ALGEBRAIC TRAITS, never op names: the carrier must be a product of
+    ONE commutative-monoid ⊕ (associative + commutative + identity — the reassociation license
+    split-K and the tree/atomic combines rely on), and each ``lift.results[i]`` must name a
+    two-arg ⊗ — one shared op across channels — with ``⊗.distributes_over(⊕)`` (the
+    registered-semiring table; ``(multiply, add)`` is the matmul). The ⊗ args classify by their
+    loads' grid-axis indexing — B is the ``(n, k)``-indexed side and never reads ``m``, A the
+    mirror (role-exclusive: a load carrying both axes is neither, and the fold stays PLANAR).
+    One side may be a pure MAP cone (the computed operand: A rides :func:`make_cone`, which
+    fixes the K seam on the node; B a plain projection evaluated per slab cell). N channels must
+    share ONE A value — sharing is the node's arity. Every λ body stmt must be consumed by a
+    lift or a cone (:meth:`Fold.contraction` REGENERATES the lift, so an unaccounted stmt would
+    be silently dropped — decline instead). ``None`` when any condition fails; the caller keeps
+    the PLANAR fold unchanged.
 
     Deliberately not yet bound here: the both-computed decode pair and the k-invariant factor
-    hoist (the fp8 / W8A8 mul-hoist arm) — registered casualties until ported to the λ body."""
+    hoist (the fp8 / W8A8 mul-hoist arm — the ``Σ a⊗(s⊗w) = s⊗Σ a⊗w`` reassociation, licensed
+    by the same distributivity/commutativity traits) — registered casualties until ported to
+    the λ body."""
     if f.axis is None or f.combine is None or f.operands:
         return None  # a fold with operand edges already composes producers — another stage's shape
     ops = component_ops(f.combine)
-    if ops is None or any(o.reduce_canon != "add" for o in ops):
-        return None
+    if ops is None or len(set(ops)) != 1:
+        return None  # the carrier is not a product of ONE ⊕ monoid
+    plus = ops[0]
+    if not (plus.associative and plus.commutative and plus.has_identity):
+        return None  # the reassociation license — the traits every contraction tier relies on
     k_name = f.axis.name
     body = list(f.lift.body)
     defs = {s.name: s for s in body if isinstance(s, Assign)}
@@ -111,13 +120,15 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
     reads: list[tuple[Assign, Load | None, str]] = []
     for res in f.lift.results:
         lift = defs.get(res) if isinstance(res, str) else None
-        if lift is None or lift.op.name != "multiply" or len(lift.args) != 2:
-            return None
+        if lift is None or len(lift.args) != 2 or not lift.op.distributes_over(plus):
+            return None  # the lift is not a ⊗ of the carrier's semiring — the fold keeps its reduce reading
         b_arg = next((a for a in lift.args if role_load(a, n_name, m_name) is not None), None)
         a_arg = next((a for a in lift.args if a != b_arg), None)
         if a_arg is None:
             return None  # a square product (both args one value) has no role split
         reads.append((lift, loads.get(b_arg) if b_arg is not None else None, a_arg))
+    if len({lift.op for lift, _, _ in reads}) != 1:
+        return None  # the channels must share ONE ⊗ — a mixed-product body is not a bilinear form
     if len({a for _, _, a in reads}) != 1:
         return None  # channels do not share ONE A value — not the product-carrier shape
     a_arg = reads[0][2]
@@ -158,4 +169,6 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str) -> Fold | None:
         k_axis=f.axis,
         a=a_edge,
         channels=tuple(Channel(b=b, acc=acc) for b, acc in zip(b_edges, f.combine.results, strict=True)),
+        product=reads[0][0].op,
+        fold_op=plus,
     )

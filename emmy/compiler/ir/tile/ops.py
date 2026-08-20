@@ -156,7 +156,12 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
     loop-varying leaves)``, left-to-right. The loop axis itself counts as loop-varying. The
     spine must be private to the product — a spine temp read by any other body stmt (or a
     non-binary multiply) returns ``None``, and the caller keeps the loop's current reading.
-    A bare leaf is the degenerate product: ``((), (value,))``."""
+    A bare leaf is the degenerate product: ``((), (value,))``.
+
+    The ALGEBRAIC LICENSE is a semiring fact: a factor constant along the fold axis commutes out
+    of the fold because ⊗ is associative + commutative and distributes over the fold's ⊕ — the
+    same reassociation category as split-K and the mul-hoist. The one registered ⊗ today is
+    ``multiply`` (``ElementwiseImpl._SEMIRING``), which this helper spells directly."""
     defs: dict[str, object] = {n: s for s in body for n in s.defines()}
     spine: list[str] = []
     leaves: list[str] = []

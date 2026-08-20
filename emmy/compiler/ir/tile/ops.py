@@ -18,10 +18,23 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
+import re
+
 from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction, splice_operands, stmt_axis_names
+from emmy.compiler.ir.pure.fold import (
+    Fold,
+    _operand_result_names,
+    deep_defines,
+    deep_reads,
+    edge_refs_axis,
+    is_contraction,
+    operand_name,
+    refs_axis,
+    splice_operands,
+    stmt_axis_names,
+)
 from emmy.compiler.ir.schedule import ReducePlan
-from emmy.compiler.ir.stmt import Loop, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile.ir import effect_tail
 
@@ -66,6 +79,106 @@ def chain_edge(cone, k_name: str):
         return None
     kv = [e for e in cone.operands if isinstance(e, Fold) and e.axis is not None and edge_refs_axis(e, k_name)]
     return kv[0] if len(kv) == 1 and is_contraction(kv[0]) and isinstance(kv[0].a, Load) else None
+
+
+def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
+    """Build a computed-A **cone** as a real node tree — the inline node its consuming operand edge
+    stores (there is no let table: sharing is the product contraction's channel arity). The
+    inverse of :func:`cone_seam`, kept beside it so the K-seam layout has one home.
+
+    The K seam is decided HERE, once, and lives ON the node: the maximal leading run of cone stmts
+    that never index the contraction axis is **row-invariant**, so it joins the per-row statistic
+    (``stat``, the :class:`Fold`, plus its scalar ``sweep``) in the cone's SOURCE node — one
+    projected reduce, exactly the RMSNorm shape; the k-varying remainder is the cone's ``body``, the
+    per-cell normalize. Everything downstream then READS that boundary (:func:`cone_seam`) instead of
+    re-scanning stmts: the scheduler sizes the stat smem rows off it, the materializer runs the
+    prologue once per tile row and the body per cell.
+
+    A producer NODE in ``cell`` is not a stmt of either side: it hangs off the cone's OPERANDS,
+    where ``cone_seam`` splits it by the same K seam — k-varying, so it is the per-cell producer
+    spliced ahead of its first use."""
+    nodes = tuple(s for s in cell if isinstance(s, Fold))
+    cell = [s for s in cell if not isinstance(s, Fold)]
+    # A stmt READING a k-varying producer varies with k as surely as one that indexes it: the K
+    # seam is a dependency question, not only an index question. Without this, attention's
+    # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
+    # row-invariant prologue, where the per-cell score it reads is not yet defined.
+    varying = {nm for n in nodes if edge_refs_axis(n, k_name) for nm in _operand_result_names(n)}
+    pro: list = []
+    rest = list(cell)
+    while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
+        pro.append(rest.pop(0))
+    prologue = Fold.projection(body=Body((*sweep, *pro)), operands=() if stat is None else (stat,))
+    src = (prologue,) if (pro or sweep or stat is not None) else ()
+    return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
+
+
+def _cone_names(stmts: list, mapping: dict) -> None:
+    """Number every name a cone BINDS, deep — the stmts' defs plus each nested loop's iteration
+    var — in walk order. A composed cone's producer node carries its own axis and temps, and two
+    separately-traced copies of one score differ in exactly those, so identity has to see through
+    them (the key digest cannot: axis names are recognition-canonical and part of it)."""
+    for s in stmts:
+        if isinstance(s, Loop):
+            mapping.setdefault(s.axis.name, f"_c{len(mapping)}")
+        for n in s.defines():
+            mapping.setdefault(n, f"_c{len(mapping)}")
+        for b in s.nested():
+            _cone_names(list(b), mapping)
+
+
+def _cone_canon(stmts: list, result: str, axis_name: str) -> str:
+    """An α-renamed rendering of a score cone — every bound name canonicalizes in walk order
+    (:func:`_cone_names`), the loop axis to a fixed placeholder, free names verbatim — so two
+    recomputed score cones compare by content. A producer NODE in the cone renders through its own
+    lowered nest, so a composed score compares like any other."""
+    flat = [t for s in stmts for t in (s.lower() if isinstance(s, Fold) else [s])]
+    mapping = {axis_name: "_ax"}
+    _cone_names(flat, mapping)
+    text = repr(tuple(flat)) + "|" + mapping.get(result, result)
+    for old, new in mapping.items():
+        text = re.sub(f"'{re.escape(old)}'", f"'{new}'", text)
+    return text
+
+
+def same_score_cone(a, b, a_axis: str, b_axis: str) -> bool:
+    """Whether two score cones are the SAME program modulo their own bound names and the axis each
+    streams — asked of two nodes that reached lowering separately (a split-K partition re-indexes
+    the weight's keys while the statistic keeps spanning the whole axis, and a lowering that folds
+    the two passes into one sweep may only do so while they still read the same keys)."""
+    return _cone_canon([a], operand_name(a), a_axis) == _cone_canon([b], operand_name(b), b_axis)
+
+
+def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """The general additive-fold factor split ``Σₖ c·xₖ = c·Σₖ xₖ``: flatten the two-arg
+    ``multiply`` spine defining ``value`` over a reduce-loop body and split the leaf factor
+    names into ``(c — the loop-invariant factors, names defined outside the body; the
+    loop-varying leaves)``, left-to-right. The loop axis itself counts as loop-varying. The
+    spine must be private to the product — a spine temp read by any other body stmt (or a
+    non-binary multiply) returns ``None``, and the caller keeps the loop's current reading.
+    A bare leaf is the degenerate product: ``((), (value,))``."""
+    defs: dict[str, object] = {n: s for s in body for n in s.defines()}
+    spine: list[str] = []
+    leaves: list[str] = []
+
+    def flatten(n: str) -> bool:
+        d = defs.get(n)
+        if isinstance(d, Assign) and d.op.name == "multiply":
+            if len(d.args) != 2:
+                return False
+            spine.append(n)
+            return flatten(d.args[0]) and flatten(d.args[1])
+        leaves.append(n)
+        return True
+
+    if not flatten(value):
+        return None
+    spine_reads = {n for n in spine if n != value}
+    for s in body:
+        if not (isinstance(s, Assign) and s.name in spine) and set(s.deps()) & spine_reads:
+            return None
+    inv = tuple(n for n in leaves if n not in defs and n != axis_name)
+    return inv, tuple(n for n in leaves if n in defs or n == axis_name)
 
 
 class Sched:
@@ -343,9 +456,12 @@ __all__ = [
     "axis_role",
     "cone_seam",
     "head",
+    "make_cone",
     "projection_tail",
     "reduce_loop",
     "reduce_plan",
+    "same_score_cone",
     "sched_of",
     "seal_workers",
+    "split_invariant_factors",
 ]

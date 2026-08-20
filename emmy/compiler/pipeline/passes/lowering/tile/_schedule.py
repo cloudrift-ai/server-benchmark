@@ -100,7 +100,6 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
 from emmy.compiler.pipeline.search.space import (
     RASTER,
     REDUCE,
@@ -468,10 +467,8 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     No view's rows depend on whether its sibling produced any: each gate is a local predicate on
     its own term (a 16-bit atom, a resolvable fill, an inventory a value can spell against)."""
     base = _Term(tile, tile.place.on_grid(), ctx)
-    pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
-    if pro is not None:
-        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
-        return [_Term(tile, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+    # The MONOID-producer composition (the fused norm→linear / gate⊗up view) is gone with the old
+    # recognize-time binder — it returns as a classification pass over the lifted tree.
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base], 0

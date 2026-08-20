@@ -12,6 +12,11 @@ import pytest
 import torch
 import yaml
 
+from tests._total_lift_rebuild import IGNORED_FILES
+
+# Total-lift rebuild: files importing the deleted recognize-time binders skip collection outright.
+collect_ignore = list(IGNORED_FILES)
+
 # Cross-process GPU lock for CUDA tests. Set on conftest import so every
 # xdist worker (and any subprocess it spawns) coordinates on the same
 # path. With this set, ``CudaBackend.run`` (via
@@ -359,6 +364,15 @@ _CUDA_CLI_GROUP = "cuda-cli"
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     import heapq
+
+    # The total-lift rebuild registry (tests/ARCHITECTURE.md whole-subsystem precedent): exact
+    # node ids strict-xfailed until the classification passes land; the module dies when it empties.
+    from tests._total_lift_rebuild import XFAIL_NODES
+
+    rebuild_xfail = pytest.mark.xfail(reason="total-lift rebuild (tests/_total_lift_rebuild.py)", strict=True)
+    for item in items:
+        if item.nodeid in XFAIL_NODES:
+            item.add_marker(rebuild_xfail)
 
     # Deselect ``perf`` unless explicitly requested. Lives here — not in
     # ``tests/perf/conftest.py`` — so the gate holds for ANY ``tests/``

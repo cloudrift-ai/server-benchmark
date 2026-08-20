@@ -70,7 +70,7 @@ from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body, opera
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ops import chain_edge
+from emmy.compiler.ir.tile.ops import chain_edge, same_score_cone, split_invariant_factors
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -87,7 +87,6 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     sync_stat_fill,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import same_score_cone, split_invariant_factors
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -2070,7 +2069,7 @@ def _atom_ops(
         and (t := inputs.get(c.a.input)) is not None
         and t.dtype != tile.atom.operand_dtype("a")
     ):
-        from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone  # noqa: PLC0415 — decode-boundary import
+        from emmy.compiler.ir.tile.ops import make_cone  # noqa: PLC0415 — decode-boundary import
 
         c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels)
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps

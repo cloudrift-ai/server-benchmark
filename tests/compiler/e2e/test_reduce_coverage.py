@@ -579,7 +579,7 @@ def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeyp
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
-    rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0)))
+    rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0))).rows
     offered = {str(v) for r in rows for k, v in r.items() if k.startswith("REDUCE")}
     assert any(s.endswith("coop-t") for s in offered), offered
 

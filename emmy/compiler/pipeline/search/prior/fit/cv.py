@@ -136,7 +136,12 @@ def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
 def evaluate_full_train(cases: list[Group], model) -> dict:
     """The ``full_train`` metrics block: every case ranked under the shippable model."""
     entries = [(c, r) for c in cases if (r := case_ranks(c, model)) is not None]
-    per_golden = {c.key: {"rank": r, "rank_optimistic": o, "pool": len(c.feats), "positives": len(c.pinned)} for c, (r, o) in entries}
+    # ``pool`` is the pool's TRUE size and ``sampled`` how many of its rows this fit saw; the rank is
+    # the raw rank within those rows, never scaled up to the pool. They differ only under sampling.
+    per_golden = {
+        c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": len(c.pinned)}
+        for c, (r, o) in entries
+    }
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 

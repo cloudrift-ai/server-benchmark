@@ -406,6 +406,13 @@ What a newcomer needs to know about the fit:
   a mean would spend weights pushing up the runner-up. At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
   tree fit's negatives, which had been teaching it that a measured-good config was bad.
+- **A pool may be a SAMPLE of itself.** `emmy fit --pool-sample N` draws its candidates during enumeration
+  (`search/pool.py`), so `Group` carries both the drawn rows and `total`, the true pool size. The linear
+  trainer's z-scoring is over the FULL pools' moments, now estimated rather than counted: each group's rows
+  carry weight `total / len(feats)` in the two streaming passes, so a 5-row pool and a 325k one do not weigh
+  the same under fixed-size sampling — which would otherwise change the standardization and with it the
+  raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
+  so a full-pool refit reproduces byte for byte.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
   each case counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink

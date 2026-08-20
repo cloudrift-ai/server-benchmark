@@ -120,3 +120,24 @@ def test_a_live_pin_keys_a_different_pool() -> None:
     assert 0 < len(pinned) < len(unpinned), "the pinned fork must be a narrowing of the unpinned one"
     # And back: the unpinned pool is still served intact after the pin lifts.
     assert _resolve(ctx, _matmul_graph()) == unpinned
+
+
+def test_a_live_context_never_samples() -> None:
+    """``dataclasses.replace`` SHARES the session cache, so a sampled Context and the live one it
+    was derived from sit on ONE memo. That is why the sample is part of the pool's cache KEY rather
+    than merely of the Context: without it the first compile to run would decide what every later
+    one sees, and a live deploy could be served a pool with most of its candidates missing."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.pool import PoolSample
+
+    ctx = Context.from_target((12, 0))
+    sampled = replace(ctx, pool_sample=PoolSample(rows=8))
+    assert sampled.session_cache is ctx.session_cache, "the shared memo is the hazard this test exists for"
+
+    drawn = _resolve(sampled, _matmul_graph())
+    full = _resolve(ctx, _matmul_graph())
+    assert 0 < len(drawn) < len(full), "the sampled Context sees a draw, the live one the whole pool"
+    assert set(drawn) < set(full), "and the draw is a SUBSET of the pool, not some other pool"
+    assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
+    assert _resolve(ctx, _matmul_graph()) == full

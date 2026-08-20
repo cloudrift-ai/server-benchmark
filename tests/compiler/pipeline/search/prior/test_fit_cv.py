@@ -6,6 +6,7 @@ determinism, the golden case builder's pool merge, and the trainer-callable seam
 
 import argparse
 import json
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,7 @@ import pytest
 from emmy.commands import fit as fit_cmd
 from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
 from emmy.compiler.pipeline.search import features
+from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_FEATURES,
     MATMUL_FEATURES,
@@ -152,7 +154,13 @@ class _StubRecord:
         self.shape_key = SimpleNamespace(kind="", is_warp=True)
 
 
+@dataclass(frozen=True)
 class _StubContext:
+    """A dataclass because the builder ``replace``s it to attach a sample - the same shape the real
+    Context has, so the plumbing under test is the real plumbing."""
+
+    pool_sample: object = None
+
     @classmethod
     def from_target(cls, cap, gpu_name=None):  # noqa: ARG003 — the stub needs no card facts
         return cls()
@@ -161,17 +169,23 @@ class _StubContext:
         return {}
 
 
-def _build(records, monkeypatch):
+def _build(records, monkeypatch, **kwargs):
     """``build_golden_groups`` over stub records: the pool arrives as the record's ``target_program``, a row
     is ``{"TILE": tag}``, and its one feature is the tag's position in the alphabet — enough for two pools to
-    featurize differently whenever their rows differ."""
+    featurize differently whenever their rows differ. The stub enumerator honours ``ctx.pool_sample``: a list
+    IS a space as far as the draw is concerned (it asks only for a length and a member)."""
+
+    def enumerate_stub(rows, ctx):
+        sample = ctx.pool_sample
+        return Candidates(rows if sample is None else sample.take(rows), len(rows))
+
     monkeypatch.setattr(fit_cmd, "GOLDEN_RECORDS", records)
     monkeypatch.setattr(fit_cmd, "Context", _StubContext)
-    monkeypatch.setattr(fit_cmd, "enumerate_graph", lambda rows, ctx: rows)  # noqa: ARG005
+    monkeypatch.setattr(fit_cmd, "enumerate_graph", enumerate_stub)
     monkeypatch.setattr(fit_cmd, "_shape_group", lambda g: "S(free=512,red=512)")  # noqa: ARG005
     monkeypatch.setattr(fit_cmd.features, "tile_signature", lambda knobs: knobs["TILE"])
     monkeypatch.setattr(fit_cmd.features, "knob_features", lambda row: {"D_a": float(ord(row["TILE"][0]))})
-    return build_golden_groups()
+    return build_golden_groups(**kwargs)
 
 
 def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
@@ -199,6 +213,33 @@ def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
     # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
     assert len({c.key for c in cases}) == len(cases)
+
+
+def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
+    """Sampling must not break the merge, and the merge is what makes two verified answers to one
+    question one training case instead of two.
+
+    ``_pool_identity`` digests the packed feature matrix, so two goldens over one pool merge only if they
+    RETAIN identical rows. They do because the draw is a pure function of ``(pool size, sample, seed)`` and
+    both goldens are bucketed onto the same keep-set. Both recorded rows survive the draw even though neither
+    was picked by it: the pool's first and last rows are exactly the positions a 4-of-26 draw is least likely
+    to reach."""
+    pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
+    cases, skipped = _build(
+        [
+            _StubRecord("m.512", {"TILE": "a"}, list(pool)),  # the FIRST row
+            _StubRecord("m.512.alias", {"TILE": "z"}, list(pool)),  # and the LAST
+        ],
+        monkeypatch,
+        sample=4,
+    )
+    assert skipped == []
+    assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
+    (case,) = cases
+    assert len(case.pinned) == 2, "both recorded rows survive the draw and pin into the case"
+    assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
+    kept = {chr(int(v)) for v in case.feats[:, 0]}
+    assert {"a", "z"} <= kept
 
 
 def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
@@ -553,7 +594,7 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     """The command layer end to end on a synthetic dataset — trainer wiring, artifact assembly and
     both output files — without tracing a single golden. ``--artifact`` is absent, so the run writes
     only into its own directory and never touches the shipped weights."""
-    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec: (_cases(), []))  # noqa: ARG005
+    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec, **_kw: (_cases(), []))  # noqa: ARG005
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
     args = parser.parse_args(["fit", "--folds", "3", "--out", str(tmp_path / "run")])

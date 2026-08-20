@@ -798,7 +798,7 @@ def test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile(monkeypatch):
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
-    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 136, _F16, False), Context.from_target((12, 0)))
+    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 136, _F16, False), Context.from_target((12, 0))).rows
     tiles = {str(v) for r in rows for k, v in r.items() if k.startswith("TILE")}
     assert any(t.startswith("mma_m16n8k16") for t in tiles), tiles
 
@@ -862,7 +862,7 @@ def test_trans_b_offers_staged_rows(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     def stages(cc) -> set[str]:
-        rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, True), Context.from_target(cc))
+        rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, True), Context.from_target(cc)).rows
         return {str(v) for r in rows for kk, v in r.items() if kk.startswith("STAGE")}
 
     offered = stages((12, 0))
@@ -964,7 +964,7 @@ def test_f16acc_enumeration_policy(monkeypatch):
     assert not allowed((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
 
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
-    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target((12, 0)))
+    rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target((12, 0))).rows
     assert any("mma_m16n8k16_f16_f16/" in str(value) for row in rows for key, value in row.items() if key.startswith("TILE"))
 
 
@@ -2025,7 +2025,7 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("static", 1280, 2048, 1024, "f16", False)
-    rows = enumerate_graph(g, Context.from_target((12, 0)))
+    rows = enumerate_graph(g, Context.from_target((12, 0))).rows
     vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
     assert vals == {"", "gm8"}, f"every contraction row must spell RASTER, flat first: {vals}"
 
@@ -2074,7 +2074,7 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
-    rows = enumerate_graph(g, Context.from_target((12, 0)))
+    rows = enumerate_graph(g, Context.from_target((12, 0))).rows
     vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
     assert vals == {""}, f"symbolic grids must stay flat: {vals}"
 

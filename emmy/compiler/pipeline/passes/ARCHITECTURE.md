@@ -77,15 +77,25 @@ across every SITE of the term. The kernel's ONE worker inventory is chosen FIRST
 that fixed context:
 
 ```
-enumerate(term) = [ r for view in views(term)                        # the derived views (collapse / monoid)
-                      for work in inventories(term)                  # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
-                      for r in rows(root_site(view), work) ]
-rows(site, work) = [ merge(v, *child_rows)                           # spelled through ops.Sched.key, site-local
-                     for v in values(site, work)                     # the domain: search/space.py, RESOLVED vs work
+space(term)      = [ segment(view, work) for work in inventories(term)   # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
+                                         for view in views(term) ]       # the derived views (collapse / monoid)
+segment(v, work) = rows(root_site(v), work) x stages x rasters(v)        # a rectangle: rows, then two free axes
+rows(site, work) = [ merge(b, *child_rows)                               # spelled through ops.Sched.key, site-local
+                     for b in blocks(site, work)                         # the domain: search/space.py, RESOLVED vs work
                      for child_rows in product(rows(c, work) for c in children(site))
-                     if legal(site, v, child_rows) ]
-fork = build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
+                     if legal(site, b, child_rows) ]
+fork = build_fork_tree(list(space), levels=[WORK, *site keys, RASTER], materialize=…)
 ```
+
+**The pool is a SPACE, not a list** (`lowering/tile/_pool.py`). A site offers BLOCKS — one rectangle per assignment
+of everything but `STAGE`, crossed with the stages legal for it — because legality never reads the transport:
+`_work_holds` and the row union see the resolved tiles and the cooperative width alone, so `STAGE` and the
+kernel-global `RASTER` multiply through the filter unconditionally. A row therefore stands for
+`width x len(rasters)` candidates rather than one, the validation runs once per legal `(TILE, REDUCE)` assignment
+(~10k instead of ~122k on a static f16 square matmul), and the exact candidate count is a prefix-sum lookup that
+builds nothing. `PoolSpace` reads that structure two ways — iterate every member, or address member *i* — through
+ONE spelling function, so the two cannot drift; `MAX_ROWS` is asked of the size, before the first candidate dict
+exists.
 
 **`WORK` leads because the codec says so**: `TilePlan.parse(spec, work)` and `ReducePlan.parse(spec, work)` read a
 value's unit widths and coop width OFF the inventory, so the dependency runs work → slice. Fixing it at the root also
@@ -98,10 +108,12 @@ candidate is simply not in `values(site, work)`".
 pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
 MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the views re-bind per op,
 so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
-identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
-cache's home: one `Context`, one fact set. Pool rows are read-only mappings; they carry no resolved slices and no
-view ownership, so a shared pool cannot be corrupted by one consumer for another — materialization re-resolves
-every slice from the row's own spellings.
+identity deliberately excludes — the symbolic-axis hints and the live schedule pins — plus `ctx.pool_sample`, and
+the ctx facts ride the cache's home: one `Context`, one fact set. The sample belongs in the KEY rather than merely
+on the Context because `dataclasses.replace` SHARES the session cache: a sampled Context and the live one it was
+derived from sit on one memo, so a Context-only flag would let a sampled pool reach a live compile. Pool rows are
+read-only mappings; they carry no resolved slices and no view ownership, so a shared pool cannot be corrupted by one
+consumer for another — materialization re-resolves every slice from the row's own spellings.
 
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its

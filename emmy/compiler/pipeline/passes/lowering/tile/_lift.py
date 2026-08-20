@@ -116,7 +116,15 @@ def _stamp_axes(loop: Loop) -> Loop:
     """Stamp each axes-less ``Accum`` with its OWN loop's axis, deep — the canonical dissolved
     spelling the parser's gate re-derives. Pipeline-lowered IR arrives stamped; hand-lowered IR
     (and some minted pieces) omits it, and the omission is spelling, not semantics: an ``Accum``
-    folds over exactly the loop it sits in."""
+    folds over exactly the loop it sits in.
+
+    A level carrying a ``base``-``Accum`` is the dissolved exp-family merge (a 030 split partial,
+    a cut fragment of a twisted cell) and is left VERBATIM: its parser
+    (``_extract_twisted_self``) proves the algebra by regenerating the merge and comparing, so
+    any re-spelling here — including an axes stamp — breaks the proof against the generator's
+    own spelling."""
+    if any(isinstance(s, Accum) and s.base is not None for s in loop.body):
+        return replace(loop, body=Body(tuple(_stamp_axes(s) if isinstance(s, Loop) else s for s in loop.body)))
     body = tuple(
         replace(s, axes=(loop.axis.name,)) if isinstance(s, Accum) and not s.axes else (_stamp_axes(s) if isinstance(s, Loop) else s)
         for s in loop.body

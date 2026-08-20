@@ -129,9 +129,16 @@ def _components(t: Fold, mx: str, canon: str) -> list[tuple[str, tuple, list, tu
     factor names)]`` in component order, or ``None`` — the fold keeps its current reading (every
     component must join; a fold half-in the carrier is not a shape this pairing understands)."""
     o = component_ops(t.combine)
-    if o is None or t.operands or any(x.reduce_canon != "add" for x in o):
+    if o is None or any(x.reduce_canon != "add" for x in o):
         return None
     body = list(t.lift.body)
+    # A producer EDGE the fold composes (the score contraction) joins through the weight's score
+    # cone (``_score_cone`` reads it as the cone's one source) and is then DROPPED with the rest
+    # of the sibling — the merged fold carries the pair's ONE α-equal copy. An edge no component
+    # consumes would silently lose compute — decline instead.
+    edge_results = {nm for e in t.operands for nm in _operand_result_names(e)}
+    if edge_results and not edge_results <= {a for s in body for a in s.deps()}:
+        return None
     defs = {n: s for s in body for n in s.defines()}
     out: list[tuple[str, tuple, list, tuple]] = []
     covered: set[int] = set()
@@ -155,8 +162,8 @@ def _components(t: Fold, mx: str, canon: str) -> list[tuple[str, tuple, list, tu
         stmts = list(vcone.members)
         if any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
             return None
-        if ({mx} | set(t.combine.results)) & {a for s in stmts for a in s.deps()}:
-            return None  # the value cone must be free of the pair's carried states
+        if ({mx} | set(t.combine.results) | edge_results) & {a for s in stmts for a in s.deps()}:
+            return None  # the value cone must be free of the pair's carried states / dropped edges
         covered |= {id(s) for s in Body(tuple(body)).backward_cone([value]).members}
         out.append((state, inv, stmts, tuple(values)))
     if any(id(s) not in covered for s in body):
@@ -294,25 +301,39 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     if stat.operands:
         if len(stat.operands) != 1 or not isinstance(stat.operands[0], Fold) or stat.operands[0].axis is None:
             return None
-        axes = frozenset(a.name for a in free) | {stat.axis.name}
-        score = next((b for ax in free if (b := bind_bilinear(stat.operands[0], ax.name, stat.axis.name, axes)) is not None), None)
-        if score is None or not isinstance(score.a, Load) or not isinstance(score.b, Load):
+        score = _bound_producer(stat.operands[0], free, stat.axis.name)
+        if score is None:
             return None  # a composed score the binder cannot read — the base rows stand
         stat = replace(stat, operands=(score,))
-    # The statistic prologue must be row-local: its reads may index (m, its own reduce axis) but
-    # never the column / contraction axes.
     fcol = fold_from_loop(kloop)
-    if fcol is None or fcol.operands:
+    if fcol is None:
         return None
     k_name = fcol.axis.name
+    # A producer the column fold COMPOSES (attention's per-key score contraction, hoisted to an
+    # operand edge by the lift) is stored BOUND where it reads as a contraction, so the schedule
+    # sees the bilinear reading (the chained A fill) instead of a scalar fold: rows are one of the
+    # kernel's free axes, columns the enclosing contraction's k. An unreadable producer declines
+    # the view — the base rows stand.
+    edges: list = []
+    for e in fcol.operands:
+        if not (isinstance(e, Fold) and e.axis is not None):
+            return None
+        b = _bound_producer(e, free, k_name)
+        if b is None:
+            return None
+        edges.append(b)
+    # The statistic prologue must be row-local: its coordinate reads (deep — index exprs, Select
+    # predicates) may span (m, its own bound axes) but never the column / contraction axes.
     banned = {n_ax.name, k_name}
-    if banned & {v for s in (*stat_epi, *stat.lower()) for e in s.exprs() for v in e.free_vars()}:
+    if banned & (_deep_idx_vars([*stat_epi, *stat.lower()]) - stmt_axis_names(stat.lower())):
         return None
     stat_defs = set(_operand_result_names(stat)) | {nm for s in stat_epi for nm in s.defines()}
-    bound = _bind_stat_channels(fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name})
+    edge_names = frozenset(nm for e in edges for nm in _operand_result_names(e))
+    bound = _bind_stat_channels(fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name}, edge_names)
     if bound is None:
         return None
     cone, channels = bound
+    cone = [*edges, *cone]  # producer nodes join the cone; make_cone hangs them off the operands
     # The combine tail: its reads must be the fold accumulators, its own defs, or STAT-FREE
     # epilogue defs (their cones prepended so the store-side epilogue can re-evaluate them); a
     # stat-DERIVED read would need the reduce's state at the store, which that path has no
@@ -373,6 +394,23 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
     return ("op", st.op.name, children)
 
 
+def _bound_producer(e: Fold, free: tuple, n_name: str) -> Fold | None:
+    """A producer the cone / statistic composes, re-read as a MATERIALIZED-operand contraction —
+    or ``None`` when it is not one. Tried against each free axis in turn as the row (its columns
+    are the enclosing contraction's ``n_name``); an axis whose bind lands on a COMPUTED operand
+    is skipped, not fatal — which axis plays m is a property of the producer's own operand
+    indices, and a partition axis the producer never reads can bind spuriously as a broadcast
+    cone."""
+    axes = frozenset(a.name for a in free) | {n_name, e.axis.name}
+    for ax in free:
+        if ax.name == n_name:
+            continue
+        b = bind_bilinear(e, ax.name, n_name, axes)
+        if b is not None and isinstance(b.a, Load) and isinstance(b.b, Load):
+            return b
+    return None
+
+
 def _channel_product(f: Fold) -> object:
     """The fold's shared ⊗ — the lift stmt op behind its first result (callers run after the
     bilinear read has already verified one shared product)."""
@@ -380,12 +418,15 @@ def _channel_product(f: Fold) -> object:
     return defs[f.lift.results[0]].op
 
 
-def _bind_stat_channels(f: Fold, n_name: str, stat_defs: set, axes: frozenset) -> tuple[list, tuple] | None:
+def _bind_stat_channels(
+    f: Fold, n_name: str, stat_defs: set, axes: frozenset, edge_names: frozenset = frozenset()
+) -> tuple[list, tuple] | None:
     """The computed-A channel read for the fused view: per additive component, a two-arg ⊗
     (distributing over the carrier's one commutative-monoid ⊕) whose directly-named B load is
     ``(n, k)``-indexed, all components sharing ONE A value whose cone reads the statistic —
-    every free SSA read of the cone must land in ``stat_defs`` (a stat-FREE cone is the demoted
-    option's shape, not this one). Returns ``(cone stmts, channels)`` or ``None``."""
+    every free SSA read of the cone must land in ``stat_defs`` or ``edge_names`` (the results of
+    producer edges the fold composes; a stat-FREE cone is the demoted option's shape, not this
+    one). Returns ``(cone stmts, channels)`` or ``None``."""
     ops = component_ops(f.combine)
     if ops is None or len(set(ops)) != 1:
         return None
@@ -424,7 +465,7 @@ def _bind_stat_channels(f: Fold, n_name: str, stat_defs: set, axes: frozenset) -
         members = list(cone.members)
         if not members or any(not isinstance(s, (Load, Assign, Select)) for s in members):
             return None
-        ext = set(cone.external_reads) - axes - {k_name}
+        ext = set(cone.external_reads) - axes - {k_name} - edge_names
         if not ext or not ext <= stat_defs:
             return None  # a stat-free cone is the demoted option's shape, not ours
         consumed |= {id(s) for s in members}
@@ -432,7 +473,9 @@ def _bind_stat_channels(f: Fold, n_name: str, stat_defs: set, axes: frozenset) -
             stmts = members  # the first copy IS the cone — the others are value-equal duplicates
     if any(isinstance(s, Load) and n_name in _idx_vars(s) for s in stmts):
         return None  # the cone must be (m, k)-indexed — an n-dependent producer isn't the A tile
-    if not any(isinstance(s, Load) and k_name in _idx_vars(s) for s in stmts):
+    # The cone must be K-VARYING: a member load indexed by k, or a read of a composed producer
+    # edge (attention's per-key score — the K variance is the edge's, not a member load's).
+    if not any(isinstance(s, Load) and k_name in _idx_vars(s) for s in stmts) and not ({a for s in stmts for a in s.deps()} & edge_names):
         return None
     if any(id(s) not in consumed for s in body):
         return None  # an unaccounted λ stmt — a shape this binding does not understand
@@ -494,6 +537,17 @@ def _replace_body(lift: Lambda, body: Body) -> Lambda:
 def _idx_vars(load: Load) -> set[str]:
     """Every free Var name across a load's index exprs."""
     return {v for e in load.index or () for v in e.free_vars()}
+
+
+def _deep_idx_vars(stmts) -> set[str]:
+    """Every free Var name across the coordinate exprs reachable in ``stmts`` (deep) — index
+    exprs and ``Select`` predicates alike (``Stmt.exprs``)."""
+    out: set[str] = set()
+    for s in stmts:
+        out |= {v for e in s.exprs() for v in e.free_vars()}
+        for b in s.nested():
+            out |= _deep_idx_vars(list(b))
+    return out
 
 
 def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset) -> list | None:
@@ -574,6 +628,12 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
         consumed.update(id(b) for _, b, _ in reads)
         a_edge = role_load(a_arg, m_name, n_name)
         if a_edge is not None:
+            if len(reads) > 1:
+                # A multi-channel node over a MATERIALIZED shared A (the merged QKV cell) has no
+                # consumer tier yet: cp.async / TMA staging is single-fold, and only the smem
+                # compute fill (a COMPUTED A) rides multi-channel. The fold keeps its PLANAR
+                # reading — exactly the old single-Accum candidacy's behavior.
+                return None
             consumed.add(id(a_edge))
         else:
             cone = _cone([s for s in body if id(s) not in consumed], a_arg, n_name, k_name, axes)

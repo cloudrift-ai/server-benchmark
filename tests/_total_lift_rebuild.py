@@ -24,14 +24,6 @@ IGNORED_FILES = [
 
 # Exact node ids xfailed (strict) until their subsystem is rebuilt.
 XFAIL_NODES = {
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg1]",
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_sweeps_the_score_once[cfg0]",
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_sweeps_the_score_once[cfg1]",
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_stages_the_nested_score",
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_split_partition_keeps_the_two_pass_pair",
-    "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg0]",
-    "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama",
-    "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama_seq512",
     "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
     "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_the_kernels",
     "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_degenerate_m1",

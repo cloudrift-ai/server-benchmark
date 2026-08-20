@@ -4,9 +4,33 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 
 from emmy import config
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
+
+#: A ``REDUCE`` value's leading cross-CTA stage — ``g<n>`` plus the atomic/deferred finalize
+#: letter (``ReducePlan.spell``).
+_GRID_STAGE = re.compile(r"g\d+[ak]?\Z")
+
+
+def _stampable_reduce(want: str) -> str | None:
+    """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
+    cross-CTA stage.
+
+    A cross-CTA split is realized by REPLACING the kernel: ``030_split_reduce`` mints brand-new
+    pieces and ``knob.consume_kernel_row`` strips their schedule row, so no piece may carry the
+    ``g<n>`` it came from (``test_split_fresh_kernels`` asserts that outright). The receipt is
+    structural — the piece's reduce axis is a slice of the parent — and knob stamps cannot show
+    it, exactly as a realized ``PLACE`` cut cannot be read off one.
+
+    Only the cross-CTA stage is invisible. The rest of the value (``coop`` / ``r<n>``) is decided
+    by the piece on its own body and stamped there, so it stays gateable.
+    """
+    tokens = [t for t in str(want).split("/") if t]
+    if not tokens or not _GRID_STAGE.match(tokens[0]):
+        return None
+    return "/".join(tokens[1:])
 
 
 def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
@@ -23,6 +47,15 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
         fam = family_of(name)
         if fam == "PLACE":
             continue  # a realized cut is visible structurally, not as a knob stamp
+        probe = want
+        if fam == "REDUCE":
+            # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
+            # so gate whatever the pieces still stamp.
+            rest = _stampable_reduce(want)
+            if rest is not None:
+                if not rest:
+                    continue
+                probe = rest
         others: list[str] = []
         saw_off = False
         hit = False
@@ -30,7 +63,7 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
-                if pin_key_matches(name, key) and values_equal(name, want, got):
+                if pin_key_matches(name, key) and values_equal(name, probe, got):
                     hit = True
                 elif is_off_value(fam, got):
                     saw_off = True

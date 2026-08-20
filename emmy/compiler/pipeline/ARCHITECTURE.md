@@ -1267,7 +1267,12 @@ explicit working file whose GPU header is checked against the selected tune devi
    registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
    raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it.
+   match it. Two realizations are **structural** and cannot be read off a knob stamp at all, so the check skips them:
+   a `PLACE` cut, and the `g<n>` cross-CTA stage of a `REDUCE` value. A split replaces the kernel it splits, and
+   `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
+   from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
+   value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a
+   `g<n>` pin which genuinely never split cannot be told apart from one that did.
 2. **Arithmetic-intensity check.** A row whose FLOP/s, implied by its shape, exceeds the peak recorded in the live
    GPU's `GpuSpec` is flagged as a bad measurement rather than a fast kernel.
 3. **Wrong-answer check.** Each pinned config is executed once on the greedy run's inputs and its outputs are

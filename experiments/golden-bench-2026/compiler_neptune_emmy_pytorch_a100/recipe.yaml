@@ -1,8 +1,27 @@
 # Neptune's published A100 matrix plus a current-PyTorch/Emmy native-SDPA subset in one durable experiment.
 # The artifact stays unmodified in its pinned container; the paired host lane pins PyTorch 2.13.0.
 #
-# Repro on a pre-allocated A100 80GB (no cloud provisioning):
-#   emmy bench experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100 --local
+# One row per (lane, operator), so a failure costs one operator instead of the whole sweep and any
+# slice can be re-measured on its own:
+#
+#   EXP=experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100
+#   emmy bench $EXP --local                                       # every lane, every operator
+#   emmy bench $EXP --local --filter lane=emmy                    # only the PyTorch/Emmy comparison
+#   emmy bench $EXP --local --filter lane=tune --filter operator=decode_gqa
+#
+# Every row for one GPU shares a single execution group, so the split costs one VM, not one per row.
+#
+# The two lanes:
+#   neptune  the pinned artifact's own tune + Nsight profile for one operator (10 operators)
+#   emmy     bench eager / torch.compile / Emmy, with Emmy replaying a pre-tuned golden (5 operators)
+#
+# Tuning happens outside this recipe, through the tune-kernels skill: trace each setup from
+# operators.sh (`./operators.sh OPERATOR SEQUENCE_LENGTH` prints the exact module source this
+# experiment benches), tune the working golden on an A100, and commit the validated result under
+# golden/<operator>-b1-s<sequence_length>.golden.yaml. The emmy lane only measures, and fails on any
+# setup whose golden is missing. Those files stay search state — the lane re-measures every schedule
+# they pin at deployable -O3, and its own records are the experiment's evidence — so a compiler change
+# is re-measured by rerunning this lane alone, without repeating the search.
 command:
   stage:
     - emmy
@@ -11,26 +30,28 @@ command:
     - LICENSE
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
+    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/operators.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py
+    - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/golden
   strict: true
   run: |
     set -euo pipefail
     IMAGE=evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca
     NEPTUNE_REV=3aa55c12ac822337e630b809b0d9eabb11eee5d3
-    NEPTUNE_RUNNER=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
-    NEPTUNE_ENTRY=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
-    EMMY_RUNNER=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_emmy.sh
+    EXPERIMENT=$repo_dir/experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100
     EVIDENCE=$task_dir/evidence
     mkdir -p "$$EVIDENCE"
     finalize() {
       final_status=$$?
       trap - EXIT
-      if [ -x $repo_dir/venv/bin/pip ]; then
-        $repo_dir/venv/bin/pip freeze --all > "$$EVIDENCE/emmy-requirements.freeze.txt" || final_status=1
-      else
-        echo "venv pip unavailable" > "$$EVIDENCE/emmy-requirements.freeze.txt"
-        final_status=1
+      if [ "$lane" != neptune ]; then
+        if [ -x $repo_dir/venv/bin/pip ]; then
+          $repo_dir/venv/bin/pip freeze --all > "$$EVIDENCE/emmy-requirements.freeze.txt" || final_status=1
+        else
+          echo "venv pip unavailable" > "$$EVIDENCE/emmy-requirements.freeze.txt"
+          final_status=1
+        fi
       fi
       printf 'status=%s\n' "$$final_status" > $task_dir/status.txt
       archive_tmp=$task_dir.artifacts.tar.gz
@@ -40,42 +61,78 @@ command:
     }
     trap finalize EXIT
 
-    docker pull "$$IMAGE" 2>&1 | tee "$$EVIDENCE/docker-pull.log"
-    docker image inspect "$$IMAGE" > "$$EVIDENCE/image-inspect.json"
-    docker run --rm --gpus all --ipc=host \
-      -e CUDA_VISIBLE_DEVICES=$gpu_device_ids \
-      -e NEPTUNE_REV="$$NEPTUNE_REV" \
-      -v "$$EVIDENCE:/results" \
-      -v "$$NEPTUNE_RUNNER:/experiment/run.sh:ro" \
-      -v "$$NEPTUNE_ENTRY:/experiment/run_neptune.py:ro" \
-      "$$IMAGE" bash /experiment/run.sh 2>&1 | tee "$$EVIDENCE/container.log"
-
-    export PATH=/usr/local/cuda/bin:$$PATH
-    cd $repo_dir
-    if [ ! -x venv/bin/python ]; then
-      python3.12 -m venv venv --prompt emmy
-    fi
-    venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/emmy-install.log"
-    test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
-    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
-    export EMMY_TUNE_DB=$task_dir/autotune.db
-    export EMMY_ONLINE_FILE=$task_dir/online.json
-    export EMMY_CUBIN_CACHE=$task_dir/cubins
-    venv/bin/python - <<'PY' > "$$EVIDENCE/emmy-torch-environment.txt"
-    import torch
-
-    print(f"torch={torch.__version__}")
-    print(f"cuda={torch.version.cuda}")
-    print(f"gpu={torch.cuda.get_device_name(0)}")
-    PY
-    nvidia-smi -q > "$$EVIDENCE/emmy-nvidia-smi.txt"
-    nvcc --version > "$$EVIDENCE/emmy-nvcc-version.txt"
-    sha256sum "$$EMMY_RUNNER" > "$$EVIDENCE/emmy-experiment-input.sha256"
-    "$$EMMY_RUNNER" venv/bin/emmy "$$EVIDENCE/emmy-tcompile"
+    case "$lane" in
+      neptune)
+        docker pull "$$IMAGE" 2>&1 | tee "$$EVIDENCE/docker-pull.log"
+        docker image inspect "$$IMAGE" > "$$EVIDENCE/image-inspect.json"
+        docker run --rm --gpus all --ipc=host \
+          -e CUDA_VISIBLE_DEVICES=$gpu_device_ids \
+          -e NEPTUNE_REV="$$NEPTUNE_REV" \
+          -v "$$EVIDENCE:/results" \
+          -v "$$EXPERIMENT/run.sh:/experiment/run.sh:ro" \
+          -v "$$EXPERIMENT/run_neptune.py:/experiment/run_neptune.py:ro" \
+          "$$IMAGE" bash /experiment/run.sh "$operator" 2>&1 | tee "$$EVIDENCE/container.log"
+        ;;
+      emmy)
+        export PATH=/usr/local/cuda/bin:$$PATH
+        cd $repo_dir
+        if [ ! -x venv/bin/python ]; then
+          python3.12 -m venv venv --prompt emmy
+        fi
+        # The staged repo is shared by every row in the group, so only the first host row installs.
+        if ! venv/bin/python -c 'import torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.13.0")' 2>/dev/null; then
+          venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/emmy-install.log"
+        fi
+        test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
+        export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+        # Task-local search state, so the greedy row is untuned by construction and the golden's
+        # pins are the only searched schedules this lane reports.
+        export EMMY_TUNE_DB=$task_dir/autotune.db
+        export EMMY_ONLINE_FILE=$task_dir/online.json
+        export EMMY_CUBIN_CACHE=$task_dir/cubins
+        venv/bin/python -c 'import torch; print(f"torch={torch.__version__}"); \
+          print(f"cuda={torch.version.cuda}"); print(f"gpu={torch.cuda.get_device_name(0)}")' \
+          > "$$EVIDENCE/emmy-torch-environment.txt"
+        nvidia-smi -q > "$$EVIDENCE/emmy-nvidia-smi.txt"
+        nvcc --version > "$$EVIDENCE/emmy-nvcc-version.txt"
+        sha256sum "$$EXPERIMENT/operators.sh" "$$EXPERIMENT/run_emmy.sh" "$$EXPERIMENT/run_pytorch.py" \
+          > "$$EVIDENCE/emmy-experiment-input.sha256"
+        # run_emmy.sh reports the per-setup missing-golden status, so an unmatched glob here must
+        # not pre-empt it with a bare sha256sum error.
+        sha256sum "$$EXPERIMENT"/golden/$operator-*.golden.yaml > "$$EVIDENCE/emmy-golden.sha256" 2>&1 || true
+        "$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator" "$$EVIDENCE/emmy-tcompile" \
+          "$$EXPERIMENT/golden"
+        ;;
+      *)
+        echo "unknown lane: $lane" >&2
+        exit 2
+        ;;
+    esac
   result_files:
     - artifacts.tar.gz
-  timeout: 86400
+  timeout: 28800
 
 matrices:
   - deploy.gpu: "NVIDIA A100 80GB"
     deploy.gpu_count: 1
+    lane: neptune
+    operator:
+      - prefill_global
+      - prefill_causal
+      - prefill_gqa
+      - decode_causal
+      - decode_gqa
+      - prefill_alibi
+      - decode_alibi
+      - prefill_softcap
+      - decode_softcap
+      - prefill_windowed
+  - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1
+    lane: emmy
+    operator:
+      - prefill_global
+      - prefill_causal
+      - prefill_gqa
+      - decode_causal
+      - decode_gqa

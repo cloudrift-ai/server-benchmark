@@ -82,6 +82,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncTransport,
     TmaTransport,
     pick_swizzle_atom,
+    software_swizzle,
     staged_kloop,
     sync_stat_fill,
 )
@@ -573,12 +574,24 @@ def _k_masked(stmts: list[Stmt], value: str, k: Expr, k_ext: Expr | None) -> tup
     )
 
 
-def _chain_of(*, c, score, mn, atom, bk_elems, slab, stats, lead, slabs):
+def _chain_of(*, c, score, mn, atom, bk_elems, slab, stats, lead, slabs, slab_swizzle):
     """The chained fill CLOSURE — ``chain(k0)`` for the transport, deferring the emission until the
     skeleton knows its chunk base."""
 
     def chain(k0):
-        return chain_a_fill(c=c, score=score, mn=mn, atom=atom, bk_elems=bk_elems, k0=k0, slab=slab, stats=stats, lead=lead, slabs=slabs)
+        return chain_a_fill(
+            c=c,
+            score=score,
+            mn=mn,
+            atom=atom,
+            bk_elems=bk_elems,
+            k0=k0,
+            slab=slab,
+            stats=stats,
+            lead=lead,
+            slabs=slabs,
+            slab_swizzle=slab_swizzle,
+        )
 
     return chain
 
@@ -618,7 +631,15 @@ def score_key_operand(*, c: Fold, score: Fold, atom, m_name: str, cols: int) -> 
     def coords(k0):
         return tuple(Sigma({c.axis.name: k0, score.axis.name: Literal(0, "int")}).apply(e) for e in b.index)
 
-    return Operand(tag=_KEY_TAG, buf=b.input, shape=(cols, k_ext), index=index, coords=coords, trans=True)
+    return Operand(
+        tag=_KEY_TAG,
+        buf=b.input,
+        shape=(cols, k_ext),
+        index=index,
+        coords=coords,
+        trans=True,
+        swizzle=software_swizzle(k_ext, atom.operand_dtype("b").nbytes),
+    )
 
 
 def score_query_operand(*, score: Fold, atom, m: Side, k_name: str) -> Operand | None:
@@ -648,7 +669,14 @@ def score_query_operand(*, score: Fold, atom, m: Side, k_name: str) -> Operand |
     def coords(_k0):
         return tuple(Sigma({m.axis.name: row_base, k_name: Literal(0, "int")}).apply(e) for e in a.index)
 
-    return Operand(tag=_QUERY_TAG, buf=a.input, shape=(m.tile, k_ext), index=index, coords=coords)
+    return Operand(
+        tag=_QUERY_TAG,
+        buf=a.input,
+        shape=(m.tile, k_ext),
+        index=index,
+        coords=coords,
+        swizzle=software_swizzle(k_ext, atom.operand_dtype("a").nbytes),
+    )
 
 
 def _lane_group(lay) -> Expr:
@@ -760,6 +788,7 @@ def chain_a_fill(
     stats: tuple[str, ...],
     lead: tuple,
     slabs: tuple = (None, None),
+    slab_swizzle: str = "NONE",
 ):
     """The **CHAINED A fill** — the score contraction the cone composes, realized on the TENSOR CORE
     with the cone as its store epilogue: ``mma(Q, Kᵀ) → C fragments → exp(s − m)·(1/d) → the A slab``
@@ -777,7 +806,7 @@ def chain_a_fill(
         (
             *(Load(names=(nm,), input=_stat_slab(nm), index=(local_row,)) for nm in stats),
             *c.a.body,
-            Write(output=slab, index=(local_row, local_col), value=c.a.out),
+            Write(output=slab, index=(local_row, local_col), value=c.a.out, swizzle=slab_swizzle),
         )
     )
     ops, cells, offset, smn, stmts, _ = _score_block(
@@ -935,6 +964,7 @@ def chain_stream_fill(
     out_frags: tuple,
     lead: tuple,
     slabs: tuple = (None, None),
+    slab_swizzle: str = "NONE",
 ):
     """The **SINGLE-PASS chained sweep** — the statistic and the weight off ONE pass of the score.
 
@@ -1008,7 +1038,7 @@ def chain_stream_fill(
         # The weight lands at the element's LOCAL slab ``(row, col)`` — σ folds the absolute cell
         # coordinate back to the slab's own.
         local = (BinaryExpr("-", Var(m.axis.name), row_base), BinaryExpr("-", Var(c.axis.name), k0))
-        epilogue = Body((Write(output=slab, index=local, value=score.acc),))
+        epilogue = Body((Write(output=slab, index=local, value=score.acc, swizzle=slab_swizzle),))
         ops, cells, offset, smn, stmts, frags = _score_block(
             n_axis=c.axis, score=score, mn=mn, atom=atom, cols=bk_elems, k0=k0, lead=lead, ns="_s", epilogue=epilogue, slabs=slabs
         )
@@ -1134,8 +1164,8 @@ def _sync_operands(
     key_op = score_key_operand(c=c, score=score_edge, atom=atom, m_name=m_name, cols=bk_elems) if score_edge is not None else None
     query_op = score_query_operand(score=score_edge, atom=atom, m=mn[0], k_name=score_edge.axis.name) if score_edge is not None else None
     slabs = (
-        (query_op.slab, query_op.shape[1]) if query_op is not None else None,
-        (key_op.slab, key_op.shape[1]) if key_op is not None else None,
+        (query_op.slab, query_op.shape[1], query_op.swizzle) if query_op is not None else None,
+        (key_op.slab, key_op.shape[1], key_op.swizzle) if key_op is not None else None,
     )
     if score_edge is not None:
         stream = chain_stream_fill(
@@ -1148,6 +1178,7 @@ def _sync_operands(
             out_frags=out_frags,
             lead=lead,
             slabs=slabs,
+            slab_swizzle=swizzles[0],
         )
     if stream is not None:
         prologue, stream_fill, finalize = stream
@@ -1195,15 +1226,26 @@ def _sync_operands(
     else:
         # The CHAINED fill where the cone composes a score CONTRACTION and the atom can mma it: the
         # slab comes from one nested contraction (fragments → the cone's epilogue → the slab), not
-        # per-cell scalar code. NONE-swizzle by construction — the fragment store applies no XOR, so
-        # the drain must read the plain row-major slab.
+        # per-cell scalar code. It swizzles like every other slab: the fragment store applies the
+        # same flattened-index XOR the ldmatrix drain undoes (``RegStore.swizzle``, stamped through
+        # the fill's ``Write``), so the weight tile costs no more bank conflicts than the operands
+        # beside it — unswizzled its 256 B rows drained ~32-way conflicted.
         if stream is not None:
-            a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, chain=stream_fill, swizzle="NONE")
+            a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, chain=stream_fill, swizzle=swizzles[0])
         elif score_edge is not None:
             chain = _chain_of(
-                c=c, score=score_edge, mn=mn, atom=atom, bk_elems=bk_elems, slab="_a_smem", stats=stats, lead=lead, slabs=slabs
+                c=c,
+                score=score_edge,
+                mn=mn,
+                atom=atom,
+                bk_elems=bk_elems,
+                slab="_a_smem",
+                stats=stats,
+                lead=lead,
+                slabs=slabs,
+                slab_swizzle=swizzles[0],
             )
-            a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, chain=chain, swizzle="NONE")
+            a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, chain=chain, swizzle=swizzles[0])
         else:
             a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
         sync_ops.append(a_op)
@@ -1540,12 +1582,14 @@ class _AtomOps:
     # ``_a`` / ``_b`` / ``_c`` do not shadow the accumulators the enclosing drain carries across
     # that same loop.
     frag_ns: str = ""
-    # Per-operand ``(slab, ldm)`` when the caller's own transport already STAGED it — the nested
-    # score's query and key slabs, filled by the enclosing loop's pipeline instead of re-read per
-    # warp through the gmem fragment loaders. Both are the operand's own gmem orientation (so
-    # ``ldm`` is the score's K extent either way), NONE-swizzle, one chunk: the read is the
-    # ordinary staged ``LdmatrixLoad``, only its slab comes from outside. ``None`` = gmem-direct.
-    slabs: tuple[tuple[str, int] | None, tuple[str, int] | None] = (None, None)
+    # Per-operand ``(slab, ldm, swizzle)`` when the caller's own transport already STAGED it — the
+    # nested score's query and key slabs, filled by the enclosing loop's pipeline instead of re-read
+    # per warp through the gmem fragment loaders. Both are the operand's own gmem orientation (so
+    # ``ldm`` is the score's K extent either way), one chunk: the read is the ordinary staged
+    # ``LdmatrixLoad``, only its slab comes from outside. ``swizzle`` is the mode the fill wrote the
+    # slab with (:func:`~._stage.software_swizzle` on the score's K span) — the drain applies the matching
+    # XOR, exactly like the enclosing contraction's own operands. ``None`` = gmem-direct.
+    slabs: tuple[tuple[str, int, str] | None, tuple[str, int, str] | None] = (None, None)
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -1655,10 +1699,17 @@ class _MmaOps(_AtomOps):
         if self.tile.atom.fragment_layout == "m8n8k4":
             return ("NONE", "NONE")
         b_inner = self.stage.bk_elems if self.c.b_trans else mn[1].tile
-        return tuple(
-            "NONE" if e.nbytes == 1 else pick_swizzle_atom(inner, e.nbytes)[1]
-            for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True)
-        )
+        # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
+        # descriptor splits its box down to the atom); every other transport writes the slab in
+        # software, so its XOR reads the row index at the slab's OWN stride.
+        hardware = self.stage.transport == "smem-tma"
+
+        def mode(inner: int, nbytes: int) -> str:
+            if nbytes == 1:
+                return "NONE"
+            return pick_swizzle_atom(inner, nbytes)[1] if hardware else software_swizzle(inner, nbytes)
+
+        return tuple(mode(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
     def state(self, cells):
         """The mma operand/accumulator register fragments — one ``_a``/``_b`` per register row/col and
@@ -1740,7 +1791,7 @@ class _MmaOps(_AtomOps):
             if self.slabs[0] is not None:
                 # Already staged: the slab covers exactly this tile's M span, so the read is the
                 # warp's own within-tile row and the K-loop's column.
-                slab, ldm = self.slabs[0]
+                slab, ldm, swz = self.slabs[0]
                 prim = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
                 return [
                     LdmatrixLoad(
@@ -1750,6 +1801,7 @@ class _MmaOps(_AtomOps):
                         role="a",
                         staged=True,
                         ldm=ldm,
+                        swizzle=swz,
                         fragment_layout=atom.fragment_layout,
                     )
                 ]
@@ -1772,7 +1824,7 @@ class _MmaOps(_AtomOps):
             if self.slabs[1] is not None:
                 # Already staged: read the slab at the cell's LOCAL column (the slab covers exactly
                 # this tile's N span, so the absolute base drops out) and the K-loop's own row.
-                slab, ldm = self.slabs[1]
+                slab, ldm, swz = self.slabs[1]
                 return [
                     LdmatrixLoad(
                         frag=self.frag(f"_b{j}"),
@@ -1782,6 +1834,7 @@ class _MmaOps(_AtomOps):
                         staged=True,
                         ldm=ldm,
                         b_trans=True,
+                        swizzle=swz,
                         fragment_layout=atom.fragment_layout,
                     )
                 ]
@@ -1861,6 +1914,7 @@ class _MmaOps(_AtomOps):
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
                     atomic=by_acc[acc].atomic,
+                    swizzle=by_acc[acc].swizzle,
                     fragment_layout=atom.fragment_layout,
                 )
                 for acc, frag in zip(accs, frags, strict=True)
@@ -1879,6 +1933,7 @@ class _MmaOps(_AtomOps):
                 m_guard=_guard(m, mcell),
                 n_guard=_guard(n, ncell),
                 atomic=write.atomic,
+                swizzle=write.swizzle,
                 fragment_layout=atom.fragment_layout,
             )
         ]

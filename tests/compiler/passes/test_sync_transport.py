@@ -3,8 +3,9 @@
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile, SyncOperand, SyncTransport
+from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile, SyncOperand, SyncTransport, software_swizzle
 
 
 def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
@@ -32,3 +33,31 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
     assert {acc.name for acc in fill.accums} == {f"acc__c{i}" for i in range(8)}
     assert {load.names[0] for load in fill.loads if load.input == "x"} == {f"value__c{i}" for i in range(8)}
     assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
+
+
+def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
+    """A software-filled slab's XOR reads its ROW index — which needs the slab's OWN stride once a
+    row is wider than one swizzle atom.
+
+    The mode's default element shift is ``log2(atom elems)``; that IS the row only while a row is
+    exactly one atom. A 128-elem fp16 row (the flash slabs' head dim) is TWO 128 B atoms, so the
+    atom bit stays inside the shifted field, consecutive rows collapse onto a quarter of the chunk
+    positions, and the ``ldmatrix`` drain over 16 rows goes multi-way bank-conflicted (measured
+    7.8-way at ``D = 128`` on an A100, none at ``D = 64``). A one-atom row — and a non-power-of-two
+    one, where no row bit is extractable — keeps the PLAIN spelling, so every slab that already
+    drained conflict-free renders byte-identically.
+    """
+    assert software_swizzle(64, 2) == "B128"  # one 128 B atom: the default shift already is the row
+    assert software_swizzle(32, 2) == "B64"  # one 64 B atom
+    assert software_swizzle(128, 2) == "B128@7"  # two atoms: shift by the row (2**7 elems), not the atom
+    assert software_swizzle(256, 2) == "B128@8"
+    assert software_swizzle(96, 2) == "B64"  # not a power of two — no row bit to shift by
+    assert software_swizzle(4, 2) == "NONE"  # no atom fits
+
+    assert swizzle_xor("B128") == (6, 0x7)
+    assert swizzle_xor("B128@7") == (7, 0x7)  # the override moves the shift, never the row mask
+    assert swizzle_xor("NONE") is None
+    # One emitted helper per distinct (mask, shift): the plain mode keeps its name, so an
+    # unchanged slab's kernel source is unchanged.
+    assert swizzle_fn("B128") == "emmy_swizzle_b128"
+    assert swizzle_fn("B128@7") == "emmy_swizzle_b128_s7"

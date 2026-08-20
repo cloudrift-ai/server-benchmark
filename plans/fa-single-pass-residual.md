@@ -2,30 +2,36 @@
 
 The FA-through-the-codec campaign (Stage 1 N-channel pairing, Stage 2 TWISTED computed-A bind, Stage 3's lowering
 half, the chained A fill + chained statistic, the SINGLE-PASS sweep, and now the nested score's own STAGED operands)
-has taken the fused single-kernel form past the two-kernel graph at every `D ≤ 64` and past torch at every `D` at
-`S = 512`. Loop fusion still refuses the merge, because `D = 128` still loses. This plan is the residual.
+has taken the fused single-kernel form past the two-kernel graph at every `D ≤ 64`, and the slab swizzles have taken
+it past torch at `D = 128` too on an A100 at `S ≤ 512`. Loop fusion still refuses the merge — pricing fused against
+cut needs the CUT arm's own schedule evidence, which nothing has measured yet. This plan is the residual.
 
 Measurements, gates, and the mechanism live in `tests/compiler/e2e/test_attention_coverage.py`'s module docstring and
 `emmy/compiler/pipeline/passes/lowering/kernel/ARCHITECTURE.md` — read those first; nothing here repeats them.
 
-## The wall at `D = 128` is now the TILE, not the memory path
+## The wall at `D = 128` was the SHARED path, and it is now cleared
 
-Staging the score took L1/TEX from 96% to 89% and the gmem fragment loaders out of the kernel entirely. What is left
-at `(1, 8, 2048, 128)` f16 on a 5090 is the tile's own footprint: **254 registers per thread and four slabs
-(A, V, score-K, score-Q) cap the kernel at ONE block per SM**, with compute utilization at 16%.
+The register reading was wrong. On an A100 the `D = 128` kernel was **shared-memory bank-conflict bound** — 78% of its
+shared wavefronts were conflict replays, L1/TEX at 80% against 7% compute — and registers never bound it (ncu's block
+limit from registers was 2, with negligible local traffic). Three slabs drained plain row-major, and the swizzle the
+fourth used under-spread a row wider than its atom. All three are fixed; the measurements and the mechanism are in the
+docstring and `ARCHITECTURE.md`. The A100 fused arm now beats torch at `S ≤ 512` and is at parity at `S = 1024`.
 
-Levers, in the order that pays:
+What is left, in the order that pays:
 
-1. **Hold the score's C fragments in fewer registers.** At `bk = 128` the score block alone is `bk/atom_n = 16`
-   C-fragments (64 registers) on top of the output tile's 16 (another 64), and `_contract_kloop` reads ALL register-col
-   B fragments before contracting, which is 32 more. Halving `bk` halves the first two but measured WORSE (209.5 vs
-   190.8 at `f1x16/k4` vs `k8`) — the chunk count and its barriers cost more than the registers save. The real fix is
-   a drain that interleaves the reads with the mma instead of hoisting them all.
-2. **Reuse ONE slab for the score's keys and the drain's values** where the two operands are the same buffer. They are
-   not in attention (K and V differ), so this is a no-op there — noted only so it is not re-derived.
+1. **The two long shapes.** `S = 1024` is at parity and `S = 2048` is ~1.35x behind, and the residual grows with `S` —
+   so it is not a fixed overhead. Profile the long shape on its own before assuming it is the same term as the short
+   one; L1/TEX is down to 61% and compute up to 24%, so neither is obviously the bound any more.
+2. **The P round trip itself.** The weight tile still goes C fragments → smem → `ldmatrix` → A fragments, costing
+   two `__syncthreads` and a slab per chunk. FA-2 recasts the C fragments into A fragments IN REGISTERS: for
+   `m16n8k16`, C tiles `j = 2k, 2k+1` hold exactly the A fragment for k-block `k`, so the recast is an f32→f16 pack
+   with no lane shuffle. That frees the slab (occupancy) and both barriers. Bigger than anything left below.
 3. **`units_n > 1`** still makes every `n` warp recompute the whole score for the same rows (323 cold vs 190.8 pinned
-   at S=2048 D=128). Sharing one warp band's statistic with the rest needs the ψ-rescale published through an smem row
-   and applied AFTER the transport's barrier — the `LeadSegment` seam now exists, so this is a second segment away.
+   at S=2048 D=128 on the 5090). Sharing one warp band's statistic with the rest needs the ψ-rescale published through
+   an smem row and applied AFTER the transport's barrier — the `LeadSegment` seam now exists, so this is a second
+   segment away.
+4. **Reuse ONE slab for the score's keys and the drain's values** where the two operands are the same buffer. They are
+   not in attention (K and V differ), so this is a no-op there — noted only so it is not re-derived.
 
 ## Schedule forks the cold pick lands on badly
 

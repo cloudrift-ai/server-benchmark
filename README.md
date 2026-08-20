@@ -21,6 +21,21 @@ git clone https://github.com/cloudrift-ai/emmy.git
 cd emmy && make setup
 ```
 
+On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) that install lands an NVRTC that cannot compile for the card: torch
+depends on `nvidia-cuda-nvrtc` 13.x, cupy resolves NVRTC to it in preference to any CUDA 12 build, and CUDA 13 dropped
+every architecture below `sm_75`. Installing `nvidia-cuda-nvrtc-cu12` does not change the resolution; preloading a
+CUDA 12 NVRTC does:
+
+```bash
+LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
+```
+
+Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
+it surface as a wall of failed benchmarks. Commands that only drive remote hardware (`deploy`, `bench`, `vm`,
+`teardown`, …) are unaffected and keep working on such a host. `make test` prints the same diagnosis in its session
+header and skips the CUDA tests naming that cause; a handful of CLI argument-validation tests still fail there, because
+the startup check aborts before argparse reaches them.
+
 ## Compile
 
 A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse it into one kernel, run it, and inspect the emitted CUDA. See the blog post: [*A Principled ML Compiler Stack in 5,000 Lines of Python*](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1).

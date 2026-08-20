@@ -1,0 +1,93 @@
+# Equal-budget search seeding: MCTS alone against MCTS seeded with model-proposed knob rows, on the
+# sequence-512 common corpus. One row per (GPU, arm); both arms of one GPU share an execution group.
+#
+#   EXP=experiments/golden-bench-2026/search_hybrid_vs_mcts
+#   emmy bench $EXP --filter deploy.gpu="NVIDIA GeForce RTX 5090"
+#   emmy bench $EXP --filter arm=hybrid
+#
+# The recipe does not trace and does not write proposals. The tune-kernels skill produces, per GPU,
+# two working golden files from ONE inventory-only trace of Qwen3-0.6B layer 0 at sequence 512:
+#   arms/<gpu-short>/mcts.yaml    the inventory with no knob rows
+#   arms/<gpu-short>/hybrid.yaml  the same inventory plus the skill's proposed knob rows
+# and commits them here. The two files must hold the same targets; the only difference is the
+# proposals. A missing arm file fails the row: the lane measures a committed input, it never
+# substitutes a fresh trace for it.
+#
+# Fairness is the recipe's: task-local empty tuning DB, online checkpoint, and cubin cache for every
+# row; the same --max-candidates, --patience, --seed, and compiler flags on both arms. Every supplied
+# proposal reserves one of the budget's slots before MCTS runs (see `emmy tune --help`), so a hybrid
+# win is a win at equal budget. Canonical repository goldens remain the common implicit deploy
+# context of both arms and are not copied into either file.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/search_hybrid_vs_mcts/recipe.yaml
+    - experiments/golden-bench-2026/search_hybrid_vs_mcts/arms
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    mkdir -p $task_dir/verification
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'arm=%s\nstatus=%s\n' "$arm" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$${task_dir}.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    devices="$gpu_device_ids"
+    first_device=$${devices%%,*}
+
+    gpu_short=$$(./venv/bin/python -c 'from emmy.hardware import gpu_short_name; print(gpu_short_name("'"$gpu"'"))')
+    arms=$repo_dir/experiments/golden-bench-2026/search_hybrid_vs_mcts/arms/$$gpu_short
+    arm_file=$$arms/$arm.yaml
+    if [ ! -f "$$arm_file" ]; then
+      echo "missing committed arm file: $$arm_file (produce both arms with the tune-kernels skill)" >&2
+      exit 2
+    fi
+    sha256sum "$$arms"/*.yaml > $task_dir/arms.sha256
+    cp "$$arm_file" $task_dir/working.yaml
+
+    ./venv/bin/emmy tune --golden-file $task_dir/working.yaml --clean \
+      --devices "$$devices" --max-candidates "$budget" --patience "$patience" --seed "$seed" \
+      --dump-dir $task_dir/dump 2>&1 | tee $task_dir/tune.log
+
+    for repeat in 0 1 2 3 4; do
+      EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
+        --golden $task_dir/working.yaml --bench --strict \
+        --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
+        --bench-backends eager,tcompile,emmy 2>&1 | tee $task_dir/verification-$$repeat.log
+    done
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  - cross:
+      arm: [mcts, hybrid]
+      budget: 12
+      patience: 4
+      seed: 0
+      zip:
+        deploy.gpu:
+          - "NVIDIA GeForce RTX 5090"
+          - "NVIDIA A100 80GB"
+        deploy.gpu_count: 1

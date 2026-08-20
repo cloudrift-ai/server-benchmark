@@ -16,6 +16,8 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 | Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
+| Search seeding | Sequence-512 common corpus, MCTS alone versus MCTS seeded with proposed knob rows | RTX 5090, A100 | Equal-budget search-seeding diagnostic; no input to the headline mean |
+| Agent-generated kernels | Common-corpus targets with committed kernels from an LLM-driven generator | RTX 5090, A100 | Per-target comparison of one generator's committed kernels against eager, Inductor, and tuned Emmy |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -184,6 +186,39 @@ performance outlier is removed. A machine-readable deployment, client, or networ
 may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
 originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
 never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source ID.
+
+## Search seeding lane: proposals versus MCTS alone
+
+`search_hybrid_vs_mcts` asks what a model-proposed starting set buys an equal search budget. The tune-kernels skill
+produces, per GPU, two working golden files from one inventory-only trace of Qwen3-0.6B layer 0 at sequence 512:
+`arms/<gpu-short>/mcts.yaml` with no knob rows and `arms/<gpu-short>/hybrid.yaml` with the skill's proposed rows
+added to the same inventory. The recipe copies the committed arm, tunes it with `--max-candidates 12 --patience 4
+--seed 0` from an empty task-local tuning DB, online checkpoint, and cubin cache, and verifies the searched winner
+five times at deployable `-O3` exactly as the `kernels` recipe does. Every proposal reserves one budget slot before
+MCTS, so the two arms spend the same number of candidates. Report per-target winner latency, the number of live
+measurements each arm spent, and how many hybrid winners were proposed rows rather than searched ones. The lane is
+a search diagnostic beside the budget ablation; it adds nothing to the headline geometric mean and supports no
+compiler-versus-compiler claim.
+
+## Agent-generated kernel lane
+
+`compiler_agent_kernels` places the LLM-driven kernel generators on the same targets as the compiler comparison.
+These systems (KernelBench-style agents, contrastive-RL generators, evolutionary searches) write a kernel per
+problem with the generator's own budget and report speedups over eager or `torch.compile` on single-operator
+benchmarks. The lane does not run a generator: a generator session is run outside the recipe, and its finished
+kernels are committed under `kernels/<agent>/<target>/` as a KernelBench-style `reference.py` (`Model`,
+`get_inputs`, `get_init_inputs`, transcribed from the target's Torch IR in the common-corpus golden file) and
+`kernel.py` (`ModelNew`), with a `MANIFEST.yaml` recording the generator, its revision, model, budget, date, and
+host GPU. The recipe measures the agent kernel, eager, and Inductor in one process with the suite's `rtol = atol =
+1e-3` gate against `Model`, and replays the committed common-corpus golden for the same target through `emmy run
+--target` at deployable `-O3`.
+
+Intelligent review must confirm, per target, that `reference.py` matches the golden's Torch IR (shapes, dtypes,
+and semantics) and that the agent kernel passed the correctness gate; an incorrect or non-matching kernel stays in
+the denominator as a failure. The result is a per-target table for one committed generator set and supports no
+ranking of generators against each other, since each set carries its own budget and model. It is also not an
+input to the kernel-corpus geometric mean: the generator's cost (model calls, wall time, human steering) is part
+of the record, not a normalized quantity.
 
 ## Megakernel comparison lane
 

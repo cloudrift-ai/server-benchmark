@@ -402,7 +402,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 58
+    assert rendered == 64
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
@@ -464,3 +464,72 @@ def test_gemma_arms_share_one_immutable_image(project_root) -> None:
         for task in tasks
         if task.variant.params["arm"] == "emmy"
     )
+
+
+def test_search_seeding_lane_is_equal_budget(project_root) -> None:
+    directory = _experiment(project_root, "search_hybrid_vs_mcts")
+    recipe = load_recipe(directory)
+    tasks = enumerate_tasks([directory])
+    assert len(tasks) == 4
+    assert {(task.recipe.deploy.gpu, task.variant.params["arm"]) for task in tasks} == {
+        ("NVIDIA GeForce RTX 5090", "mcts"),
+        ("NVIDIA GeForce RTX 5090", "hybrid"),
+        ("NVIDIA A100 80GB", "mcts"),
+        ("NVIDIA A100 80GB", "hybrid"),
+    }
+    # Both arms run the same search under the same budget; only the committed input differs.
+    assert {(task.variant.params["budget"], task.variant.params["patience"], task.variant.params["seed"]) for task in tasks} == {(12, 4, 0)}
+    run = recipe.command.run
+    assert "emmy trace" not in run
+    assert 'cp "$$arm_file" $task_dir/working.yaml' in run
+    assert "./venv/bin/emmy tune --golden-file $task_dir/working.yaml --clean" in run
+    assert "for repeat in 0 1 2 3 4" in run
+    assert "--golden $task_dir/working.yaml --bench --strict" in run
+    assert "EMMY_TUNE_DB=$task_dir/autotune.db" in run
+    assert "EMMY_ONLINE_FILE=$task_dir/online.json" in run
+    assert "experiments/golden-bench-2026/search_hybrid_vs_mcts/arms" in recipe.command.stage
+    for task in tasks:
+        command = render_command(task.recipe.command.run, build_substitution_map(task.variant, [0], "/repo", "/task"))
+        assert f"arm_file=$arms/{task.variant.params['arm']}.yaml" in command
+    # Committed arm pairs share their targets and only the hybrid file carries proposals.
+    import yaml
+
+    for hybrid in (Path(directory) / "arms").glob("*/hybrid.yaml"):
+        mcts = hybrid.with_name("mcts.yaml")
+        assert mcts.exists()
+        hybrid_doc, mcts_doc = yaml.safe_load(hybrid.read_text()), yaml.safe_load(mcts.read_text())
+        names = lambda doc: [entry["name"] for program in doc["programs"] for entry in program["target"]]  # noqa: E731
+        assert names(hybrid_doc) == names(mcts_doc)
+        assert not any(
+            realization.get("knobs")
+            for program in mcts_doc["programs"]
+            for entry in program["target"]
+            for realization in entry.get("realizations", [])
+        )
+
+
+def test_agent_kernel_lane_measures_committed_kernels(project_root) -> None:
+    directory = _experiment(project_root, "compiler_agent_kernels")
+    recipe = load_recipe(directory)
+    tasks = enumerate_tasks([directory])
+    assert {(task.recipe.deploy.gpu, task.variant.params["agent"]) for task in tasks} == {
+        ("NVIDIA GeForce RTX 5090", "kernelagent"),
+        ("NVIDIA A100 80GB", "kernelagent"),
+    }
+    run = recipe.command.run
+    # Generation happens outside the recipe; the lane replays committed kernels and the common-corpus golden.
+    assert "emmy tune" not in run
+    assert "emmy trace" not in run
+    assert 'test -f "$$agent_dir/MANIFEST.yaml"' in run
+    assert '--golden "$$golden" --target "$$target" --bench --strict' in run
+    assert "run_agent_kernels.py" in run
+    assert "--rtol 1e-3 --atol 1e-3" in run
+    assert "experiments/golden-bench-2026/kernels/goldens" in recipe.command.stage
+    assert "experiments/golden-bench-2026/compiler_agent_kernels/kernels" in recipe.command.stage
+    runner = (Path(directory) / "run_agent_kernels.py").read_text()
+    assert "ModelNew" in runner and "get_init_inputs" in runner
+    assert "agent-incorrect" in runner
+    for manifest in (Path(directory) / "kernels").glob("*/MANIFEST.yaml"):
+        for target in manifest.parent.iterdir():
+            if target.is_dir():
+                assert (target / "reference.py").exists() and (target / "kernel.py").exists()

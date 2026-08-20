@@ -1,0 +1,99 @@
+# Agent-generated kernels against eager PyTorch, Inductor, and tuned Emmy on the common-corpus targets.
+# One row per (GPU, agent); the row measures every target the agent's committed kernel set covers.
+#
+#   EXP=experiments/golden-bench-2026/compiler_agent_kernels
+#   emmy bench $EXP --filter agent=kernelagent
+#
+# The recipe generates nothing. An LLM-driven kernel generator (KernelAgent, CUDA-L1, an evolutionary
+# search, or a human-driven agent session) is run outside the recipe with its own budget and
+# hardware, and its finished kernels are committed as inputs:
+#   kernels/<agent>/MANIFEST.yaml            generator name, revision, model, budget, date, host GPU
+#   kernels/<agent>/<target>/reference.py    KernelBench-style `Model`, `get_inputs`, `get_init_inputs`
+#                                            transcribed from the target's Torch IR in the common-corpus
+#                                            golden file (same shapes, dtypes, and semantics)
+#   kernels/<agent>/<target>/kernel.py       the generator's `ModelNew` for that reference
+# <target> is the golden target name (`k_linear_reduce_06a42b.975d5314f1c7.s512`), so the Emmy row
+# for the same target replays the committed common-corpus golden through `emmy run --target`.
+# The agent kernel, eager, and Inductor are measured by run_agent_kernels.py with the suite's
+# correctness gate (rtol = atol = 1e-3 against `Model`) and the same CUDA-graph timing method the
+# Neptune lane uses. A target whose reference.py does not match the golden's Torch IR is a broken
+# input and is rejected at review, not here.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/compiler_agent_kernels/recipe.yaml
+    - experiments/golden-bench-2026/compiler_agent_kernels/run_agent_kernels.py
+    - experiments/golden-bench-2026/compiler_agent_kernels/kernels
+    - experiments/golden-bench-2026/kernels/goldens
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    mkdir -p $task_dir/agent $task_dir/emmy $task_dir/logs
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'agent=%s\nstatus=%s\n' "$agent" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$${task_dir}.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    # Task-local search state: the Emmy row replays the committed golden and searches nothing.
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+
+    EXPERIMENT=$repo_dir/experiments/golden-bench-2026/compiler_agent_kernels
+    gpu_short=$$(./venv/bin/python -c 'from emmy.hardware import gpu_short_name; print(gpu_short_name("'"$gpu"'"))')
+    golden=$repo_dir/experiments/golden-bench-2026/kernels/goldens/qwen3-06b_$$gpu_short.yaml
+    agent_dir=$$EXPERIMENT/kernels/$agent
+    test -f "$$agent_dir/MANIFEST.yaml"
+    test -f "$$golden"
+    cp "$$agent_dir/MANIFEST.yaml" $task_dir/
+    find "$$agent_dir" -type f -print0 | sort -z | xargs -0 sha256sum > $task_dir/agent-kernels.sha256
+    sha256sum "$$golden" > $task_dir/golden.sha256
+    nvidia-smi -q > $task_dir/nvidia-smi.txt
+
+    status_file=$task_dir/target-status.tsv
+    printf 'target\temmy_status\n' > "$$status_file"
+    for target_dir in "$$agent_dir"/*/; do
+      target=$$(basename "$$target_dir")
+      if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1800s ./venv/bin/emmy run \
+        --golden "$$golden" --target "$$target" --bench --strict --no-record-nodes \
+        --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
+        --json $task_dir/emmy/$$target 2>&1 | tee $task_dir/logs/emmy-$$target.log; then
+        printf '%s\tok\n' "$$target" >> "$$status_file"
+      else
+        printf '%s\tfailed:%s\n' "$$target" "$$?" >> "$$status_file"
+      fi
+    done
+
+    ./venv/bin/python "$$EXPERIMENT/run_agent_kernels.py" "$$agent_dir" $task_dir/agent \
+      --warmup 10 --iters 100 --rtol 1e-3 --atol 1e-3 2>&1 | tee $task_dir/logs/agent.log
+  result_files:
+    - artifacts.tar.gz
+  timeout: 43200
+
+matrices:
+  - cross:
+      agent: [kernelagent]
+      zip:
+        deploy.gpu:
+          - "NVIDIA GeForce RTX 5090"
+          - "NVIDIA A100 80GB"
+        deploy.gpu_count: 1

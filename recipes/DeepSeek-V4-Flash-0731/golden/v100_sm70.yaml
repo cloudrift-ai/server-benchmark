@@ -86886,8 +86886,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 872.9600012302399
-      reference_us: 478.9760112762451
+      emmy_us: 913.4
+      reference_us: 914.4
       reference_backend: emmy-greedy
 - program: 0
   target:
@@ -87778,8 +87778,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 862.7199828624725
-      reference_us: 478.4640073776245
+      emmy_us: 914.4
+      reference_us: 916.5
       reference_backend: emmy-greedy
 - program: 0
   target:
@@ -88253,8 +88253,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 827.3919820785522
-      reference_us: 477.6960015296936
+      emmy_us: 914.4
+      reference_us: 914.4
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -89145,8 +89145,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 837.6320004463196
-      reference_us: 478.2080054283142
+      emmy_us: 916.5
+      reference_us: 916.5
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -89620,8 +89620,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 863.2319867610931
-      reference_us: 478.2080054283142
+      emmy_us: 914.4
+      reference_us: 916.5
       reference_backend: emmy-greedy
 - program: 2
   target:
@@ -90379,8 +90379,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 828.4159898757935
-      reference_us: 438.01601231098175
+      emmy_us: 915.5
+      reference_us: 915.5
       reference_backend: emmy-greedy
 - program: 2
   target:
@@ -90854,8 +90854,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 873.4719753265381
-      reference_us: 478.7200093269348
+      emmy_us: 915.5
+      reference_us: 916.5
       reference_backend: emmy-greedy
 - program: 3
   target:
@@ -91347,8 +91347,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
     measurements:
-      emmy_us: 823.8080143928528
-      reference_us: 447.2320079803467
+      emmy_us: 912.4
+      reference_us: 912.4
       reference_backend: emmy-greedy
 - program: 3
   target:

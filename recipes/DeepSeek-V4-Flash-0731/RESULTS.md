@@ -118,13 +118,38 @@ therefore ran against the committed inventory rather than a freshly re-derived o
 | Strict decode of every realization | committed file | 279 / 279 |
 | Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0, 3 min 54 s |
 
-### `REDUCE=g2a` was a recorded pessimization, and no longer realizes at all
+### `REDUCE=g2a`: a validator false negative, now fixed and re-measured
 
-Every one of the 9 realizations the golden pinned to `REDUCE=g2a` measured slower than Emmy's own greedy pick, with a
-median ratio of 0.549× against 1.009× for `REDUCE=coop` and 1.425× for the default — about 27.6 ms of recorded but
-avoidable latency. Under the current compiler those pins do not reproduce at all: an exact `--ab` pin reports
-`unreproducible pin: REDUCE=g2a realized (off)`, so the planner silently selects a different schedule and the recorded
-`emmy_us` values for those rows cannot be measured today.
+The nine realizations the golden pinned to `REDUCE=g2a` all recorded worse-than-greedy numbers, and an exact `--ab`
+pin reported `unreproducible pin: REDUCE=g2a realized (off)`, so the row would not bench at all. Neither symptom
+meant what it looked like.
+
+`g2a` decodes as a cross-CTA split of width 2 with atomic finalize, and it does realize: pinning it halves the
+emitted K loop from 16,384 to 8,192, adds the partition axis and closes with `atomicAdd`. What changed is where the
+receipt lives. #539 made a split mint brand-new kernels and had `knob.consume_kernel_row` strip their schedule row,
+so no piece may carry the `g<n>` it came from — `test_split_fresh_kernels` asserts that outright. The partition is
+recorded by the piece's sliced reduce axis, not by a stamp, exactly as a realized `PLACE` cut is. The
+realized-vs-pinned gate reads only stamps, so it saw the pieces' `REDUCE=(off)` and called a realized pin dropped.
+The golden was recorded 2026-08-11, seven days before #539, which is why its rows predate the problem.
+
+The gate now skips the `g<n>` stage the way it already skips `PLACE`, and still gates the rest of the value. With
+that, all eight surviving `g2a` rows bench cleanly (16/16 runs, no unreproducible-pin error) and were re-measured on
+the target GPU. `g2a` and greedy are indistinguishable on every one of them:
+
+| Realization | `g2a` (µs) | greedy (µs) |
+| --- | ---: | ---: |
+| `layer0.i003` | 913.4 | 914.4 |
+| `layer0.i052` | 914.4 | 916.5 |
+| `layer2.i003` | 914.4 | 914.4 |
+| `layer2.i063` | 916.5 | 916.5 |
+| `layer3.i003` | 914.4 | 916.5 |
+| `layer3.i064` | 915.5 | 915.5 |
+| `layer4.i003` | 915.5 | 916.5 |
+| `layer4.i063` | 912.4 | 912.4 |
+
+Each row keeps its `g2a` knobs — the configuration is real and ties with greedy — and carries the slowest of its two
+runs on each side. Across the file, realizations materially slower than greedy fall from 41 to 11, and the remaining
+eleven are sub-microsecond pointwise kernels.
 
 ### Tuning: equal-budget hybrid versus MCTS-only
 
@@ -155,11 +180,9 @@ The hybrid proposal wins decisively on the one target with real headroom — 2.8
 and use the cooperative reduce with a thread work inventory. It is promoted into the golden with its two O3
 measurements.
 
-The eight `k_linear_reduce_f6a146` realizations are deliberately **not** repinned. Greedy already beats every
-searched and proposed candidate there by roughly 2.7×, and pinning greedy's own displayed knobs (`TILE=f2x2,
-WORK=t16x8`) measures 1,641 µs against greedy's 909 µs at a different grid — so no knob spelling in this schema
-faithfully records what greedy actually does. Their recorded `g2a` knobs remain unreproducible and should be
-re-derived by a compiler-side fix rather than hand-edited.
+The eight `k_linear_reduce_f6a146` realizations keep their `g2a` knobs. No searched or proposed candidate beat
+greedy there, and once the validator fix let the incumbent bench, `g2a` measured as a tie with greedy on all
+eight — so the recorded configuration stands and only its stale measurements needed refreshing.
 
 ### Reproducing the compiler work
 

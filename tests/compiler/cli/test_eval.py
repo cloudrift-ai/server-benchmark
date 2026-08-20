@@ -776,11 +776,13 @@ def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
         gpu_name="NVIDIA GeForce RTX 4090",
         compute_cap=(8, 9),
     )
+    from emmy.compiler.pipeline.search.golden_eval import Ranked
+
     seen: list = []
 
     def fake_evaluate_record(record, ctx):
         seen.append(ctx)
-        return dict(record.knobs), 0, 1, 0
+        return Ranked(dict(record.knobs), 0, 1, 0)
 
     monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
     monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_record", fake_evaluate_record)
@@ -820,7 +822,7 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
         ctx = Context.from_target(cap, gpu_name=gpu)
 
     def enumerated_row(graph):
-        rows = enumerate_graph(graph.copy(), ctx)
+        rows = enumerate_graph(graph.copy(), ctx).rows
         return stamp_schedule_families(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
 
     def records(graph, name, entries):

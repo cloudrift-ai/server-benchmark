@@ -77,15 +77,25 @@ across every SITE of the term. The kernel's ONE worker inventory is chosen FIRST
 that fixed context:
 
 ```
-enumerate(term) = [ r for view in views(term)                        # the derived views (collapse / monoid)
-                      for work in inventories(term)                  # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
-                      for r in rows(root_site(view), work) ]
-rows(site, work) = [ merge(v, *child_rows)                           # spelled through ops.Sched.key, site-local
-                     for v in values(site, work)                     # the domain: search/space.py, RESOLVED vs work
+space(term)      = [ segment(view, work) for work in inventories(term)   # w<M>x<N>[+p<n>] | t<N>[x<M>] | ""
+                                         for view in views(term) ]       # the derived views (collapse / monoid)
+segment(v, work) = rows(root_site(v), work) x stages x rasters(v)        # a rectangle: rows, then two free axes
+rows(site, work) = [ merge(b, *child_rows)                               # spelled through ops.Sched.key, site-local
+                     for b in blocks(site, work)                         # the domain: search/space.py, RESOLVED vs work
                      for child_rows in product(rows(c, work) for c in children(site))
-                     if legal(site, v, child_rows) ]
-fork = build_fork_tree(rows, levels=[WORK, *site keys, RASTER], materialize=…)
+                     if legal(site, b, child_rows) ]
+fork = build_fork_tree(list(space), levels=[WORK, *site keys, RASTER], materialize=…)
 ```
+
+**The pool is a SPACE, not a list** (`lowering/tile/_pool.py`). A site offers BLOCKS — one rectangle per assignment
+of everything but `STAGE`, crossed with the stages legal for it — because legality never reads the transport:
+`_work_holds` and the row union see the resolved tiles and the cooperative width alone, so `STAGE` and the
+kernel-global `RASTER` multiply through the filter unconditionally. A row therefore stands for
+`width x len(rasters)` candidates rather than one, the validation runs once per legal `(TILE, REDUCE)` assignment
+(~10k instead of ~122k on a static f16 square matmul), and the exact candidate count is a prefix-sum lookup that
+builds nothing. `PoolSpace` reads that structure two ways — iterate every member, or address member *i* — through
+ONE spelling function, so the two cannot drift; `MAX_ROWS` is asked of the size, before the first candidate dict
+exists.
 
 **`WORK` leads because the codec says so**: `TilePlan.parse(spec, work)` and `ReducePlan.parse(spec, work)` read a
 value's unit widths and coop width OFF the inventory, so the dependency runs work → slice. Fixing it at the root also
@@ -98,10 +108,12 @@ candidate is simply not in `values(site, work)`".
 pipeline re-runs this rule per trajectory — pay one enumeration. The cache sits BELOW the search policies (greedy and
 MCTS share hits without knowing it exists) and holds no ranking and no evidence — only the views re-bind per op,
 so materialization always stamps against that op's own placement and stores. The key folds in the two inputs op
-identity deliberately excludes — the symbolic-axis hints and the live schedule pins — and the ctx facts ride the
-cache's home: one `Context`, one fact set. Pool rows are read-only mappings; they carry no resolved slices and no
-view ownership, so a shared pool cannot be corrupted by one consumer for another — materialization re-resolves
-every slice from the row's own spellings.
+identity deliberately excludes — the symbolic-axis hints and the live schedule pins — plus `ctx.pool_sample`, and
+the ctx facts ride the cache's home: one `Context`, one fact set. The sample belongs in the KEY rather than merely
+on the Context because `dataclasses.replace` SHARES the session cache: a sampled Context and the live one it was
+derived from sit on one memo, so a Context-only flag would let a sampled pool reach a live compile. Pool rows are
+read-only mappings; they carry no resolved slices and no view ownership, so a shared pool cannot be corrupted by one
+consumer for another — materialization re-resolves every slice from the row's own spellings.
 
 **No site builds `TileOp`s directly, and no term shape gets its own path.** The product over sites is what lets a
 term whose operand is a NODE rather than a `Load` be scheduled at all: a materialized operand is not a site, so its
@@ -164,7 +176,7 @@ derivation changes the SITE SET, because that is what a product cannot absorb. T
 (`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); two do, mutually exclusive by shape, so
 a term has at most TWO views (`_schedule._views`):
 
-- the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
+- the MONOID-producer composition (`_classify.fused_view`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
   the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
   contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too. The statistic's CARRIER is not
@@ -243,8 +255,8 @@ layout rules that drift apart) and silently narrows coverage to the shapes someo
 
 How to comply:
 
-- **Write the rule per element, not per shape.** Example: `lowering/tile/_atomize.map_cone` /
-  `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
+- **Write the rule per element, not per shape.** Example: `lowering/tile/_classify.bind_bilinear` /
+  `fused_view` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side decode cone) is covered for free.
@@ -295,32 +307,78 @@ re-enumerates, so two rules' batches interleave — measured, the same predicate
 at 6.006 GiB because the compute producer still reached the open product first. A pass is left only once it is
 quiescent.
 
+**Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
+splits one of the kernel's output axes into a nest of two (an attention projection's
+`view(batch, seq, heads, head_dim)` carves N into heads × head_dim), leaving the operand loads addressing the
+original axis through a composite index (`wt[k, h*D + d]`). Downstream that split is an eligibility lockout,
+not a slowdown: contraction binding reads the trailing free-axis pair as `(m, n)`, so the split kernel binds
+the wrong row, the weight load carries a third grid axis, and the warp/mma tiers are never enumerated — no
+search budget can reach a schedule family that does not exist. The canonicalization re-fuses a free pair via
+the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the result only
+when every access folds clean: operand composites collapse to the bare fused axis (the `(f/Q)·Q + f%Q → f`
+recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
+split-store spelling — `[…, f/Q, f%Q]` when the buffer's row-major flatten folds it back to an affine address,
+or the permuted `[…, f/Q, …, f%Q]` of a transposed output. The pair need not be adjacent: free loops are
+parallel, so the perfectly-nested free loops between them (the `transpose(1, 2)` every attention projection
+fuses after its view puts `seq` between `heads` and `head_dim`) interchange outward and the fused axis takes
+the inner loop's place. Any surviving residue elsewhere (an axis addressed alone, a predicate over the pair)
+declines the pair and the nest stands. Split and unsplit spellings of one contraction thereby converge to ONE
+canonical nest — one kernel identity, one shape key, one golden family.
+
+It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
+fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
+check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cut pieces
+minted at splice time, where re-fusing axes would fight the scheduler or re-spell a fragment whose `PLACE`
+seam was recorded against the unfused nest. And canonicalizing a producer that still awaits a merge could
+re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
+`loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
+
+The consumers that had assumed "one output axis per buffer dim" were generalized with it, all on one
+reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's
+output-ordering positions an axis at that dim (under the permuted store the quotient dim sits outside another
+axis entirely, and positioning there would make the fused axis the row and the stride-`Q` axis the column);
+the mma `RegStore`'s auto row stride derives from the store template's innermost M-carrying dim (`row_dim`)
+instead of assuming the inner extent; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
+and `080_vectorize_stores` re-reads a run its per-dim matching declines by the row-major flat address when a
+div/mod residue is present, so a row-major split store keeps its vectorized transactions (the permuted one
+stores scalar on the scalar tiers — exact, unvectorized). The warp tier's fragment store evaluates the cell
+base once per atom and adds `col` / `row · ldm` across it, so a split pair is mma-addressable only when the
+row-major flatten recomposes it, or when the `%` dim is the innermost carrier (contiguous for `n`) with `Q` a
+multiple of the atom extent — an aligned atom never straddles a `Q` boundary. That is the `warp_split_store`
+legality predicate: dropped by the unpinned catalog, raised on a pin, like every other tile gate; the scalar
+tiers, which evaluate every element's index, are always exact.
+
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
-Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading (`_fromloop.fold_from_loop`
-— a reduce `Loop` interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling) and the
-⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)` facts, shared
-by both contraction binders). The online-softmax pairing states its condition on λ-fold results; contraction CANDIDACY
-(`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates every operand shape
-(direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition binds its channels through
-the same lift reading. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
-recognition step holds a private stmt-pattern reading of the algebra.
+Recognition is TWO phases with exactly TWO shared readings. The TOTAL LIFT (`_lift.recognized_tile`) turns any
+loop nest into a Fold tree through the ONE loop→term parser (`_fromloop.fold_from_loop` — a reduce `Loop`
+interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling; a declined loop stays a
+verbatim raw subtree). CLASSIFICATION (`_classify`) then rewrites the tree, each stage's condition stated on `Fold`
+fields: the online-softmax pairing on `component_ops` canons and α-equal score cones; the contraction binding
+(`bind_bilinear` — the semiring ⊗ read: one shared two-arg product distributing over the carrier's one
+commutative-monoid ⊕, by the `ElementwiseImpl` traits, never op names) arbitrating every operand shape (direct
+loads, hoistable k-invariant factor chains, computed cones), with role purity checked per index EXPR — another
+free axis may ride a separate dim of an operand load (a batch offset the grid absorbs) but never the same expr
+as the role axis, since that composite has no slab address and must decline instead of reaching an emitter
+that cannot spell it; the monoid composition (`fused_view`) binding its
+channels through the same read. A stage that declines rewrites nothing — the fold already derives PLANAR
+structurally. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
+classification stage holds a private stmt-pattern reading of the algebra.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
-option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
-RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
+the tile IR already holds. Classification (`lowering/tile/_classify.py`) resolves the algebra→hardware-atom binding
+once at RECOGNIZE time (`bind_bilinear` on the lifted fold; `fused_view` for the composed edge) and feeds it into the
 contraction-shaped `Fold`, so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping zero-axis fold's `lift` — its one
 home). Resolving it before the schedule means an atom that **cannot** be
-bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never gets built in the bilinear shape: its
-loads stay INLINE in a fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
+bound (e.g. a non-`Load` operand — a computed-cone / demoted matvec) never gets built in the bilinear shape: its
+loads stay INLINE in the fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
 failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
-  (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
+- a bilinear cell → the `(a, b, acc, projection)` operand→role facts
+  (`_classify.bind_bilinear`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`_atomize.make_cone`
+  has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`ir/tile/ops.make_cone`
   — a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is ONE `Fold` in the
   BILINEAR shape (`Fold.contraction` builds it, `is_contraction` / `Fold._contraction` read it back — a predicate and
@@ -350,7 +408,7 @@ failing several passes later:
   a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
   decode cone's scale from the kernel). A **storage decode times k-invariant multiplicative factors** chain — a
   decode of the (n, k) load ⊗ factors constant along the reduce axis — binds through the **mul-hoist**
-  (`_atomize._hoist_k_invariant_factors`):
+  (`_classify._hoist_factors`):
   the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
   reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
   bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
@@ -365,7 +423,7 @@ failing several passes later:
   declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
   the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
   codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
-  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**
@@ -415,7 +473,8 @@ failing several passes later:
   conflicts / 82.5 M LSU inst on the 5090; the swizzle + vector fill store recovered -29% (std) / -41% (fm).
   Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
-  binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting zero-axis fold
+  derives on demand too (`_classify.fused_view`, structure-only — the schedule and the golden decode re-derive the
+  same reading): a projecting zero-axis fold
   over a per-row statistic — `PLANAR` (rms/mean) or `TWISTED` (the online-softmax `(m, d)` pair, which is what makes
   a fused `softmax(S)·V` region this shape) — whose tail is one or more ⊗-folds of one shared A value nodifies to
   `Fold.projection(fn=projection, operands=(fold,))` — over ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each
@@ -592,7 +651,7 @@ touched — and the doubly-split partial drops off the mma tier.
 sound cosmetic are therefore load-bearing. The partition axis is spelled with a LEADING UNDERSCORE
 (`_factor_k`, `_slice_loop`'s `_ksplit`) because `normalize_body`'s `canonicalize_free_axis_order` sorts the outer
 free-loop chain by axis NAME: sorted below the row / column axes it must dominate, `hoist_loop_invariants` sinks the
-partition between the column sweep and the K fold, where `bind_prologue_contraction` cannot parse it and the piece
+partition between the column sweep and the K fold, where `fused_view` cannot parse it and the piece
 loses its computed-A binding. And the twisted extractors compare their regenerated `exp_merge` to the body
 **up to SSA temp names** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the generator's own temps
 the moment a term touches the loop dialect, so a raw byte compare would reject the α-equivalent program and lose
@@ -650,9 +709,9 @@ routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut
 OLD piece shapes' keys and are re-seeded rather than joined).
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
-is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable, so a nested
-contraction reached through a composed fold binds through the same path — a tier is a node gaining a `TilePlan`,
-never a new path.
+is the plain scalar fma cell). The contraction binder (`bind_bilinear`) reads any lifted fold, so a nested
+contraction reached through a composed edge binds through the same path (`_bound_producer`) — a tier is a node
+gaining a `TilePlan`, never a new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those

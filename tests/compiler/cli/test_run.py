@@ -1486,3 +1486,34 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
     assert pinned["timing_semantics"] == "whole_program_e2e"
     assert pinned["captured"] is True
     assert pinned["num_launches"] == 2
+
+
+def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatch):
+    """A realized cross-CTA ``REDUCE`` split leaves no knob stamp, so the gate must not read one.
+
+    ``030_split_reduce`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
+    schedule row, so no piece may carry the ``g<n>`` it came from — ``test_split_fresh_kernels``
+    asserts exactly that. The receipt is the piece's sliced reduce axis, which knob stamps cannot
+    show, so a ``g2a`` pin that DID realize used to be reported ``realized (off)`` and its row went
+    unbenched. What the pieces still stamp is the rest of the row, and that stays gateable.
+    """
+    from emmy.compiler.pipeline import knob as knob_mod
+    from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    monkeypatch.setattr(
+        knob_mod,
+        "_REGISTRY",
+        {"REDUCE": Knob("REDUCE", KnobType.STR, off=""), "WORK": Knob("WORK", KnobType.STR, off="")},
+    )
+
+    # Wholly structural: the whole value is the cross-CTA stage, so there is nothing left to gate.
+    assert unreproducible_pin_flag({"REDUCE": "g2a"}, [{"REDUCE": "", "WORK": "t16x8"}]) is None
+    assert unreproducible_pin_flag({"REDUCE": "g4k"}, [{"REDUCE": "", "WORK": "t16x8"}]) is None
+    # The remainder is still gated: ``coop`` is stamped by the piece that realizes it.
+    assert unreproducible_pin_flag({"REDUCE": "g2k/coop"}, [{"REDUCE": "coop"}]) is None
+    flag = unreproducible_pin_flag({"REDUCE": "g2k/coop"}, [{"REDUCE": ""}])
+    assert flag is not None and "REDUCE=g2k/coop" in flag
+    # A value with no cross-CTA stage is unaffected — the old behaviour stands.
+    assert "unreproducible pin" in unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": ""}])
+    assert unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": "coop"}]) is None

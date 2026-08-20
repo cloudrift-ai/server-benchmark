@@ -811,7 +811,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
-    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))))
+    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))).rows)
     assert rows, "the trellis linear must offer a compute-filled warp lane"
     offered = {str(r.get("REDUCE", "")) for r in rows}
     assert any(s.startswith("g") for s in offered), offered

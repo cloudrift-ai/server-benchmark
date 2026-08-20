@@ -130,7 +130,7 @@ class ElementwiseImpl:
     _SEMIRING: dict[str, frozenset[str]] = {"add": frozenset({"multiply"})}
     # Storage-decode ops — op name → the bits-carrier storage dtype token the op is
     # the decode cast for. This is the trait the tile binding arm (the k-invariant
-    # factor hoist, ``_atomize``) keys on instead of op-name lists: a new storage
+    # factor hoist, ``_classify``) keys on instead of op-name lists: a new storage
     # format registers its decode op here (one ``_NAME_TO_FN`` entry + one row)
     # and the binding arm covers it without change.
     _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}

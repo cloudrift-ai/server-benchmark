@@ -70,7 +70,7 @@ from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body, opera
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ops import chain_edge
+from emmy.compiler.ir.tile.ops import chain_edge, same_score_cone, split_invariant_factors
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -87,7 +87,6 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     sync_stat_fill,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import same_score_cone, split_invariant_factors
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -137,6 +136,18 @@ def _wrap(side: Side, coord: Expr) -> Expr:
     return BinaryExpr("%", coord, side.ext) if side.mask else coord
 
 
+def _row_dim(index: tuple, m_name: str) -> int | None:
+    """The INNERMOST output-index position carrying the M (row) coordinate — read off the pre-σ
+    ``Write`` template, where the row is still the ``m`` axis Var. ``RegStore`` derives its auto
+    ``ldm`` (the fragment row stride) from this dim's trailing extents. The innermost occurrence
+    is the one whose stride IS ``∂addr/∂m``: a re-fused split store spells the row as
+    ``[…, m/P, m%P, …]``, and the recomposition that makes the flat address affine in ``m``
+    gives it exactly the ``m%P`` dim's stride as coefficient. An N-side split (``[…, m, n/Q,
+    n%Q]``) has one m dim either way, whose trailing extents span the whole fused N."""
+    dims = [d for d, e in enumerate(index) if m_name in e.free_vars()]
+    return dims[-1] if dims else None
+
+
 def _cells(mn: tuple, offset, i: int, j: int):
     """Yield ``(side, cell-base coord)`` for each present output axis of register cell ``(i, j)`` —
     ``(m, offset[0].base(i))`` then ``(n, offset[1].base(j))`` (``m`` skipped for a 1-D output)."""
@@ -147,12 +158,17 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
 def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
-    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for a dim varying with the output row /
-    col axis, else ``"fixed"`` (batch / grid literal — uniform across the fragment cell)."""
-    roles = []
-    for e in index:
-        fv = e.free_vars()
-        roles.append("m" if m_name in fv else "n" if n_name in fv else "fixed")
+    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for the dim the output row / col axis moves
+    within the fragment cell, else ``"fixed"`` (batch / grid literal — uniform across the cell).
+    Only the INNERMOST dim carrying an axis moves (the same reading as :func:`_row_dim`): a
+    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]``, and within an atom the
+    quotient dim is uniform — giving both dims the role would add the lane offset at two
+    strides."""
+    roles = ["fixed"] * len(index)
+    for role, name in (("n", n_name), ("m", m_name)):
+        dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+        if dims:
+            roles[dims[-1]] = role
     return tuple(roles)
 
 
@@ -1916,6 +1932,7 @@ class _MmaOps(_AtomOps):
                     atomic=by_acc[acc].atomic,
                     swizzle=by_acc[acc].swizzle,
                     fragment_layout=atom.fragment_layout,
+                    row_dim=_row_dim(by_acc[acc].index, m.axis.name),
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -1935,6 +1952,7 @@ class _MmaOps(_AtomOps):
                 atomic=write.atomic,
                 swizzle=write.swizzle,
                 fragment_layout=atom.fragment_layout,
+                row_dim=_row_dim(write.index, m.axis.name),
             )
         ]
 
@@ -2070,9 +2088,11 @@ def _atom_ops(
         and (t := inputs.get(c.a.input)) is not None
         and t.dtype != tile.atom.operand_dtype("a")
     ):
-        from emmy.compiler.pipeline.passes.lowering.tile._atomize import make_cone  # noqa: PLC0415 — decode-boundary import
+        from emmy.compiler.ir.tile.ops import make_cone  # noqa: PLC0415 — decode-boundary import
 
-        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels)
+        # Rebuilds thread the node's OWN semiring — never the constructor default.
+        mul, plus = c.semiring
+        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels, product=mul, fold_op=plus)
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
 

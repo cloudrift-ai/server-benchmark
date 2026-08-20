@@ -9,11 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-from emmy import gpu as gpu_registry
+import yaml
+
 from emmy.recipe.catalog import (
     HF_ID,
     create_recipe_stub,
-    deployment_setups,
     recipe_catalog,
     validate_model_heat,
     validate_stub_deployments,
@@ -161,18 +161,6 @@ def _retain_best_effort(decision: dict, records: dict[str, dict]) -> dict:
     return {"model_id": model_id, "rationale": _existing_rationale(records[model_id]), "heat": decision["heat"]}
 
 
-def _deployment_footprints(config: dict) -> tuple[int, ...]:
-    """Return total physical VRAM in MiB for every known deployment variant."""
-
-    footprints = []
-    for setup in deployment_setups(config):
-        spec = gpu_registry.by_name(setup["deploy.gpu"])
-        if spec is None or spec.vram_mib is None:
-            continue
-        footprints.append(spec.vram_mib * setup["deploy.gpu_count"])
-    return tuple(footprints)
-
-
 def _serving_capacity(config: dict) -> tuple[object, object]:
     llm = (config.get("engine") or {}).get("llm") or {}
     return llm.get("context_length"), llm.get("max_concurrent_requests")
@@ -215,9 +203,6 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
             existing_task = (config.get("model") or {}).get("task", "generate")
             if candidate["task"] != existing_task:
                 raise ValueError(f"Existing onboarding model {model_id} must retain task {existing_task!r}")
-            existing_deployments = validate_stub_deployments(config.get("matrices"), model_id)
-            if normalized_deployments != existing_deployments:
-                raise ValueError(f"Existing onboarding model {model_id} must retain its deployment matrix")
         candidate_ids.add(model_id)
         normalized_candidates.append(
             {
@@ -267,16 +252,6 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
         model_task = (records[model_id]["config"].get("model") or {}).get("task", "generate")
         replacement_task = (records[replacement]["config"].get("model") or {}).get("task", "generate")
         if model_task != replacement_task:
-            best_effort.append(_retain_best_effort(decision, records))
-            continue
-        model_footprints = _deployment_footprints(records[model_id]["config"])
-        replacement_footprints = _deployment_footprints(records[replacement]["config"])
-        if not model_footprints or not replacement_footprints:
-            best_effort.append(_retain_best_effort(decision, records))
-            continue
-        model_min = min(model_footprints)
-        replacement_min = min(replacement_footprints)
-        if replacement_min > model_min:
             best_effort.append(_retain_best_effort(decision, records))
             continue
         if "comparable" in decision["rationale"].casefold():
@@ -354,11 +329,25 @@ def _replace_model_metadata(text: str, rationale: str, heat: int) -> str:
     return "".join(lines)
 
 
-def _set_lifecycle(record: dict, lifecycle: str, rationale: str, heat: int) -> bool:
+def _replace_matrices(text: str, deployments: list[dict[str, object]]) -> str:
+    lines = text.splitlines(keepends=True)
+    start = next((index for index, line in enumerate(lines) if line.startswith("matrices:")), None)
+    if start is None:
+        raise ValueError("Onboarding shell is missing its matrices block")
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end].startswith((" ", "\t", "-"))):
+        end += 1
+    lines[start:end] = [yaml.safe_dump({"matrices": deployments}, sort_keys=False, width=116)]
+    return "".join(lines)
+
+
+def _set_lifecycle(record: dict, lifecycle: str, rationale: str, heat: int, deployments: list | None = None) -> bool:
     path = record["path"]
     before = path.read_text()
     after = _replace_tag_block(before, _tags_with_lifecycle(record["tags"], lifecycle))
     after = _replace_model_metadata(after, rationale, heat)
+    if deployments is not None:
+        after = _replace_matrices(after, deployments)
     if before == after:
         return False
     path.write_text(after)
@@ -439,7 +428,16 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
         changed = _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG, decision["rationale"], decision["heat"]) or changed
     for candidate in manifest["onboarding_models"]:
         if candidate["model_id"] in records:
-            changed = _set_lifecycle(records[candidate["model_id"]], ONBOARDING_TAG, candidate["rationale"], candidate["heat"]) or changed
+            changed = (
+                _set_lifecycle(
+                    records[candidate["model_id"]],
+                    ONBOARDING_TAG,
+                    candidate["rationale"],
+                    candidate["heat"],
+                    candidate["deployments"],
+                )
+                or changed
+            )
         else:
             create_recipe_stub(
                 workspace / "recipes",

@@ -161,6 +161,12 @@ independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
 
+`run --golden PATH` without `--target` replays every embedded target in one process. It parses and validates the
+document once and hands that object to each target's resolution step, because a whole-model inventory is large
+enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
+15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
+read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
+
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
 per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
@@ -631,6 +637,21 @@ realized merge count is therefore an output of the run — the header's `cases` 
 merged, and every `per_golden` row carries `positives`, so a case count that dropped against an earlier fit says why
 instead of looking like lost data. A golden whose signature matches no row in its pool is unchanged: it is skipped
 and counted per card as `unranked`.
+
+**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
+that many candidates per pool while the pool is still an addressable space, before a candidate dict exists —
+the corpus is millions of rows and tens of gigabytes otherwise, and one golden's pool alone is past the
+scheduler's materialization budget, so an unsampled `--data golden` fit does not finish. The draw is a pure
+function of `(pool size, N, --seed)` and never looks at a row, so a refit of the same corpus is byte-identical
+and two goldens over one pool still retain identical rows and still merge into one case. Every recorded
+config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
+always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the
+draw with the true pool size beside them (`per_golden` carries both `pool` and `sampled`), never scaled: a
+sample's rank resolution floor is `pool / N`. The setting is recorded in the metrics header and the artifact
+provenance, so two fits are only comparable when it matches. `catboost`'s `--negatives` is a SECOND uniform
+draw from whatever pool it is handed, and a uniform draw from a uniform draw is a uniform draw from the
+original — the two nest by construction, and the trainer warns when `--negatives` reaches the size of the
+pools it is given and therefore selects nothing.
 
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in

@@ -1,6 +1,7 @@
 """Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, used to
 construct σ-tiled load/store indices in the lowering passes (`enumeration/_build` warp-tier σ-tiling,
-`assembly/_assemble` carrier realization), plus `gmem_axis_step` / `gmem_row_stride` — how a gmem
+`assembly/_assemble` carrier realization), plus `split_pair` — the re-fused split-store spelling of an
+axis across two buffer dims — and `gmem_axis_step` / `gmem_row_stride` — how a gmem
 `Load`'s flat address moves along one axis, the row step (`ldm`) a fragment loader reads off the
 index and buffer shape and the contiguity its columns need, plus `BYTE_SLAB_PAD` — the smem row pad
 a cp.async-staged byte slab carries. Generic Expr / addressing algebra — no flash / attention /
@@ -233,3 +234,18 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
         elif e != flat:
             return None  # the coordinates delinearize DIFFERENT expressions — not one reshape
     return flat
+
+
+def split_pair(index: tuple, name: str) -> int | None:
+    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one ``name // Q`` and one
+    ``name % Q`` (the split-store spelling a re-fused axis reaches a buffer with, in either dim
+    order), else ``None``."""
+    carrying = [e for e in index if name in e.free_vars()]
+    if len(carrying) != 2:
+        return None
+    parts: dict[str, int] = {}
+    for e in carrying:
+        if not (isinstance(e, BinaryExpr) and e.op in ("//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
+            return None
+        parts[e.op] = int(e.right.value)
+    return parts["//"] if set(parts) == {"//", "%"} and parts["//"] == parts["%"] else None

@@ -111,6 +111,15 @@ class CatBoostTrainer:
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
         sampled = [self._uniform(len(m), g.pinned, rng) for m, g in zip(pools, groups, strict=True)]
+        inert = sum(1 for s, m in zip(sampled, pools, strict=True) if len(s) >= len(m) - 1)
+        if inert:
+            logger.warning(
+                "--negatives %d is inert on %d of %d pools: they are no larger than the draw, so every row is a "
+                "negative and the setting selects nothing there",
+                self.negatives,
+                inert,
+                len(pools),
+            )
 
         model = self._fit_once(pools, groups, sampled)
         ranks = self._ranks(model, pools, groups)
@@ -135,7 +144,13 @@ class CatBoostTrainer:
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
         """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
-        contribute every row they have rather than being padded with duplicates."""
+        contribute every row they have rather than being padded with duplicates.
+
+        This is a SECOND-STAGE draw: the pool it is handed may itself already be a uniform sample of a
+        larger one (``emmy fit --pool-sample``), and a uniform draw from a uniform draw is a uniform draw
+        from the original - so the two nest by construction and neither needs to know about the other.
+        What that also means is that ``--negatives`` goes inert once it reaches the size of the pool it
+        is given, which the caller reports rather than leaving to be inferred from a flat rank table."""
         others = np.delete(np.arange(n), list(pinned))
         if len(others) <= self.negatives:
             return others

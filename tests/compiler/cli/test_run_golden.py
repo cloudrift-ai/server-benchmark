@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.commands import run as run_mod
 
 
@@ -120,3 +122,47 @@ def test_strict_result_requires_every_requested_exact_row():
     errors = run_mod._strict_benchmark_errors(args, {"Emmy": 10.0}, bench, True, proof, [])
 
     assert "expected 1 exact --ab row(s), got 0" in errors
+
+
+def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
+    """A whole-model inventory must not be re-read and re-validated per target."""
+    from emmy.compiler.pipeline.search import golden
+
+    loads = []
+    document = {"configs": []}
+    monkeypatch.setattr(golden, "load_golden_file", lambda _path: loads.append(_path) or document)
+    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [SimpleNamespace(name=name) for name in ("a", "b", "c")])
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert len(loads) == 1
+    assert [args._golden_document for args in calls] == [document] * 3
+
+
+def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, tmp_path):
+    """With a document supplied, resolution must not touch the file at all."""
+    from emmy.commands import compile as compile_mod
+    from emmy.compiler.pipeline.search import golden
+
+    def _explode(_path, **_kwargs):
+        raise AssertionError("load_golden_file must not be called when a document is supplied")
+
+    monkeypatch.setattr(golden, "load_golden_file", _explode)
+    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [])
+
+    args = SimpleNamespace(
+        golden="missing",
+        golden_file=str(tmp_path / "absent.yaml"),
+        _golden_document={"configs": []},
+        input=None,
+        code=None,
+        ir=None,
+        dynamic=None,
+    )
+    # No record matches "missing", so resolution exits 2 — reaching that exit proves it
+    # resolved against the supplied document instead of reading the absent file.
+    with pytest.raises(SystemExit) as excinfo:
+        compile_mod.resolve_golden_arg(args)
+    assert excinfo.value.code == 2

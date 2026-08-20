@@ -956,16 +956,30 @@ def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
         torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
 
+def _dynamic_fp8_activation_hook(_module, args):
+    """Eager mirror of the spelled dynamic fp8 activation algebra
+    (``quant.py::_spell_dynamic_activation``): per-row amax with a 1e-12 floor, scale to the
+    e4m3 finite max, round-trip through fp8 bits."""
+    (x,) = args
+    scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 448.0
+    return ((x / scale).to(torch.float8_e4m3fn).float() * scale,)
+
+
 def _run_e2e(tmp_path, config, ref_sd):
     """Compile the traced quantized model on the CUDA backend, bind computed buffers from the
     wrapper and every checkpoint tensor through the safetensors loader (bits + scales for the
     in-graph cone and plain reads for the rest), and return
-    ``(emmy_logits, ref_logits, compiled)``."""
+    ``(emmy_logits, ref_logits, compiled)``. When the checkpoint declares dynamic fp8
+    activations, the eager reference applies the same activation quantization on every
+    coded projection, matching the algebra the trace spells in-graph — the pure dequantized
+    model would differ by the inherent activation rounding (~1e-2 on these logits), which is
+    not a backend error."""
     import transformers
 
     from emmy.commands.compile import _trace_model
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import _dynamic_activation_declaration, _fp8_quant_config
 
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
     backend = CudaBackend()
@@ -984,6 +998,12 @@ def _run_e2e(tmp_path, config, ref_sd):
 
     ref_model = transformers.AutoModelForCausalLM.from_config(config).float().eval()
     ref_model.load_state_dict(ref_sd)
+    enabled, fmt = _dynamic_activation_declaration(_fp8_quant_config(tmp_path))
+    if enabled:
+        assert fmt == "f8e4m3", f"the hook mirrors e4m3 only, checkpoint declares {fmt}"
+        for name, module in ref_model.named_modules():
+            if isinstance(module, torch.nn.Linear) and ".layers." in name:  # the fp8-stored projections
+                module.register_forward_pre_hook(_dynamic_fp8_activation_hook)
     with torch.no_grad():
         ref_logits = ref_model(input_ids=ids).logits.numpy()
     return emmy_logits, ref_logits, compiled
@@ -1000,7 +1020,8 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
     compiled on the CUDA backend with the dequant cone unconditionally in-graph: fp8 bits stay
-    compressed in device memory, and the output matches the dequantized eager reference."""
+    compressed in device memory, and the output matches the eager reference running the same
+    dequant + dynamic-activation algebra."""
     config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
     assert _f8_constants(compiled), "no fp8-dtype constant survived to the compiled graph — the cone did not stay in-graph"

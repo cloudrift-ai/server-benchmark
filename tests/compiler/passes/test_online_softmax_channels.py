@@ -1,14 +1,15 @@
 """The N-channel online-softmax pairing — expectation channels joining the ``(m, d)`` pair.
 
-Unit tests for the generalized pairing in ``lowering/tile/_softmax.py``: the ``(m, d)`` pair
-alone keeps its historical byte-exact spelling; a same-extent additive fold whose lifted value
-is (the pair's per-element weight) × (a value cone) joins the SAME twisted loop as an expectation
-channel, with any loop-invariant multiplicative factor split off (``Σ c·x = c·Σ x``) and
-multiplied back after the loop; a foreign fold declines; the fused-matmul spelling (channels
-inside a free output sweep) sinks the pair into the sweep; and the emitted body round-trips
-``fold_from_loop`` byte-identically. The fusion pass's readable-seam refusal is exercised in
-lockstep: the merged softmax·V region now splices while other multi-statistic entanglements
-still refuse. Numeric equivalence of the merged region is pinned via ``NumpyBackend``.
+Unit tests for the tree-native pairing in ``lowering/tile/_classify.pair_softmax``: the ``(m, d)``
+pair builds ONE TWISTED fold whose DERIVED loop is the historical dissolved spelling; a
+same-extent additive fold whose lifted value is (the pair's per-element weight) × (a value cone)
+joins the SAME carrier as an expectation component, with any loop-invariant multiplicative factor
+split off (``Σ c·x = c·Σ x``) and multiplied back in the projection body; a foreign fold
+declines; the fused-matmul spelling (channels inside a free output sweep) keeps the pair as the
+sweep's per-row statistic, bound by the fused computed-A view; and the built fold's derived loop
+re-lifts to the same node (the closure the cut/split pieces rely on). The fusion pass's
+readable-seam refusal is exercised in lockstep. Numeric equivalence of the merged region is
+pinned via ``NumpyBackend``.
 """
 
 import numpy as np
@@ -23,11 +24,24 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.ir.pure.carrier import exp_merge
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.ir.stmt.leaves import ElementwiseImpl
+from emmy.compiler.ir.tile.ops import split_invariant_factors
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._softmax import _fuse, split_invariant_factors
+from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view, pair_softmax
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, _stamp_axes, fold_from_loop
+from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+
+def _paired(*stmts):
+    """Lift each sibling reduce loop, wrap in the projection, pair — the classify read over a
+    hand-built region (pure stmts stay in the projection body)."""
+    folds = tuple(fold_from_loop(_stamp_axes(s)) for s in stmts if isinstance(s, Loop))
+    assert all(f is not None for f in folds), "every sibling must lift"
+    body = tuple(s for s in stmts if not isinstance(s, Loop))
+    return pair_softmax(Fold.projection(body=Body.coerce(body), operands=folds))
+
 
 # --------------------------------------------------------------------------------------------
 # Fixtures — the merged loop-IR spelling the fusion pass produces for softmax(·V).
@@ -83,17 +97,21 @@ def _recip() -> Assign:
 
 
 def test_pair_alone_keeps_the_md_spelling() -> None:
-    fused, changed = _fuse(Body.coerce(_pair()))
-    assert changed
-    (loop,) = list(fused)
+    node = _paired(*_pair())
+    (tw,) = node.operands
+    assert tw.role is AxisRole.TWISTED
+    assert tw.lift.results == ("in0", 1.0) and tw.combine.results == ("acc0", "acc1")
+    assert tw.init == (ElementwiseImpl("maximum").identity, 0.0)
+    # The DERIVED loop is the historical dissolved spelling — the score cone + the streaming
+    # merge (derivation IS the emission now; the pairing never hand-assembles the merge).
     expect = Body.coerce(
         (
-            Load(name="acc0__osin", input="x", index=(Var("a0"), Var("a1"))),
-            *exp_merge(("acc0", "acc1"), ("acc0__osin", 1.0), key="acc0"),
+            Load(name="in0", input="x", index=(Var("a0"), Var("a1"))),
+            *exp_merge(("acc0", "acc1"), ("in0", 1.0), key="acc0"),
         )
     )
-    assert isinstance(loop, Loop) and loop.role is AxisRole.TWISTED
-    assert loop.body == expect
+    assert tw.loop.role is AxisRole.TWISTED
+    assert _same_program(tw.loop.body, expect)
 
 
 # --------------------------------------------------------------------------------------------
@@ -102,35 +120,24 @@ def test_pair_alone_keeps_the_md_spelling() -> None:
 
 
 def test_expectation_channel_joins_flat_sibling() -> None:
-    fused, changed = _fuse(Body.coerce((*_pair(), _recip(), _value_loop())))
-    assert changed
-    stmts = list(fused)
-    loops = [s for s in stmts if isinstance(s, Loop)]
-    assert len(loops) == 1, "the pair and the value fold join into ONE twisted loop"
-    loop = stmts[0]
-    assert loop.role is AxisRole.TWISTED
-    expect = Body.coerce(
-        (
-            Load(name="acc0__osin", input="x", index=(Var("a0"), Var("a1"))),
-            Load(name="in3", input="w", index=(Var("a1"),)),  # the value cone, re-spelled on the pair's axis
-            *exp_merge(("acc0", "acc1", "acc2__sum"), ("acc0__osin", 1.0, "in3"), key="acc0"),
-        )
-    )
-    assert loop.body == expect
-    # The held-back reciprocal re-emits after the loop; the invariant factor multiplies the
-    # carried sum back into the original accumulator name (Σ c·x = c·Σ x).
-    assert stmts[1:] == [_recip(), Assign(name="acc2", op="multiply", args=("acc2__sum", "v2"))]
+    node = _paired(*_pair(), _recip(), _value_loop())
+    (tw,) = node.operands
+    assert tw.role is AxisRole.TWISTED, "the pair and the value fold join into ONE twisted carrier"
+    assert tw.combine.results == ("acc0", "acc1", "acc2__sum")
+    assert tw.lift.results == ("in0", 1.0, "in3")
+    # The value cone, re-spelled on the pair's axis.
+    assert Load(name="in3", input="w", index=(Var("a1"),)) in tuple(tw.lift.body)
+    # The held-back reciprocal stays in the projection body; the invariant factor multiplies the
+    # carried sum back into the original accumulator name (Σ c·x = c·Σ x) AFTER it.
+    assert list(node.body) == [_recip(), Assign(name="acc2", op="multiply", args=("acc2__sum", "v2"))]
 
 
 def test_emitted_channel_body_round_trips_fold_from_loop() -> None:
-    fused, _ = _fuse(Body.coerce((*_pair(), _recip(), _value_loop())))
-    loop = list(fused)[0]
-    fold = fold_from_loop(loop)
-    assert fold is not None, "the emitted N-channel spelling must be λ-readable"
-    assert fold.combine.results == ("acc0", "acc1", "acc2__sum")
-    assert fold.lift.results == ("acc0__osin", 1.0, "in3")
-    assert fold.init == (float("-inf"), 0.0, 0.0)
-    assert fold.loop == loop, "the byte-identity gate: derivation reproduces the emitted loop"
+    node = _paired(*_pair(), _recip(), _value_loop())
+    (tw,) = node.operands
+    assert tw.init == (ElementwiseImpl("maximum").identity, 0.0, 0.0)
+    again = fold_from_loop(tw.loop)
+    assert again == tw, "the closure: the built fold's derived loop re-lifts to the same node"
 
 
 def test_split_invariant_factors_reads_the_product() -> None:
@@ -142,14 +149,12 @@ def test_split_invariant_factors_reads_the_product() -> None:
 
 def test_foreign_value_loop_declines() -> None:
     # The additive fold's weight reads a DIFFERENT score buffer — not the pair's weight: the
-    # pair keeps its plain (m, d) spelling and the foreign loop rides untouched.
-    fused, changed = _fuse(Body.coerce((*_pair(), _recip(), _value_loop(input_buf="y"))))
-    assert changed
-    stmts = list(fused)
-    loops = [s for s in stmts if isinstance(s, Loop)]
-    assert len(loops) == 2
-    assert sum(1 for s in loops[0].body if isinstance(s, Accum)) == 2, "the pair fused alone"
-    assert loops[1] == _value_loop(input_buf="y"), "the foreign fold is untouched"
+    # pair keeps its plain (m, d) carrier and the foreign fold rides untouched beside it.
+    node = _paired(*_pair(), _recip(), _value_loop(input_buf="y"))
+    assert len(node.operands) == 2
+    tw, foreign = node.operands
+    assert tw.role is AxisRole.TWISTED and len(tw.combine.results) == 2, "the pair fused alone"
+    assert foreign == fold_from_loop(_stamp_axes(_value_loop(input_buf="y"))), "the foreign fold is untouched"
 
 
 # --------------------------------------------------------------------------------------------
@@ -191,14 +196,13 @@ def _value_loop_2d() -> Loop:
 def test_pair_stays_above_the_free_sweep() -> None:
     # A channel joins only where it is a SIBLING of the pair. Inside a following free sweep it
     # is one fold per output COLUMN, so joining per cell would recompute the statistic once per
-    # column; the pair stays at its own level and the sweep rides untouched.
-    fused, changed = _fuse(_sweep_body())
-    assert changed
-    stmts = list(fused)
-    assert isinstance(stmts[0], Loop) and stmts[0].role is AxisRole.TWISTED
-    assert sum(1 for s in stmts[0].body if isinstance(s, Accum)) == 2, "the plain (m, d) pair"
-    assert stmts[1] == _recip(), "the hoisted normalize is the statistic's scalar epilogue"
-    assert isinstance(stmts[2], Loop) and not stmts[2].is_reduce and stmts[2].body == _sweep_body()[-1].body
+    # column; the pair stays at its own level — the sweep's per-ROW statistic — and the sweep's
+    # contraction stays a raw body loop for the fused view to bind.
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
+    (stat,) = tile.op.operands
+    assert stat.role is AxisRole.TWISTED and len(stat.combine.results) == 2, "the plain (m, d) pair"
+    assert any(isinstance(s, Assign) and s.op.name == "reciprocal" for s in tile.op.body)
+    assert any(isinstance(s, Loop) and s.is_reduce for s in tile.op.body), "the sweep contraction rides the body"
 
 
 def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
@@ -207,14 +211,12 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     SOURCE is the pair — the same binding the norm→linear edge uses, so the contraction schedule
     catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
     from emmy.compiler.ir.pure.fold import is_contraction
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
-    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     (stat,) = tile.op.operands
     assert stat.role is AxisRole.TWISTED, "the row statistic is the online-softmax pair"
 
-    bound = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+    bound = fused_view(tile)
     assert bound is not None, "the sweep must bind as a computed-A contraction over the twisted statistic"
     node, n_axis, _stores = bound
     con = node.operands[0]
@@ -233,19 +235,17 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     temp names or a re-lifted pair is lost and the piece falls off the warp tier."""
     from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.ir.tile.ir import effect_tail
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
-    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
-    bound = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
+    bound = fused_view(tile)
     assert bound is not None
     node, n_axis, stores = bound
 
     stmts = tuple(effect_tail(node.lower(), stores))
     for axis in reversed((*tile.place.free, n_axis)):
         stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
-    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)), "out")
-    again = bind_prologue_contraction(relifted.op, tuple(relifted.place.free))
+    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)))
+    again = fused_view(relifted)
     assert again is not None, "the round trip must not cost the region its computed-A binding"
     assert is_contraction(again[0].operands[0]), "and it must come back as the SAME one contraction"
 

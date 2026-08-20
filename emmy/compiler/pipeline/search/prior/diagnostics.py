@@ -152,7 +152,8 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
         base = {**ctx.features(), **s_feats}
         # ``evaluate_record`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
-        _, rank, pool, _ = golden_eval.evaluate_record(g, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r}))
+        ranked = golden_eval.evaluate_record(g, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r}))
+        rank, pool = ranked.rank, ranked.pool
         if rank is None:
             skipped.append((g.name, f"recorded knobs not in the enumeration ({pool} rows) — pin/dtype mismatch?"))
             continue

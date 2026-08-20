@@ -360,14 +360,22 @@ class Fold:
         a shortcut: node-locally the two are symmetric (matmul's ``A[m,k]`` and ``B[k,n]`` both
         carry ``k`` plus one free axis), and telling M from N needs the PLACEMENT, which is a
         caller fact living on the ``TileOp`` and deliberately absent here. Order is what
-        ``as_fold`` always used and what the byte-identity gate pins."""
-        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+        ``as_fold`` always used and what the byte-identity gate pins.
 
+        The reading is SEMIRING-GENERIC, by the traits and never by op name: the carrier must be a
+        product of ONE commutative-monoid ⊕ and every lift stmt one shared two-arg ⊗ with
+        ``⊗.distributes_over(⊕)`` — the registered-semiring table. Today that table admits exactly
+        ``(multiply, add)``, so the reading is the matmul it always was; a new semiring instance
+        registers in ``ElementwiseImpl._SEMIRING`` and reads back here without change (the mma
+        tier gates on the ``(·, +)`` instance via :attr:`semiring`)."""
         if self.axis is None or len(self.operands) < 2 or self.combine is None:
             return None
         ops = component_ops(self.combine)
         n = len(self.combine.results)
-        if ops != (ElementwiseImpl("add"),) * n or len(self.operands) != n + 1:
+        if ops is None or len(set(ops)) != 1 or len(self.operands) != n + 1:
+            return None
+        plus = ops[0]
+        if not (plus.associative and plus.commutative and plus.has_identity):
             return None
         body = tuple(self.lift.body)
         if len(body) != n or tuple(self.lift.results) != tuple(f"{r}__v" for r in self.combine.results):
@@ -375,11 +383,27 @@ class Fold:
         names = [operand_name(e) for e in self.operands]
         b0, a, rest = names[0], names[1], names[2:]
         want = [(b0, a), *((a, b) for b in rest)]
+        muls = set()
         for stmt, (x, y) in zip(body, want, strict=True):
-            if not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("multiply") or stmt.args != (x, y):
+            if not isinstance(stmt, Assign) or not stmt.op.distributes_over(plus) or stmt.args != (x, y):
                 return None
+            muls.add(stmt.op)
+        if len(muls) != 1:
+            return None  # the channels must share ONE ⊗ — a mixed-product body is not a bilinear form
         chans = tuple(Channel(b=e, acc=acc) for e, acc in zip((self.operands[0], *self.operands[2:]), self.combine.results, strict=True))
         return self.operands[1], chans
+
+    @property
+    def semiring(self) -> tuple | None:
+        """The bilinear reading's ``(⊗, ⊕)`` instance — the :class:`ElementwiseImpl` pair the
+        node's algebra instantiates (``(multiply, add)`` is the matmul; the admissible pairs are
+        ``ElementwiseImpl._SEMIRING``'s) — or ``None`` when the fold is not a contraction. The
+        trait consumers gate on: the tensor-core (mma) tier realizes ONLY the ``(·, +)``
+        instance, and a rebuild of an existing node threads this pair rather than assuming the
+        constructor default."""
+        if self._contraction is None:
+            return None
+        return (self.lift.body[0].op, component_ops(self.combine)[0])
 
     @property
     def composed(self) -> Fold | None:
@@ -433,12 +457,20 @@ class Fold:
         return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
 
     @classmethod
-    def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...]) -> Fold:
-        """A BILINEAR fold — the matmul cell (what the retired ``Contraction`` kind named). Unlike
-        :meth:`projection` this constructor GENERATES algebra: operands `(b₀, a, b₁…)`, the lift
-        ``λ(k, b, a, b₂…). (b·a, a·b₂, …)`` and the componentwise-additive ⊕ over the channel
-        accumulators. That generated shape is exactly what :attr:`_contraction` reads back, so
-        ``a`` / ``channels`` / ``b_trans`` and the ``CONTRACTION`` role all follow from it.
+    def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...], product="multiply", fold_op="add") -> Fold:
+        """A BILINEAR fold over the ``(⊗, ⊕)`` semiring — the matmul cell at the default
+        ``(multiply, add)`` instance. Unlike :meth:`projection` this constructor GENERATES
+        algebra: operands `(b₀, a, b₁…)`, the lift ``λ(k, b, a, b₂…). (b⊗a, a⊗b₂, …)`` and the
+        componentwise ⊕ over the channel accumulators. That generated shape is exactly what
+        :attr:`_contraction` reads back, so ``a`` / ``channels`` / ``b_trans`` / :attr:`semiring`
+        and the ``CONTRACTION`` role all follow from it.
+
+        The FORMATION GATE asserts the laws every consumer relies on, where the node is built:
+        ``⊕`` a commutative monoid (associative + commutative + identity — the reassociation
+        license behind split-K, the tree combine and the atomic partition store) and ``⊗``
+        distributing over it (``ElementwiseImpl.distributes_over``, the registered-semiring
+        table). A caller REBUILDING an existing node (a σ-sliced split, a decode-boundary cone
+        rewrap) must thread the node's own :attr:`semiring`, never assume the default.
 
         Arity N ≥ 2 is the fused sibling edge (gate⊗up): N matrices over ONE shared A, scheduled
         and lowered as one unit. Sharing is the arity — the shared edge simply appears in every
@@ -448,7 +480,10 @@ class Fold:
         slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
 
-        mul = ElementwiseImpl("multiply")
+        mul = ElementwiseImpl(product) if isinstance(product, str) else product
+        plus = ElementwiseImpl(fold_op) if isinstance(fold_op, str) else fold_op
+        if not (plus.associative and plus.commutative and plus.has_identity and mul.distributes_over(plus)):
+            raise ValueError(f"contraction: ({mul.name}, {plus.name}) is not a registered semiring (⊗ over a commutative-monoid ⊕)")
         channels = tuple(channels)
         prim = channels[0]
         operands = (prim.b, a, *(ch.b for ch in channels[1:]))
@@ -461,7 +496,7 @@ class Fold:
             body=Body(tuple(body)),
             results=tuple(f"{acc}__v" for acc in accs),
         )
-        init, combine = M(*(["add"] * len(accs)), names=accs)
+        init, combine = M(*([plus] * len(accs)), names=accs)
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 
     @classmethod

@@ -58,22 +58,28 @@ An exact-SHA `emmy recipe query` reads the rolling `recipes/` root and expands i
 tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
 lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
 prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
-deterministic batches without selecting lifecycle states. The parent returns only scores, maintained IDs, obsolete
-proposals, and new onboarding models. The tracked `discovery_manifest.jq` filter validates exact score coverage,
-ignores already-inventoried IDs repeated as new candidates, and mechanically assembles the four-list manifest before
-the lifecycle validator applies policy. An exact-SHA recipe query against the rolling root enforces the maintained
-count after application.
+deterministic batches without selecting lifecycle states. Hidden fit subagents size one onboarding model each, in
+parallel, reading that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
+`prompts/model-fit.md` contract; the parent relays their deployments and authors no hardware itself. The parent
+returns only scores, maintained IDs, obsolete proposals, new onboarding models, and the sized deployments. The tracked
+`discovery_manifest.jq` filter validates exact score coverage, ignores already-inventoried IDs repeated as new
+candidates, and mechanically assembles the four-list manifest before the lifecycle validator applies policy. An
+exact-SHA recipe query against the rolling root enforces the maintained count after application.
 
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
 plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.
 This lets a manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or
-silently using an older manifest contract. The manifest filter tolerates a model reasoning wrapper around the JSON
-object, but requires exactly the four expected selection fields before assembling the manifest. The named discovery
-agent denies repository edits and permits only the tracked discovery skill, public-web tools, repository reads,
-read-only Git inspection, the three named read-only source subagents, and the tool-free batch scorer. Parent work caps
-at 64 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources;
-Reddit can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
+silently using an older manifest contract. The manifest filter reads the last fenced or bare object carrying exactly
+the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
+expected selection fields before assembling the manifest. A sized deployment replaces an existing onboarding shell's
+matrix, so a shell's hardware is corrected as the fleet and the checkpoint's published form become better understood.
+An empty sized result drops a new candidate that nothing in the fleet can serve and leaves an existing shell's matrix
+untouched, which keeps one unreadable checkpoint from failing the run. The named discovery agent denies repository
+edits and permits only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the
+three named read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 64
+agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit
+can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
 OpenCode's final completed text event is logged before deterministic assembly so a rejected decision remains
 inspectable; the repository validator remains the authoritative completion gate. The project provider configuration
 selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
@@ -183,18 +189,19 @@ The validated manifest tags the ten selected complete recipes `maintained`, keep
 `best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
 best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
 reason the recipe should no longer be used. The manifest must classify and score every complete recipe exactly once.
-For decisions with a replacement, the validator compares
-qualified targets and demotes the proposal to `best-effort` unless the replacement is active, serves the same task,
-and its smallest deployment uses no more total physical GPU memory than the old recipe's smallest deployment. A
-replacement described as merely comparable, or whose recipe reduces configured context or concurrency, also defaults
-to `best-effort` while retaining the supplied heat. Unknown or malformed lower-priority model IDs cannot stand in for
-an omitted recipe because every real recipe must still be scored. A checkpoint name is normalized across a missing or
-incorrect organization only when it uniquely identifies one existing recipe; ambiguous or unknown maintained IDs
-still fail validation because all ten selections must resolve exactly. The agent must use
-`best-effort` when the old model retains any material capability or operating advantage. Every complete recipe stores
-the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but cannot be
-deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or best-effort
-set.
+For decisions with a replacement, the validator demotes the proposal to `best-effort` unless the replacement is active
+and serves the same task. A replacement described as merely comparable, or whose recipe reduces configured context or
+concurrency, also defaults to `best-effort` while retaining the supplied heat. No repository code estimates whether a
+checkpoint fits a platform: memory footprint depends on total parameters, quantization, and context, which the recipe
+does not record. `prompts/model-fit.md` is the shared contract where that reasoning happens, attached to both the
+discovery and onboarding agents so a proposed platform and a measured one mean the same thing. Unknown or malformed
+lower-priority model IDs cannot stand in for an omitted recipe because every real recipe must still be scored. A
+checkpoint name is normalized across a missing or incorrect organization only when it uniquely identifies one existing
+recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections must resolve exactly. The
+agent must use `best-effort` when the old model retains any material capability or operating advantage. Every complete
+recipe stores the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but
+cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or
+best-effort set.
 
 The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
 `emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate

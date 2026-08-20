@@ -1870,6 +1870,12 @@ class RegStore(Stmt):
     # columns are contiguous and even-based, so the XOR (which passes intra-chunk bits 0..2
     # through) keeps a vectorized pair inside its relocated 16-byte chunk. "NONE" is inert.
     swizzle: str = "NONE"
+    # The ``dst_index`` position carrying the M (row) coordinate, set by the store's creator. The
+    # auto ``ldm`` is the row stride — the product of the buffer extents AFTER this dim — which
+    # equals the inner extent only while N is exactly the last dim; a re-fused split store
+    # (``[…, m, n/Q, n%Q]``) spans N over the trailing dims, so ``shape[-1]`` under-strides the
+    # fragment row offset. ``None`` keeps the legacy inner-extent resolution.
+    row_dim: int | None = None
 
     def deps(self) -> tuple[str, ...]:
         extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
@@ -2029,7 +2035,7 @@ class RegStore(Stmt):
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
 
         flat = render_index(self.dst_buffer, self.dst_index, ctx)
-        ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx)
+        ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
         dst_dt = ctx.buffer_dtypes.get(self.dst_buffer, "f32")
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
@@ -2197,15 +2203,19 @@ def _dim_stride(buffer: str, dim: int, ctx: RenderCtx) -> int | str:
     return f"({expr})"
 
 
-def _resolve_ldm(buffer: str, ctx: RenderCtx) -> int | str:
-    """Look up the row-major leading-dimension stride (= inner extent)
-    for ``buffer`` from the kernel render context. Used by
+def _resolve_ldm(buffer: str, ctx: RenderCtx, row_dim: int | None = None) -> int | str:
+    """Look up the row-major row stride for ``buffer`` from the kernel render context. Used by
     :class:`LdmatrixLoad` / :class:`RegStore` when ``ldm == 0`` (auto).
-    Accepts both raw int extents and :class:`Dim` extents (Tensor.shape) —
+    With ``row_dim`` (the index position carrying the M coordinate — ``RegStore.row_dim``) the
+    stride is the product of every extent after that dim, which stays correct when the N
+    coordinate spans several trailing dims (the re-fused split store); without it, the legacy
+    inner-extent read. Accepts both raw int extents and :class:`Dim` extents (Tensor.shape) —
     a symbolic inner extent (e.g. QK^T's ``(seq, seq)`` output) resolves to
     a C expression over the runtime kernel arg (the M9 runtime-ldm path);
     every consumer interpolates ``ldm`` into an address string, so the
     int/str split is transparent."""
+    if row_dim is not None:
+        return _dim_stride(buffer, row_dim, ctx)
     shape = ctx.shapes.get(buffer)
     if shape is None:
         raise ValueError(f"_resolve_ldm: buffer {buffer!r} not in ctx.shapes (no shape registered)")

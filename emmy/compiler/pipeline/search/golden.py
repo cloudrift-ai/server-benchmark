@@ -361,6 +361,11 @@ def validate_golden_file(
     configs = document.get("configs")
     if not isinstance(configs, list) or not configs:
         raise ValueError("configs must be a non-empty list")
+    # A whole-model inventory points many configs at the same few programs (279 configs
+    # over 13 programs here), and decoding one is the expensive part of this check. Decode
+    # each distinct program once per call: `tune` re-validates the whole document on every
+    # incremental persist, so the redundancy is quadratic in the number of targets.
+    decoded_programs: dict[int, None] = {}
     strict = validation in (GoldenFileValidation.PROMOTION, GoldenFileValidation.REPOSITORY)
     for index, entry in enumerate(configs):
         where = f"configs[{index}]"
@@ -372,10 +377,12 @@ def validate_golden_file(
         program_ref = entry.get("program")
         if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
-        try:
-            graph_from_wire(programs[program_ref])
-        except ValueError as exc:
-            raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+        if program_ref not in decoded_programs:
+            try:
+                graph_from_wire(programs[program_ref])
+            except ValueError as exc:
+                raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+            decoded_programs[program_ref] = None
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
@@ -645,7 +652,7 @@ def _recognized_target(record: GoldenRecord):
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, node.output.name, name=node.id)
+    tile = recognized_tile(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}
@@ -661,7 +668,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     any-of, no classified shape."""
     from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
 
     try:
@@ -674,7 +681,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         verdicts = store.setdefault("verdicts", {})
         if verdict_key in verdicts:
             return verdicts[verdict_key]
-        pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+        pro = fused_view(tile)
         route_tree, route_free, route_stores = (
             (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
         )

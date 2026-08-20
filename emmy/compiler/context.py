@@ -17,8 +17,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from emmy import config, gpu
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.pool import PoolSample
 
 # GPU hardware facts live in the common :mod:`emmy.gpu` registry; these are
 # aliases so the long-standing context-local names keep working.
@@ -179,6 +183,14 @@ class Context:
     # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
     # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
+    # The candidate-pool sample this compile enumerates under, or ``None`` for a LIVE compile,
+    # which always sees the whole pool. Set by the offline dataset builders (``emmy fit``), never
+    # by a deploy. It is part of the Context's VALUE and rides the schedule pool's cache key,
+    # because ``dataclasses.replace`` shares the session cache below: a sampled Context and the
+    # live one it was derived from sit on one memo, so a flag that did not key the cache would
+    # serve a sampled pool to a live compile. NOT in ``structural_key`` — it decides which rows are
+    # OFFERED, never what a chosen row compiles to.
+    pool_sample: PoolSample | None = None
     # The session memo (:class:`SessionCache`) — ambient, mutable-inside, shared across
     # ``dataclasses.replace`` copies. NOT in ``structural_key`` and ``compare=False``:
     # caching must never change identity or context equality.

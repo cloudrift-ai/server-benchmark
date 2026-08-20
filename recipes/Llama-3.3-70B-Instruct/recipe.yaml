@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: meta-llama/Llama-3.3-70B-Instruct
+  rationale: Huge HF momentum and downloads make this a must-add dense model.
+  heat: 92
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 2

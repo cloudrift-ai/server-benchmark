@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "984 upvotes, massive local adoption, unsloth GGUF, HF darling."
+  rationale: "Breakout model with 800+ Reddit comments and top arena benchmarks."
   heat: 98
   task: generate
 matrices:

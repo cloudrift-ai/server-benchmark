@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Active Qwen3.8 comparison workhorse; moderate sustained interest."
-  heat: 40
+  rationale: "Active on OpenRouter with moderate sustained community interest."
+  heat: 60
 engine:
   llm:
     tensor_parallel_size: 2

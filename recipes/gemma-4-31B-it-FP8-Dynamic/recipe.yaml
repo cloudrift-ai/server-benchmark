@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "No HF trending or Reddit buzz; cooling post-Qwen3.8."
+  rationale: "No trending or buzz; cooling post-Qwen3.8 release cycle."
   heat: 10
 engine:
   llm:

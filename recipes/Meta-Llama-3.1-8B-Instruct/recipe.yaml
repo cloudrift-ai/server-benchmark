@@ -5,7 +5,7 @@ tags:
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
-  rationale: "Aged out by Llama 4 and Qwen3.8; no current community attention."
+  rationale: "Aged out by Llama 3.3 and 4; no current momentum or community buzz."
   heat: 15
   revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
     FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned

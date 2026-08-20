@@ -18,11 +18,11 @@
 # vLLM and standard-fork emmy. So it is faster at numerics the quality gate cannot
 # distinguish, which is what makes it the default rather than an opt-in.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Stable Gemma-3 IT serving on OR; eclipsed by Qwen3.8."
+  rationale: "Stable OR serving but eclipsed by Qwen3.8 and more capable variants."
   heat: 30
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 

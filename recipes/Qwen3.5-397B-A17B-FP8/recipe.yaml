@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Older architecture, consumer-GPU niche, no current signals."
+  rationale: "Old architecture with no current interest; niche consumer-GPU deployment."
   heat: 20
 engine:
   llm:

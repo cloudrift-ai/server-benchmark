@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "New exl3 format with zero adoption or community signal."
+  rationale: "Niche exl3 format with zero adoption or community signals."
   heat: 10
   task: generate
 matrices:
-  - deploy.gpu: NVIDIA GeForce RTX 5090
-    deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

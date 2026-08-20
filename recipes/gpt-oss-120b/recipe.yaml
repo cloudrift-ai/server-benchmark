@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "5.1K likes, 4.7M downloads; top-5 HF momentum, proprietary channel."
-  heat: 75
+  rationale: "Strong HF downloads and likes despite proprietary origin."
+  heat: 82
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

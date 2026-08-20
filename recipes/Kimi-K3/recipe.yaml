@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "10.8K HF likes, 647 upvotes, record 2.8T MoE breakout."
-  heat: 92
+  rationale: "HF likes strong but minimal evidence on Reddit or OR discovery."
+  heat: 20
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

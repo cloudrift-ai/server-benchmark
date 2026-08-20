@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: zai-org/GLM-5.2
-  rationale: "5K HF likes, 2.7M downloads, strong OR presence and engagement."
-  heat: 82
+  rationale: "5K HF likes and 2.7M downloads; strong OR and Reddit signals."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

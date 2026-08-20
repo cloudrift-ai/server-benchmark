@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3-235B-A22B
-  rationale: "OR active with Elo 1021 but overshadowed by Qwen3.8 breakout."
-  heat: 55
+  rationale: "Extreme HF momentum despite Qwen3.8 breakout; strong serving signal."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

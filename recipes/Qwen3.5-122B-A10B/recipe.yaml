@@ -2,12 +2,12 @@
 # keeps six layers per pipeline stage; PP16 exposes incompatible hybrid-cache page geometry in the
 # pinned engine. Build the image with experiments/qwen35-122b/stack_v100 before this recipe runs.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "V100 multi-GPU hardware coverage offsets Qwen3.8 overshadowing."
-  heat: 30
+  rationale: "Overshadowed by Qwen3.8 family; older architecture lacks community signals."
+  heat: 20
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 

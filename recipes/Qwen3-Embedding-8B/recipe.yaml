@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "2.9M downloads and 778 likes indicate sustained embed interest."
+  rationale: "Sustained embed interest with strong download and like counts."
   heat: 45
   task: embed
 

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "5.4K HF likes, 1.2M downloads, strong frontier MoE signal."
-  heat: 85
+  rationale: "Established 1.6T MoE served on OR; moderate sustained interest."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: Qwen/Qwen2.5-72B-Instruct
+  rationale: Consistently highest HF downloads and likes; fills 72B gap.
+  heat: 88
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 2

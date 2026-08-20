@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: 700 upvotes on release thread; FP8 variant for wider GPU fit than BF16.
+  rationale: "Strong FP8 variant of the breakout 3.8 model for wider deployment."
   heat: 90
   task: generate
 matrices:

@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Older GLM variant overshadowed by GLM-5.2 momentum."
-  heat: 28
+  rationale: "Overshadowed by GLM-5.2; no independent current evidence."
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 8

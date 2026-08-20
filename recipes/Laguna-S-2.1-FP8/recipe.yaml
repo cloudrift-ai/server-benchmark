@@ -4,8 +4,8 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Niche FP8 V100 model with no current adoption momentum."
-  heat: 22
+  rationale: "Minimal evidence; no current adoption momentum or trending data."
+  heat: 15
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

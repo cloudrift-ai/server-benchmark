@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Niche compiler model with zero current community activity."
+  rationale: "Niche compiler model with zero community activity or demand."
   heat: 5
   task: generate
 matrices:
-  - deploy.gpu: NVIDIA GeForce RTX 5090
-    deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

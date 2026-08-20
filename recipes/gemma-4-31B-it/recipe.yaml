@@ -1,10 +1,10 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Gemma cooling post-Qwen3.8; minimal cross-source signals."
-  heat: 20
+  rationale: "Strong OR presence (heat 58) with 31B dense VLM signal."
+  heat: 58
 engine:
   llm:
     tensor_parallel_size: 1

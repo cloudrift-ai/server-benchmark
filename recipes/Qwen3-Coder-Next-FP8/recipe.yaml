@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Flagship OR coding model with strong serving signal."
-  heat: 50
+  rationale: "FP8 coding variant on OpenRouter with strong serving signal."
+  heat: 60
 engine:
   llm:
     tensor_parallel_size: 1

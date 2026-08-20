@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "1583 upvotes, dominant 2.4T MoE breakout across all sources."
+  rationale: "Dominant 2.4T MoE breakout across all discovery sources."
   heat: 95
   task: generate
 matrices:

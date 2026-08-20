@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
-  rationale: "416 upvotes, strong Meta release and gated model signal."
-  heat: 80
+  rationale: "OR serving active with strong gated release and upvote signals."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

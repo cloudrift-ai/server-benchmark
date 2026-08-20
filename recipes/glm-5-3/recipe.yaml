@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "1646 Reddit upvotes, GLM-5 family momentum, strong family signal."
-  heat: 85
+  rationale: "Strong Reddit activity and GLM-5 family momentum; moderate interest."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

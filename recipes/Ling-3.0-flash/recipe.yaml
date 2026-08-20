@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "Zero evidence across all discovery sources; minimal HF presence."
+  rationale: "Zero evidence across all discovery sources; minimal presence."
   heat: 10
   task: generate
 matrices:
-  - deploy.gpu: NVIDIA H200 141GB
-    deploy.gpu_count: 4
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 4

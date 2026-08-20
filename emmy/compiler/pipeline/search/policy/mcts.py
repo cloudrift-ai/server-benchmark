@@ -653,7 +653,11 @@ class TuningSearch(Search):
                                 run_id=run_id,
                             )
                         )
-                elif is_leaf and node.bench_status == "bench_fail" and stats is not None:
+                elif is_leaf and node.bench_status == "bench_fail" and stats is not None and node.realized_knobs is not None:
+                    # ``skip`` above sends an unrealized leaf here, so the same
+                    # nothing-to-key-on rule has to hold: a variant that bench-failed before
+                    # its knobs were realized (a run-stage timeout, a missing bench input)
+                    # carries ``realized_knobs is None`` and cannot be keyed at all.
                     # Sentinel latency from the failed bench; NOT a value anchor — no
                     # assert, no parent_value update, children keep the inherited nk.
                     emit(

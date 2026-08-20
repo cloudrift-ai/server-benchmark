@@ -105,9 +105,9 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
             "NVIDIA Tesla V100 SXM3 32GB",
             16,
         ),
-        "serving_qwen36_27b_awq_rtx4090": (
-            "cyankiwi/Qwen3.6-27B-AWQ-INT4",
-            "e5cc0400fb2403c437c2c40a7c52fb5ae93fda18",
+        "serving_qwen38_27b_awq_rtx4090": (
+            "philbert440/Qwen3.8-27B-W4A16-AWQ",
+            "7908d42a71077a5e4dc458f273682b12dfe384a0",
             "NVIDIA GeForce RTX 4090",
             1,
         ),

@@ -145,10 +145,11 @@ math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to
 traces and does not establish a W8A8-only result without the deferred target filter.
 
 The RTX 4090 row is stock-only for a structural reason rather than a scheduling one. Qwen3.8-27B is a hybrid
-checkpoint whose 48 Gated DeltaNet linear-attention layers need a depthwise causal `conv1d`, and Emmy's compiler
-frontend has no convolution operation in its Tensor IR at all. That path therefore cannot lower, so this row admits
-no matched Emmy arm until that gap closes; its 16 full-attention layers, MLP, norms, and head do lower. Treat the
-row as consumer-platform system qualification only.
+checkpoint whose 48 Gated DeltaNet linear-attention layers do not lower, so this row admits no matched Emmy arm; its
+16 full-attention layers, MLP, norms, and head do. The depthwise `conv1d` and the delta-rule `einsum` those layers
+open with now decompose, but the chunked delta rule behind them still does not: it builds its chunk masks with
+`triu`/`tril`, which have no tracer mapping, and then unrolls a sequential 64-step recurrence. That is an algorithm
+to absorb rather than an operation to add, so treat the row as consumer-platform system qualification only.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
 `cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`

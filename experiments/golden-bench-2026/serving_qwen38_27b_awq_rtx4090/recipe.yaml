@@ -2,8 +2,8 @@
 # as an Emmy end-to-end speedup by itself.
 #
 # Qwen3.8-27B is a hybrid checkpoint: 48 of its 64 layers are Gated DeltaNet linear attention and 16 are full
-# attention. Emmy's compiler frontend has no `conv1d` operation, so the linear-attention path does not lower and no
-# Emmy arm can exist for this row yet; see the model's onboarding report for the exact unsupported operations.
+# attention. The linear-attention path does not lower, so no Emmy arm can exist for this row yet; see the model's
+# onboarding report for where it now stops.
 #
 # The pinned image is a vLLM nightly rather than the `qwen38` release tag: that tag predates this checkpoint revision
 # and fails to build the tokenizer backend inside the engine process.

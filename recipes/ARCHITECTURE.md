@@ -66,8 +66,11 @@ matrices:
     deploy.gpu_count: 2
 ```
 
-The one to three matrix entries are proposed qualification setups, not measured targets. There is no onboarding-shell
-count limit; scheduled onboarding chooses the available shell with the highest heat. The shell is a handoff to model
+The one to three matrix entries are proposed qualification setups, not measured targets. Each is sized by a discovery
+fit subagent from the checkpoint's published configuration, and a later discovery run may re-size a shell that is
+still untested — a shell's hardware is a current estimate, not a commitment. A candidate nothing in the fleet can
+serve yields no shell at all. There is no onboarding-shell count limit; scheduled onboarding chooses the available
+shell with the highest heat. The shell is a handoff to model
 onboarding, not a serving claim. It becomes runnable only after qualification replaces the shell with a complete
 configuration and the `best-effort` lifecycle tag, while preserving its heat until discovery refreshes it.
 

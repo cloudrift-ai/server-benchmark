@@ -130,8 +130,11 @@ In automated lifecycle mode, follow `prompts/discover-models/lifecycle.md`: invo
 once and in parallel, then invoke `discover-scorer` once per deterministic recipe batch and in parallel. Each source
 investigator stays read-only, uses at most three public-web calls, and returns a compact source-specific candidate
 list. Each scorer follows `prompts/discover-models/score-recipes.md` without doing more research or choosing lifecycle
-state. The parent alone reconciles identities, compares scores globally, selects the maintained set, and proposes new
-onboarding models.
+state. Invoke `discover-fit` once per onboarding model — every new candidate and every existing onboarding shell —
+in parallel; each sizes exactly one checkpoint under `prompts/model-fit.md` and
+`prompts/discover-models/size-deployments.md` and returns that model's deployments. The parent alone reconciles
+identities, compares scores globally, selects the maintained set, and proposes new onboarding models; it relays the
+sized deployments verbatim and authors none of them.
 
 Layer quantitative demand with qualitative mindshare — what people are actually saying. For each top candidate,
 search for:
@@ -188,6 +191,10 @@ read total parameters from `config.json`, the footprint arithmetic, the Mixture 
 tensor-parallel sizing, and the requirement to state the numbers behind every fit claim.
 
 Read canonical GPU names and their `vram_mib` from `emmy/gpu.py`; that registry is the authority on fleet capacity.
+
+In automated lifecycle mode this step belongs to the `discover-fit` subagents, one per onboarding model, so each
+checkpoint is sized on its own evidence rather than alongside the demand signals that selected it. A model whose
+weights no fleet platform can hold yields no deployment and is dropped.
 
 ## Step 5 — Hardware → model matrix (the deliverable)
 

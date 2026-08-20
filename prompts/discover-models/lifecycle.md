@@ -36,13 +36,20 @@ comparison in the obsolete model's score rationale. When no successor is appropr
 concrete technical limitation.
 
 Add every genuinely promising newly discovered model to `new_onboarding_models`; there is no candidate-count limit.
-Use task `embed` only for embedding models. Give each new model one to three useful deployments containing only
-canonical `deploy.gpu` and positive `deploy.gpu_count` values. Derive every deployment from the attached
-`model-fit.md`: read the checkpoint's total parameters, size the footprint, and compare it against that platform's
-real capacity. No repository code checks this, so an unservable deployment reaches rented hardware unchallenged. Put
-the total parameter count, the quantization, and the resulting footprint in the model's rationale. Do not claim an
-onboarding shell was deployed or benchmarked. Never put an existing recipe ID in `new_onboarding_models`, including an
-existing onboarding shell; an existing ID appears only in `scores`.
+Use task `embed` only for embedding models. Do not give a candidate a deployment: you never author hardware here.
+Never put an existing recipe ID in `new_onboarding_models`, including an existing onboarding shell; an existing ID
+appears only in `scores`. Do not claim an onboarding shell was deployed or benchmarked.
+
+## Deployment sizing
+
+Invoke `discover-fit` once per onboarding model and in parallel: every model in `new_onboarding_models`, plus every
+existing recipe in the inventory tagged `onboarding`. Give each the complete contents of the attached `model-fit.md`
+and `size-deployments.md`, and exactly one model ID. Return every result in `onboarding_deployments`, copying each
+subagent's `model_id` and `deployments` verbatim.
+
+You do not review, adjust, extend, or replace a returned deployment, and you never supply one a subagent did not
+return. An empty `deployments` array is a valid result: repository code drops that new candidate and leaves an
+existing shell's current matrix untouched. A candidate the fleet cannot serve is not worth rented GPU hours.
 
 ## Output
 
@@ -59,13 +66,11 @@ Return exactly one JSON object without prose or a Markdown fence:
     {"model_id": "exact/technically-broken-id"}
   ],
   "new_onboarding_models": [
-    {
-      "model_id": "exact/new-id",
-      "task": "generate",
-      "rationale": "Why this model is worth onboarding.",
-      "heat": 90,
-      "deployments": [{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}]
-    }
+    {"model_id": "exact/new-id", "task": "generate", "rationale": "Why this model is worth onboarding.", "heat": 90}
+  ],
+  "onboarding_deployments": [
+    {"model_id": "exact/new-id", "deployments": [{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}]},
+    {"model_id": "exact/existing-shell-id", "deployments": []}
   ]
 }
 ```
@@ -73,7 +78,10 @@ Return exactly one JSON object without prose or a Markdown fence:
 `scores` must contain every existing recipe from every batch exactly once, including onboarding shells. Copy each
 existing `model_id` letter for letter. Each score contains exactly `model_id`, `rationale`, and `heat`; heat is an
 integer from 0 through 100. `maintained_model_ids` contains exact IDs only. Each obsolete entry contains `model_id`
-and optionally `replacement_model_id`. `new_onboarding_models` contains new models only.
+and optionally `replacement_model_id`. Each new onboarding entry contains exactly `model_id`, `task`, `rationale`, and
+`heat`; `new_onboarding_models` contains new models only. Each `onboarding_deployments` entry contains exactly
+`model_id` and `deployments`, and the array covers every new candidate and every existing onboarding shell exactly
+once.
 
 Before returning, verify that the scores cover every batch row and that the maintained count is exact. If OpenCode
 requests the final response, return the best complete selection immediately without another tool call.

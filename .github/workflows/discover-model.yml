@@ -186,6 +186,7 @@ jobs:
             --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
+            --file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md" \
             --file "$AGENT_TASK" > "$AGENT_EVENTS"
           agent_status=$?
           set -e

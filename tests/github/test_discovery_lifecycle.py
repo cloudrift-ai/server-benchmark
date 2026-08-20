@@ -365,7 +365,8 @@ def test_discovery_counts_lifecycle_with_recipe_query():
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
     prompt = " ".join((Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text().split())
 
-    assert "Derive every deployment from the attached `model-fit.md`" in prompt
+    assert "Invoke `discover-fit` once per onboarding model and in parallel" in prompt
+    assert "you never author hardware here" in prompt
     assert "A replacement that is merely comparable is not" in prompt
     assert "read both recipe files" in prompt
     assert "configured context, concurrency, quantization, hardware support, model capability" in prompt
@@ -441,6 +442,25 @@ def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
         scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
         assert any('--file "$WORKFLOW_SOURCE/prompts/model-fit.md"' in script for script in scripts)
     assert "vram_mib" not in Path(lifecycle).read_text()
+
+
+def test_fit_subagent_sizes_each_onboarding_model_alone():
+    workspace = Path(__file__).parents[2]
+    agent = (workspace / ".opencode" / "agents" / "discover-fit.md").read_text()
+    config = yaml.safe_load(agent.split("---", 2)[1])
+    parent = (workspace / ".opencode" / "agents" / "discover-models.md").read_text()
+    prompt = " ".join((workspace / "prompts" / "discover-models" / "size-deployments.md").read_text().split())
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "discover-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+
+    assert config["mode"] == "subagent"
+    assert config["hidden"] is True
+    assert config["permission"] == {"*": "deny", "read": "allow", "grep": "allow", "webfetch": "allow", "websearch": "allow"}
+    assert '"discover-fit": allow' in parent
+    assert '--file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md"' in script
+    assert "Never substitute a sibling, quantized, or same-family repository" in prompt
+    assert "Return an empty `deployments` array when the checkpoint cannot be sized" in prompt
+    assert "never infer size from the model ID" in prompt
 
 
 def _recipe(workspace, name, model_id, tags=None, leading_comment=False, task=None, gpu=GPU, gpu_count=1, heat=50):
@@ -642,16 +662,20 @@ def test_preserves_existing_onboarding_shell(tmp_path):
     assert "`NVIDIA H200 141GB x1`" in (tmp_path / "summary.md").read_text()
 
 
-def test_rejects_existing_onboarding_shell_without_deployment_matrix(tmp_path):
+def test_resizes_an_existing_onboarding_shell_matrix(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
-    shell.write_text(shell.read_text().replace("matrices:\n  - deploy.gpu: NVIDIA H200 141GB\n    deploy.gpu_count: 1\n", ""))
     selection = tmp_path / "selection.json"
-    pending = _candidate("org/pending", deployments=[{"deploy.gpu": GPU, "deploy.gpu_count": 1}])
-    _manifest(selection, ["org/ready"], onboarding=[pending])
+    resized = [{"deploy.gpu": GPU, "deploy.gpu_count": 4}, {"deploy.gpu": "NVIDIA B200", "deploy.gpu_count": 4}]
+    _manifest(selection, ["org/ready"], onboarding=[_candidate("org/pending", deployments=resized)])
 
-    with pytest.raises(ValueError, match="org/pending needs one to 3 deployments"):
-        discovery_lifecycle.validate_manifest(selection, tmp_path)
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    assert discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md") == {"changed": True}
+
+    config = yaml.safe_load(shell.read_text())
+    assert config["matrices"] == resized
+    assert config["tags"] == ["onboarding", "untested"]
+    assert config["model"]["huggingface"] == "org/pending"
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):

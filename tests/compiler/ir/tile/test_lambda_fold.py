@@ -71,7 +71,7 @@ def _view(arity: int = 2) -> Fold:
 
 def _softmax_loop() -> Loop:
     """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
-    exp-family state, exactly as ``_softmax.try_online_softmax`` builds it."""
+    exp-family state, exactly as ``_classify.pair_softmax`` builds it."""
     from emmy.compiler.ir.pure.carrier import exp_merge
 
     body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))

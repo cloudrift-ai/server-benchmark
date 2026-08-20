@@ -44,7 +44,7 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
     prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
     own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
-    when the cone was built (``_atomize.make_cone`` splits at the K seam once, structurally).
+    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
 
     The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
     contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer

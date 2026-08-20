@@ -23,7 +23,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
 
 def _tile(body: Body):
-    return recognized_tile(LoopOp(body=body), "out")
+    return recognized_tile(LoopOp(body=body))
 
 
 def _matmul_body(epilogue=(), k_extent: int = 128) -> Body:

@@ -456,7 +456,7 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     function of the row's ``WORK`` tier alone (:func:`schedule`), never a carried identity. At
     most two views, mutually exclusive by shape:
 
-    - the MONOID-producer composition (``bind_prologue_contraction``) — the stored map form plus
+    - the MONOID-producer composition (``_classify.fused_view``) — the stored map form plus
       the derived fused contraction. The contraction's tree is the REFERENCE namespace: bare
       ``REDUCE`` must mean its K fold, so the map view spells its statistic at ``REDUCE@<axis>``;
     - the COLLAPSE (:meth:`Fold.demoted`) — a stored computed-A contraction plus the derived

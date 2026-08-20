@@ -186,7 +186,7 @@ def _order_free_by_output(node, free: list, stores: tuple = ()) -> tuple:
     return tuple(sorted(free, key=lambda ax: (1, pos[ax.name]) if ax.name in pos else (0, order.index(ax))))
 
 
-def recognized_tile(op: LoopOp, output_name: str, name: str = "") -> TileOp:
+def recognized_tile(op: LoopOp, name: str = "") -> TileOp:
     """The total lift: ``op``'s body → the UNMAPPED lifted ``TileOp`` (free axes peeled and
     output-ordered, every parseable reduce a typed :class:`Fold`, boundary effects split to
     :class:`Store`\\ s). This is the ONE entry point the live compile and the strict golden

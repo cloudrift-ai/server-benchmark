@@ -198,7 +198,7 @@ def test_pair_stays_above_the_free_sweep() -> None:
     # is one fold per output COLUMN, so joining per cell would recompute the statistic once per
     # column; the pair stays at its own level — the sweep's per-ROW statistic — and the sweep's
     # contraction stays a raw body loop for the fused view to bind.
-    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     (stat,) = tile.op.operands
     assert stat.role is AxisRole.TWISTED and len(stat.combine.results) == 2, "the plain (m, d) pair"
     assert any(isinstance(s, Assign) and s.op.name == "reciprocal" for s in tile.op.body)
@@ -212,7 +212,7 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     catalog (the warp tier, the staged transports, split-K) applies with nothing added for it."""
     from emmy.compiler.ir.pure.fold import is_contraction
 
-    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     (stat,) = tile.op.operands
     assert stat.role is AxisRole.TWISTED, "the row statistic is the online-softmax pair"
 
@@ -236,7 +236,7 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.ir.tile.ir import effect_tail
 
-    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}), "out")
+    tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     bound = fused_view(tile)
     assert bound is not None
     node, n_axis, stores = bound
@@ -244,7 +244,7 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     stmts = tuple(effect_tail(node.lower(), stores))
     for axis in reversed((*tile.place.free, n_axis)):
         stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
-    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)), "out")
+    relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)))
     again = fused_view(relifted)
     assert again is not None, "the round trip must not cost the region its computed-A binding"
     assert is_contraction(again[0].operands[0]), "and it must come back as the SAME one contraction"

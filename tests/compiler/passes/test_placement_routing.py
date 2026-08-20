@@ -115,7 +115,7 @@ def test_place_sites_are_the_non_root_nodes() -> None:
     lowered = Pipeline.build(LOOP_PASSES).run(_norm_linear_graph())
     node = next(n for n in lowered.nodes.values() if isinstance(n.op, LoopOp))
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, node.output.name, name=node.op.name)
+    tile = recognized_tile(node.op, name=node.op.name)
     pro = fused_view(tile)
     assert pro is not None, "the norm→linear tile must derive its fused computed-A view"
     c_map, _n_ax, _stores = pro

@@ -77,6 +77,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   performs.
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
   the program's meaning.
+- **Total lift** — The first half of Emmy's loop→tile boundary: one algorithm that turns any loop nest into a tree
+  of typed fold nodes, verified by re-deriving the loop and comparing. A loop it cannot read stays as-is (the raw
+  escape), so the lift never fails — its worst case is leaving the program unchanged.
+- **Classification** — The second half: deciding which algebra each lifted fold realizes (a matrix multiplication,
+  an online softmax, a fused normalize-then-multiply edge) by reading the fold's stored fields. A stage that cannot
+  decide changes nothing, and the fold keeps its plain reduction reading.
 - **Runtime** — The code and state involved while a compiled program is executing. Emmy's CUDA runtime allocates
   buffers, resolves dynamic sizes, and launches kernels.
 - **Fusion** — Combining operations so that one GPU kernel performs work that would otherwise require several

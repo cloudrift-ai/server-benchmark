@@ -645,7 +645,7 @@ def _recognized_target(record: GoldenRecord):
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, node.output.name, name=node.id)
+    tile = recognized_tile(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}

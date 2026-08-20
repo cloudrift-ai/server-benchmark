@@ -1,7 +1,7 @@
 """Loop IR → term: reconstructing a :class:`Fold`'s algebra from a reduce ``Loop``.
 
 This is a PARSER, not part of the term vocabulary — it belongs with the passes that consume it
-(``010_recognize``, ``ops.nodify_reduce``), not on the node. Every algebra fact reads off the loop
+(the total lift, ``_classify``, ``nodify_reduce``), not on the node. Every algebra fact reads off the loop
 body's own ``Accum``\\s, so a loop carries no side-band algebra; the byte-identity gate in
 :func:`fold_from_loop` is what lets the extractors stay shape-strict without a correctness burden
 — a shape that does not read off cleanly returns ``None`` and the caller keeps the raw-loop-IR

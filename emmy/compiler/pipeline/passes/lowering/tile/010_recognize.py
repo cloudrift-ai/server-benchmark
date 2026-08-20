@@ -35,7 +35,7 @@ PATTERN = [Pattern("root", LoopOp)]
 
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     loop: LoopOp = root.op
-    map_tile = recognized_tile(loop, root.output.name, name=loop.name)
+    map_tile = recognized_tile(loop, name=loop.name)
     # The matcher re-populates io when a later pass matches the op; seeding the output here makes
     # the UNMAPPED tile self-describing before any match has run (``deploy_identity`` folds the
     # output dtype).

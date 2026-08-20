@@ -115,9 +115,25 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
         runner.final_norm(np.zeros((1, 8), dtype=np.float16))
 
 
-@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("awq", True), ("fp8", False)])
+@pytest.mark.parametrize(
+    ("quant_method", "coded_trunk"),
+    [("exl3", True), ("awq", True), ("fp8", False), ("modelopt", False)],
+)
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ stay checkpoint-coded; FP8 preserves its decoded trunk lane."""
+    """EXL3/AWQ stay checkpoint-coded; FP8 and NVFP4 preserve the decoded trunk lane.
+
+    NVFP4 (``modelopt``) belongs in the coded column on its merits — the loader honours
+    ``compress_trunk`` for it and the packed byte-slab lowering consumes the result. It sits in the
+    decoded column because the re-sourcing is INCOMPLETE: a coded weight arrives as a
+    ``torch.empty`` placeholder, only some of a layer's matmuls get re-sourced from the
+    checkpoint's codes, and the rest read the placeholder. Nothing about that is loud — the program
+    compiles and the packed drain shows up in the emitted source — so this case is the guard that
+    the wrongness cannot return silently. Measured on nvidia/Qwen3-8B-NVFP4, one decoder layer,
+    identical input: coded absmax 0.472 against decoded 5.328.
+
+    Flip this row to ``True`` in the same change that completes the re-sourcing, with parity as the
+    evidence, and not before.
+    """
     import json
 
     from emmy.compiler.loader import safetensors
@@ -125,6 +141,8 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     from emmy.serving.gen_runner import EmmyGenRunner
 
     quant_config = {"quant_method": quant_method}
+    if quant_method == "modelopt":
+        quant_config["quant_algo"] = "NVFP4"
     if quant_method == "awq":
         quant_config.update(bits=4, version="gemm", zero_point=True)
     (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))

@@ -535,7 +535,11 @@ def _legalize(node):
       form (the structural key and the scalar render walk stmts, not terms), reached when
       ``split_effects`` declines a sweep whose members the lift had typed. The member lowers
       back to its verbatim loop (the parser's gate makes that byte-exact); the fused reading of
-      that sweep is :func:`fused_view`'s to re-derive."""
+      that sweep is :func:`fused_view`'s to re-derive.
+
+    A raw REDUCE loop restored beside a hoisted fold needs no entry here: the cooperative
+    emitter runs it serially per lane (``_factor._tile_reduce_axis`` — lane striding is for
+    FREE sweeps only), so the restored sibling stays correct on every tier."""
     if isinstance(node, Fold) and node.axis is None and len(node.operands) > 1:
         keep, rest = node.operands[0], node.operands[1:]
         node = Fold.projection(body=Body((*(f.loop for f in rest), *node.body)), operands=(keep,))
@@ -543,16 +547,6 @@ def _legalize(node):
         lowered = tuple(_lower_nested_folds(s) if isinstance(s, Loop) else s for s in node.body)
         if any(a is not b for a, b in zip(lowered, node.body, strict=True)):
             node = replace(node, lift=_replace_body(node.lift, Body(lowered)))
-    # An AXIS-NAME COLLISION between a hoisted operand fold and a raw body loop (normalization
-    # numbers sibling loops scope-locally, so a restored sibling shares the kept fold's axis
-    # name): the reduce partition slices loops BY AXIS NAME across the kernel, so the raw loop
-    # would be strided WITHOUT the carrier combine — an uncombined partial, a miscompile.
-    # Correctness beats tiers: the whole cell takes the verbatim escape.
-    if isinstance(node, Fold) and node.axis is None and node.operands:
-        fold_axes = {f.axis.name for f in node.operands if isinstance(f, Fold) and f.axis is not None}
-        if fold_axes & stmt_axis_names(node.body):
-            loops = tuple(f.loop if isinstance(f, Fold) else f for f in node.operands)
-            return Fold.projection(body=Body((*loops, *node.body)))
     return node
 
 

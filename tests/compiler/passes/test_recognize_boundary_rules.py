@@ -385,7 +385,9 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
         init=(float("-inf"), 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,))
+    # The prologue passes ``mx`` through beside its own ``rd``: the cell binds both positionally
+    # (``make_cone``'s closure rule), so no λ in the tree captures.
+    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,), results=("rd", "mx"))
     cone = Fold.projection(
         body=Body(
             (
@@ -437,6 +439,30 @@ def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
     # …and the statistic edge keeps its own reduce site — it is realized per tile ROW, not per cell.
     stat = cone.operands[0].operands[0]
     assert any(s.node is stat for s in family_sites("REDUCE", all_sites))
+
+
+@pytest.mark.parametrize("shape", ["sdpa", "norm_linear"])
+def test_cone_cell_lambda_is_closed(shape):
+    """Every λ in a stored term is CLOSED: the per-cell normalize reads the statistic it
+    normalizes against (softmax's ``m``, RMSNorm's ``rsqrt``) through the prologue's RESULTS,
+    bound positionally, never as a captured name. The seam between statistic and normalize is
+    then a positional edge like every other; what bridges through the stat smem rows is exactly
+    that edge's results."""
+    from emmy.compiler.ir.tile.ops import cone_seam
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
+
+    _, tile = _resolve_sdpa(is_causal=True) if shape == "sdpa" else _resolve(_norm_linear_graph(), pick=_is_warp_row)
+    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    cone = fold.a
+    prologue = cone.operands[0]
+    assert "captures" not in tile.pretty_body()
+    assert cone.lift.params == prologue.lift.results, "the cell binds every prologue result positionally"
+    if shape == "sdpa":  # ``exp(s − m)`` reads the carrier's ``m`` itself; RMSNorm's cell reads only the projected rsqrt
+        assert set(prologue.operands[0].combine.results) & set(prologue.lift.results), "the statistic's own state passes through"
+    _, _, stats = cone_seam(cone, fold.axis.name)
+    assert set(stats) == set(prologue.lift.results), f"the bridge is the prologue's results: {stats} vs {prologue.lift.results}"
+    axes = stmt_axis_names(cone.lower()) | {a.name for a in (*tile.place.free, *tile.place.grid)} | {fold.axis.name}
+    assert not _captured_values(cone, axes) and not _captured_values(prologue, axes)
 
 
 def test_cone_per_cell_edge_reaches_the_per_cell_emitter():

@@ -619,9 +619,11 @@ non-empty (`λ() [captures m_i__t5] -> (…)`) — the free names that are not i
 closure predicate applies (`axis_names`, relocated to `tile/ops.py` so the dump and `_cut._captured_values` share one
 definition; the iteration space is the term's axes ∪ the placement's free/grid ∪ the boundary stores' sweep axes).
 Without a capture set a λ reads as closed, and closure is precisely what decides whether a subtree can hoist to an
-operand edge — combine-derived material captures the carrier's running state, which is why its seam is not cuttable. The
-set is measured only when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted
-rather than reporting grid coordinates as captures.
+operand edge. No stored term carries one: the computed-A cone (`ops.make_cone`) passes every statistic value its
+per-cell normalize reads through the prologue's results (softmax's `m`, read by `exp(s − m)`), so the cell binds it
+positionally and the seam between statistic and normalize is a positional edge like any other. The set is measured only
+when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted rather than reporting
+grid coordinates as captures.
 
 **Nothing DERIVED is printed** — not the per-cell step, not the nodes synthesized inside it, not the lowered nest.
 The structure is already complete in the stored tree: the operand edges and their nesting say it, and a derived

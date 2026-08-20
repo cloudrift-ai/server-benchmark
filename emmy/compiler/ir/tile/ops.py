@@ -96,7 +96,13 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
 
     A producer NODE in ``cell`` is not a stmt of either side: it hangs off the cone's OPERANDS,
     where ``cone_seam`` splits it by the same K seam — k-varying, so it is the per-cell producer
-    spliced ahead of its first use."""
+    spliced ahead of its first use.
+
+    The cell's λ is CLOSED: every prologue value it reads — a statistic component the prologue
+    binds (softmax's ``m``, read by the per-cell ``exp(s − m)``) or a row-invariant def — passes
+    through as a further prologue RESULT, so the cell binds it positionally like any operand.
+    Nothing in a stored term captures; the seam between statistic and normalize is then a
+    positional edge like every other, and ``cone_seam``'s bridge is that edge's extra results."""
     nodes = tuple(s for s in cell if isinstance(s, Fold))
     cell = [s for s in cell if not isinstance(s, Fold)]
     # A stmt READING a k-varying producer varies with k as surely as one that indexes it: the K
@@ -108,7 +114,14 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
         pro.append(rest.pop(0))
-    prologue = Fold.projection(body=Body((*sweep, *pro)), operands=() if stat is None else (stat,))
+    pro_body = Body((*sweep, *pro))
+    pro_ops = () if stat is None else (stat,)
+    prologue = Fold.projection(body=pro_body, operands=pro_ops)
+    cell_reads = deep_reads(rest)
+    bound = (*(n for e in pro_ops for n in _operand_result_names(e)), *(n for s in pro_body for n in s.defines()))
+    bridged = tuple(n for n in dict.fromkeys(bound) if n in cell_reads and n not in prologue.lift.results)
+    if bridged:
+        prologue = Fold.projection(body=pro_body, operands=pro_ops, results=(*prologue.lift.results, *bridged))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
     return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
 

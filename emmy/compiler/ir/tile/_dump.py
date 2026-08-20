@@ -79,10 +79,10 @@ class _Ctx:
         """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
         space — the same reading the cut's closure predicate applies
         (``_cut._captured_values``). Non-empty means the λ is NOT closed, which is exactly what
-        makes a subtree unhoistable to an operand edge: flash's ``P = exp(s − m)`` reads the
-        online-softmax carrier's running max, so it can never be an edge and its seam is not
-        cuttable. Empty when the iteration space is unknown (no owning ``TileOp``) — an unanswered
-        question prints as no annotation, never as "closed"."""
+        makes a subtree unhoistable to an operand edge; no stored term prints one (the computed-A
+        cone binds the statistic's ``m`` positionally — ``ops.make_cone``), so an annotation marks
+        a hand-built tree. Empty when the iteration space is unknown (no owning ``TileOp``) — an
+        unanswered question prints as no annotation, never as "closed"."""
         return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
 
     def note(self, node) -> str:

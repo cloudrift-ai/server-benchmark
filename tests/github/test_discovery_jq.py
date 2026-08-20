@@ -147,7 +147,6 @@ def test_manifest_filter_restores_existing_onboarding_and_filters_repeated_candi
     ]
 
 
-
 def test_manifest_filter_reads_a_fenced_selection_followed_by_more_reasoning():
     ready = _recipe("org/ready")
     selection = _selection([_score("org/ready", 70)], ["org/ready"])

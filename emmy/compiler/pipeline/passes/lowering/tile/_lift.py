@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, Write
@@ -181,7 +180,12 @@ def _order_free_by_output(node, free: list, stores: tuple = ()) -> tuple:
         write = next((st.write for st in stores if st.sweep is None), None)
     if write is None:
         return tuple(free)
-    pos = {e.name: i for i, e in enumerate(write.index) if isinstance(e, Var)}
+    # Position by index-expr membership, not bare-Var identity: a re-fused axis reaches the
+    # store as the split pair ``[…, f/Q, f%Q]``, and its position is the outer of the two.
+    pos: dict[str, int] = {}
+    for i, e in enumerate(write.index):
+        for v in e.free_vars():
+            pos.setdefault(v, i)
     order = list(free)
     return tuple(sorted(free, key=lambda ax: (1, pos[ax.name]) if ax.name in pos else (0, order.index(ax))))
 

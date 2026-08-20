@@ -136,6 +136,18 @@ def _wrap(side: Side, coord: Expr) -> Expr:
     return BinaryExpr("%", coord, side.ext) if side.mask else coord
 
 
+def _row_dim(index: tuple, m_name: str) -> int | None:
+    """The INNERMOST output-index position carrying the M (row) coordinate — read off the pre-σ
+    ``Write`` template, where the row is still the ``m`` axis Var. ``RegStore`` derives its auto
+    ``ldm`` (the fragment row stride) from this dim's trailing extents. The innermost occurrence
+    is the one whose stride IS ``∂addr/∂m``: a re-fused split store spells the row as
+    ``[…, m/P, m%P, …]``, and the recomposition that makes the flat address affine in ``m``
+    gives it exactly the ``m%P`` dim's stride as coefficient. An N-side split (``[…, m, n/Q,
+    n%Q]``) has one m dim either way, whose trailing extents span the whole fused N."""
+    dims = [d for d, e in enumerate(index) if m_name in e.free_vars()]
+    return dims[-1] if dims else None
+
+
 def _cells(mn: tuple, offset, i: int, j: int):
     """Yield ``(side, cell-base coord)`` for each present output axis of register cell ``(i, j)`` —
     ``(m, offset[0].base(i))`` then ``(n, offset[1].base(j))`` (``m`` skipped for a 1-D output)."""
@@ -1915,6 +1927,7 @@ class _MmaOps(_AtomOps):
                     atomic=by_acc[acc].atomic,
                     swizzle=by_acc[acc].swizzle,
                     fragment_layout=atom.fragment_layout,
+                    row_dim=_row_dim(by_acc[acc].index, m.axis.name),
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -1934,6 +1947,7 @@ class _MmaOps(_AtomOps):
                 atomic=write.atomic,
                 swizzle=write.swizzle,
                 fragment_layout=atom.fragment_layout,
+                row_dim=_row_dim(write.index, m.axis.name),
             )
         ]
 

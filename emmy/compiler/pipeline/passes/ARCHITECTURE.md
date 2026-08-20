@@ -307,6 +307,36 @@ re-enumerates, so two rules' batches interleave — measured, the same predicate
 at 6.006 GiB because the compute producer still reached the open product first. A pass is left only once it is
 quiescent.
 
+**Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
+splits one of the kernel's output axes into a nest of two (an attention projection's
+`view(batch, seq, heads, head_dim)` carves N into heads × head_dim), leaving the operand loads addressing the
+original axis through a composite index (`wt[k, h*D + d]`). Downstream that split is an eligibility lockout,
+not a slowdown: contraction binding reads the trailing free-axis pair as `(m, n)`, so the split kernel binds
+the wrong row, the weight load carries a third grid axis, and the warp/mma tiers are never enumerated — no
+search budget can reach a schedule family that does not exist. The canonicalization re-fuses an adjacent free
+pair via the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the
+result only when every access folds clean: operand composites collapse to the bare fused axis (the
+`(f/Q)·Q + f%Q → f` recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer
+dims keeps the honest `[…, f/Q, f%Q]` — accepted only when the buffer's row-major flatten folds it back to an
+affine address. Any surviving residue (an axis addressed alone, a permuted-stride split, a predicate over the
+pair) declines the pair and the nest stands. Split and unsplit spellings of one contraction thereby converge
+to ONE canonical nest — one kernel identity, one shape key, one golden family.
+
+It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
+fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
+check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cut pieces
+minted at splice time, where re-fusing axes would fight the scheduler or re-spell a fragment whose `PLACE`
+seam was recorded against the unfused nest. And canonicalizing a producer that still awaits a merge could
+re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
+`loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
+
+Three consumers had assumed "one output axis per buffer dim" and were generalized with it: the lift's
+output-ordering reads an axis's store position through the index exprs' free vars (the fused axis reaches the
+store as its `f/Q, f%Q` pair); the mma `RegStore`'s auto row stride derives from the store template's
+innermost M-carrying dim (`row_dim`) instead of assuming the inner extent — under a split store, `shape[-1]`
+is not the row stride; and `080_vectorize_stores` re-reads a run its per-dim matching declines by the
+row-major flat address when a div/mod residue is present, so a split store keeps its vectorized transactions.
+
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
 Recognition is TWO phases with exactly TWO shared readings. The TOTAL LIFT (`_lift.recognized_tile`) turns any
@@ -316,7 +346,10 @@ verbatim raw subtree). CLASSIFICATION (`_classify`) then rewrites the tree, each
 fields: the online-softmax pairing on `component_ops` canons and α-equal score cones; the contraction binding
 (`bind_bilinear` — the semiring ⊗ read: one shared two-arg product distributing over the carrier's one
 commutative-monoid ⊕, by the `ElementwiseImpl` traits, never op names) arbitrating every operand shape (direct
-loads, hoistable k-invariant factor chains, computed cones); the monoid composition (`fused_view`) binding its
+loads, hoistable k-invariant factor chains, computed cones), with role purity checked per index EXPR — another
+free axis may ride a separate dim of an operand load (a batch offset the grid absorbs) but never the same expr
+as the role axis, since that composite has no slab address and must decline instead of reaching an emitter
+that cannot spell it; the monoid composition (`fused_view`) binding its
 channels through the same read. A stage that declines rewrites nothing — the fold already derives PLANAR
 structurally. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
 classification stage holds a private stmt-pattern reading of the algebra.

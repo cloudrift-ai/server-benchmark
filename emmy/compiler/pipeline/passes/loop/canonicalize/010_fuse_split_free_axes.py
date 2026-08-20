@@ -8,17 +8,22 @@ not a slowdown: contraction binding assigns ``(m, n)`` to the trailing free-axis
 kernel binds the wrong row, the weight load carries a third grid axis, and the warp/mma tier is
 never enumerated — the kernel stays a scalar reduce no amount of tuning can rescue.
 
-This rule restores the canonical spelling: two adjacent free loops ``p`` (extent P) over ``q``
-(extent Q) — perfectly nested, both static — fuse into one axis of extent P·Q via the bijective
+This rule restores the canonical spelling: two free loops ``p`` (extent P) over ``q`` (extent
+Q) — perfectly nested, both static — fuse into one axis of extent P·Q via the bijective
 reindexing ``p → f / Q``, ``q → f % Q``, with every coordinate expression σ-substituted and
-re-simplified. The substitution is semantics-preserving unconditionally; whether it lands is a
-PROFITABILITY gate checked after the fact: every rewritten access must fold clean. A composite
-operand index collapses to the bare axis (``(f/Q)·Q + f%Q → f``, the recomposition fold in
-``Expr.simplify``); a store that indexes the pair as separate buffer dims keeps the honest
-``[…, f/Q, f%Q]`` spelling, accepted only when the buffer's row-major flatten folds it back to an
-affine address (the strides match the split, so the emitted address is byte-identical). Any access
-where a div/mod residue would survive — an axis used alone, a permuted-stride split, a predicate
-over the pair — declines the pair, and the nest stands.
+re-simplified. The pair need not be adjacent: free loops are parallel by definition, so a
+perfectly-nested run of free loops between them (the ``transpose(1, 2)`` every attention
+projection fuses after its view puts ``seq`` between ``heads`` and ``head_dim``) interchanges
+outward and the fused axis takes ``q``'s place under it. The substitution is semantics-preserving
+unconditionally; whether it lands is a PROFITABILITY gate checked after the fact: every rewritten
+access must fold clean. A composite operand index collapses to the bare axis (``(f/Q)·Q + f%Q →
+f``, the recomposition fold in ``Expr.simplify``); a store that indexes the pair as separate
+buffer dims keeps the honest split-store spelling — ``[…, f/Q, f%Q]`` when the buffer's
+row-major flatten folds it back to an affine address, or the permuted ``[…, f/Q, …, f%Q]`` of a
+transposed output, whose address is per-element exact on every scalar tier and whose warp-tier
+addressability is the scheduler's legality question (``warp_split_store``). Any access where a
+div/mod residue would otherwise survive — an axis used alone, a predicate over the pair —
+declines the pair, and the nest stands.
 
 Runs to fixpoint inside one rewrite (a three-way split fuses pairwise), AFTER ``loop/fusion`` is
 quiescent — canonicalizing a producer that still awaits a merge could re-spell the very indices the
@@ -39,6 +44,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import simplify as _simplify_stmt
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering._addr import split_pair
 
 PATTERN = [Pattern("root", LoopOp)]
 
@@ -58,11 +64,15 @@ def _no_divmod_on(e: Expr, name: str) -> bool:
     return True
 
 
-def _access_ok(index: tuple, shape, fname: str) -> bool:
+def _access_ok(index: tuple, shape, fname: str, store: bool = False) -> bool:
     """A rewritten access folds clean when its index exprs carry no div/mod residue on the fused
     axis, or — the split-store spelling ``[…, f/Q, f%Q]`` — when the buffer's row-major flatten
-    recomposes the residue to an affine address (needs the full static shape)."""
+    recomposes the residue to an affine address (needs the full static shape). A ``store`` may
+    also keep the bare pair at permuted strides (``[…, f/Q, …, f%Q]``): every tier addresses an
+    output element at its own coordinate, so the spelling is exact by construction."""
     if all(_no_divmod_on(e, fname) for e in index if fname in e.free_vars()):
+        return True
+    if store and split_pair(index, fname) is not None:
         return True
     if shape is None or len(shape) != len(index) or not all(getattr(d, "is_static", False) for d in shape):
         return False
@@ -80,15 +90,17 @@ def _folds_clean(fused: Loop, fname: str, shapes: dict) -> bool:
             if not _access_ok(s.index, shapes.get(s.input), fname):
                 return False
         elif isinstance(s, Write):
-            if not _access_ok(s.index, shapes.get(s.output), fname):
+            if not _access_ok(s.index, shapes.get(s.output), fname, store=True):
                 return False
         elif any(fname in e.free_vars() and not _no_divmod_on(e, fname) for e in s.exprs()):
             return False
     return True
 
 
-def _fuse_pair(outer: Loop, inner: Loop, shapes: dict) -> Loop | None:
-    """The fused loop for a perfectly-nested free pair, or ``None`` when the pair declines."""
+def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...] = ()) -> Loop | None:
+    """The fused nest for a perfectly-nested free pair, or ``None`` when the pair declines. The
+    free loops ``between`` them (outermost first) interchange outward: the fused axis sits where
+    ``inner`` was, under them."""
     p, q = outer.axis, inner.axis
     if p.name == q.name or p.window is not None or q.window is not None:
         return None
@@ -107,18 +119,31 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict) -> Loop | None:
     body = Body(tuple(s.rewrite(lambda n: n, sigma) for s in inner.body))
     fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, role=AxisRole.FREE, seed=inner.seed)
     fused = _simplify_stmt(fused, SimplifyCtx.empty())
-    return fused if _folds_clean(fused, q.name, shapes) else None
+    if not _folds_clean(fused, q.name, shapes):
+        return None
+    for mid in reversed(between):
+        fused = replace(mid, body=Body((fused,)))
+    return fused
+
+
+def _free_chain(loop: Loop) -> list[Loop]:
+    """``loop`` and the perfectly-nested free loops under it, outermost first."""
+    out = [loop]
+    while len(out[-1].body) == 1 and isinstance(out[-1].body[0], Loop) and not out[-1].body[0].is_reduce:
+        out.append(out[-1].body[0])
+    return out
 
 
 def _fuse_once(body: Body, shapes: dict) -> Body | None:
-    """The body with ONE pair fused (outermost-first, depth-first), or ``None`` when no pair
-    fuses. The caller iterates to fixpoint, so an outer pair exposed by an inner fusion is
-    picked up on the next round."""
+    """The body with ONE pair fused (outermost-first, depth-first, the nearest partner first), or
+    ``None`` when no pair fuses. The caller iterates to fixpoint, so an outer pair exposed by an
+    inner fusion is picked up on the next round."""
     for i, s in enumerate(body):
         if not isinstance(s, Loop) or s.is_reduce:
             continue
-        if len(s.body) == 1 and isinstance(s.body[0], Loop) and not s.body[0].is_reduce:
-            fused = _fuse_pair(s, s.body[0], shapes)
+        chain = _free_chain(s)
+        for j in range(1, len(chain)):
+            fused = _fuse_pair(s, chain[j], shapes, tuple(chain[1:j]))
             if fused is not None:
                 return Body((*body[:i], fused, *body[i + 1 :]))
         inner = _fuse_once(s.body, shapes)

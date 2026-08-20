@@ -180,12 +180,14 @@ def _order_free_by_output(node, free: list, stores: tuple = ()) -> tuple:
         write = next((st.write for st in stores if st.sweep is None), None)
     if write is None:
         return tuple(free)
-    # Position by index-expr membership, not bare-Var identity: a re-fused axis reaches the
-    # store as the split pair ``[…, f/Q, f%Q]``, and its position is the outer of the two.
+    # Position by index-expr membership, not bare-Var identity, at the INNERMOST dim carrying the
+    # axis: a re-fused axis reaches the store as the split pair ``f/Q`` … ``f%Q``, and the
+    # remainder dim is the one its unit step moves — under a transposed output
+    # (``[…, f/Q, s, f%Q]``) the quotient dim sits outside another axis entirely.
     pos: dict[str, int] = {}
     for i, e in enumerate(write.index):
         for v in e.free_vars():
-            pos.setdefault(v, i)
+            pos[v] = i
     order = list(free)
     return tuple(sorted(free, key=lambda ax: (1, pos[ax.name]) if ax.name in pos else (0, order.index(ax))))
 

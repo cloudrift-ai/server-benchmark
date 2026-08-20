@@ -158,12 +158,17 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
 def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
-    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for a dim varying with the output row /
-    col axis, else ``"fixed"`` (batch / grid literal — uniform across the fragment cell)."""
-    roles = []
-    for e in index:
-        fv = e.free_vars()
-        roles.append("m" if m_name in fv else "n" if n_name in fv else "fixed")
+    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for the dim the output row / col axis moves
+    within the fragment cell, else ``"fixed"`` (batch / grid literal — uniform across the cell).
+    Only the INNERMOST dim carrying an axis moves (the same reading as :func:`_row_dim`): a
+    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]``, and within an atom the
+    quotient dim is uniform — giving both dims the role would add the lane offset at two
+    strides."""
+    roles = ["fixed"] * len(index)
+    for role, name in (("n", n_name), ("m", m_name)):
+        dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+        if dims:
+            roles[dims[-1]] = role
     return tuple(roles)
 
 

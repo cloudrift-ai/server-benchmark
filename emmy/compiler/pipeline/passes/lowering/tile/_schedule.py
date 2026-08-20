@@ -542,6 +542,9 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=False):
         return False
+    shapes = {**term.tile.inputs, **term.tile.outputs}
+    if not legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=False):
+        return False
     conv = _converting_a(node, plan.atom, term.tile.inputs)
     # The converting fill reads A per element through its own σ — the fragment loader's contiguous
     # K-column requirement is a gmem-direct/byte-transport fact and does not apply to it.
@@ -1029,6 +1032,8 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
                     legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
+                shapes = {**term.tile.inputs, **term.tile.outputs}
+                legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=True)
                 if _has_computed_operand(node) or conv:
                     legal.enforce(legal.computed_operand_cover(node, plan.placed_on(term.place), converting_a=conv), pinned=True)
                     legal.enforce(

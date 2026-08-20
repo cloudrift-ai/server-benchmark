@@ -313,14 +313,17 @@ splits one of the kernel's output axes into a nest of two (an attention projecti
 original axis through a composite index (`wt[k, h*D + d]`). Downstream that split is an eligibility lockout,
 not a slowdown: contraction binding reads the trailing free-axis pair as `(m, n)`, so the split kernel binds
 the wrong row, the weight load carries a third grid axis, and the warp/mma tiers are never enumerated — no
-search budget can reach a schedule family that does not exist. The canonicalization re-fuses an adjacent free
-pair via the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the
-result only when every access folds clean: operand composites collapse to the bare fused axis (the
-`(f/Q)·Q + f%Q → f` recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer
-dims keeps the honest `[…, f/Q, f%Q]` — accepted only when the buffer's row-major flatten folds it back to an
-affine address. Any surviving residue (an axis addressed alone, a permuted-stride split, a predicate over the
-pair) declines the pair and the nest stands. Split and unsplit spellings of one contraction thereby converge
-to ONE canonical nest — one kernel identity, one shape key, one golden family.
+search budget can reach a schedule family that does not exist. The canonicalization re-fuses a free pair via
+the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the result only
+when every access folds clean: operand composites collapse to the bare fused axis (the `(f/Q)·Q + f%Q → f`
+recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
+split-store spelling — `[…, f/Q, f%Q]` when the buffer's row-major flatten folds it back to an affine address,
+or the permuted `[…, f/Q, …, f%Q]` of a transposed output. The pair need not be adjacent: free loops are
+parallel, so the perfectly-nested free loops between them (the `transpose(1, 2)` every attention projection
+fuses after its view puts `seq` between `heads` and `head_dim`) interchange outward and the fused axis takes
+the inner loop's place. Any surviving residue elsewhere (an axis addressed alone, a predicate over the pair)
+declines the pair and the nest stands. Split and unsplit spellings of one contraction thereby converge to ONE
+canonical nest — one kernel identity, one shape key, one golden family.
 
 It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
 fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
@@ -330,12 +333,20 @@ seam was recorded against the unfused nest. And canonicalizing a producer that s
 re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
 `loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
 
-Three consumers had assumed "one output axis per buffer dim" and were generalized with it: the lift's
-output-ordering reads an axis's store position through the index exprs' free vars (the fused axis reaches the
-store as its `f/Q, f%Q` pair); the mma `RegStore`'s auto row stride derives from the store template's
-innermost M-carrying dim (`row_dim`) instead of assuming the inner extent — under a split store, `shape[-1]`
-is not the row stride; and `080_vectorize_stores` re-reads a run its per-dim matching declines by the
-row-major flat address when a div/mod residue is present, so a split store keeps its vectorized transactions.
+The consumers that had assumed "one output axis per buffer dim" were generalized with it, all on one
+reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's
+output-ordering positions an axis at that dim (under the permuted store the quotient dim sits outside another
+axis entirely, and positioning there would make the fused axis the row and the stride-`Q` axis the column);
+the mma `RegStore`'s auto row stride derives from the store template's innermost M-carrying dim (`row_dim`)
+instead of assuming the inner extent; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
+and `080_vectorize_stores` re-reads a run its per-dim matching declines by the row-major flat address when a
+div/mod residue is present, so a row-major split store keeps its vectorized transactions (the permuted one
+stores scalar on the scalar tiers — exact, unvectorized). The warp tier's fragment store evaluates the cell
+base once per atom and adds `col` / `row · ldm` across it, so a split pair is mma-addressable only when the
+row-major flatten recomposes it, or when the `%` dim is the innermost carrier (contiguous for `n`) with `Q` a
+multiple of the atom extent — an aligned atom never straddles a `Q` boundary. That is the `warp_split_store`
+legality predicate: dropped by the unpinned catalog, raised on a pin, like every other tile gate; the scalar
+tiers, which evaluate every element's index, are always exact.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 

@@ -1,0 +1,39 @@
+# Qwen3.8-27B W4A16 on one RTX 4090 (sm_89, 24 GB). Conservative onboarding baseline: the
+# checkpoint's unquantized embed_tokens + lm_head (248,320 x 5,120 each, ~5.1 GB together)
+# dominate the non-quantized footprint, so --language-model-only is required to free the
+# vision tower before any KV budget exists.
+model:
+  huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
+  revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.95
+    context_length: 8192
+    max_concurrent_requests: 4
+    vllm:
+      image: "vllm/vllm-openai@sha256:dae7af23ea9b66b4f15de3d5e4ddebfdafa7be636be91d400184c1666f1b1462"
+      extra_args: >-
+        --language-model-only --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+        --no-enable-prefix-caching
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+
+# Three workload points, no prefix caching: a short interactive point, the mid point the
+# recipe is selected on, and a long-prefill point that approaches the 8,192 context cap.
+# The measured KV pool is 32,182 tokens, so concurrency x context must stay under it.
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 4090"
+      deploy.gpu_count: 1
+      zip:
+        benchmark.random_input_len: [128, 1024, 4096]
+        benchmark.random_output_len: [128, 256, 512]
+        benchmark.max_concurrency: [4, 4, 2]
+        benchmark.num_prompts: [32, 16, 8]

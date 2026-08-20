@@ -13,6 +13,7 @@ lift / monoid / derived carrier in lockstep."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import component_ops, degenerate
 from emmy.compiler.ir.pure.fold import Channel, Fold
@@ -82,7 +83,9 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
     fold = fold_from_loop(loop)
     assert fold is not None and fold.lift is not None
     assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
-    assert fold.init == (float("-inf"), 0.0)
+    # The pivot seeds the max op's finite IDENTITY (−1e30), never −inf: an all-masked carrier
+    # slice (a coop strided lane, a split-KV chunk) would rescale ``subtract(−inf, −inf)`` — NaN.
+    assert fold.init == (ElementwiseImpl("maximum").identity, 0.0)
     assert not degenerate(fold.combine)
     assert fold.combine.results == ("m_i", "l_i")  # recognition's names thread through
     # The derived serial step (combine at the singleton) reproduces the dissolved merge exactly.

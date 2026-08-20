@@ -22,7 +22,7 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, component_ops
-from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names
+from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names, stmt_axis_names
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select
 from emmy.compiler.ir.tile.ops import _cone_canon, make_cone, split_invariant_factors
@@ -100,8 +100,11 @@ def _score_cone(f: Fold, res: str) -> list | None:
     if not stmts or any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
         return None
     used = [n for n in nodes if n in {a for s in stmts for a in s.deps()}]
-    srcs = [s for s in stmts if isinstance(s, Load)] + [nodes[n] for n in used]
-    if len(srcs) != 1:
+    # A SOURCE is what the cone streams — an INDEXED load or a producer edge. A scalar
+    # index-invariant load (a mask fill / eps constant) is a cone member, never a source: the
+    # causal-mask spelling carries two of them beside the one streamed score.
+    srcs = [s for s in stmts if isinstance(s, Load) and any(e.free_vars() for e in s.index or ())]
+    if len(srcs) + len(used) != 1:
         return None
     return [*(nodes[n] for n in used), *stmts]
 
@@ -240,7 +243,11 @@ def _pair(fmax, rest: list) -> tuple[Fold, int, list] | None:
         unroll=fmax.unroll,
         operands=edges,
         lift=lift,
-        init=(float("-inf"),) + (0.0,) * (len(names) - 1),
+        # The pivot seeds the max op's IDENTITY (−1e30), never −inf: an ALL-MASKED carrier slice
+        # (a coop strided lane, a split-KV chunk) folds only −inf scores, and the rescale
+        # ``subtract(m_old, m_new)`` at ``m_old = m_new = −inf`` is NaN — at the finite identity
+        # it is 0 and the empty carrier stays (identity, 0, …).
+        init=(om[0].identity,) + (0.0,) * (len(names) - 1),
         combine=combine,
     )
     return merged, consumed, epilogue
@@ -357,6 +364,9 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
         return ("free", name)
     if isinstance(st, Load):
         return ("load", st.input, tuple(e.pretty() for e in st.index))
+    if isinstance(st, Select):
+        branches = tuple((b.select.pretty() if b.select is not None else "", _cone_value_key(b.value, defs)) for b in st.branches)
+        return ("select", branches)
     children = tuple(_cone_value_key(a, defs) for a in st.args)
     if st.op.commutative:
         children = tuple(sorted(children))
@@ -454,6 +464,16 @@ def _legalize(node):
         lowered = tuple(_lower_nested_folds(s) if isinstance(s, Loop) else s for s in node.body)
         if any(a is not b for a, b in zip(lowered, node.body, strict=True)):
             node = replace(node, lift=_replace_body(node.lift, Body(lowered)))
+    # An AXIS-NAME COLLISION between a hoisted operand fold and a raw body loop (normalization
+    # numbers sibling loops scope-locally, so a restored sibling shares the kept fold's axis
+    # name): the reduce partition slices loops BY AXIS NAME across the kernel, so the raw loop
+    # would be strided WITHOUT the carrier combine — an uncombined partial, a miscompile.
+    # Correctness beats tiers: the whole cell takes the verbatim escape.
+    if isinstance(node, Fold) and node.axis is None and node.operands:
+        fold_axes = {f.axis.name for f in node.operands if isinstance(f, Fold) and f.axis is not None}
+        if fold_axes & stmt_axis_names(node.body):
+            loops = tuple(f.loop if isinstance(f, Fold) else f for f in node.operands)
+            return Fold.projection(body=Body((*loops, *node.body)))
     return node
 
 

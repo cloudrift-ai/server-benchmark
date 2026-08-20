@@ -180,7 +180,9 @@ def _extract_twisted_self(loop: Loop) -> tuple[Lambda, tuple, Lambda, tuple] | N
             return None
         other = tuple(f"{n}__o" for n in names)
         combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-        return lift, (float("-inf"),) + (0.0,) * len(adds), combine, edges
+        # The pivot seeds the max op's IDENTITY (−1e30), never −inf: an all-masked carrier slice
+        # would rescale ``subtract(−inf, −inf)`` — NaN; at the finite identity it is 0.
+        return lift, (maxes[0].op.identity,) + (0.0,) * len(adds), combine, edges
     return None
 
 
@@ -216,7 +218,7 @@ def _extract_twisted_lift(loop: Loop, like: Fold) -> tuple[Lambda, tuple, Lambda
         lift = Lambda(params=(loop.axis.name,), body=Body(prefix), results=terms)
     except ValueError:
         return None
-    return lift, (float("-inf"),) + (0.0,) * (len(names) - 1), like.combine, ()
+    return lift, like.init, like.combine, ()
 
 
 def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold | None:

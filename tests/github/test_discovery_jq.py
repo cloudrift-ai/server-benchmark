@@ -147,6 +147,18 @@ def test_manifest_filter_restores_existing_onboarding_and_filters_repeated_candi
     ]
 
 
+
+def test_manifest_filter_reads_a_fenced_selection_followed_by_more_reasoning():
+    ready = _recipe("org/ready")
+    selection = _selection([_score("org/ready", 70)], ["org/ready"])
+    wrapped = f"Here it is:\n```json\n{json.dumps(selection)}\n```\n\nWait - let me re-check the shells:\n- one\n- two\n"
+
+    result, manifest = _run_manifest(_task(ready), wrapped)
+
+    assert result.returncode == 0, result.stderr
+    assert manifest["maintained_models"] == [_score("org/ready", 70)]
+
+
 def test_manifest_filter_drops_a_new_candidate_the_fit_agents_could_not_size():
     ready = _recipe("org/ready")
     selection = _selection(

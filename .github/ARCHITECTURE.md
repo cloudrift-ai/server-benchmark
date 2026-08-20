@@ -70,20 +70,20 @@ The workflow checks that the agent did not modify the checkout, then validates a
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
 plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.
 This lets a manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or
-silently using an older manifest contract. The manifest filter tolerates a model reasoning wrapper around the JSON
-object, but requires exactly the five expected selection fields before assembling the manifest. A sized deployment
-replaces an existing onboarding shell's matrix, so a shell's hardware is corrected as the fleet and the checkpoint's
-published form become better understood. An empty sized result drops a new candidate that nothing in the fleet can
-serve and leaves an existing shell's matrix untouched, which keeps one unreadable checkpoint from failing the run. The
-named discovery agent denies repository edits and permits only the tracked discovery skill, public-web tools,
-repository reads, read-only Git inspection, the three named read-only source subagents, the tool-free batch scorer,
-and the fit subagent. Parent work caps at 64 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena
-investigators run as independent bounded sources; Reddit can surface a candidate before an exact Hugging Face identity
-is known. The last complete selection object in OpenCode's final completed text event is logged before deterministic
-assembly so a rejected decision remains inspectable; the repository validator remains the authoritative completion
-gate. The project provider configuration selects the configurable CloudRift model through an OpenAI-compatible Chat
-Completions endpoint and disables the model's chat-template thinking mode for the concise JSON result. Discovery never
-provisions hardware.
+silently using an older manifest contract. The manifest filter reads the last fenced or bare object carrying exactly
+the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
+expected selection fields before assembling the manifest. A sized deployment replaces an existing onboarding shell's
+matrix, so a shell's hardware is corrected as the fleet and the checkpoint's published form become better understood.
+An empty sized result drops a new candidate that nothing in the fleet can serve and leaves an existing shell's matrix
+untouched, which keeps one unreadable checkpoint from failing the run. The named discovery agent denies repository
+edits and permits only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the
+three named read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 64
+agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit
+can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
+OpenCode's final completed text event is logged before deterministic assembly so a rejected decision remains
+inspectable; the repository validator remains the authoritative completion gate. The project provider configuration
+selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
+model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
 provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The

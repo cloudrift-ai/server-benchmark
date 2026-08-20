@@ -5,8 +5,20 @@ def require($condition; $message):
 def exact_fields($fields):
   (keys | sort) == ($fields | sort);
 
+# The agent may fence its object, or keep reasoning after it. Prefer the last fenced or bare
+# candidate carrying exactly the selection fields; fall back to the whole text, then to a greedy span.
+def selection_fields:
+  ["scores", "maintained_model_ids", "obsolete_models", "new_onboarding_models", "onboarding_deployments"];
+
 def parse_selection:
-  ($selection | fromjson?) // ($selection | capture("(?s)(?<json>\\{.*\\})").json | fromjson);
+  (
+    [$selection, ($selection | splits("```(?:json)?"))]
+    | map(fromjson?)
+    | map(select(type == "object" and exact_fields(selection_fields)))
+    | last
+  )
+  // ($selection | fromjson?)
+  // ($selection | capture("(?s)(?<json>\\{.*\\})").json | fromjson);
 
 def model_ids($items):
   [$items[]?.model_id];
@@ -31,7 +43,7 @@ def model_ids($items):
 | parse_selection as $choice
 | require(
     ($choice | type) == "object"
-      and ($choice | exact_fields(["scores", "maintained_model_ids", "obsolete_models", "new_onboarding_models", "onboarding_deployments"]));
+      and ($choice | exact_fields(selection_fields));
     "Discovery selection has an invalid shape"
   )
 | require(

@@ -664,6 +664,19 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, NodeRef], g: Graph | None 
     return result
 
 
+# Fill-value tensor constructors and their static fill; ``None`` reads the fill from the call.
+_FILL_CONSTRUCTORS = {
+    "new_zeros": 0.0,
+    "zeros": 0.0,
+    "zeros_like": 0.0,
+    "ones": 1.0,
+    "ones_like": 1.0,
+    "new_full": None,
+    "full": None,
+    "full_like": None,
+}
+
+
 def _handle_placeholder(
     g: Graph,
     fx_node: Any,
@@ -1220,17 +1233,19 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # dtype/device template; receiver values do not participate in the result. Represent the
     # constructed tensor as a scalar plus an explicit broadcast so its FX metadata shape is
     # preserved even when the receiver has an unrelated shape.
-    if op_name in ("new_zeros", "new_full"):
+    # The ``_like`` forms and the receiver-less factories (``zeros``/``ones``/``full``, exported as
+    # leaves with no tensor input at all) construct the same way.
+    if op_name in _FILL_CONSTRUCTORS:
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
-        if op_name == "new_full":
-            fill = fx_node.args[2] if len(fx_node.args) > 2 else (fx_node.kwargs or {}).get("fill_value")
+        fill = _FILL_CONSTRUCTORS[op_name]
+        scalar_id = None
+        if fill is None:
+            fill_position = 2 if op_name == "new_full" else 1
+            fill = fx_node.args[fill_position] if len(fx_node.args) > fill_position else (fx_node.kwargs or {}).get("fill_value")
             if not isinstance(fill, (int, float, bool)):
-                raise NotImplementedError(f"aten.new_full requires a static scalar fill value, got {fill!r}")
+                raise NotImplementedError(f"aten.{op_name} requires a static scalar fill value, got {fill!r}")
             scalar_id = input_ids[-1] if input_ids and isinstance(g.nodes[input_ids[-1]].op, ConstantOp) else None
-        else:
-            fill = 0.0
-            scalar_id = None
         if scalar_id is None:
             scalar_name = f"{name}_scalar"
             scalar_id = g.add_node(

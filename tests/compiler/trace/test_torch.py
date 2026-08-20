@@ -1457,3 +1457,31 @@ def test_trace_clamp_matches_torch_eager():
     with torch.no_grad():
         want = m(gate, up).numpy()
     np.testing.assert_allclose(next(iter(outs.values())), want, rtol=1e-5, atol=1e-6)
+
+
+def test_trace_factory_constructors_and_like_forms_match_eager():
+    """``torch.ones``/``zeros``/``full`` export as input-less leaves; ``ones_like`` carries a template.
+
+    Before, a zero-input factory produced no graph node at all, so its consumer lost an operand
+    and failed later with an unrelated error (the ``triu``/``masked_fill`` chunk-mask idiom).
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class Factories(nn.Module):
+        def forward(self, x):
+            ones = torch.ones(x.shape[-1], x.shape[-1], dtype=x.dtype)
+            full = torch.full((x.shape[-1],), 2.5, dtype=x.dtype)
+            like = torch.ones_like(x) - torch.zeros_like(x)
+            return x * ones.sum(dim=0) + full + like
+
+    x = torch.randn(2, 3, 4)
+    graph = trace_module(Factories(), (x,))
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_allclose(got, Factories()(x).numpy(), rtol=1e-5, atol=1e-5)

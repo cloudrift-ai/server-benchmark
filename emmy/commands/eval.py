@@ -682,7 +682,7 @@ def _emit_golden_features(kernel_filter: str | None) -> None:
     :class:`OnlinePrior` regresses on — ``features.knob_features(merged)`` where
     ``merged`` is the ``H_*`` host/regime features + the ``S_*`` structural/shape
     features (obtained by compiling the shape to the loop dialect, where
-    ``992_stamp_structural_features`` runs) + the golden tuning knobs. This is
+    the IdentityStrategy stamps at the loop terminal) + the golden tuning knobs. This is
     the model's *input* for that shape+config — note the shape enters only as the
     coarse ``S_ext_*`` extent products/maxes; the occupancy / CTA-count / reuse
     terms that drive matmul perf (the engineered ``D_*`` features) are NOT here."""

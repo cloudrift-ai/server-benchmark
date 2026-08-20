@@ -318,7 +318,7 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     )
     frag.outputs = [out.name]
     # A cut CONSUMES the kernel it replaces: both pieces drop its schedule row and its structural
-    # identity, so each arrives at ``005_stamp_structural_features`` / ``020_schedule`` as a
+    # identity, so each arrives at the identity stamp / ``020_schedule`` as a
     # brand-new kernel stamped and scheduled from its OWN body. They are built fresh here, so this
     # is the contract stated rather than work done — and it stays stated, because a rule that mints
     # a kernel is the thing that has to say the kernel is new.
@@ -327,7 +327,7 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
         op.knobs = consume_kernel_row(op.knobs)
     # The decision is spelled onto the OPTION, exactly as the pin that replays it, so a recorded
     # routing golden can match this fragment against the seam it names. The splice then CONSUMES it
-    # along with everything else the pieces came with (``candidate._strip_minted``): once the cut
+    # along with everything else the pieces came with (the pieces' own ``consume_kernel_row``): once the cut
     # has happened the graph holds two kernels where it held one, and that is the record.
     parent = frag.nodes[out.name].op
     parent.knobs = {**(parent.knobs or {}), spelled: _CUT}

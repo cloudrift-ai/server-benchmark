@@ -26,17 +26,17 @@ def _make_fanout_graph() -> Graph:
 
 
 def test_splice_single_output_back_compat():
-    """``output`` as a str keeps the original behavior: one node redirected,
-    a single new id returned."""
+    """``output`` as a str: one node redirected; the receipt's ``output``
+    carries the single new id."""
     g = _make_fanout_graph()
     frag = Graph()
     frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
     frag.add_node(ElementwiseOp("exp"), ["x"], Tensor("a", (8,)), node_id="fa")
     frag.outputs = ["fa"]
 
-    new_id = g.splice(frag, consumed={"a"}, output="a")
-    assert isinstance(new_id, str)
-    assert new_id == "a"  # promoted back to the friendly output name
+    receipt = g.splice(frag, consumed={"a"}, output="a")
+    assert receipt.single
+    assert receipt.output == "a"  # promoted back to the friendly output name
     assert g.nodes["ua"].inputs == ["a"]  # downstream rewired to the new node
     assert g.nodes["a"].inputs == ["x"]  # the fragment node reads x directly
     assert "p" in g.nodes  # p not consumed here — still feeds b
@@ -54,10 +54,12 @@ def test_splice_multi_output_redirects_each_consumer():
     frag.add_node(ElementwiseOp("reciprocal"), ["x"], Tensor("b", (8,)), node_id="fb")
     frag.outputs = ["fa", "fb"]
 
-    result = g.splice(frag, consumed={"p", "a", "b"}, output={"a": "fa", "b": "fb"})
+    receipt = g.splice(frag, consumed={"p", "a", "b"}, output={"a": "fa", "b": "fb"})
 
-    # Returns the {old: new} map; both promoted to their friendly names.
-    assert result == {"a": "a", "b": "b"}
+    # The receipt's redirected map is {old: new}; both promoted to their friendly names.
+    assert receipt.redirected == {"a": "a", "b": "b"}
+    assert set(receipt.new_compute_ids) == {"a", "b"}
+    assert set(receipt.consumed_hints) == {"p", "a", "b"}
     # Shared producer dissolved.
     assert "p" not in g.nodes
     # Each downstream consumer rewired to its own replacement.

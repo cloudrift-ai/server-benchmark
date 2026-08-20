@@ -127,7 +127,7 @@ measure Emmy compiler speedup and are not inputs to the protocol-only kernel lan
 
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
-| RTX 4090 | Qwen3.6-27B AWQ, TP1 | Recent consumer qualification | Stock baseline until an Emmy arm exists |
+| RTX 4090 | Qwen3.8-27B W4A16, TP1 | Recent consumer qualification | Stock baseline; no Emmy arm is possible yet |
 | RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
 | RTX 5090 | Qwen3.6-27B mixed FP8/W4A16-NVFP4, TP1 | Requested quantized checkpoint | W4A16/Marlin compatibility and throughput only |
 | RTX 5090 | Qwen3-8B NVFP4, TP1 | Native W4A4 consumer qualification | Stock capability result until an Emmy arm exists |
@@ -143,6 +143,13 @@ against one process. Preserve latency, time to first token, inter-token latency,
 digests, driver/CUDA state, and failures. A compatibility fallback is not native NVFP4 or EXL3 evidence. General fast
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
+
+The RTX 4090 row is stock-only for a structural reason rather than a scheduling one. Qwen3.8-27B is a hybrid
+checkpoint whose 48 Gated DeltaNet linear-attention layers do not lower, so this row admits no matched Emmy arm; its
+16 full-attention layers, MLP, norms, and head do. The depthwise `conv1d` and the delta-rule `einsum` those layers
+open with now decompose, but the chunked delta rule behind them still does not: it builds its chunk masks with
+`triu`/`tril`, which have no tracer mapping, and then unrolls a sequential 64-step recurrence. That is an algorithm
+to absorb rather than an operation to add, so treat the row as consumer-platform system qualification only.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
 `cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`

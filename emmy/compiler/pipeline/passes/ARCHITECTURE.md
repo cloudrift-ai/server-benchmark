@@ -176,7 +176,7 @@ derivation changes the SITE SET, because that is what a product cannot absorb. T
 (`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); two do, mutually exclusive by shape, so
 a term has at most TWO views (`_schedule._views`):
 
-- the MONOID-producer composition (`_atomize.bind_prologue_contraction`) — the fused norm→linear / gate⊗up edge, whose
+- the MONOID-producer composition (`_classify.fused_view`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
   the map form's single reduce site, and its tree is the union's REFERENCE namespace: bare `REDUCE` must mean the
   contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too. The statistic's CARRIER is not
@@ -255,8 +255,8 @@ layout rules that drift apart) and silently narrows coverage to the shapes someo
 
 How to comply:
 
-- **Write the rule per element, not per shape.** Example: `lowering/tile/_atomize.map_cone` /
-  `bind_prologue_contraction` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
+- **Write the rule per element, not per shape.** Example: `lowering/tile/_classify.bind_bilinear` /
+  `fused_view` classify each ⊗-fold operand independently (plain `Load` stays put; a computed cone is
   bound as the shared A value by value-tree equality, however many fold channels read it). Norm→linear, gate/up +
   SwiGLU, scale→matmul, SDPA P@V, and rotary QK^T are *instances* of that one rule, not branches — and a shape
   nobody designed for (a weight-side decode cone) is covered for free.
@@ -309,30 +309,32 @@ quiescent.
 
 ## Resolve the hardware-atom binding once, structurally, at the tile level
 
-Recognition reads the loop algebra through exactly TWO shared parsers: the λ-fold reading (`_fromloop.fold_from_loop`
-— a reduce `Loop` interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling) and the
-⊗-lift reading (`_atomize._bilinear_reads` — a bilinear fold's per-channel `(B, A-value, accumulator)` facts, shared
-by both contraction binders). The online-softmax pairing states its condition on λ-fold results; contraction CANDIDACY
-(`010_recognize._bilinear_candidate`) is deliberately liberal and the one binder arbitrates every operand shape
-(direct loads, hoistable k-invariant factor chains, computed cones); the monoid composition binds its channels through
-the same lift reading. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
-recognition step holds a private stmt-pattern reading of the algebra.
+Recognition is TWO phases with exactly TWO shared readings. The TOTAL LIFT (`_lift.recognized_tile`) turns any
+loop nest into a Fold tree through the ONE loop→term parser (`_fromloop.fold_from_loop` — a reduce `Loop`
+interpreted as a `Fold`, gated by identity of the re-derived loop at the CANONICAL spelling; a declined loop stays a
+verbatim raw subtree). CLASSIFICATION (`_classify`) then rewrites the tree, each stage's condition stated on `Fold`
+fields: the online-softmax pairing on `component_ops` canons and α-equal score cones; the contraction binding
+(`bind_bilinear` — the semiring ⊗ read: one shared two-arg product distributing over the carrier's one
+commutative-monoid ⊕, by the `ElementwiseImpl` traits, never op names) arbitrating every operand shape (direct
+loads, hoistable k-invariant factor chains, computed cones); the monoid composition (`fused_view`) binding its
+channels through the same read. A stage that declines rewrites nothing — the fold already derives PLANAR
+structurally. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
+classification stage holds a private stmt-pattern reading of the algebra.
 
 The same invariant applies *across* the tile→kernel boundary: the kernel materializer must not re-recognize structure
-the tile IR already holds. The **atomize** step (`lowering/tile/_atomize.py`, called when a warp / register-tiled
-option is built — *not* a standalone pass) resolves the algebra→hardware-atom binding once at
-RECOGNIZE time (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction`) and feeds it into the
+the tile IR already holds. Classification (`lowering/tile/_classify.py`) resolves the algebra→hardware-atom binding
+once at RECOGNIZE time (`bind_bilinear` on the lifted fold; `fused_view` for the composed edge) and feeds it into the
 contraction-shaped `Fold`, so materialize reads the operands /
 `acc` off the node and only `factorize`s (the projection is peeled off the wrapping zero-axis fold's `lift` — its one
 home). Resolving it before the schedule means an atom that **cannot** be
-bound (e.g. a non-`Load` operand — a computed-cone / demoted matmul) never gets built in the bilinear shape: its
-loads stay INLINE in a fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
+bound (e.g. a non-`Load` operand — a computed-cone / demoted matvec) never gets built in the bilinear shape: its
+loads stay INLINE in the fold's lift, so the contraction reading (and with it the placed tiers) declines it instead of
 failing several passes later:
 
-- a `CONTRACTION` contraction → the `(a, b, acc, projection)` operand→role facts
-  (`_atomize.bind_contraction`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
+- a bilinear cell → the `(a, b, acc, projection)` operand→role facts
+  (`_classify.bind_bilinear`): the operands are named by the ⊗ **lift** (the `Assign` the fold accumulates) — B is its
   (n, k)-indexed `Load`, A is the lift's other argument, either a plain `Load` (clean gmem-direct) or, when loop fusion
-  has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`_atomize.make_cone`
+  has inlined an operand cone, the cone as a zero-axis `Fold` stored INLINE on an operand edge (`ir/tile/ops.make_cone`
   — a STAT-FREE computed A, which rides the `sync` compute-fill like the norm→linear cone but carries
   no statistic prologue) — plus the fold accumulator and the projection. The STORED form is ONE `Fold` in the
   BILINEAR shape (`Fold.contraction` builds it, `is_contraction` / `Fold._contraction` read it back — a predicate and
@@ -362,7 +364,7 @@ failing several passes later:
   a lift whose B operand is a computed cone never falls through to the positional rule (that binding dropped the fp8
   decode cone's scale from the kernel). A **storage decode times k-invariant multiplicative factors** chain — a
   decode of the (n, k) load ⊗ factors constant along the reduce axis — binds through the **mul-hoist**
-  (`_atomize._hoist_k_invariant_factors`):
+  (`_classify._hoist_factors`):
   the factors commute out of the fold onto the accumulator in the epilogue (`Σ_k a·(s·w) = s·Σ_k a·w`, the split-K
   reassociation category) and the decode is ABSORBED by the B load's own storage dtype — every consumer converts a
   bits-carrier element by dtype (the render's promote on the scalar tier; the gmem-direct fragment load's per-element
@@ -377,7 +379,7 @@ failing several passes later:
   declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
   the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
   codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
-  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`010_recognize._nodify_contraction` — every
+  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**
@@ -427,7 +429,8 @@ failing several passes later:
   conflicts / 82.5 M LSU inst on the 5090; the swizzle + vector fill store recovered -29% (std) / -41% (fm).
   Scalar-`Load`-drained slabs stay plain row-major).
 - the **MONOID-producer composition** — the fused norm→linear edge and its N-channel form, the gate/up MLP edge —
-  binds at recognize time too (`_atomize.bind_prologue_contraction`, structure-only): a projecting zero-axis fold
+  derives on demand too (`_classify.fused_view`, structure-only — the schedule and the golden decode re-derive the
+  same reading): a projecting zero-axis fold
   over a per-row statistic — `PLANAR` (rms/mean) or `TWISTED` (the online-softmax `(m, d)` pair, which is what makes
   a fused `softmax(S)·V` region this shape) — whose tail is one or more ⊗-folds of one shared A value nodifies to
   `Fold.projection(fn=projection, operands=(fold,))` — over ONE `role=CONTRACTION` `Fold` whose LIFT multiplies each
@@ -552,11 +555,11 @@ grammar it read).
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
   accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
 
-**Every piece is a BRAND-NEW kernel — and no rule has to remember that.** A rewrite that returns DIFFERENT NODES
-is a kernel-set change, so the ENGINE clears the knobs of every KERNEL it splices before they land
-(`candidate._strip_minted`; `Op.cache_key` is the is-this-a-kernel test, so the pre-lowering ops a decomposition
-or the checkpoint loader splices keep the data they carry). A rule cannot leak a decision or an identity across a
-kernel boundary by forgetting to clear one, and no pass has to assert that it didn't.
+**Every piece is a BRAND-NEW kernel.** A rewrite that returns DIFFERENT NODES is a kernel-set change, and the
+minting rule states it by consuming the replaced kernel's row on the pieces it builds
+(`knob.consume_kernel_row` — every SCHEDULE family and every `S_*`/`H_*` feature stripped, the rule's own decision
+stamp kept): a piece arrives with neither the row it was scheduled with nor the identity of the body it no longer
+has, and is stamped and scheduled on its own, from its own body.
 
 The DECISION is cleared along with everything else, because **a decision is consumed by the rewrite that realizes
 it** — the same rule the cross-CTA split follows. Once a cut has happened the graph holds two kernels where it
@@ -564,8 +567,8 @@ held one, and that is the record; a surviving `PLACE@<seam>: cut` knob would be 
 node set already says. The stamp still goes on the OPTION, which is what a recorded routing golden matches
 (`greedy._verified_pick`) — it is consumed at the splice, not before.
 
-What happens next is the ordinary pass scan. `005_stamp_structural_features` gives each piece its own `S_*`
-because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
+What happens next is the ordinary pass scan. The `IdentityStrategy` gives each piece its own `S_*` at the splice
+event because it has none; `020_schedule` offers it a fork because it is unmapped. Both fire on the piece's own state,
 neither is called, and neither is told what a piece is. **No pass can tell a split piece from a fresh kernel**,
 and no pass tries. The invariant holds in both directions: nothing downstream reads split provenance, and nothing
 upstream is told what the pieces are for.
@@ -604,7 +607,7 @@ touched — and the doubly-split partial drops off the mma tier.
 sound cosmetic are therefore load-bearing. The partition axis is spelled with a LEADING UNDERSCORE
 (`_factor_k`, `_slice_loop`'s `_ksplit`) because `normalize_body`'s `canonicalize_free_axis_order` sorts the outer
 free-loop chain by axis NAME: sorted below the row / column axes it must dominate, `hoist_loop_invariants` sinks the
-partition between the column sweep and the K fold, where `bind_prologue_contraction` cannot parse it and the piece
+partition between the column sweep and the K fold, where `fused_view` cannot parse it and the piece
 loses its computed-A binding. And the twisted extractors compare their regenerated `exp_merge` to the body
 **up to SSA temp names** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the generator's own temps
 the moment a term touches the loop dialect, so a raw byte compare would reject the α-equivalent program and lose
@@ -615,24 +618,18 @@ engine says *the same kernel, decided further*, so it merges the replaced op's k
 pass scan — the piece would inherit the very row it was minted to shed and would never reach its own fork (`_one`).
 
 The fragment idiom's re-entry semantics are shared, not per-rule: every rule hands its fragment back to the pass
-scan, and `005_stamp_structural_features` / `010_recognize` / `020_schedule` pick up whatever is un-stamped,
-un-recognized or unmapped. The shared fixpoint is what lets such rules compose without knowing about each other.
+scan, and `010_recognize` / `020_schedule` pick up whatever is un-recognized or unmapped (identity was stamped at
+the splice event before the fragment entered the graph). The shared fixpoint is what lets such rules compose
+without knowing about each other.
 
-**A piece is stamped before it is recognized, and that order is enforced by `010_recognize`, not by the scan.** The
-scan returns to rule 0 only when it wraps past the LAST rule, and a fork's option is applied by the caller
-(`Candidate.apply`), which advances the rule cursor only if the applied match closed its batch. A cut taken at an
-UNPINNED placement fork with another kernel still pending therefore leaves the cursor on `010_recognize`, which
-re-matches its own fresh pieces on the next step — ahead of `005`. So `010` DEFERS an unstamped `LoopOp`
-(`RuleSkipped`); the batch ends, the scan wraps, and the piece is stamped first. Without that guard the piece lifts
-with no `S_*` and `020_schedule` asserts on the empty structural identity — which is what a whole-model compile with a
-discovered (rather than pinned) cut hit.
-
-`005_stamp_structural_features` duplicates `loop/stamp/020_stamp_structural_features` rather than replacing it,
-because a kernel is stamped in the pass where it is BORN. The loop-dialect pass owns the kernels the fusion end
-produces; it cannot reach one minted later, since `Cursor.advance` only restarts a scan WITHIN the current pass and
-never returns to an earlier one. Moving it is not an option either: the OUTER search's terminals are finalized
-`LoopOp`s, handed over before tile lowering runs, so `two_level`'s `op_sig` would digest an empty set for every
-kernel in every model. Two registrations of one work function, each idempotent, is the whole design.
+**A piece is stamped before it is recognized — by construction, not by scan ordering.** Identity is the
+`IdentityStrategy`'s (`passes/identity.py`): computed from the body and materialized into knobs exactly once, at
+birth. Fusion-born kernels stamp at the loop dialect's end (`PassEndEvent` of `loop/stamp` — the fused body is
+final there, so one logical kernel never carries two identities); minted pieces stamp at the SPLICE EVENT, before
+the fragment enters the graph — so no rule, whatever the cursor position, can observe an unstamped kernel. There
+is no stamp rule to race, no scan-order dependence, and nothing a new minting rule has to remember: the stamp
+rides the engine's splice event, which every fragment goes through. (The historical design — twin stamp rules in
+`loop/stamp` and `lowering/tile` plus a recognize-time deferral guarding their ordering — is gone with it.)
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
@@ -668,9 +665,9 @@ routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut
 OLD piece shapes' keys and are re-seeded rather than joined).
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
-is the plain scalar fma cell). The contraction binder (`bind_contraction`) is loop-addressable, so a nested
-contraction reached through a composed fold binds through the same path — a tier is a node gaining a `TilePlan`,
-never a new path.
+is the plain scalar fma cell). The contraction binder (`bind_bilinear`) reads any lifted fold, so a nested
+contraction reached through a composed edge binds through the same path (`_bound_producer`) — a tier is a node
+gaining a `TilePlan`, never a new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those

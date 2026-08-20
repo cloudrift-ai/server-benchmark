@@ -1,0 +1,137 @@
+"""Engine events + the :class:`PipelineStrategy` protocol + discovery.
+
+The rewrite engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS and never
+branches on pass names, dialects, or per-concern flags. Every cross-cutting concern — provenance
+threading, kernel structural identity, a tune session's kernel inventory — is a strategy class
+implementing the event methods it cares about. Extension is a new strategy over the existing
+events (or a new event field), never a new engine parameter.
+
+Two binding scopes share the protocol:
+
+- **Discovered** (build-scoped): strategy modules are plain ``.py`` files at the top level of the
+  ``passes/`` directory; :func:`discovered_strategies` imports them and instantiates every
+  :class:`PipelineStrategy` subclass they define. Instances are shared across runs and candidates, so
+  they hold immutable config only — never trajectory state. Dispatch order is deterministic
+  (class-name sort) but MUST NOT be load-bearing: no strategy may depend on another having
+  handled an event first.
+- **Composed per run** (``Pipeline.with_strategies``): instances with per-run state (e.g. the
+  two-level tuner's minted-kernel watcher), composed into the run's own pipeline instance after
+  the discovered set. A pipeline composed with stateful strategies serves one run.
+
+Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,
+``Candidate.apply``'s Graph splice (before and after), and ``Cursor.advance``'s pass completion —
+and carry payload objects so signatures never churn. Events are FROZEN records of a moment: a
+handler never mutates the event (nor could a mutation mean anything — nobody reads it after the
+dispatch). What a handler legitimately mutates is the compilation state an event references —
+fragment ops, node hints — because acting on that state is a strategy's whole job.
+"""
+
+from __future__ import annotations
+
+import importlib
+from abc import ABC
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, SpliceReceipt
+    from emmy.compiler.ir.base import Op
+    from emmy.compiler.pipeline.pipeline import Match
+
+
+class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods: every event hook is optional
+    """ABC for engine-event strategies — the event protocol's one authoritative declaration.
+    Subclasses defined in a ``passes/`` top-level module are DISCOVERED and instantiated at
+    ``Pipeline.build`` (see module docstring); per-run instances are composed via
+    ``Pipeline.with_strategies``. Deliberately no abstract methods: every handler below is a concrete
+    no-op, since each strategy cares about a subset — override the events you act on. Contrast
+    ``search.strategy.base.SearchStrategy`` (a search SHAPE over the engine's loop) and
+    ``search.policy.Search`` (the frontier policy inside one loop)."""
+
+    def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """A loop (``Run.drive`` / ``Run.resolve``) starts driving a graph."""
+
+    def on_splice(self, e: SpliceEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """Before a ``Graph`` fragment splices in (op identities stable, pre-id-promotion).
+        Handlers may mutate fragment OPS — never the graph or the cursor."""
+
+    def on_spliced(self, e: SplicedEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """After the splice, with its :class:`~emmy.compiler.graph.SpliceReceipt`."""
+
+    def on_pass_end(self, e: PassEndEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """A named pass completed (quiescent scan)."""
+
+
+@dataclass(frozen=True)
+class RunStartEvent:
+    """A loop (``Run.drive`` / ``Run.resolve``) starts driving ``graph``. ``passes`` names the
+    pipeline's pass list — a strategy keyed to a pass boundary reads it to handle partial
+    pipelines that enter after its boundary (e.g. a loop-stage IR resume never runs
+    ``loop/stamp``, so identity stamps at entry instead)."""
+
+    graph: Graph
+    ctx: Context
+    passes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SpliceEvent:
+    """Emitted by ``Candidate.apply`` BEFORE a ``Graph`` fragment splices in. Fragment op
+    identities are stable (pre-splice, pre-id-promotion); ``graph`` is the candidate's graph,
+    still holding the consumed nodes. Strategies may mutate fragment OPS (stamp identity,
+    thread attribution) — never the graph or the cursor."""
+
+    match: Match
+    fragment: Graph
+    root_op: Op
+    pass_name: str
+    graph: Graph
+
+
+@dataclass(frozen=True)
+class SplicedEvent:
+    """Emitted by ``Candidate.apply`` AFTER the splice; ``receipt`` is what the splice did
+    (see :class:`emmy.compiler.graph.SpliceReceipt`)."""
+
+    graph: Graph
+    pass_name: str
+    receipt: SpliceReceipt
+
+
+@dataclass(frozen=True)
+class PassEndEvent:
+    """Emitted by ``Cursor.advance`` when a named pass completes with a quiescent scan.
+    ``passes`` names the pipeline's full pass list, so a strategy keyed to a boundary can
+    compute it per event instead of holding per-run state (build-scoped strategies are shared
+    across concurrent runs)."""
+
+    pass_name: str
+    graph: Graph
+    ctx: Context
+    passes: tuple[str, ...]
+
+
+_STRATEGY_DIR = Path(__file__).resolve().parent / "passes"
+_DISCOVERED: tuple[PipelineStrategy, ...] | None = None
+
+
+def discovered_strategies() -> tuple[PipelineStrategy, ...]:
+    """Import every top-level ``passes/*.py`` strategy module and return one shared instance of
+    each :class:`PipelineStrategy` subclass they define, class-name-sorted. Cached — the same instances
+    serve every pipeline build (they are stateless by contract)."""
+    global _DISCOVERED
+    if _DISCOVERED is None:
+        modules: set[str] = set()
+        for path in sorted(_STRATEGY_DIR.glob("*.py")):
+            if path.name == "__init__.py" or path.name.startswith("_"):
+                continue
+            # Canonical import path (passes/ is a package), so a strategy class has exactly one
+            # class object whether reached through discovery or a plain import.
+            name = f"emmy.compiler.pipeline.passes.{path.stem}"
+            importlib.import_module(name)
+            modules.add(name)
+        classes = [cls for cls in PipelineStrategy.__subclasses__() if cls.__module__ in modules]
+        _DISCOVERED = tuple(cls() for cls in sorted(classes, key=lambda c: c.__name__))
+    return _DISCOVERED

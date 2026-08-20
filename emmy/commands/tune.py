@@ -331,7 +331,7 @@ def _tune_one(
     import time
 
     from emmy.commands.tune_progress import TuneProgress
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     graph, _, bench_bundle = load_or_trace(args)
     if dump:
@@ -366,9 +366,7 @@ def _tune_one(
             proposal_ranking_callback(rankings)
         budget = getattr(args, "max_candidates", None)
         remaining = None if budget is None else max(0, budget - min(len(proposals), budget))
-        result = await run_two_level_tune(
-            graph,
-            ctx=ctx,
+        strategy = TwoLevelStrategy(
             db=db,
             backends=backends,
             patience=patience,
@@ -381,6 +379,7 @@ def _tune_one(
             max_candidates=remaining,
             prior=prior,
         )
+        result = await strategy.run(graph, ctx)
         return result, rankings
 
     try:
@@ -474,7 +473,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     """
     from emmy.commands.tune_progress import TuneProgress
     from emmy.compiler.pipeline.search.prior import load_prior
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     prepared = []
     temp_dumps: list[Path] = []
@@ -521,9 +520,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
         async def tune_target(index, target, graph, dump):
             budget = getattr(args, "max_candidates", None)
             remaining = None if budget is None else max(0, budget - min(len(target.proposals), budget))
-            return await run_two_level_tune(
-                graph,
-                ctx=ctx,
+            return await TwoLevelStrategy(
                 db=db,
                 backends=backends,
                 patience=patience,
@@ -538,7 +535,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 manage_prior=False,
                 backend_slots=slots,
                 close_backends=False,
-            )
+            ).run(graph, ctx)
 
         try:
             results = await asyncio.gather(
@@ -655,7 +652,7 @@ def handle_tune(args):
     # One session id per CLI invocation (a golden sweep = one collection session) —
     # stamped on every node row this run writes, so cross-run keep-min drift in the
     # node store is traceable to its tune session.
-    from emmy.compiler.pipeline.search.two_level import _mint_run_id
+    from emmy.compiler.pipeline.search.strategy.two_level import _mint_run_id
 
     run_id = _mint_run_id()
 

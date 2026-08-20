@@ -16,7 +16,7 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 - **OUTPUT-tiled** (a contraction — warp / register tile) — a `Fold` that reads as bilinear (`ir/tile/ir.py`; since
   the collapse `Contraction` is that READING, not a stored kind), its operand→role binding resolved recognize-side
-  (`010_recognize._nodify_contraction` / `_atomize.bind_prologue_contraction` — the ONLY nodification sites; the
+  (`_classify.bind_bilinear` / `_classify.fused_view` — the ONLY nodification sites; the
   schedule just places), so
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
@@ -189,7 +189,7 @@ authoritative.
 
 **Inline operands — the `smem` compute fill.** A matmul with a pure producer cone on either operand reaches
 the warp tier through a COMPUTED edge: recognition stores the producer tree inline on that edge
-(`_atomize.make_cone`), and the schedule offers a MANDATORY resolved `smem` `Stage` (there is no gmem-direct sibling —
+(`ir/tile/ops.make_cone`), and the schedule offers a MANDATORY resolved `smem` `Stage` (no gmem-direct sibling —
 a byte transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
 ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
 canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
@@ -203,7 +203,7 @@ per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialize
 gmem orientation (`Operand.trans`). When a two-slot ring also fits the smem budget, the stage resolves at `depth=2`
 and copied peer chunks can stay in flight across the current chunk's drain. A
 **reduce-bearing (MONOID) cone** — the fused norm→linear edge — is the schedule's fused term READING
-(`_atomize.bind_prologue_contraction`; real fork rows unioned with the map form's, not a pin rescue): the A cone is an
+(`_classify.fused_view`; real fork rows unioned with the map form's, not a pin rescue): the A cone is an
 inline node tree whose
 SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
 IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
@@ -217,13 +217,16 @@ fragment store (`RegStore` + `RegEpilogue`) and written straight into the slab t
 second mma emitter: the score is a contraction, so it is built out of the SAME atom strategy (`_atom_ops` on the score
 node — `state` declares the fragments, `reduce` emits the `ldmatrix` + `mma.sync` K-loop, `store` writes them),
 namespaced (`_AtomOps.frag_ns`) so the nested fragments never shadow the accumulators the enclosing drain carries
-across the same loop. The slab stays NONE-swizzle there — a fragment store applies no address XOR.
+across the same loop. That slab SWIZZLES like every other one: the fragment store applies the same flattened-index XOR
+the `ldmatrix` drain undoes (`RegStore.swizzle`, stamped through the fill's `Write`), so the weight tile costs no more
+bank conflicts than the operands beside it. The nested score's own staged operands (its per-chunk keys, its
+loop-invariant query tile) carry their mode on the cp.async fill the same way.
 
 The chained fill takes one of two forms, and the first is preferred wherever it reads:
 
 - **SINGLE-PASS** (`_atom.chain_stream_fill`) — the statistic and the weight come off ONE pass of the score. The two
   cannot share a pass while the weight names a denominator the sweep has not finished, so the cone's state-only
-  factors are split off (`_cone_weight` over `_softmax.split_invariant_factors`) and multiplied back onto the output
+  factors are split off (`_cone_weight` over `ir/tile/ops.split_invariant_factors`) and multiplied back onto the output
   fragments after the loop. What remains is the twisted monoid's streaming law: per KV chunk the block's scores land
   in C fragments, its row pivot advances the carried one, and the ψ-RESCALE that advance puts on every carried channel
   (`carrier.exp_rescale`) is applied to the ENCLOSING drain's output fragments — the one channel that lives outside

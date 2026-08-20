@@ -159,7 +159,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/db.py` | `SearchDB`, the persistent SQLite store (Part 6). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
-| `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
+| `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
@@ -202,6 +202,57 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
   `root.inputs[i]`. Take only what you need — `ctx` is optional.
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
 - Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
+
+### Strategies — engine events for cross-cutting concerns
+
+The engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS — frozen records of an engine moment
+(handlers act on the compilation state an event references, never on the event) — and never branches on pass
+names, dialects, or per-concern flags. Three prefixed protocols share the "strategy" vocabulary, each with its own
+ABC, told apart by what the loop is doing when they act:
+
+- **`PipelineStrategy`** (`pipeline/strategy.py`) — reacts to what the loop DID (events below): the cross-cutting
+  concerns (provenance, identity, the kernel inventory). Never steers the search; the loop's trajectory is
+  identical without them.
+- **`Search`** (`search/policy/base.py`) — answers what ONE loop ASKS during exploration: frontier ranking
+  (`push`/`pop`) and terminal valuation (`evaluate`); `TuningSearch` is the realization, and `greedy_decide`'s
+  decide callback is the deterministic sibling for `Run.resolve`.
+- **`SearchStrategy`** (`search/strategy/base.py`) — the search SHAPES above the loop: how many loops, over which pass
+  lists, with which policy inside, and what the results mean together (`GreedyStrategy`, `TwoLevelStrategy`; each
+  implements `run(graph, ctx)`).
+
+The composition chain for a tune: a `SearchStrategy` constructs runs with a `Search` policy inside; the loop emits
+events that `PipelineStrategy` instances act on. Each layer only knows the one below it. Every cross-cutting
+concern is a `PipelineStrategy` implementing the event methods it cares about; extension is a new strategy over
+the existing events (or a new event field), never a new engine parameter. The events, each a payload object: `RunStartEvent` (a loop starts driving a graph),
+`SpliceEvent` (before a `Graph` fragment splices in — op identities stable; strategies may mutate fragment OPS,
+never the graph or cursor), `SplicedEvent` (after the splice, carrying its `SpliceReceipt` — `Graph.splice` is pure
+surgery and hands back what it did), and `PassEndEvent` (a named pass completed a quiescent scan).
+
+Two binding scopes share the protocol:
+
+- **Discovered** (build-scoped): strategy modules are plain `.py` files at the top level of `passes/`
+  (`passes/provenance.py`, `passes/identity.py`); `Pipeline.build` collects every `PipelineStrategy` subclass they
+  define into shared instances (`strategy.discovered_strategies`), class-name-sorted. Dispatch order MUST NOT be
+  load-bearing — no strategy may depend on another having handled an event first — which is why identity is a
+  computed function, not a stamp others wait on. Build-scoped instances are shared across runs and candidates:
+  immutable config plus content-keyed caches only, never trajectory state.
+- **Composed per run** (`Pipeline.with_strategies`): instances with per-run state — e.g. the two-level tuner's
+  minted-kernel watcher — composed into the run's own pipeline instance after the discovered set. A pipeline
+  composed with stateful strategies serves one run; sharing across runs is only safe when every strategy is
+  stateless.
+
+The two discovered strategies: **`ProvenanceStrategy`** owns op provenance end to end (`seed` at run start,
+`propagate` from the splice receipt, mint for `frontend/decomposition`'s fragments, aggregate for everything else)
+— a pipeline built without it has no provenance anywhere, and `graph.py` imports none of it.
+**`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
+`op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
+`loop/stamp`), minted pieces (a cut's fragments, a split's pieces) at the splice event, before the fragment even
+enters the graph, so no rule at any cursor position can observe an unstamped kernel. The stamped row rides the
+engine's rebind knob-merge into every later dialect (which is what keeps a terminal `CudaOp`'s cache key, DB rows,
+and prior feature columns carrying the loop-birth identity). It also threads decomposition attribution
+(`Op.source`) and serves the read API (`signature` / `op_sig` — knobs-first, compute-fallback) every identity
+consumer goes through. The search shapes (`SearchStrategy` subclasses) are the same idea one level up — they own
+loop composition and terminal aggregation — but are constructed by their entry points, not discovered.
 
 A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
 AND again at apply time (`Candidate.try_rewrite`). This matters because an earlier apply in the same batch may have
@@ -707,7 +758,7 @@ sum-of-predictions comparison would be exposed to the model's absolute-µs error
 different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `Pipeline.run` retires a structural pick whose fragment kernel failed to LOWER
+which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
 (the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
 avoids re-splitting the slice it is pricing.
 
@@ -725,12 +776,14 @@ inversions and must not override a well-trained model on its own.
 non-chronological backtracking, no snapshots). A structural pick that leaves a fragment kernel un-lowered retires
 structural picks wholesale and re-resolves the keep-fused branch before falling back to tile blocklisting.
 
-**Greedy validity fallback.** The prior ranks by predicted latency, which can rank a tile that fails `validate(ctx)`
-(smem / thread budget) first — `tune` benches-and-skips it, but greedy benches nothing. So when a deterministic compile
-leaves a node un-lowered, `Pipeline.run` blocklists that tile's `tile_identity` (its planner knobs) and re-resolves:
-`greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
+**Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
+`policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
+predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first — `tune`
+benches-and-skips it, but greedy benches nothing. So when a deterministic compile leaves a node un-lowered, the
+strategy blocklists that tile's `tile_identity` (its planner knobs) and re-resolves: `greedy_decide(blocked=…)`
+drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
-the first in-budget one), `Pipeline.run` takes one last **emission-order resolve**
+the first in-budget one), the strategy takes one last **emission-order resolve**
 (`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
 overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
 failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
@@ -739,10 +792,13 @@ fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 
-`async Pipeline.tune_async(graph, *, search, backend=None, db=None)` is the (async-only) autotune sweep. Pass a
-`TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per fully-explored rollout, and
-`tune_async` benches each via `await _bench_terminal_async` (writes per-kernel `perf` / `lowering` / inventory rows,
-returns the aggregate `PerfStats`), then calls `search.observe(stats, status)`.
+`async Pipeline.tune_async(graph, *, search, backend=None, db=None)` is the (async-only) autotune
+sweep. Pass a `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per
+fully-explored rollout and awaits `search.evaluate(token, cand, backend=, db=)` — terminal VALUATION is search
+policy, not engine mechanics: the bench (or cache/stub short-circuit), the per-kernel `perf` / `lowering` /
+inventory rows, the observe protocol, and the deployable `-O3` re-bench all live on the policy
+(`search/policy/terminal_bench.py` + `TuningSearch.evaluate`). Per-run engine-event strategies are composed into
+the pipeline itself (`Pipeline.with_strategies` — see the strategies section of the rule contract above).
 
 - With `backend=None` the bench is stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never
   overwrites tuned rows.
@@ -767,10 +823,14 @@ forks, which change which kernels exist — how ops are grouped into kernels, an
 opposite structure, `two_level.py` separates them by the fork's *effect*, reusing the `Op`-rebind vs `Graph`-splice
 classification made where the children are pushed.
 
-**Outer search** (`run_two_level_tune`) drives the graph-changing passes: `frontend` + `loop`, plus the part of
-`lowering/tile` that runs before `partition_loops`. A **terminal** here is the state in which the cursor reaches
-`partition_loops` with every structural fork resolved. Each terminal is one candidate grouping of ops into kernels;
-its **reward** is `1 / Σ best-per-op time` from the inner search, backpropagated by the reused `TuningSearch`.
+The whole design is ONE class — `TwoLevelStrategy` — composing the engine's loop; the engine knows nothing
+two-level-shaped. **Outer**: drive the graph-changing passes (`TwoLevelStrategy.OUTER_PASSES` = `frontend` +
+`loop`, the strategy's OWN boundary config, never an engine parameter). The outer never ventures into Tile IR; a
+**terminal** is the fused graph of finalized `LoopOp`s. Each terminal is one candidate grouping of ops into
+kernels; its **reward** is `1 / Σ best-per-op time` from the strategy's separable scoring, backpropagated by the
+reused `TuningSearch`. Tile-dialect structural forks (a `PLACE` cut, a cross-CTA split) stay INNER — they are part
+of a kernel's independent measurement, and a slice whose kernel set changed benches as the Σ over the pieces it
+minted.
 
 Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
@@ -781,8 +841,9 @@ one combined Σ row per structural decision it took (features `{ctx, op knobs be
 delta}`, label = the Σ of that side's per-kernel bests), so a re-tune on a warm machine descends into the kernel set
 predicted to be cheaper first.
 
-**Inner search** (`_inner_reward_async`) tunes each finalized kernel **independently** in its own single-node slice
-(`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes only (`tile → kernel → cuda`):
+**Separable scoring** (`TwoLevelStrategy._evaluate_terminal`) tunes each finalized kernel **independently** in
+its own single-node slice (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes
+only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are measured:
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
@@ -793,6 +854,14 @@ predicted to be cheaper first.
 - **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
   outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
+- **Minted kernels are enrolled as first-class targets.** The strategy's private splice watcher (`_KernelInventory`, in `two_level.py`)
+  rides every inner run and reports each genuinely NEW kernel a splice mints (a cut's fragments, a split's
+  pieces), deduped by structural identity across the whole session, outer kernels included. Each reported kernel
+  is enrolled in a wave after the current wave completes: tuned in its own slice cut from the minting fragment,
+  its `perf` rows keyed under its own `cache_key`, its node rows under its own `op_sig` — and its own inner run
+  may mint further pieces, which the same inventory catches for the next wave (waves terminate: cut/split trees
+  strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
+  slice's Σ already priced them, so they stay out of `per_op` / `total_us` and out of `searched_winner()`.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
 rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
@@ -813,7 +882,7 @@ rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that
 ### Per-kernel and working-target GPU parallelism (`--gpus N` / `--devices 0,1,2`)
 
 Because the inner search tunes each unique kernel independently, the per-op loop fans out across GPUs. The whole tuner
-is async-only: `run_two_level_tune` `await`s `_inner_reward_async` per outer terminal, which runs one coroutine per
+is async-only: `TwoLevelStrategy.run` `await`s its separable scoring per outer terminal, which runs one coroutine per
 unique kernel over an `asyncio.Queue` of `len(pool)` device-pinned `CudaBackend`s — each pops a backend, drives its
 op's whole inner search via `Pipeline.tune_async`, then returns the backend. So `len(pool)` benches run at once, one
 per GPU.
@@ -945,10 +1014,10 @@ checkpoint carries deploy evidence, not just model state.
 ### Driving the loop
 
 `emmy tune <model_or_ir | --code EXPR>` probes a `Context`, opens the tuning database (`EMMY_TUNE_DB` or
-`~/.cache/emmy/autotune.db`), and calls `run_two_level_tune(...)`. The DB accumulates rows across runs; re-running
+`~/.cache/emmy/autotune.db`), and drives `TwoLevelStrategy(...).run(graph, ctx)`. The DB accumulates rows across runs; re-running
 resumes from the cached state. On default verbosity (and a tty) a `TuneProgress` draws a live single-line bar
 (completed/total tuned op leaves plus a `<kernel> <current us> (best <best us>) <knobs>` tail), threaded as an optional
-`progress=` through `run_two_level_tune` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
+`progress=` through `TwoLevelStrategy` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
 shows the per-`[tune]` INFO lines instead, `-q` is quiet. `--bench` re-benches the tuned winner at -O3 (deployable,
 not the -O1 ranking pass): the full model against the real torch module and each kernel via its in-memory frontend
 provenance slice, vs eager / `torch.compile` / Emmy.
@@ -1104,7 +1173,7 @@ tree stays correct however the engine interleaves pops, pushes and observes. It 
 cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no tree at all — they never go through a
 `Search`.
 
-**`_bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
+**`terminal_bench.bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
 backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
 backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
 lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
@@ -1332,7 +1401,7 @@ attribution POOLS GPUs and flag settings, which is safe because regret is a rati
 `lowering/tile/` lowers each fused `LoopOp` to a kernel-ready `TileOp` over the block-DAG Tile IR (`ir/tile/ir.py`):
 `010_recognize` (lift `LoopOp` → `TileOp`, recognize the online-softmax streaming form, annotate each reduce
 `Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — and **atomize**: resolve the
-algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_atomize.py`) →
+algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_classify.py`) →
 `030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
 shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; the
 online-softmax reduce is the `TWISTED` fold, a twisted monoid is a monoid, selected structurally), not
@@ -1486,7 +1555,7 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
 shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
 
-**`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
+**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — the LoopOp's structural features (stmt/op histogram +
 loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
 online prior's feature vector). Skipped by `format_tuning_knobs`.
 
@@ -1550,10 +1619,10 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
 | `loop/prefusion/`         | `dissolve_narrowing` runs the SAME splice as `loop/fusion` (both call `_merge.merge_region`) over the subset of regions whose sink is no wider than the producer. A merge makes the sink the region's output, so those can only shrink what gets written; draining them to fixpoint first means every contraction has CLOSED before anything can splice into its open product and force the outer product to gmem. It refuses nothing — a widening merge is deferred, and `loop/fusion` offers it afterwards. A separate PASS because rule batches interleave WITHIN a pass but a pass is left only once quiescent. |
 | `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
-| `loop/recognize/`         | Empty (retired) — online-softmax recognition moved into `lowering/tile/010_recognize` (the `_softmax` helper), so the loop dialect carries no pattern recognizers. |
+| `loop/recognize/`         | Empty (retired) — recognition is classification of the lifted Fold tree (`lowering/tile/_classify`), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
-| `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/010_recognize._nodify_contraction` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` resolves dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
+| `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/_classify.bind_bilinear` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` resolves dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
 ## Dump hooks (`dump.py`)

@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves
+from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 
 logger = logging.getLogger(__name__)
 
@@ -357,8 +358,6 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]
     if path is None:
         return _db_measured_index_build(db, ctx)
     try:
-        from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
-
         # Stat the main file AND its ``-wal`` sidecar: in WAL mode a ``record_perf``
         # commit can land in the WAL without bumping the main file's mtime, so a
         # main-mtime-only key could serve a stale index to a same-process
@@ -397,7 +396,6 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float,
     regressed qkv/mlp_down ~15% in the ninth-4090-sweep verification).
     Best-effort: any failure returns an empty index (deploys fall back to the
     prior)."""
-    from emmy.compiler.pipeline.search.policy.mcts import O3_NVCC_FLAGS  # noqa: PLC0415
 
     index: dict[frozenset, list[tuple[dict, float, bool]]] = {}
     try:

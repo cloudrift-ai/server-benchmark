@@ -8,7 +8,7 @@ on both). Enumeration is precision-gated (``FP8_MMA`` / the ``FAST_MATH`` umbrel
 precision is arch-dependent, reduced on sm_89) and structurally gated (materialized f8 A, every
 channel at the same f8 dtype, static K); a ``TILE`` pin naming the atom bypasses the precision
 gate only. The W8A8 form arrives by graph algebra: ``to_f8e4m3`` (the encode twin of the M2b
-decode) materializes the quantized activation, and ``bind_contraction``'s mul-hoist — now
+decode) materializes the quantized activation, and ``bind_bilinear``'s mul-hoist — now
 side-generic — binds BOTH decode cones as raw f8 loads with the two scale factors composed on the
 f32 accumulator epilogue.
 """
@@ -35,8 +35,21 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 from tests.compiler.helpers import requires_cuda
+
+
+def _bind(loop, m: str = "m", n: str = "n"):
+    """The tree-native bind: the loop lifts through the ONE parser, then the semiring binder —
+    ``(contraction, projection epilogue)`` (asserted non-None here; the mul-hoist shapes bind)."""
+    fold = fold_from_loop(_stamp_axes(loop))
+    assert fold is not None, "the dequant loop must lift"
+    r = bind_bilinear(fold, m, n, frozenset({m, n}))
+    assert r is not None, "the mul-hoist shape must bind"
+    con, epi = r
+    return con.a, con.b, con.acc, epi
+
 
 K32 = "mma_m16n8k32_e4m3_f32"
 
@@ -141,7 +154,7 @@ def _w8a8_loop(*, a_scale=True, b_scale=True):
 def test_a_side_decode_scale_binds_raw_with_hoist():
     """A decode-times-factor cone on the A side (B direct would be the mirror of M2b; here B is a
     bare decode) binds A as the RAW f8 load with the activation scale hoisted to the epilogue."""
-    a, b, acc, epi = bind_contraction(_w8a8_loop(b_scale=False), "m", "n", Body())
+    a, b, acc, epi = _bind(_w8a8_loop(b_scale=False))
     assert isinstance(a, Load) and a.input == "a_bits"
     assert isinstance(b, Load) and b.input == "w_bits"
     assert acc == "acc__mh"
@@ -152,7 +165,7 @@ def test_a_side_decode_scale_binds_raw_with_hoist():
 def test_double_cone_hoists_both_scales():
     """The W8A8 shape: BOTH operands ride decode-times-factor cones — both bind raw, and the two
     scale factors compose into one epilogue chain on the accumulator."""
-    a, b, acc, epi = bind_contraction(_w8a8_loop(), "m", "n", Body())
+    a, b, acc, epi = _bind(_w8a8_loop())
     assert isinstance(a, Load) and a.input == "a_bits"
     assert isinstance(b, Load) and b.input == "w_bits"
     assert acc == "acc__mh"
@@ -162,7 +175,7 @@ def test_double_cone_hoists_both_scales():
 
 
 def test_bare_double_decode_binds_raw_without_epilogue():
-    a, b, acc, epi = bind_contraction(_w8a8_loop(a_scale=False, b_scale=False), "m", "n", Body())
+    a, b, acc, epi = _bind(_w8a8_loop(a_scale=False, b_scale=False))
     assert isinstance(a, Load) and a.input == "a_bits" and isinstance(b, Load) and b.input == "w_bits"
     assert acc == "acc" and not len(epi)
 

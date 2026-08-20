@@ -645,7 +645,7 @@ def _recognized_target(record: GoldenRecord):
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, node.output.name, name=node.id)
+    tile = recognized_tile(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}
@@ -661,7 +661,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     any-of, no classified shape."""
     from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
 
     try:
@@ -674,7 +674,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         verdicts = store.setdefault("verdicts", {})
         if verdict_key in verdicts:
             return verdicts[verdict_key]
-        pro = bind_prologue_contraction(tile.op, tuple(tile.place.free))
+        pro = fused_view(tile)
         route_tree, route_free, route_stores = (
             (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
         )

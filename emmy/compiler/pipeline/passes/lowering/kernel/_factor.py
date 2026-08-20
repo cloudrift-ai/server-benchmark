@@ -739,19 +739,25 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # both emit (``combine_tail``).
     merge = combine_tail(alg, reg=reg, coop=coop, lane=lane)
 
-    # Post-reduce projection. A full-row output (softmax / RMSNorm) distributes its sweep
+    # Post-reduce projection. A full-row output (softmax / RMSNorm) distributes its FREE sweep
     # across the coop lanes; a scalar output is written once, guarded to lane 0. With no
-    # cooperation (coop == 1) the single thread runs the projection as-is.
+    # cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in
+    # the tail (a restored sibling fold the classifier could not consume) is NOT a sweep: lane
+    # striding it would leave each lane an uncombined partial, so it runs SERIALLY per lane —
+    # every lane computes the identical full fold, and the tail's unguarded stores stay
+    # deterministic because every lane writes the same value.
     tail = tail_src
     if lane is None:
         body_tail = with_store(tail, ctx.output, grid, out_val)
-    elif any(isinstance(s, Loop) for s in tail):
+    elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
         body_tail = [
             StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
-            if isinstance(s, Loop)
+            if isinstance(s, Loop) and not s.is_reduce
             else s
             for s in tail
         ]
+    elif any(isinstance(s, Loop) for s in tail):
+        body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
     else:
         stored = with_store(tail, ctx.output, grid, out_val)
         body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]

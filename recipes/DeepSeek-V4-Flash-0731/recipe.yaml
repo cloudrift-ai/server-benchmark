@@ -8,8 +8,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "1.98M HF downloads; strong community recommendation on OR"
-  heat: 55
+  rationale: "2.3M HF downloads, strong OR serving, solid current momentum."
+  heat: 72
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 

@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "555 upvotes; GLM-5.2 has 2.7M HF downloads; strong family momentum"
+  rationale: "1646 Reddit upvotes, GLM-5 family momentum, strong family signal."
   heat: 85
   task: generate
 matrices:

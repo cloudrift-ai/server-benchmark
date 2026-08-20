@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
-  rationale: Llama 4 family; 416 upvotes; gated but strong OR and Meta release signal
+  rationale: "416 upvotes, strong Meta release and gated model signal."
   heat: 80
   task: generate
 matrices:

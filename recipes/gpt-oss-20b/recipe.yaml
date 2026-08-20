@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "7.8M HF downloads; strong open-weights interest despite no OR"
-  heat: 65
+  rationale: "4.9K likes, 7.6M downloads; strong open-weights community signal."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

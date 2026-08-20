@@ -9,12 +9,12 @@
 # faster after — EMMY_CUBIN_CACHE persists compiled cubins on the model volume).
 # Stock vLLM ignores that env var, so it sits at the base level for both variants.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Specialized embedding task with naturally low mindshare"
-  heat: 15
+  rationale: "7.7M HF downloads show sustained embed model momentum."
+  heat: 55
   task: embed
 
 engine:

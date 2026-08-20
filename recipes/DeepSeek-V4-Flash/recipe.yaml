@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Retained on a best-effort basis because discovery did not establish an all-around better replacement."
-  heat: 20
+  rationale: "No current momentum; overshadowed by V4-Flash-0731 variant."
+  heat: 25
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).
 # Engine = vLLM; deepseek_v4 tokenizer/tool/reasoning parsers, kv-cache fp8, block-size 256 (vLLM recipe + HF card).

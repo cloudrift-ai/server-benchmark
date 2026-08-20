@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3-235B-A22B
-  rationale: Arena rank 3 with 1078 Elo; established OR serving signal
-  heat: 75
+  rationale: "OR active with Elo 1021 but overshadowed by Qwen3.8 breakout."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-  rationale: "Zero evidence across all sources; no OR or Reddit mindshare"
-  heat: 10
+  rationale: "Zero evidence across all sources; no OR or Reddit mindshare."
+  heat: 5
   task: generate
 matrices:
   - deploy.gpu: NVIDIA H100 80GB

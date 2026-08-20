@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "FP8 H200 tier coverage; overshadowed by newer Qwen releases"
-  heat: 30
+  rationale: "FP8 H200 utility but overshadowed by newer Qwen releases."
+  heat: 25
 engine:
   llm:
     pipeline_parallel_size: 1

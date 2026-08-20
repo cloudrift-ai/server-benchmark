@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: Qwen3.8 family with 367 upvotes; strong release momentum and HF signal
-  heat: 85
+  rationale: "1162 upvotes, strong local deployment signal for consumer GPUs."
+  heat: 92
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition

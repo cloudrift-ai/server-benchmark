@@ -1,10 +1,10 @@
 tags:
-  - onboarding
-  - untested
+- onboarding
+- untested
 model:
-  huggingface: Qwen/Qwen3.8-27B
-  rationale: "984 upvotes, massive local adoption, unsloth GGUF, HF darling."
-  heat: 98
+  huggingface: Qwen/Qwen3.8-27B-FP8
+  rationale: 700 upvotes on release thread; FP8 variant for wider GPU fit than BF16.
+  heat: 90
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

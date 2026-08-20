@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "647 upvotes; record 2.8T MoE; 10.8K HF likes; breakout"
+  rationale: "10.8K HF likes, 647 upvotes, record 2.8T MoE breakout."
   heat: 92
   task: generate
 matrices:

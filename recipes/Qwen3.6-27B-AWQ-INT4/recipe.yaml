@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
-  rationale: "Established consumer quant but overshadowed by Qwen3.8"
-  heat: 45
+  rationale: "Established consumer quant but eclipsed by Qwen3.8 dominance."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

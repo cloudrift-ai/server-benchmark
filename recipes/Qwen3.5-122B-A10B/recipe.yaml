@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "V100 multi-GPU coverage; overshadowed by Qwen3.8"
+  rationale: "V100 multi-GPU hardware coverage offsets Qwen3.8 overshadowing."
   heat: 30
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate

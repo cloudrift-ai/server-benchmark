@@ -39,8 +39,8 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Qwen3 family mentioned in comparisons; overshadowed by Qwen3.8"
-  heat: 45
+  rationale: "Overshadowed by Qwen3.8 35B-A3B in community discussions."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

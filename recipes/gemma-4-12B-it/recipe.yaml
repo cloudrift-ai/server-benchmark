@@ -22,8 +22,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Gemma-3-27b IT on OR; Qwen3.8 overshadows gemma family"
-  heat: 35
+  rationale: "Stable Gemma-3 IT serving on OR; eclipsed by Qwen3.8."
+  heat: 30
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 
 engine:

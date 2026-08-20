@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "Zero evidence; new format with no adoption signal"
+  rationale: "New exl3 format with zero adoption or community signal."
   heat: 10
   task: generate
 matrices:

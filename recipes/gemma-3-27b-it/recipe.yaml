@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: google/gemma-3-27b-it
-  rationale: Gemma 3 MoE on OpenRouter; strong mid-range serving signal
-  heat: 70
+  rationale: "OR serving active at 15.6M tokens; Qwen3.8 dominates community."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition

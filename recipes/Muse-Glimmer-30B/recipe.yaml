@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "370 Reddit upvotes; open-weight multimodal release from Meta"
+  rationale: "1763 Reddit upvotes, open-weight Meta multimodal agent model."
   heat: 70
   task: generate
 matrices:

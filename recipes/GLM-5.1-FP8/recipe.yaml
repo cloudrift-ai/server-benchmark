@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "GLM-5.2 has 2.7M downloads but this older variant lacks focus"
-  heat: 30
+  rationale: "Older GLM variant overshadowed by GLM-5.2 momentum."
+  heat: 28
 engine:
   llm:
     tensor_parallel_size: 8

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "No current signals; Qwen3.8 cycle cooled gemma attention"
+  rationale: "Gemma cooling post-Qwen3.8; minimal cross-source signals."
   heat: 20
 engine:
   llm:

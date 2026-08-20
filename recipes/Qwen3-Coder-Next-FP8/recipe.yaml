@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Flagship Qwen coding model; strong OR presence"
-  heat: 65
+  rationale: "Flagship OR coding model with strong serving signal."
+  heat: 50
 engine:
   llm:
     tensor_parallel_size: 1

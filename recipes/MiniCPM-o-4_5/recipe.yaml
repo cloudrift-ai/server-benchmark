@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM-o-4_5
-  rationale: "Strong Reddit mindshare; 993K downloads; any-to-any multimodal"
-  heat: 70
+  rationale: "993K downloads, strong Reddit mindshare for any-to-any multimodal."
+  heat: 72
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

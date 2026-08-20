@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "400+ upvotes; first Qwen-Max open; strong MoE signal"
-  heat: 92
+  rationale: "1583 upvotes, dominant 2.4T MoE breakout across all sources."
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

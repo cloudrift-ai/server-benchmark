@@ -9,13 +9,13 @@
 # There is no Emmy lane here. Qwen3.8 is a hybrid checkpoint whose 48 Gated DeltaNet linear-attention layers need a
 # depthwise causal `conv1d`, which Emmy's compiler frontend cannot map; see RESULTS.md for the exact reproducer.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
+  rationale: "Qwen3.8 breakout consumer entry, strong OR and Reddit signals."
+  heat: 94
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
-  rationale: "Only W4A16 Qwen3.8 build that fits one 24 GB consumer card, giving the 27B-class dense entry point."
-  heat: 92
   task: generate
 
 engine:

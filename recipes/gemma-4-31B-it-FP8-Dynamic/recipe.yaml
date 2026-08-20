@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "No current signals; gemma-3-27b IT is on OR instead"
-  heat: 20
+  rationale: "No HF trending or Reddit buzz; cooling post-Qwen3.8."
+  heat: 10
 engine:
   llm:
     tensor_parallel_size: 1

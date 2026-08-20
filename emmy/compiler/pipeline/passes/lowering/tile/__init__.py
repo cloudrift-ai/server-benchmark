@@ -5,9 +5,10 @@
    typed ``Fold`` in place (``_fromloop`` is the one parser, byte-identity gated), and wrap the
    cell in a ``TileOp`` with an **unmapped** placement. A declined loop stays a verbatim raw-loop
    subtree. After this nothing downstream traffics in ``LoopOp``. Recognition — which algebra a
-   fold realizes (contraction binding, online-softmax pairing, the monoid-producer composition) —
-   is CLASSIFICATION of the lifted tree and is being rebuilt downstream; ``_cut`` holds the
-   placement cut.
+   fold realizes — is CLASSIFICATION of the lifted tree (``_classify``: the online-softmax
+   pairing, the semiring contraction binding with its mul-hoist arm, legalize; the fused
+   computed-A composition is a derived VIEW shared with the schedule and the golden decode);
+   ``_cut`` holds the placement cut, resolved over the fused reference tree.
 2. **Schedule** (``020_schedule``) — decide that op's ``place`` (free axes → grid) and its per-node
    ``schedule`` slices, and offer them as a fork. ONE generic row enumerator (``_schedule``): the
    kernel's single ``WORK`` inventory is CHOSEN first, then a recursive walk of the site tree hands

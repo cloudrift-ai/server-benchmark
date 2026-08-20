@@ -1,12 +1,12 @@
 """The k-invariant multiplicative dequant binding (M2b of the FP8 plan).
 
-``_atomize.bind_contraction``'s mul-hoist arm: a computed **B** whose cone is a storage decode
+``_classify.bind_bilinear``'s mul-hoist arm, off the lifted fold's λ body: a computed **B** whose cone is a storage decode
 (recognized by the ``ElementwiseImpl.decodes`` trait, never an op-name list) times k-invariant
 factors binds as the RAW storage-dtype ``Load`` (the decode absorbed by dtype — every consumer
 converts a bits-carrier element by dtype) with the factors moved onto the accumulator in the
 epilogue (``Σ_k a·(s·w) = s·Σ_k a·w``). A pure map the arm cannot hoist — a k-varying
 (2-D block) scale or another computed B — remains a closed computed operand instead of being
-positionally misbound to an interior load. A storage-dtype (fp8) B now also STAGES — a
+positionally misbound to an interior load (declines to PLANAR, never raises). A storage-dtype (fp8) B now also STAGES — a
 raw byte slab whose drain converts to the atom's fragments (``test_fp8_staged``); a mismatch that
 is not a byte slab still refuses and keeps the warp tier gmem-direct.
 """
@@ -27,10 +27,19 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_contraction
+from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
-from emmy.compiler.pipeline.pipeline import LoweringError
 from tests.compiler.helpers import requires_cuda
+
+
+def _bind(loop, m: str = "m", n: str = "n"):
+    """The tree-native bind: the loop lifts through the ONE parser, then the semiring binder —
+    ``(contraction, projection epilogue)`` or ``None`` (the fold keeps its PLANAR reading)."""
+    fold = fold_from_loop(_stamp_axes(loop))
+    assert fold is not None, "the dequant loop must lift"
+    return bind_bilinear(fold, m, n, frozenset({m, n}))
+
 
 # ===================================================================
 # The decode trait — the registration a new storage format extends
@@ -80,7 +89,8 @@ def _dequant_loop(*, scale_index=None, scale_op="multiply", decode="from_f8e4m3"
 
 
 def test_decode_scale_cone_binds_via_mul_hoist():
-    a, b, acc, epi = bind_contraction(_dequant_loop(), "m", "n", Body())
+    con, epi = _bind(_dequant_loop())
+    a, b, acc = con.a, con.b, con.acc
     assert isinstance(a, Load) and a.input == "x"
     assert isinstance(b, Load) and b.input == "w_bits"  # the RAW f8 load — decode absorbed by dtype
     assert acc == "acc__mh"  # the channel accumulator renamed; the epilogue defines ``acc``
@@ -92,52 +102,54 @@ def test_decode_scale_cone_binds_via_mul_hoist():
 
 def test_inverse_scale_hoists_as_divide():
     """``weight_scale_inv`` spells the cone with a divide — it commutes out the same way."""
-    _a, b, acc, epi = bind_contraction(_dequant_loop(scale_op="divide"), "m", "n", Body())
-    assert isinstance(b, Load) and b.input == "w_bits"
+    con, epi = _bind(_dequant_loop(scale_op="divide"))
+    assert isinstance(con.b, Load) and con.b.input == "w_bits"
     tail = list(epi)[-1]
-    assert tail.name == "acc" and tail.op.name == "divide" and tail.args == (acc, "s")
+    assert tail.name == "acc" and tail.op.name == "divide" and tail.args == (con.acc, "s")
 
 
 def test_factor_chain_hoists_every_k_invariant_factor():
-    _a, _b, acc, epi = bind_contraction(_dequant_loop(extra_factor=True), "m", "n", Body())
+    con, epi = _bind(_dequant_loop(extra_factor=True))
     assigns = [s for s in epi if isinstance(s, Assign)]
     assert assigns[-1].name == "acc"  # the chain's last def carries the fold's output name
     assert {s.op.name for s in assigns} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"w_scale", "w_scale2"}
-    assert acc == "acc__mh"
+    assert con.acc == "acc__mh"
 
 
 def test_original_epilogue_reads_the_scaled_value():
-    orig = Body((Assign(name="out", op="relu", args=("acc",)),))
-    _a, _b, _acc, epi = bind_contraction(_dequant_loop(), "m", "n", orig)
-    stmts = list(epi)
-    scale_def = next(i for i, s in enumerate(stmts) if isinstance(s, Assign) and s.name == "acc")
-    relu = next(i for i, s in enumerate(stmts) if isinstance(s, Assign) and s.name == "out")
-    assert scale_def < relu  # ``acc`` is defined (scaled) before the projection reads it
+    """The factor chain DEFINES ``acc``, and the caller (classify) prepends it to the wrapping
+    projection's body — so any projection stmt reading ``acc`` reads the scaled value."""
+    con, epi = _bind(_dequant_loop())
+    assert tuple(con.combine.results) == ("acc__mh",)
+    tail = [s for s in epi if isinstance(s, Assign)]
+    assert tail and tail[-1].name == "acc"
 
 
 def test_k_varying_scale_binds_as_whole_computed_b_cone():
     """A 2-D scale cannot commute out, so the complete generic map remains the B operand."""
     loop = _dequant_loop(scale_index=(Var("k"), Var("n")))
-    a, b, acc, epi = bind_contraction(loop, "m", "n", Body())
-    assert isinstance(a, Load) and isinstance(b, list) and acc == "acc" and not len(epi)
-    assert [s.defines() for s in b][-1] == ("wsc",)
-    assert {s.input for s in b if isinstance(s, Load)} == {"w_scale", "w_bits"}
+    con, epi = _bind(loop)
+    assert isinstance(con.a, Load) and isinstance(con.b, Fold) and con.b.axis is None
+    assert con.acc == "acc" and not len(epi)
+    cone = list(con.b.body)
+    assert [s.defines() for s in cone][-1] == ("wsc",)
+    assert {s.input for s in cone if isinstance(s, Load)} == {"w_scale", "w_bits"}
 
 
 def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():
     """An arbitrary pure map on B binds as a whole; the interior load is never misbound alone."""
     loop = _dequant_loop(decode="exp")
-    a, b, acc, epi = bind_contraction(loop, "m", "n", Body())
-    assert isinstance(a, Load) and isinstance(b, list) and acc == "acc" and not len(epi)
-    assert any(isinstance(s, Assign) and s.name == "dq" and s.op.name == "exp" for s in b)
+    con, epi = _bind(loop)
+    assert isinstance(con.a, Load) and isinstance(con.b, Fold) and con.acc == "acc" and not len(epi)
+    assert any(isinstance(s, Assign) and s.name == "dq" and s.op.name == "exp" for s in con.b.body)
 
 
 def test_m_dependent_b_cone_declines_instead_of_crossing_operand_roles():
-    """A B producer that reads the output-row axis is not a separable (k,n) operand."""
+    """A B producer that reads the output-row axis is not a separable (k,n) operand — the binder
+    DECLINES (the fold keeps its PLANAR reading); nothing is positionally misbound."""
     loop = _dequant_loop(scale_index=(Var("m"), Var("k")))
-    with pytest.raises(LoweringError, match="computed cone"):
-        bind_contraction(loop, "m", "n", Body())
+    assert _bind(loop) is None
 
 
 def test_bare_decode_binds_raw_load_without_epilogue():
@@ -156,8 +168,8 @@ def test_bare_decode_binds_raw_load_without_epilogue():
             )
         ),
     )
-    _a, b, acc, epi = bind_contraction(loop, "m", "n", Body())
-    assert isinstance(b, Load) and b.input == "w_bits" and acc == "acc" and not len(epi)
+    con, epi = _bind(loop)
+    assert isinstance(con.b, Load) and con.b.input == "w_bits" and con.acc == "acc" and not len(epi)
 
 
 # ===================================================================

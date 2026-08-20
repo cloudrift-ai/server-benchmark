@@ -10,9 +10,8 @@ Stages, in order: **online-softmax pairing** (:func:`pair_softmax` — the monoi
 **contraction binding** (:func:`bind_bilinear` — the semiring read), **legalize**
 (:func:`_legalize` — the explicit downstream-capability list). The **monoid-producer
 composition** (:func:`fused_view`) is a VIEW, not a stage: the canonical tree stays stored and
-the fused computed-A reading is re-derived on demand at the schedule and the golden decode.
-Pending (the rebuild registry's remaining casualty classes): the placement cut fork, the
-fp8/W8A8 mul-hoist arm, the split partial's per-channel-Write store shape.
+the fused computed-A reading is re-derived on demand at the schedule and the golden decode —
+which reading a fork row realizes is a decision about the SCHEDULE.
 """
 
 from __future__ import annotations
@@ -22,11 +21,11 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, component_ops
-from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names, stmt_axis_names
+from emmy.compiler.ir.pure.fold import Channel, Fold, _operand_result_names, refs_axis, stmt_axis_names
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write
 from emmy.compiler.ir.tile.ops import _cone_canon, make_cone, split_invariant_factors
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 
 
 def classify(node, free):
@@ -41,15 +40,30 @@ def classify(node, free):
         m_name, n_name = free[-2].name, free[-1].name
         axes = frozenset(a.name for a in free)
         if isinstance(node, Fold) and node.axis is not None:
-            node = bind_bilinear(node, m_name, n_name, axes) or node
+            r = bind_bilinear(node, m_name, n_name, axes)
+            if r is not None:
+                con, epi = r
+                # A mul-hoist epilogue (the k-invariant factor chain) rides the wrapping
+                # projection — the ONE home for a projection.
+                node = Fold.projection(body=Body(tuple(epi)), operands=(con,)) if epi else con
         elif isinstance(node, Fold) and node.axis is None and node.operands:
-            ops = tuple(
-                (bind_bilinear(f, m_name, n_name, axes) or f) if isinstance(f, Fold) and f.axis is not None else f for f in node.operands
-            )
-            if any(a is not b for a, b in zip(ops, node.operands, strict=True)):
-                # The rebound channels keep their accumulator names, so the projection's λ params
-                # (bound positionally to the operands' result components) are unchanged.
-                node = replace(node, operands=ops)
+            ops: list = []
+            epis: list = []
+            changed = False
+            for f in node.operands:
+                r = bind_bilinear(f, m_name, n_name, axes) if isinstance(f, Fold) and f.axis is not None else None
+                if r is None:
+                    ops.append(f)
+                    continue
+                con, epi = r
+                ops.append(con)
+                epis += list(epi)
+                changed = True
+            if changed:
+                # The rebound channels keep their accumulator names (a hoisted channel's chain
+                # DEFINES the original name), so the projection's λ params — bound positionally
+                # to the operands' result components — stay consistent with the body's reads.
+                node = Fold.projection(body=Body((*epis, *node.body)), operands=tuple(ops))
     return _legalize(node)
 
 
@@ -84,7 +98,10 @@ def pair_softmax(node):
         i += 1
     if not changed:
         return node
-    return Fold.projection(body=Body((*epi, *node.body)), operands=tuple(ops))
+    # The channel epilogue APPENDS: an invariant factor may be defined by a body stmt (the
+    # held-back reciprocal), and the epilogue's own defs (the rescaled accumulators) are read
+    # only by the boundary stores.
+    return Fold.projection(body=Body((*node.body, *epi)), operands=tuple(ops))
 
 
 def _score_cone(f: Fold, res: str) -> list | None:
@@ -286,16 +303,32 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
         return None
     if stat.role not in (AxisRole.PLANAR, AxisRole.TWISTED):
         return None  # the statistic is a projected reduce; a contraction there is another shape
-    if len(stores) != 1 or stores[0].sweep is None:
-        return None
-    n_ax, write = stores[0].sweep, stores[0].write
-    if not write.is_scalar:
-        return None
     body = list(node.body)
-    loops = [i for i, s in enumerate(body) if isinstance(s, Loop) and s.is_reduce]
-    if len(loops) != 1:
+    if len(stores) == 1 and stores[0].sweep is not None:
+        n_ax, writes = stores[0].sweep, [stores[0].write]
+        loops = [i for i, s in enumerate(body) if isinstance(s, Loop) and s.is_reduce]
+        if len(loops) != 1:
+            return None
+        stat_epi, kloop, tail = body[: loops[0]], body[loops[0]], body[loops[0] + 1 :]
+    elif not stores and body and isinstance(body[-1], Loop) and not body[-1].is_reduce:
+        # The SPLIT PARTIAL's spelling: with one Write per CHANNEL (each fold's raw state to its
+        # own workspace slot) and no combine tail, ``split_effects`` declines the sweep, so the
+        # column loop stays a raw body member and its writes are the trailing run.
+        sweep = body[-1]
+        stat_epi = body[:-1]
+        inner = list(sweep.body)
+        cut = len(inner)
+        while cut and isinstance(inner[cut - 1], Write):
+            cut -= 1
+        writes = inner[cut:]
+        if not writes or not inner or not isinstance(inner[0], Loop) or not inner[0].is_reduce:
+            return None
+        kloop, tail = inner[0], inner[1:cut]
+        n_ax = sweep.axis
+    else:
         return None
-    stat_epi, kloop, tail = body[: loops[0]], body[loops[0]], body[loops[0] + 1 :]
+    if not all(w.is_scalar for w in writes):
+        return None
     if not all(isinstance(s, (Load, Assign)) for s in stat_epi) or not all(isinstance(s, Assign) for s in tail):
         return None
     if stat.operands:
@@ -305,7 +338,7 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
         if score is None:
             return None  # a composed score the binder cannot read — the base rows stand
         stat = replace(stat, operands=(score,))
-    fcol = fold_from_loop(kloop)
+    fcol = fold_from_loop(_stamp_axes(kloop))
     if fcol is None:
         return None
     k_name = fcol.axis.name
@@ -360,8 +393,11 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
             if id(st) not in seen:
                 seen.add(id(st))
                 prefix.append(st)
-    expect = (tail[-1].name,) if tail else (channels[0].acc,)
-    if tuple(write.values) != expect:
+    # A combine tail projects the channels to ONE value, so it stores once; with no tail every
+    # fold's accumulator is stored raw, each exactly once (the split partial's slot-per-channel).
+    stored = sorted(tuple(w.values) for w in writes)
+    expect = sorted([(tail[-1].name,)] if tail else [(ch.acc,) for ch in channels])
+    if stored != expect:
         return None
     con = Fold.contraction(
         k_axis=fcol.axis,
@@ -372,7 +408,7 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     )
     from emmy.compiler.ir.tile.ir import Store  # noqa: PLC0415
 
-    return Fold.projection(body=Body((*prefix, *tail)), operands=(con,)), n_ax, (Store(write=write),)
+    return Fold.projection(body=Body((*prefix, *tail)), operands=(con,)), n_ax, tuple(Store(write=w) for w in writes)
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -406,8 +442,8 @@ def _bound_producer(e: Fold, free: tuple, n_name: str) -> Fold | None:
         if ax.name == n_name:
             continue
         b = bind_bilinear(e, ax.name, n_name, axes)
-        if b is not None and isinstance(b.a, Load) and isinstance(b.b, Load):
-            return b
+        if b is not None and not b[1] and isinstance(b[0].a, Load) and isinstance(b[0].b, Load):
+            return b[0]  # an edge carries no projection epilogue — a hoisted producer declines
     return None
 
 
@@ -569,7 +605,7 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset) -
     return stmts
 
 
-def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset()) -> Fold | None:
+def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset()) -> tuple[Fold, tuple] | None:
     """Rebind a lifted fold as the bilinear contraction — the ONE contraction reading, off the λ
     spelling and stated on the ALGEBRAIC TRAITS, never op names: the carrier must be a product of
     ONE commutative-monoid ⊕ (associative + commutative + identity — the reassociation license
@@ -613,10 +649,10 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
         lift = defs.get(res) if isinstance(res, str) else None
         if lift is None or len(lift.args) != 2 or not lift.op.distributes_over(plus):
             return None  # the lift is not a ⊗ of the carrier's semiring — the fold keeps its reduce reading
+        if lift.args[0] == lift.args[1]:
+            return None  # a square product (both args one value — Σ x·x) has no role split
         b_arg = next((a for a in lift.args if role_load(a, n_name, m_name) is not None), None)
-        a_arg = next((a for a in lift.args if a != b_arg), None)
-        if a_arg is None:
-            return None  # a square product (both args one value) has no role split
+        a_arg = next(a for a in lift.args if a != b_arg)
         reads.append((lift, loads.get(b_arg) if b_arg is not None else None, a_arg))
     if len({lift.op for lift, _, _ in reads}) != 1:
         return None  # the channels must share ONE ⊗ — a mixed-product body is not a bilinear form
@@ -624,6 +660,30 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
         return None  # channels do not share ONE A value — not the product-carrier shape
     a_arg = reads[0][2]
     consumed: set[int] = {id(lift) for lift, _, _ in reads}
+
+    def role_leaf(on: str, off: str) -> Load | None:
+        # The role-EXCLUSIVE K-indexed leaf over the WHOLE λ body — the raw storage-dtype load a
+        # decode cone wraps is not named by the ⊗ lift, so it is found positionally, as the old
+        # binder found it.
+        return next(
+            (s for s in body if isinstance(s, Load) and k_name in _idx_vars(s) and on in _idx_vars(s) and off not in _idx_vars(s)),
+            None,
+        )
+
+    def hoisted() -> tuple[Fold, tuple] | None:
+        # The mul-hoist arm (fp8 / W8A8, either side or BOTH): a storage decode × k-invariant
+        # multiplicative factors — the factors commute out of the fold (``Σ a⊗(s⊗w) = s⊗Σ a⊗w``,
+        # the same reassociation category as split-K) onto the renamed accumulator in the
+        # projection epilogue, and the decode is ABSORBED by the load's own storage dtype.
+        if len(reads) != 1:
+            return None
+        h = _hoist_factors(body, reads[0][0], role_leaf(m_name, n_name), role_leaf(n_name, m_name), k_name, f.combine.results[0])
+        if h is None:
+            return None
+        a_l, b_l, raw, chain = h
+        con = Fold.contraction(k_axis=f.axis, a=a_l, channels=(Channel(b=b_l, acc=raw),), product=reads[0][0].op, fold_op=plus)
+        return con, tuple(chain)
+
     if all(b is not None for _, b, _ in reads):
         consumed.update(id(b) for _, b, _ in reads)
         a_edge = role_load(a_arg, m_name, n_name)
@@ -636,6 +696,9 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
                 return None
             consumed.add(id(a_edge))
         else:
+            h = hoisted()
+            if h is not None:
+                return h
             cone = _cone([s for s in body if id(s) not in consumed], a_arg, n_name, k_name, axes)
             if cone is None:
                 return None  # a computed A that does not read cleanly — the fold stays PLANAR
@@ -643,9 +706,13 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
             a_edge = make_cone(cone, k_name)
         b_edges: list = [b for _, b, _ in reads]
     elif len(reads) == 1 and (a_edge := role_load(a_arg, m_name, n_name)) is not None:
-        # B rides a computed value (A is the direct load). A computed B is a closed zero-axis
+        # B rides a computed value (A is the direct load). A storage decode × k-invariant factors
+        # binds through the mul-hoist first; any other pure MAP cone is a closed zero-axis
         # operand node — no row-statistic seam to split; its whole MAP tree is evaluated at each
         # (k, n) slab cell.
+        h = hoisted()
+        if h is not None:
+            return h
         consumed.add(id(a_edge))
         lift = reads[0][0]
         b_arg = next(a for a in lift.args if a != a_arg)
@@ -655,17 +722,106 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
         consumed.update(id(s) for s in cone)
         b_edges = [Fold.projection(body=Body(tuple(cone)))]
     else:
-        return None  # both sides computed — the mul-hoist / decode-pair arm, not yet ported
+        # Both sides computed — the W8A8 double-decode pair binds through the mul-hoist alone.
+        return hoisted()
     if any(id(s) not in consumed for s in body):
         return None  # an unaccounted λ stmt — a shape this binding does not understand
     # B-layout agreement across channels: one shared A fragment implies one slab orientation
     # (k-last vs k-first), so disagreeing loads never group.
     if len({k_name in b.index[-1].free_vars() if isinstance(b, Load) else True for b in b_edges}) != 1:
         return None
-    return Fold.contraction(
+    con = Fold.contraction(
         k_axis=f.axis,
         a=a_edge,
         channels=tuple(Channel(b=b, acc=acc) for b, acc in zip(b_edges, f.combine.results, strict=True)),
         product=reads[0][0].op,
         fold_op=plus,
     )
+    return con, ()
+
+
+def _hoist_factors(body: list, lift: Assign, a_leaf: Load | None, b_leaf: Load | None, k_name: str, acc: str) -> tuple | None:
+    """Bind a computed operand (either side — or BOTH, the W8A8 shape) whose cone is a storage
+    decode times k-invariant multiplicative factors — the mul-hoist, ported to the λ body. Each
+    lift argument must be the operand ``Load`` itself, or factor as ``(storage decode of that
+    side's leaf) ⊗ k-invariant factors`` where ⊗ is a multiply / divide chain: a factor CONSTANT
+    along the reduce axis commutes out of the fold, so the factors move onto the accumulator in
+    the projection EPILOGUE, and the decode is ABSORBED by the load's own storage dtype. The
+    chain's leaf is recognized by TRAIT (``ElementwiseImpl.decodes``), never by op name; a
+    k-varying (2-D block) scale does not commute and the arm declines.
+
+    Returns ``(a_leaf, b_leaf, raw_acc, chain)`` — the accumulator renamed to ``<acc>__mh`` so
+    the epilogue's factor chain can DEFINE ``acc`` and every downstream reader sees the scaled
+    value — or ``None`` (not this shape)."""
+    if a_leaf is None or b_leaf is None:
+        return None
+    defs = {s.name: s for s in body if isinstance(s, Assign)}
+
+    def cone(name: str) -> list | None:
+        members = list(Body(tuple(body)).backward_cone([name]).members)
+        return members if members and all(isinstance(s, (Load, Assign, Select)) for s in members) else None
+
+    def cone_names(name: str) -> set[str] | None:
+        c = cone(name)
+        return None if c is None else {n for s in c for n in s.defines()}
+
+    def k_free(name: str) -> bool:
+        c = cone(name)
+        return c is not None and not any(refs_axis(s, k_name) for s in c)
+
+    factors: list[tuple[str, str]] = []  # (op, ssa) applied to the accumulator, outer chain first
+    for arg in lift.args:
+        if arg in (a_leaf.names[0], b_leaf.names[0]):
+            continue  # a directly-named operand — nothing to decode or hoist on this side
+        names = cone_names(arg)
+        if names is None:
+            return None
+        in_a, in_b = a_leaf.names[0] in names, b_leaf.names[0] in names
+        if in_a == in_b:
+            return None  # both leaves in one cone / neither — not the decode-times-factors chain
+        leaf = a_leaf if in_a else b_leaf
+        bits = leaf.names[0]
+        cur = arg
+        while True:
+            st = defs.get(cur)
+            if st is None:
+                return None
+            if st.op.name in ("multiply", "divide") and len(st.args) == 2:
+                x, y = st.args
+                xs, ys = cone_names(x), cone_names(y)
+                if xs is None or ys is None or (bits in xs) == (bits in ys):
+                    return None  # the operand on both sides / neither — not the decode-times-factors chain
+                w_side, s_side = (x, y) if bits in xs else (y, x)
+                if st.op.name == "divide" and bits not in xs:
+                    return None  # ``s / w`` — the divide does not commute out of the fold
+                if not k_free(s_side):
+                    return None  # a k-varying factor (2-D block scale) stays in the fold — decline
+                factors.append((st.op.name, s_side))
+                cur = w_side
+                continue
+            storage = st.op.decodes
+            if storage is not None and st.args == (bits,) and (leaf.dtype is None or leaf.dtype.name == storage):
+                # The chain's leaf IS the registered decode for the load's storage dtype.
+                break
+            return None
+    # Full coverage: every λ stmt is the lift, an operand leaf, or a member of a bound cone.
+    bound = {id(s) for s in cone(lift.args[0]) or ()} | {id(s) for s in cone(lift.args[1]) or ()}
+    if any(isinstance(s, (Load, Assign)) and id(s) not in bound and s is not lift for s in body):
+        return None
+    if not factors:  # bare decode(s) — the operands bind as the raw storage-dtype loads, nothing to hoist
+        return a_leaf, b_leaf, acc, ()
+    hoisted_stmts: list = []
+    seen: set[int] = set()
+    for _opn, nm in factors:
+        for st in cone(nm) or ():
+            if id(st) not in seen:
+                seen.add(id(st))
+                hoisted_stmts.append(st)
+    raw = f"{acc}__mh"
+    chain: list = []
+    cur_val = raw
+    for i, (opn, nm) in enumerate(factors):
+        out_nm = acc if i == len(factors) - 1 else f"{raw}{i}"
+        chain.append(Assign(name=out_nm, op=opn, args=(cur_val, nm)))
+        cur_val = out_nm
+    return a_leaf, b_leaf, raw, (*hoisted_stmts, *chain)

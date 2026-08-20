@@ -25,11 +25,11 @@ from dataclasses import replace
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Write
+from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import Placement, TileOp, split_effects
 from emmy.compiler.pipeline.passes.lowering.tile._classify import classify
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 
 # --------------------------------------------------------------------------- #
 # Peel — the outer free-loop chain becomes the kernel's parallel axes.
@@ -110,26 +110,6 @@ def _rewrite_deep(stmt: Stmt, rename) -> Stmt:
     if isinstance(stmt, Loop):
         return replace(stmt, body=Body(tuple(_rewrite_deep(s, rename) for s in stmt.body)))
     return stmt.rewrite(rename)
-
-
-def _stamp_axes(loop: Loop) -> Loop:
-    """Stamp each axes-less ``Accum`` with its OWN loop's axis, deep — the canonical dissolved
-    spelling the parser's gate re-derives. Pipeline-lowered IR arrives stamped; hand-lowered IR
-    (and some minted pieces) omits it, and the omission is spelling, not semantics: an ``Accum``
-    folds over exactly the loop it sits in.
-
-    A level carrying a ``base``-``Accum`` is the dissolved exp-family merge (a 030 split partial,
-    a cut fragment of a twisted cell) and is left VERBATIM: its parser
-    (``_extract_twisted_self``) proves the algebra by regenerating the merge and comparing, so
-    any re-spelling here — including an axes stamp — breaks the proof against the generator's
-    own spelling."""
-    if any(isinstance(s, Accum) and s.base is not None for s in loop.body):
-        return replace(loop, body=Body(tuple(_stamp_axes(s) if isinstance(s, Loop) else s for s in loop.body)))
-    body = tuple(
-        replace(s, axes=(loop.axis.name,)) if isinstance(s, Accum) and not s.axes else (_stamp_axes(s) if isinstance(s, Loop) else s)
-        for s in loop.body
-    )
-    return replace(loop, body=Body(body))
 
 
 def _lift_cell(cell: list[Stmt]) -> list:

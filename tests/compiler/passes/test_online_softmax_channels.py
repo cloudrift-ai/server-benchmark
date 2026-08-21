@@ -527,10 +527,9 @@ def test_fusion_folds_a_collapsing_reshape_instead_of_splicing_a_reduce_into_it(
         inputs={"s": g.nodes["s"].output},
     )
     g.add_node(op=flat, inputs=["s"], output=Tensor("r", (32,), F16), node_id="r")
-    g.add_node(op=ElementwiseOp(op="exp"), inputs=["r"], output=Tensor("y", (32,), F16), node_id="y")
-    g.inputs, g.outputs = ["x"], ["y"]
+    g.inputs, g.outputs = ["x"], ["r"]
 
-    out = Pipeline.build(LOOP_PASSES).run(g)
+    out = Pipeline.build(LOOP_PASSES).run(g.copy())
     loops = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)]
     reducing = [n for n in loops if n.op.reduce_axis_names]
     assert len(reducing) == 1, "one reduce-bearing loop — the reshape did not splice the reduce"
@@ -541,3 +540,13 @@ def test_fusion_folds_a_collapsing_reshape_instead_of_splicing_a_reduce_into_it(
     assert not any(isinstance(s, Load) and s.input == "s" for n in loops for s in n.op.body.iter()), (
         "the copy folded into the producer's writes"
     )
+
+    # A COMPUTING sink that absorbed the reshape (the output-gate multiply over the flattened
+    # heads) refuses the splice the same way; it has no identity to fold, so it stays a kernel
+    # reading the producer's materialized tensor.
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=["r"], output=Tensor("y", (32,), F16), node_id="y")
+    g.outputs = ["y"]
+    out = Pipeline.build(LOOP_PASSES).run(g)
+    loops = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)]
+    assert len([n for n in loops if n.op.reduce_axis_names]) == 1, "the reduce was not spliced into the gate kernel"
+    assert any(isinstance(s, Load) and s.input == "s" for n in loops for s in n.op.body.iter()), "the gate kernel reads s"

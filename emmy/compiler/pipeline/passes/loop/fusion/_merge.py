@@ -15,7 +15,6 @@ from emmy.compiler.ir.pure.fold import deep_defines, deep_reads
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
@@ -210,13 +209,11 @@ def _deep_stmts(body: Body):
             yield from _deep_stmts(b)
 
 
-def _collapsing_indexmap(loop_op: LoopOp) -> bool:
-    """A pure indexmap whose loads address the producer through a div/mod-by-literal of its own
-    axes — a reshape that collapses (or splits) loop axes, as opposed to a permutation or slice."""
+def _collapsing_loads(loop_op: LoopOp, producers: set[str]) -> bool:
+    """Whether ``loop_op`` loads one of ``producers`` through a div/mod-by-literal of its own
+    axes — a reshape that collapses (or splits) loop axes, whether the sink is the bare reshape
+    or a compute that already absorbed it (the output-gate multiply over the flattened heads)."""
     from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
-
-    if not _is_pure_indexmap(loop_op):
-        return False
 
     def composite(expr) -> bool:
         import dataclasses  # noqa: PLC0415
@@ -231,7 +228,7 @@ def _collapsing_indexmap(loop_op: LoopOp) -> bool:
                 return True
         return False
 
-    return any(composite(e) for s in _deep_stmts(loop_op.body) if isinstance(s, Load) for e in s.index or ())
+    return any(composite(e) for s in _deep_stmts(loop_op.body) if isinstance(s, Load) and s.input in producers for e in s.index or ())
 
 
 def _total_work(loop_op: LoopOp) -> int:
@@ -252,13 +249,15 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
-    if _collapsing_indexmap(sink.op) and any(graph.nodes[node_id].op.reduce_axis_names for node_id in region - {sink.id}):
+    producers = region - {sink.id}
+    if _collapsing_loads(sink.op, producers) and any(graph.nodes[node_id].op.reduce_axis_names for node_id in producers):
         # Splicing a reduce-bearing producer at a collapsing reshape's load sites re-runs its
         # reduces per output element, indexed by the flat axis's quotient — the per-head softmax
-        # statistic replayed for every ``d`` of the ``(head, d)`` flatten, with no loop to hoist it
-        # out of and no seam to cut. ``030_fold_output_reshape`` retargets the producer's writes
-        # onto the flat buffer instead, keeping its loop nest; a non-identity copy stays a kernel.
-        raise RuleSkipped("sink collapses axes of a reduce-bearing producer — the reshape folds into its writes instead")
+        # statistic replayed for every ``d`` of the ``(head, d)`` flatten, or P·V spelled per flat
+        # cell with composite operand indices no slab loader can address — with no loop to hoist
+        # it out of and no seam to cut. ``030_fold_output_reshape`` retargets a pure reshape onto
+        # the producer's writes instead, keeping its loop nest; a computing sink stays a kernel.
+        raise RuleSkipped("sink reads a reduce-bearing producer through a collapsing reshape — an unreadable seam")
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")

@@ -1220,8 +1220,8 @@ configs:
       TILE: ''
       WORK: t512
     measurements:
-      emmy_us: 2.3771
-      reference_us: 121.8309
+      emmy_us: 2.3779
+      reference_us: 121.8654
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1240,8 +1240,8 @@ configs:
       TILE: ''
       WORK: t512
     measurements:
-      emmy_us: 4.7445
-      reference_us: 7.8507
+      emmy_us: 4.7191
+      reference_us: 5.5936
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1263,7 +1263,7 @@ configs:
       WORK: t512
     measurements:
       emmy_us: 4.8416
-      reference_us: 35.0158
+      reference_us: 35.1407
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1285,7 +1285,31 @@ configs:
       WORK: t512
     measurements:
       emmy_us: 4.7397
-      reference_us: 33.7541
+      reference_us: 33.6403
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - add_2
+    - add_2_c1_bc
+    - mean_2
+    - pow_3
+    - rsqrt_2
+  realizations:
+  - name: k_mean_37b56e.969dd81bf016
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t32
+    measurements:
+      emmy_us: 1.5219
+      reference_us: 34.455
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1344,7 +1368,7 @@ configs:
       WORK: t1024
     measurements:
       emmy_us: 393.216
-      reference_us: 155.648
+      reference_us: 154.624
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1364,22 +1388,19 @@ configs:
       TILE: ''
       WORK: t512
     measurements:
-      emmy_us: 9.4575
-      reference_us: 9.3342
+      emmy_us: 9.4382
+      reference_us: 9.3298
       reference_backend: torch-eager
 - program: 0
   target:
     origins:
     - add_1
     - add_1_c1_bc
-    - add_2
-    - add_2_c1_bc
     - add_3
     - add_4
     - cat
     - cat_1
     - mean_1
-    - mean_2
     - mul_2
     - mul_3
     - mul_4
@@ -1395,10 +1416,8 @@ configs:
     - p_attn_k_norm_weight_bc
     - p_attn_q_norm_weight_bc
     - pow_2
-    - pow_3
     - rsqrt_1
     - rsqrt_1_bc
-    - rsqrt_2
     - rsqrt_2_bc
     - scaled_dot_product_attention
     - slice_1
@@ -1414,7 +1433,7 @@ configs:
     - unsqueeze_1_bc
     - unsqueeze_bc
   realizations:
-  - name: k_sdpa_mean_reduce_0a2624.e5230d7bf4e8
+  - name: k_sdpa_mean_reduce_5dfb29.be43ff7940ea
     bindings: {}
     pins:
       FAST_MATH: false

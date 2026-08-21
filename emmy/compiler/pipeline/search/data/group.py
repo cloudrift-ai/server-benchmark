@@ -1,4 +1,4 @@
-"""``Group`` — the fit pipeline's dataset representation: one candidate pool plus its labels.
+"""``Group`` — one candidate pool plus its labels: the comparison set every ranking question is asked over.
 
 A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. Today
 that supervision is a SET of pinned verified-optimum rows (``pinned`` — the row indices of every golden the
@@ -7,6 +7,12 @@ land, so builders other than the golden case builder can populate groups from me
 built by plain functions (the golden builder lives in ``emmy/commands/fit.py`` — case building needs the snippet
 tracer, which ``pipeline/`` must not import) and consumed by trainers and the CV harness through this one shape;
 there is no iterator/batching layer — the whole dataset is a small in-memory list.
+
+It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
+fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and
+a second pool representation for them would be a second chance to disagree about what a candidate set IS.
+Nothing here imports a model: a group carries the columns and the labels, and each model class decides for
+itself which columns it wants (see :meth:`Group.matrix`).
 
 Rows are ndarray-backed, not dict-backed: ``feats`` is one float64 matrix (rows × ``feat_names``), packed
 once by :meth:`Group.from_dicts` from the builder's transient per-row feature dicts. A per-row dict of ~63
@@ -35,7 +41,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, LinearModel
+from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -43,7 +49,7 @@ from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, L
 # are constant within a shape, so they drop out of a within-shape ranking — a weight on one is invisible to the
 # rank objective (it shifts every candidate in the pool by the same amount) and therefore unidentifiable. The
 # routing stamp is the same kind of quantity, which is why the LINEAR model narrows it out of its own
-# coordinates (:func:`~..linear_model.descent_cols`) while the matrix still carries it for a tree to split on.
+# coordinates (:func:`~..prior.linear_model.descent_cols`) while the matrix still carries it for a tree to split on.
 #
 # ``MMA_acc_bits`` is load-bearing: the f16-accumulate fork is spelled in the TILE codec's atom token, so a row
 # taking it is identical under every ``D_*`` feature to its f32-accumulate sibling. While the view dropped it,
@@ -51,41 +57,6 @@ from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, L
 # matmul goldens had a tied candidate ahead of them in emission order — unrankable at top-1 by construction.
 # The remaining ``MMA_*`` (``MMA_atom_m/n/k``, ``MMA_a_bits``) measured exactly neutral, so they stay out.
 DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
-
-# The tree view: the default view MINUS every feature that exists only because an additive model cannot
-# form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
-# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
-# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
-# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
-#
-# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
-#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
-#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
-# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
-#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
-#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
-#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
-#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
-# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
-#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
-#   ``D_bm_band``, ``D_tilen_clean``.
-# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
-#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
-#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
-#
-# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
-# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
-# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
-# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
-# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
-# candidate column at all, so no split on the pool can recover it.
-TREE_FEATURES = (
-    "D_*,MMA_tier,MMA_acc_bits,"
-    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
-    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
-    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
-    "-D_tma_*,-D_l2_cells_occ"
-)
 
 # The matmul view: every feature that can actually move a matmul candidate's rank, and no other. An
 # ordinary spec for :func:`feature_view` — pass it as ``--features``; nothing else filters.
@@ -147,13 +118,13 @@ def feature_view(spec: str):
     drop it. Excluding is the safe direction: an unforeseen feature arrives in the view, where at worst the
     model ignores it.
 
-    :data:`~..linear_model.ROUTING_FEATURES` are kept by EVERY view, named or not, and cannot be excluded.
+    :data:`~..features.ROUTING_FEATURES` are kept by EVERY view, named or not, and cannot be excluded.
     They select a weight set rather than contribute a term, and the packed column is what a tree splits the
     two regimes on, so keeping them costs a view nothing. A view that could drop them would instead route
     every pool to the static weight set and report a fit with zero dynamic cases — silently, since nothing
     downstream can tell an unfittable dynamic set from a genuinely static dataset. What keeps the stamp out
     of a LINEAR descent is the model class narrowing its own coordinates
-    (:func:`~..linear_model.descent_cols`), not the dataset withholding the column."""
+    (:func:`~..prior.linear_model.descent_cols`), not the dataset withholding the column."""
     pats = [p.strip() for p in spec.split(",") if p.strip()]
     keep = _matcher([p for p in pats if not p.startswith("-")])
     drop = _matcher([p[1:] for p in pats if p.startswith("-")])
@@ -175,14 +146,14 @@ class Group:
     gpu: str
     # The cross-validation fold group: this pool's extent identity, spelled by the builder from the source
     # record's ``ShapeKey``. Goldens sharing it compete over the same candidates, so they must be held out
-    # TOGETHER — see :func:`~.cv.assign_folds`. Unlike ``gpu`` (a report axis) this decides folds; unlike
+    # TOGETHER by the fold harness. Unlike ``gpu`` (a report axis) this decides folds; unlike
     # ``tier`` (a label) it is load-bearing.
     shape: str
     dynamic: bool
     # The verified-optimum rows of this pool, ascending: every golden the builder matched into it. Deploy ships
     # ONE config, so any of them ranked first is a win — which is why the fit's per-group term is the best rank
-    # over this set (:func:`~.rank.best_rank`) and the reported one the matching dual rank
-    # (:func:`~.rank.best_dual_rank`). At one positive both collapse to the single-golden functions exactly.
+    # over this set, and the reported one the matching dual rank. At one positive both collapse to the
+    # single-golden functions exactly.
     pinned: tuple[int, ...]
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
@@ -220,9 +191,9 @@ class Group:
         wrapping it would say nothing. ``total`` is the size of the pool ``feats`` was drawn from, defaulting
         to "nothing was sampled" - see :attr:`total`.
 
-        The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
+        The routing features (:data:`~..features.ROUTING_FEATURES`) are read off the pool into
         :attr:`dynamic` AND packed like every other column: a tree splits the two regimes on it, and the
-        linear model narrows it out of its own coordinates (:func:`~..linear_model.descent_cols`). Packing
+        linear model narrows it out of its own coordinates (:func:`~..prior.linear_model.descent_cols`). Packing
         every column is what keeps one model class from deciding for the other. Reading row 0 is exact: the
         stamp comes from the shape, which every candidate in a pool shares.
 
@@ -231,7 +202,7 @@ class Group:
         flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
         would otherwise train and be scored under the wrong weight set with nothing reporting it.
         This is what keeps ``tier``, a label that decides nothing, honest."""
-        dynamic = bool(feats) and LinearModel.is_dynamic_row(feats[0])
+        dynamic = bool(feats) and is_dynamic_row(feats[0])
         if dynamic != (tier == "dyn"):
             raise ValueError(
                 f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "

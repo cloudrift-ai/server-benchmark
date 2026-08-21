@@ -7,7 +7,7 @@ everything the linear model needed *because* it is additive:
 
 - **No weight sets.** A linear model prices a symbolic-axis (masked-tile) kernel with a second weight vector
   because it cannot form a product; a tree splits on ``S_ext_n_symbolic_axis`` and prices both regimes inside one
-  model. The routing feature is therefore an ordinary COLUMN here — :class:`~.fit.group.Group` packs it like any
+  model. The routing feature is therefore an ordinary COLUMN here — :class:`~..data.group.Group` packs it like any
   other and the trainer reads it straight from the matrix, matching the live candidate, which already carries it
   in its own featurization.
 - **No fitted scalar interaction.** The atomic-free split-K gate is a hand-built term in the linear model because

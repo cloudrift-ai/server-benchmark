@@ -16,11 +16,13 @@ quantity a derivative-free descent walks, which a tree model has no additive equ
 point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
 
 Weight-set routing is ONE fact read from ONE place: the ``S_ext_n_symbolic_axis`` stamp
-(:data:`ROUTING_FEATURES`). A symbolic-axis (masked-tile) kernel prices differently from its static counterpart —
-boundary-guard tax on small tiles, staged prologues locked out, occupancy over a free-dim product that excludes
-the symbolic axis — so it ranks under ``weights_dynamic``. That stamp must never ALSO be a fitted weight: it is
-constant across a candidate pool, so a linear term on it adds the same constant to every candidate and cancels
-exactly out of the within-pool ranking. The rank objective cannot see it, and whatever value a descent lands on
+(:data:`~..features.ROUTING_FEATURES`, spelled by the featurizer and read by
+:func:`~..features.is_dynamic_row`; what the stamp MEANS is this module's business). A symbolic-axis
+(masked-tile) kernel prices differently from its static counterpart — boundary-guard tax on small tiles,
+staged prologues locked out, occupancy over a free-dim product that excludes the symbolic axis — so it ranks
+under ``weights_dynamic``. That stamp must never ALSO be a fitted weight: it is constant across a candidate
+pool, so a linear term on it adds the same constant to every candidate and cancels exactly out of the
+within-pool ranking. The rank objective cannot see it, and whatever value a descent lands on
 there is decided by the regularizer and noise. It routes; it is never a coordinate.
 """
 
@@ -31,11 +33,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
-
-# Features that SELECT a weight set rather than contribute a term. Owned here because routing is the model's
-# business: :func:`descent_cols` keeps them out of the linear descent, and no other model class is bound by that.
-ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, ROUTING_FEATURES, is_dynamic_row
 
 
 def descent_cols(names) -> tuple[str, ...]:
@@ -192,7 +190,7 @@ class LinearModel:
         and the number it decomposes are one thing rather than two that have to be kept in step. Terms that would
         be ``±0.0`` (an absent or zero feature, or the gate on a row with no finalize kernel) are dropped: they
         are neutral in the total and would only pad the explanation."""
-        w_set = self.weight_set(self.is_dynamic_row(feats))
+        w_set = self.weight_set(is_dynamic_row(feats))
         terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
         finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
         if finalize:
@@ -225,11 +223,6 @@ class LinearModel:
         return quality_columns(
             mat, vec, gate_columns(mat, names), weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
         )
-
-    @staticmethod
-    def is_dynamic_row(feats: dict) -> bool:
-        """Whether a featurized row takes the dynamic weight set — the ONE reading of the routing stamp."""
-        return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
     def weight_set(self, dynamic: bool) -> dict[str, float]:
         """The weight dict a row of this kind scores under — the ONE place the two sets are chosen between.

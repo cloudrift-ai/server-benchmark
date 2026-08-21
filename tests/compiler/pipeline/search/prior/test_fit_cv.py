@@ -15,21 +15,18 @@ import pytest
 from emmy.commands import fit as fit_cmd
 from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
 from emmy.compiler.pipeline.search import features
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, Group, feature_view
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import (
-    DEFAULT_FEATURES,
-    MATMUL_FEATURES,
-    TREE_FEATURES,
-    Group,
     LinearFit,
     LinearTrainer,
     best_dual_rank,
     best_rank,
     dual_rank,
-    feature_view,
     rank_of_golden,
 )
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
+from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
 

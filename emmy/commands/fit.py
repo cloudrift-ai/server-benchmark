@@ -31,14 +31,13 @@ from pathlib import Path
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, Group, feature_view
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
-from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
-from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, TREE_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
@@ -254,7 +253,7 @@ def build_golden_groups(
             skipped.append((g.gpu_name, g.name, f"golden not in {len(rows)} candidates"))
             continue
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
-        # ``MMA_tier`` — see its rationale in ``prior/fit/group.py``) filters here, before
+        # ``MMA_tier`` — see its rationale in ``search/data/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
         # ``feature_view`` keeps the routing features whatever the spec says, so a narrower
         # ``--features`` cannot silently misroute a symbolic-axis pool.
@@ -362,11 +361,11 @@ def _catboost_trainers(args, names: list[str]):
 
 # Each trainer's factory and its default feature view. The views differ because the model classes do: the
 # linear one needs the engineered step / fold / interaction features, having no way to form them, and the
-# tree re-derives every one of them from the columns :data:`TREE_FEATURES` keeps. ``--features`` overrides
+# tree re-derives every one of them from the columns ``fit_catboost.TREE_FEATURES`` keeps. ``--features`` overrides
 # either, which is how the two views are compared on one model class.
 TRAINERS = {
     "linear": (_linear_trainers, DEFAULT_FEATURES),
-    "catboost": (_catboost_trainers, TREE_FEATURES),
+    "catboost": (_catboost_trainers, fit_catboost.TREE_FEATURES),
 }
 
 

@@ -193,3 +193,35 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
         "lowering/kernel/*.py must not call a schedule classifier / offer fn — "
         "read the stamped TileOp attribute instead of re-deriving the decision.\n" + "\n".join(offenders)
     )
+
+
+def test_search_data_does_not_import_the_prior() -> None:
+    """``search/data/*.py`` may not import from ``search.prior``.
+
+    The data layer describes candidates and their labels — a :class:`Group` is a packed pool plus what
+    is known about its rows, and that is the same object whether a trainer, a fold harness or an
+    evaluation report is asking. Deciding what a SCORE means is the layer above, and it has two model
+    classes that disagree: the linear one narrows the routing stamp out of its coordinates, the tree
+    splits on it. A dataset that imported either would be answering for both — which is exactly the
+    train/serve skew ``Group`` shipped with while it stripped the routing column on the linear model's
+    behalf, leaving the tree a column of NaN.
+
+    If this fires, the fact you reached for is either feature SPELLING (``search/features.py``, imported
+    by both layers) or a model DECISION that belongs to its caller — pass it in.
+    """
+    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "data"
+    assert data_dir.is_dir(), f"search/data/ not found at {data_dir}"
+    # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.linear_model import X``)
+    # and the package-import idiom (``from ….search import prior``) that ``commands/fit.py`` already writes for
+    # ``features``. A guard that caught only the first would wave through the form a future violation is most
+    # likely to be written in.
+    forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\.search(?:\.prior\b|\s+import\s+\(?\s*prior\b)")
+    offenders: list[str] = []
+    for py in sorted(data_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.match(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "search/data/*.py must not import search.prior — the data layer carries columns and labels; "
+        "each model class decides for itself which columns it wants.\n" + "\n".join(offenders)
+    )

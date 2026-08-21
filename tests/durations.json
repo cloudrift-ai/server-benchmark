@@ -228,6 +228,8 @@
  "tests/compiler/passes/test_pool_space.py::test_the_traversal_is_pinned_element_wise[reduce_matvec]": 0.02,
  "tests/compiler/passes/test_pool_space.py::test_the_traversal_is_pinned_element_wise[scalar_matmul]": 0.31,
  "tests/compiler/passes/test_pool_space.py::test_the_traversal_is_pinned_element_wise[warp_matmul]": 3.1,
+ "tests/compiler/passes/test_recognize_boundary_rules.py::test_cone_cell_lambda_is_closed[norm_linear]": 2.05,
+ "tests/compiler/passes/test_recognize_boundary_rules.py::test_cone_cell_lambda_is_closed[sdpa]": 1.37,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_score_cone_keeps_its_predicate_per_cell": 1.47,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_sdpa_reaches_the_computed_a_contraction[False]": 1.15,
  "tests/compiler/passes/test_recognize_boundary_rules.py::test_masked_sdpa_reaches_the_computed_a_contraction[True]": 1.18,

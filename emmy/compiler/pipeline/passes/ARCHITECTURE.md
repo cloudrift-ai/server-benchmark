@@ -398,7 +398,9 @@ failing several passes later:
   validation reading (1q) and lives with its one consumer, the cut (`_cut._captured_values`); closure is the precondition for lifting any subtree into its own kernel (a placement
   cut). A twisted fold's streaming merge is `combine`'s derived singleton-specialization internals — material BELOW
   the seam lattice, never a cut target: a value defined inside the merge captures the carrier's running state, so it
-  can never hoist to an edge. The same edge vocabulary applies to **B**: a pure, closed B
+  can never hoist to an edge. The STORED cone itself is closed: `make_cone` passes every statistic value the per-cell
+  normalize reads (softmax's `m`) through the prologue's results, so no λ in a stored term captures and the
+  statistic/normalize seam is a positional edge like any other. The same edge vocabulary applies to **B**: a pure, closed B
   producer can remain inline and fill the Tensor Core B slab directly. This is a generic producer-to-contraction
   fusion over ordinary tensor algebra; storage-format reconstruction must already have decomposed before this band.
   Binding off the lift rather than off "the first (m, k)-indexed `Load`" is load-bearing: a cone-INTERNAL load is
@@ -698,8 +700,8 @@ recursively: a deeper `PLACE` key can cut the cone piece again, yielding the cas
 matmul, every piece joining an EXISTING golden kind's evidence at its own schedule forks.
 A compile that cannot price the fork (nothing measured, no useful prior) decides nothing here and ranks the cut
 fragments beside the fused form like any other leaves — the fused form is not held back for it.
-Cut legality is structural: single-component CLOSED children only (`_captured_values`
-in its demoted validation role — combine-derived material that captures carrier state is simply not cuttable), and
+Cut legality is structural: single-component CLOSED children only (`_captured_values` in its demoted validation
+role; the multi-result prologue of a cone that passes its statistic through stays uncut by the component gate), and
 the pure-copy degenerate
 (cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
 non-terminating case) is refused. Loop fusion stops at `__cut_` workspace producers — a decided placement is not

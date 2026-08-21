@@ -66,10 +66,9 @@ def _captured_values(root, axes: set[str]) -> tuple[str, ...]:
     DEMOTED to a validation check at 1q: operands bind POSITIONALLY to lift params, so an edge
     cannot see the fold's state or its siblings — **edge iff closed holds by construction** — and
     the cut is the one decision that still consults the scan. It is the executable statement of
-    that invariant, and the honest reading of the one legal capture: flash's ``P = exp(s − m)``
-    genuinely reads the online-softmax carrier's running max, updated by the merge stmts of the
-    very loop step that consumes it (legal: an inline operand's one home is always inside the
-    scope it captures from) — which is why that seam is not cuttable.
+    that invariant. No stored term captures: the computed-A cone passes every statistic value its
+    per-cell normalize reads through the prologue's results (``ops.make_cone``), so softmax's
+    ``exp(s − m)`` binds ``m`` positionally; only a hand-built tree can fail this check.
 
     Returned sorted, so callers can put it straight into an error message."""
     stmts = list(root.lower())
@@ -85,9 +84,7 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     - the child produces ONE component (a product fold's per-component separation is
       deliberately forfeited at tile level — the sanctioned cut for the fused edge is the
       shared ``a`` operand, never a channel);
-    - the child is CLOSED over values (:func:`_captured_values` — its demoted validation role: a
-      state-capturing composition like flash's ``P`` sits in the step at its semantic position
-      and is simply not cuttable);
+    - the child is CLOSED over values (:func:`_captured_values` — its demoted validation role);
     - the seam is not the pure-copy degenerate: cutting a root zero-axis fold's only source when the
       projection body is empty and the store is a plain write leaves a parent that merely
       copies the workspace back out — the child IS the kernel, the tree does not shrink, and

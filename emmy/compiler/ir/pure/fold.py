@@ -500,7 +500,7 @@ class Fold:
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 
     @classmethod
-    def projection(cls, operands: tuple = (), *, body=None) -> Fold:
+    def projection(cls, operands: tuple = (), *, body=None, results: tuple | None = None) -> Fold:
         """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
         No axis and no monoid: the synthesized binder IS the ``lift`` and IS the per-cell compute,
         so softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over
@@ -510,12 +510,16 @@ class Fold:
         binds every channel accumulator, so the geglu combine's second read is a bound param and
         never a free name. ``body`` is the raw-loop-IR arm, where :func:`_loop_ir_fn` tolerates an
         impure body; its params come from the operands' components and its results from the last
-        def. A caller holding a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly —
-        this builder exists for the body form, which is the only one anything spells."""
+        def unless ``results`` names them (a prologue passing a bound statistic through to the
+        consumer that reads it — :func:`~emmy.compiler.ir.tile.ops.make_cone`). A caller holding
+        a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly — this builder exists for
+        the body form, which is the only one anything spells."""
         operands = tuple(operands)
         b = Body.coerce(body) if body is not None else Body()
         params = tuple(n for s in operands for n in _operand_result_names(s))
-        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, _map_results(b) or params[:1]))
+        if results is None:
+            results = _map_results(b) or params[:1]
+        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, tuple(results)))
 
     def external_reads(self) -> tuple[str, ...]:
         """Every input buffer read anywhere under this node's operand edges (deep — an inline

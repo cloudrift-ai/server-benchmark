@@ -45,6 +45,12 @@ and `--seq-len` instead.
 | hybrid model | `emmy run nvidia/Qwen3.6-27B-NVFP4 --layer <N>` | parity for both layer kinds | **unknown, not checked** |
 | hybrid model | `emmy serve nvidia/Qwen3.6-27B-NVFP4 --generate` | full-attention layers on emmy, linear-attention layers on stock, generating coherently | **SPECULATED** (`emmy/serving/vllm_model_gen.py` plus the Known gaps entry) — the serving-side half is unwritten |
 
+**What the counts say.** Of twenty-one rows, nine rest on runs from this session and seven on artifacts inspected
+directly; six are unknown and three are inherited claims not re-verified here. Four of the green rows are green
+because *serving* exercises that code rather than because the named command ran — `emmy compile`, `emmy run` and `emmy
+eval` have not themselves run against NVFP4. Every correctness and structure property has a row that would demonstrate
+it; the efficiency column is the thin one, and the coded-trunk TPOT stays unobtainable until tuning lands.
+
 **Coverage.** Phase 1 maps to the `--ir torch` row; phase 2 to `emmy pull`; phase 3 to `--ir cuda`, the pytest oracle
 and `emmy run --bench`; phase 4 to the two `--seq-len 512` rows; phase 5's model side to the hybrid compile row and
 its serving side to the hybrid serve row; phase 6 to the serving row. Among the design decisions, 1, 2, 4, 6 and 7 map

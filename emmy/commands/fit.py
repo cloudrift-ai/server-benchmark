@@ -151,10 +151,17 @@ def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool
 
     Two goldens belong in one group when this matches — the featurized pool is then byte-identical, so the
     second golden's row index addresses the same row the first one's does and the two are simply two verified
-    answers to one question. Membership is decided by CONSTRUCTION this way, never by a metadata key: most
-    same-name duplicates are ``FAST_MATH`` siblings whose pools are genuinely disjoint (the fast-math
-    enumeration offers an f16-accumulate atom the standard one never emits), and merging on the name would
-    produce indices for rows that do not exist. Comparing the packed matrix cannot make that mistake.
+    answers to one question. Membership is decided by CONSTRUCTION, never by a metadata key, and the packing
+    it needs is why the builder cannot group the records before it enumerates them.
+
+    That is measured, not assumed. The best metadata key available before enumeration is the card, the pins
+    and the FULL ``S_*`` structural feature dict — everything the enumerator is handed except the program
+    itself. Over the golden corpus it puts 213 sets of goldens together, and only 113 of those genuinely
+    share a pool: the other 100 enumerate different candidates. The clearest cases are a ``.lin`` Loop-IR
+    variant against its wire-graph twin, and different projections of one shape (``gemma4_12b.q_proj`` and
+    ``gemma4_12b.k_proj_global.m4096``) — identical in every ``S_*`` feature, different pools. Same-name
+    ``FAST_MATH`` siblings are the easy half of the problem, since their pins already separate them; these
+    are the half a key cannot see. Comparing the packed matrix cannot make either mistake.
 
     The identity fields ride along with the matrix digest because they decide things the matrix does not: the
     weight set (``dynamic``), the fold group (``shape``) and the report axes. Requiring them to agree can only

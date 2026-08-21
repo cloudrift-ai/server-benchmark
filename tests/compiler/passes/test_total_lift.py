@@ -279,8 +279,13 @@ def test_fold_reading_a_body_defined_name_is_restored_verbatim():
     tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None and not node.operands
-    raw_loops = [s for s in node.body if isinstance(s, Loop) and s.is_reduce]
-    assert len(raw_loops) == 2, "the consumer restored beside the escape, order preserved"
+    # The escape stays a raw loop; the consumer reads its typed accumulator, which no projection
+    # edge can close over (an effectful producer), so it stays a body member — as a NODE, in
+    # place, lowering byte-exact beside the escape.
+    kinds = [("loop" if isinstance(s, Loop) and s.is_reduce else "fold" if isinstance(s, Fold) else "other") for s in node.body]
+    assert kinds[:2] == ["loop", "fold"], "the consumer beside the escape, order preserved"
+    # ``LoopOp`` normalization renames axes; the node's loop is the consumer's by extent and body length.
+    assert node.body[1].axis.extent == consumer.axis.extent and len(node.body[1].loop.body) == len(consumer.body)
 
 
 def test_non_distributing_lift_declines_to_planar():

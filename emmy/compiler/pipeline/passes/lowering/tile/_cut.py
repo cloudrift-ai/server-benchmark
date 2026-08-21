@@ -92,7 +92,11 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     child = site.node
     if len(_operand_result_names(child)) != 1:
         return False
-    if _captured_values(child, axis_names(root) | {a.name for a in free}):
+    # A boundary store's SWEEP axis is an iteration axis of the kernel (it lives off-term on the
+    # ``Store``): a child under the sweep reads it as a coordinate, never as a captured value —
+    # the cut piece iterates it as one of its own free axes (:func:`realize_cut`).
+    sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}
+    if _captured_values(child, axis_names(root) | {a.name for a in free} | sweep_axes):
         return False
     trivial_body = (isinstance(root, Fold) and root.axis is None) and not len(root.body) and all(st.sweep is None for st in stores)
     if trivial_body and any(s is child for s in root.operands):
@@ -105,7 +109,6 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     # subtree (found live: ``Assign v9: arg 'acc1' not defined`` on the m4096 geglu cut).
     probe = Load(name=operand_name(child), input="__seam_probe", index=())
     parent_tree = _replace_edge(root, child, probe)
-    sweep_axes = {st.sweep.name for st in stores if st.sweep is not None}  # boundary-store sweeps live off-term (1q)
     if _captured_values(parent_tree, axis_names(parent_tree) | sweep_axes | {a.name for a in free}):
         return False
     return True
@@ -163,10 +166,14 @@ def _ancestor_axes(root, child) -> tuple[Axis, ...]:
     def walk(node, acc: tuple[Axis, ...]) -> tuple[Axis, ...] | None:
         if node is child:
             return acc
-        edges = node.operands if isinstance(node, Fold) else ()
-        # A ZERO-AXIS node contributes no fold axis to the path (it does not iterate).
-        below = (*acc, node.axis) if isinstance(node, Fold) and node.axis is not None else acc
-        for e in edges:
+        if not isinstance(node, Fold):
+            return None
+        # A ZERO-AXIS node contributes no fold axis to the path (it does not iterate). Its body
+        # members that are nodes (a chained column fold reading the store's sweep) are children
+        # like its operand edges.
+        below = (*acc, node.axis) if node.axis is not None else acc
+        members = (*node.operands, *(m for m in node.body if isinstance(m, Fold))) if node.axis is None else node.operands
+        for e in members:
             if isinstance(e, Fold):
                 got = walk(e, below)
                 if got is not None:
@@ -259,7 +266,13 @@ def _replace_edge(node, child, load: Load):
     # seam is the same rewrite whether the node reads as a map, a reduce or a contraction.
     if any(e is child for e in node.operands):
         return _dc_replace(node, operands=tuple(load if e is child else e for e in node.operands))
-    return _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, Fold) else e for e in node.operands))
+    out = _dc_replace(node, operands=tuple(_replace_edge(e, child, load) if isinstance(e, Fold) else e for e in node.operands))
+    if node.axis is None and any(isinstance(m, Fold) for m in node.body):
+        # A zero-axis node's body members that are nodes (the chained column fold in a sweep)
+        # carry seams too; the seam child itself becomes the load in place.
+        body = tuple(load if m is child else (_replace_edge(m, child, load) if isinstance(m, Fold) else m) for m in node.body)
+        out = out.with_bodies((Body(body),))
+    return out
 
 
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:
@@ -278,7 +291,8 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     if ws in match.graph.nodes:
         raise RuleSkipped(f"seam already cut — {ws} exists")
     anc = _ancestor_axes(tile_op, child)
-    axes = _child_axes(child, tuple(free), anc)
+    sweeps = tuple(st.sweep for st in stores if st.sweep is not None)
+    axes = _child_axes(child, (*free, *sweeps), anc)
     ws_index = tuple(Var(a.name) for a in axes)
     ws_dtype = _ws_dtype(child, getattr(root.op, "inputs", None) or {})
     spelled = spell(tile_op, "PLACE", child, all_sites=sites(tile_op))

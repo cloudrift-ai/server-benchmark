@@ -183,11 +183,11 @@ class Group:
     # or a measured set, where every row carries its own latency — so this is one array rather than two
     # optional ones, and the kind is fixed by whichever builder made the group.
     #
-    # :data:`PINNED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere. Several goldens can land on one
-    # pool (the same shape recorded twice, or under two names), so this is a SET. Deploy ships one config, so
-    # any of them ranked first is a win — which is why the fit's per-group term is the best rank over the set,
-    # and the reported one the matching dual rank. At one positive both collapse to the single-golden functions
-    # exactly. Read the indices through :attr:`pinned`.
+    # :data:`PINNED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere — so ``np.flatnonzero(labels)``
+    # is the row set and ``labels.sum()`` the count. Several goldens can land on one pool (the same shape
+    # recorded twice, or under two names), so this is a SET. Deploy ships one config, so any of them ranked
+    # first is a win — which is why the fit's per-group term is the best rank over the set, and the reported
+    # one the matching dual rank. At one positive both collapse to the single-golden functions exactly.
     #
     # :data:`LATENCY`: the row's measured µs, lower = faster. This is what the regret and correlation metrics
     # take, and it is only ever populated from rows that were actually benched.
@@ -206,25 +206,6 @@ class Group:
     # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
     # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
     _cache: tuple | None = field(default=None, repr=False, compare=False)
-
-    @property
-    def pinned(self) -> tuple[int, ...]:
-        """The verified-optimum row indices, ascending — the :data:`PINNED` label read as the index set the
-        rank metrics take. Raises on a measured group, where "which row is the answer" is not a question the
-        labels answer: every row has a latency and the best one is a matter of degree, not of record."""
-        if self.label_kind != PINNED:
-            raise ValueError(f"{self.key}: pinned rows asked of a {self.label_kind!r}-labelled group")
-        return tuple(int(i) for i in np.flatnonzero(self.labels))
-
-    @property
-    def latency_us(self) -> np.ndarray:
-        """The measured µs per row — the :data:`LATENCY` label read as what the regret and correlation metrics
-        take. The twin of :attr:`pinned`, and guarded for the same reason: :attr:`labels` is storage, and
-        reading it without asking the kind is how a report ends up correlating a model's scores against a
-        column of 0/1 verification markers and publishing the number."""
-        if self.label_kind != LATENCY:
-            raise ValueError(f"{self.key}: measured latencies asked of a {self.label_kind!r}-labelled group")
-        return self.labels
 
     @classmethod
     def from_dicts(

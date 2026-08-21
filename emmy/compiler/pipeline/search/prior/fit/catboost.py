@@ -138,7 +138,7 @@ class CatBoostTrainer:
         pools = [g.matrix(cols, fill=ABSENT) for g in groups]
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
-        sampled = [self._uniform(len(m), g.pinned, rng) for m, g in zip(pools, groups, strict=True)]
+        sampled = [self._uniform(len(m), np.flatnonzero(g.labels), rng) for m, g in zip(pools, groups, strict=True)]
         inert = sum(1 for s, m in zip(sampled, pools, strict=True) if len(s) >= len(m) - 1)
         if inert:
             logger.warning(
@@ -153,7 +153,10 @@ class CatBoostTrainer:
         ranks = self._ranks(model, pools, groups)
         logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled, groups), topk_table(ranks))
         for r in range(1, max(1, self.rounds)):
-            sampled = [np.union1d(s, self._hard(model.quality_rows(m), g.pinned)) for s, m, g in zip(sampled, pools, groups, strict=True)]
+            sampled = [
+                np.union1d(s, self._hard(model.quality_rows(m), np.flatnonzero(g.labels)))
+                for s, m, g in zip(sampled, pools, groups, strict=True)
+            ]
             model = self._fit_once(pools, groups, sampled)
             ranks = self._ranks(model, pools, groups)
             logger.info("  round %d mined (%d rows): %s", r, self._n_rows(sampled, groups), topk_table(ranks))
@@ -162,13 +165,13 @@ class CatBoostTrainer:
 
     @staticmethod
     def _n_rows(sampled, groups: list[Group]) -> int:
-        return sum(len(s) + len(g.pinned) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
+        return sum(len(s) + int(g.labels.sum()) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
 
     @staticmethod
     def _ranks(model: CatBoostModel, pools, groups: list[Group]) -> list[int]:
         """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
         (:func:`~..metrics.best_rank`), matching what the linear fit reports per round."""
-        return [best_rank(model.quality_rows(m), g.pinned) for m, g in zip(pools, groups, strict=True)]
+        return [best_rank(model.quality_rows(m), np.flatnonzero(g.labels)) for m, g in zip(pools, groups, strict=True)]
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
         """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
@@ -200,9 +203,10 @@ class CatBoostTrainer:
 
         x, y, gid = [], [], []
         for i, (mat, g, neg) in enumerate(zip(pools, groups, sampled, strict=True)):
-            rows = np.concatenate((np.asarray(g.pinned, dtype=int), np.asarray(neg, dtype=int)))
+            pins = np.flatnonzero(g.labels)
+            rows = np.concatenate((pins, np.asarray(neg, dtype=int)))
             x.append(mat[rows])
-            y.append(np.concatenate((np.ones(len(g.pinned)), np.zeros(len(rows) - len(g.pinned)))))
+            y.append(np.concatenate((np.ones(len(pins)), np.zeros(len(rows) - len(pins)))))
             gid.append(np.full(len(rows), i))
         booster = new_ranker(
             loss_function="QuerySoftMax",

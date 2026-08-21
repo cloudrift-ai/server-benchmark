@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import statistics
 
+import numpy as np
+
 from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
 
@@ -107,7 +109,7 @@ def case_ranks(case: Group, model) -> tuple[int, int] | None:
     scores = model.score_rows(case)
     if scores is None:
         return None
-    return best_dual_rank(scores, case.pinned)
+    return best_dual_rank(scores, np.flatnonzero(case.labels))
 
 
 def _median(vals: list[float]) -> float:
@@ -139,7 +141,7 @@ def evaluate_full_train(cases: list[Group], model) -> dict:
     # ``pool`` is the pool's TRUE size and ``sampled`` how many of its rows this fit saw; the rank is
     # the raw rank within those rows, never scaled up to the pool. They differ only under sampling.
     per_golden = {
-        c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": len(c.pinned)}
+        c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": int(c.labels.sum())}
         for c, (r, o) in entries
     }
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
@@ -191,12 +193,13 @@ def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     return {
         "holdout": {
             "per_golden": {
-                c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.pinned), "fold": holdout_fold[c.key]} for c, (r, o) in holdout
+                c.key: {"rank": r, "rank_optimistic": o, "positives": int(c.labels.sum()), "fold": holdout_fold[c.key]}
+                for c, (r, o) in holdout
             },
             "per_card": holdout_cards,
         },
         "train": {
-            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.pinned)} for c, (r, o) in train_entries},
+            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": int(c.labels.sum())} for c, (r, o) in train_entries},
             "per_card": train_cards,
         },
         "gap": {gpu: round(holdout_cards[gpu]["median"] - train_cards[gpu]["median"], 2) for gpu in holdout_cards if gpu in train_cards},

@@ -171,7 +171,7 @@ def test_row_accounting_covers_every_positive():
     rows = [{"D_a": float(i), "D_b": 0.0, "S_ext_n_symbolic_axis": 0.0} for i in range(30)]
     extra = Group.from_dicts("gpuA/p1", "p1", "warp", "gpuA", "s1", (0, 1, 29), rows)
     groups = [_groups(n_pools=1)[0], extra]
-    assert (len(groups[0].pinned), len(extra.pinned)) == (1, 3)
+    assert (groups[0].labels.sum(), extra.labels.sum()) == (1, 3)
     assert trainer._n_rows([np.arange(4), np.arange(4)], groups) == (4 + 1) + (4 + 3)
 
 

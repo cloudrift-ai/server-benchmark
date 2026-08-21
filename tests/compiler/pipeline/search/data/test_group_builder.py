@@ -8,7 +8,7 @@ misgrouped or mislabelled pool still produces a confident-looking correlation.
 
 from __future__ import annotations
 
-import pytest
+import numpy as np
 
 from emmy.compiler.pipeline.search.data.group import LATENCY, PINNED, Group, group_measured
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS
@@ -102,34 +102,27 @@ def test_every_row_is_either_grouped_or_counted():
 # --- the two label kinds -----------------------------------------------------------
 
 
-def test_each_kind_answers_only_its_own_question():
-    """One array, two meanings, and asking the wrong one of it is an error rather than a plausible answer.
-
-    Both directions matter, and the second is the dangerous one: a rank metric handed a measured group would
-    at least be asking for something absent, but a correlation handed a PINNED group gets a perfectly
-    well-formed vector of 0/1 verification markers, correlates against it, and publishes the number."""
+def test_the_kind_travels_with_the_group():
+    """One array, two meanings, and ``label_kind`` is how a consumer knows which it holds. Nothing derives
+    the meaning from the numbers — a pinned pool's 0/1 markers are a perfectly well-formed vector to
+    correlate against, and a report that guessed would publish the result."""
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(3)]
     (measured,), _ = group_measured(rows)
     pinned = Group.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
 
-    assert measured.latency_us.tolist() == [200.0, 300.0, 400.0]
-    assert pinned.pinned == (1,)
-    with pytest.raises(ValueError, match="pinned rows asked of a 'latency'-labelled group"):
-        _ = measured.pinned
-    with pytest.raises(ValueError, match="measured latencies asked of a 'pinned'-labelled group"):
-        _ = pinned.latency_us
+    assert (measured.label_kind, measured.labels.tolist()) == (LATENCY, [200.0, 300.0, 400.0])
+    assert (pinned.label_kind, pinned.labels.tolist()) == (PINNED, [0.0, 1.0, 0.0])
 
 
-def test_pinning_reads_back_as_the_index_set_the_rank_metrics_take():
-    """Pins go in as row indices and come back as row indices, whatever the storage underneath — a group is
-    built ONCE, already knowing every verified row it holds, so there is no amend-after-construction path."""
+def test_pins_go_in_as_row_indices_and_mark_those_rows():
+    """A group is built ONCE, already knowing every verified row it holds, so there is no
+    amend-after-construction path — several pins arrive together, in any order, with duplicates."""
     feats = [{"D_a": float(i)} for i in range(5)]
     one = Group.from_dicts("g/x", "x", "warp", "g", "x", 2, feats)
-    assert one.label_kind == PINNED and one.pinned == (2,)
     assert one.labels.tolist() == [0.0, 0.0, 1.0, 0.0, 0.0]
 
     several = Group.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats)
-    assert several.pinned == (2, 4), "sorted and duplicate-free, whichever order the builder found them in"
+    assert np.flatnonzero(several.labels).tolist() == [2, 4]
 
 
 def test_a_row_the_freeze_would_refuse_is_refused_here_too():

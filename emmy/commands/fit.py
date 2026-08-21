@@ -126,12 +126,15 @@ def _shape_group(g) -> str:
 
 
 @dataclass
-class _PendingPool:
-    """A packed candidate pool that has not become a :class:`Group` yet, because it does not yet know all of
-    its answers. Mutable and local to :func:`build_golden_groups`: ``pins`` grows as later goldens turn out to
-    have landed on this same pool, and only once the corpus is exhausted is the group built, with its labels
-    already final. Building first and amending afterwards would mean the group's own labels being edited from
-    outside it, which is the shape this exists to avoid."""
+class _Pool:
+    """One candidate pool and every golden that landed in it — what :func:`build_golden_groups` accumulates
+    before it builds anything.
+
+    Which goldens share a pool is a fact about the whole corpus, not about any one golden, so it cannot be
+    known until the corpus is exhausted. Grouping the goldens first and building each :class:`Group` once,
+    with its labels already final, is what keeps a group's labels from being edited from outside it. The
+    identity fields are the FIRST golden's; the pool is byte-identical for the rest, which is what ``identity``
+    established."""
 
     key: str
     name: str
@@ -139,8 +142,8 @@ class _PendingPool:
     gpu: str
     shape: str
     packed: tuple[tuple[str, ...], np.ndarray, bool]
-    pins: set[int]
     total: int
+    pins: list[int]
 
 
 def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool]) -> tuple:
@@ -230,8 +233,7 @@ def build_golden_groups(
     cases: list[Group] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
-    pools: dict[tuple, _PendingPool] = {}  # pool identity -> the pool, in first-appearance order
-    joined = 0
+    pools: dict[tuple, _Pool] = {}  # pool identity -> the pool + its goldens, in first-appearance order
     # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
     # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
     # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
@@ -280,27 +282,29 @@ def build_golden_groups(
         # ``--features`` cannot silently misroute a symbolic-axis pool.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         packed = pack_features(feats)  # the dicts are dropped here; everything below is the matrix
+        # File this golden under the pool it landed in. A second golden on the same pool is another verified
+        # answer to one question, not a second case — and one recorded twice at the same config pins the same
+        # row, so it folds away entirely rather than becoming a ``#2`` that double-counts one fact.
         pool = pools.get(identity := _pool_identity(g, tier, packed))
-        if pool is not None:
-            # Same pool as an earlier golden: this one is another verified answer to it, not a second case.
-            # A golden recorded twice at the same config pins the same row and folds away entirely, where it
-            # used to become a ``#2`` case that double-counted one fact in every metric.
-            joined += 1
-            pool.pins.add(gidx)
-            continue
-        pools[identity] = _PendingPool(
-            f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), packed, {gidx}, candidates.total
-        )
-    # Every pool now knows every verified row it holds, so each becomes ONE group with its labels already
-    # final. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator on
-    # it) and is spent per POOL in first-appearance order, so same-name goldens that merged never claim one.
+        if pool is None:
+            pool = pools[identity] = _Pool(
+                f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), packed, candidates.total, []
+            )
+        pool.pins.append(gidx)
+    # Each pool now knows every golden that landed in it, so each becomes ONE group whose labels are final at
+    # construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator
+    # on it) and is spent per POOL in first-appearance order, so goldens that merged never claim one.
     for pool in pools.values():
         key_counts[pool.key] = n = key_counts.get(pool.key, 0) + 1
         key = pool.key if n == 1 else f"{pool.key}#{n}"
-        labels = pinned_labels(sorted(pool.pins), len(pool.packed[1]))
+        labels = pinned_labels(pool.pins, len(pool.packed[1]))
         cases.append(Group.from_packed(key, pool.name, pool.tier, pool.gpu, pool.shape, pool.packed, labels, PINNED, pool.total))
+    matched = sum(len(p.pins) for p in pools.values())
     logger.info(
-        "  %d matched goldens over %d candidate pools (%d joined a pool an earlier golden opened)", len(cases) + joined, len(cases), joined
+        "  %d matched goldens over %d candidate pools (%d joined a pool an earlier golden opened)",
+        matched,
+        len(cases),
+        matched - len(cases),
     )
     return cases, skipped
 
@@ -416,7 +420,7 @@ def handle_fit(args) -> None:
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
     # ``merged`` is the positives beyond one per pool; the builder logs the record-level count, which also
     # counts a golden recorded twice at one config (it pins a row already pinned, so it adds no positive).
-    positives = sum(len(c.pinned) for c in cases)
+    positives = sum(int(c.labels.sum()) for c in cases)
     logger.info(
         "  %d static + %d dynamic golden cases (%d positives, %d merged), %d D_* features, %d skipped",
         len(cases) - n_dyn,

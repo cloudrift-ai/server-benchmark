@@ -121,7 +121,9 @@ def fit_weights(
     # projection. Copying here is what it has always done — the difference is that the projection it copies
     # from is now built once for the whole run instead of once per fold.
     mats = [g.matrix(names).copy() for g in groups]
-    pinned = [g.pinned for g in groups]
+    # Once, outside the descent: the coordinate walk re-scores every pool thousands of times, and the
+    # positive rows do not move.
+    pinned = [np.flatnonzero(g.labels) for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
     # Two streaming passes (mean, then squared deviation) and an IN-PLACE scaling, rather than

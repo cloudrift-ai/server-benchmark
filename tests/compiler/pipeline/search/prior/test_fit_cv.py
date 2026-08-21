@@ -64,8 +64,8 @@ def test_from_dicts_normalizes_one_or_many_positives():
     nothing. Either way the stored tuple is sorted and duplicate-free, which is what lets the builder grow a
     group's pins without the trainers having to re-sort or de-duplicate them."""
     rows = [{"D_a": float(i)} for i in range(5)]
-    assert Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).pinned == (2,)
-    assert Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).pinned == (1, 3)
+    assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).labels).tolist() == [2]
+    assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).labels).tolist() == [1, 3]
 
 
 def test_a_merged_case_reports_its_positive_count():
@@ -152,7 +152,10 @@ def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
         ],
         monkeypatch,
     )
-    assert [(c.key, c.pinned, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
+    assert [(c.key, np.flatnonzero(c.labels).tolist(), len(c.feats)) for c in cases] == [
+        ("gpuA/m.512", [1, 2], 3),
+        ("gpuA/m.512#2", [3], 4),
+    ]
     assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
     # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
@@ -180,7 +183,7 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     assert skipped == []
     assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
     (case,) = cases
-    assert len(case.pinned) == 2, "both recorded rows survive the draw and pin into the case"
+    assert case.labels.sum() == 2, "both recorded rows survive the draw and pin into the case"
     assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
     kept = {chr(int(v)) for v in case.feats[:, 0]}
     assert {"a", "z"} <= kept
@@ -192,7 +195,7 @@ def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
     cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
-    assert [(c.key, c.pinned) for c in cases] == [("gpuA/m.512", (1,))]
+    assert [(c.key, np.flatnonzero(c.labels).tolist()) for c in cases] == [("gpuA/m.512", [1])]
 
 
 # --- synthetic cases ---------------------------------------------------------------

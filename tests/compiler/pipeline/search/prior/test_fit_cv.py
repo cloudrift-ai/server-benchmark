@@ -91,8 +91,8 @@ def test_dual_rank_tie_plateau():
 
 def test_best_rank_collapses_to_the_single_golden_functions_at_one_positive():
     """THE compatibility guard. A pool with one positive must score exactly what it scored before the field
-    became a set — otherwise every fitted artifact moves, which is what the byte-identity tests in
-    ``test_prior_fit`` fail on. Checked at every index, so the tie conventions are covered on both sides of a
+    became a set — otherwise every fitted artifact moves, and nothing in the suite compares a fit against the
+    previous release's numbers. Checked at every index, so the tie conventions are covered on both sides of a
     plateau, not just at the winner."""
     scores = np.array([5.0, 3.0, 5.0, 5.0, 7.0])
     for i in range(len(scores)):

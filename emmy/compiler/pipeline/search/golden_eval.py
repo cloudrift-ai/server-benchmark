@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.features import tile_signature
+from emmy.compiler.pipeline.search.metrics import dual_rank
 from emmy.compiler.pipeline.search.pool import Candidates
-from emmy.compiler.pipeline.search.prior.fit.rank import dual_rank
 
 
 @dataclass(frozen=True)

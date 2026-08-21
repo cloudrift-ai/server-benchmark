@@ -32,7 +32,6 @@ both model classes feed the shared score and policy wrappers unchanged.
 from __future__ import annotations
 
 import base64
-import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -42,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.prior.base import latency_proxy
 
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
@@ -141,9 +141,7 @@ class CatBoostModel:
         CatBoost's per-call overhead 78k times."""
         if not feats_list:
             return []
-        # Clip the exp ARGUMENT, never the quality: within ±700 the proxy stays strictly ordered, and beyond it
-        # exp would overflow or underflow anyway (the linear model's identical float-safety bound).
-        return [math.exp(max(min(-self.scale * q, 700.0), -700.0)) for q in self.quality_rows(self.matrix(feats_list))]
+        return [latency_proxy(q, self.scale) for q in self.quality_rows(self.matrix(feats_list))]
 
     def explain_features(self, feats: dict) -> dict[str, float]:
         """Per-term decomposition of one row's :meth:`quality_rows`, as TreeSHAP values.

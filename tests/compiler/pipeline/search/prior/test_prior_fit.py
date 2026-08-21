@@ -12,13 +12,16 @@ guarantees the extraction from the original fit script must keep:
 """
 
 import json
+import math
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from emmy.compiler.pipeline.search.data.group import Group, feature_matrix
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.metrics import rank_of_golden
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
     LinearFit,
@@ -26,7 +29,6 @@ from emmy.compiler.pipeline.search.prior.fit import (
     fit_weights,
     gate_columns,
     mean_log_rank,
-    rank_of_golden,
     raw_weights,
 )
 from emmy.compiler.pipeline.search.prior.linear_model import GATE_DEFAULTS, LinearModel, gate_values
@@ -237,6 +239,28 @@ def test_an_unfittable_dynamic_fold_scores_as_none_rather_than_raising():
     for caller in (static_only, LinearFit(static_only, [], [])):  # the model, and the fit that forwards to it
         assert caller.score_rows(dyn) is None
         assert caller.score_rows(static) is not None
+
+
+def test_the_proxy_warns_when_it_clips_instead_of_collapsing_a_ranking_silently():
+    """A clipped exponent destroys a ranking: every row past the bound lands on the same float, so a greedy
+    argmin over that plateau falls through to enumeration order. That is the 2026-07 incident, and it was
+    silent — the whole point of the warning is that the same regime cannot recur unnoticed.
+
+    Both model classes must go through the one definition, so the tree gets the same guarantee as the linear
+    model without a second copy of the transform."""
+    from emmy.compiler.pipeline.search.prior import base
+
+    monkey = base._clip_warned
+    try:
+        base._clip_warned = False
+        with patch.object(base.logger, "warning") as warned:
+            assert base.latency_proxy(quality=1.0, scale=0.1) == pytest.approx(math.exp(-0.1))
+            assert not warned.called  # the reachable regime says nothing
+            assert base.latency_proxy(quality=1e5, scale=0.1) == pytest.approx(math.exp(-base.PROXY_CLIP))
+            assert warned.called
+            assert "enumeration order" in warned.call_args[0][0]
+    finally:
+        base._clip_warned = monkey
 
 
 def test_model_artifact_round_trips():

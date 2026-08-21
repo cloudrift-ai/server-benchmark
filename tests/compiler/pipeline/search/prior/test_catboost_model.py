@@ -115,6 +115,24 @@ def test_score_rows_covers_the_full_pool_not_the_sample():
     assert fit.score_rows(groups[0]).shape == (30,)
 
 
+def test_score_rows_projects_onto_the_models_own_columns():
+    """A pool need not carry the columns the model was trained on, nor in its order — projecting it is the
+    MODEL's job now, and every other pool in this file stamps every column, so nothing else reaches this.
+
+    Column ORDER is the catchable half, and this pins it: the same pool read in the wrong order scores
+    differently. The FILL is deliberately not asserted through a score — CatBoost's ``nan_mode="Min"`` puts
+    NaN on the same side of every split as the training minimum, and ``0.0`` IS that minimum here, so a
+    mis-filled column would score identically. That is why the fill is pinned where it is decided
+    (:func:`test_absent_features_are_nan_not_zero`) rather than by its effect."""
+    model = _fit()  # trained on ("D_a", "D_b")
+    group = Group.from_dicts("gpuA/p", "p", "warp", "gpuA", "s", 0, [{"D_a": float(i)} for i in range(6)])
+    assert group.feat_names == ("D_a",)  # the pool is missing a column the model wants
+
+    scores = model.score_rows(group)
+    assert np.array_equal(scores, model.quality_rows(group.matrix(list(model.cols), fill=ABSENT)))
+    assert not np.array_equal(replace(model, cols=("D_b", "D_a")).score_rows(group), scores)
+
+
 def test_hard_negative_mining_grows_the_training_set():
     """Round 0 draws negatives uniformly; each further round adds the rows the current model ranks near the
     golden. More rounds therefore train on strictly more rows — the mechanism, not merely the flag."""

@@ -467,7 +467,7 @@ The names below recur throughout this document; together they are the whole publ
 
 | Member | Caller | What it is |
 |--------|--------|------------|
-| `score(knobs)` | MCTS selection (PUCT) only | Predicted latency, used to steer exploration. On the composite prior this is the one call that blends the two halves (see the calibration-gate section below). |
+| `policy(knobs_list)` | MCTS selection (PUCT) only | How much the model prefers each sibling in ONE fork's set, normalized within it. The one call that may combine the two halves (see the calibration-gate section below). |
 | `mean_score` / `mean_scores` | deploy + eval ranking | The model's latency prediction for one row / for a batch of candidates. `FallbackPrior` routes these to the online half when it is `trustworthy`, else to the offline half — no blending. |
 | `evidence_pick(rows)` | deploy tier 2 | The pick made from measured reservoir rows (defined below). Returns `(index, measured_µs)` or `None`. Consulted whatever the calibration verdict says, because measured evidence needs no trusted model: a quarantined model — or a checkpoint whose reservoir has rows but no fitted model yet — still supplies this tier. |
 | `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the verified tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
@@ -477,7 +477,7 @@ The names below recur throughout this document; together they are the whole publ
 
 ### The deploy evidence hierarchy
 
-`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `score`. `greedy_decide` (`compile` / `run`, via
+`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `policy`. `greedy_decide` (`compile` / `run`, via
 `Run.resolve`) never explores: at each fork it picks once, working down the list below from the top. **This list is
 the authoritative order** — the summaries elsewhere in this file defer to it.
 

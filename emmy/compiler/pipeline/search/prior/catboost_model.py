@@ -2,7 +2,8 @@
 second model class :class:`~emmy.compiler.pipeline.search.prior.offline.OfflinePrior` can rank with.
 
 Same contract as the linear model and the same two access shapes over one arithmetic: a feature-dict path (how a
-live candidate is scored) and a packed-matrix path (what ``emmy fit`` trains and evaluates on). What differs is
+live candidate is scored) and a packed-matrix path (what ``emmy fit`` trains and evaluates on, entered for a
+whole candidate pool through :meth:`CatBoostModel.score_rows`). What differs is
 everything the linear model needed *because* it is additive:
 
 - **No weight sets.** A linear model prices a symbolic-axis (masked-tile) kernel with a second weight vector
@@ -36,11 +37,16 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
+if TYPE_CHECKING:
+    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
+    # subprocess) onto the deploy path, which loads none of it today.
+    from emmy.compiler.pipeline.search.data.group import Group
 
 # The artifact's ``params`` block for this model class, in written order — the twin of the linear model's
 # ``PARAM_ORDER``. ``offline._load_artifact`` demands exactly the keys the writer emits, so a new scalar param is
@@ -158,6 +164,15 @@ class CatBoostModel:
     def matrix(self, feats_list: list[dict]) -> np.ndarray:
         """Feature dicts packed into this model's own column order, absent key = :data:`ABSENT`."""
         return np.array([[f.get(c, ABSENT) for c in self.cols] for f in feats_list], dtype=float)
+
+    def score_rows(self, group: Group) -> np.ndarray:
+        """:meth:`quality_rows` over a whole packed pool — the pool-shaped entry point :class:`~..linear_model.LinearModel`
+        also answers, and the ONE place the tree's column choice is made: :attr:`cols` in its own order,
+        absent filling to :data:`ABSENT`, which is what the booster was trained against.
+
+        Never ``None``: one model prices both regimes, so the linear model's "this fold fit no dynamic
+        weight set" case cannot arise here."""
+        return self.quality_rows(group.matrix(list(self.cols), fill=ABSENT))
 
     def quality_rows(self, mat: np.ndarray) -> np.ndarray:
         """Per-row ranking quality (higher = predicted faster) over a matrix already in :attr:`cols` order — the

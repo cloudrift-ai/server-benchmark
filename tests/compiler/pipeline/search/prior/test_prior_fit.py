@@ -211,6 +211,34 @@ def test_dict_and_matrix_paths_score_identically(dynamic):
     assert np.allclose(fitted, deployed)
 
 
+def test_an_unfittable_dynamic_fold_scores_as_none_rather_than_raising():
+    """A model fit with no symbolic-axis cases has no dynamic weight set, and a dynamic pool handed to it
+    is unanswerable rather than wrong. ``None`` is the word for that, and it must survive the forward from
+    the fit to the model — :func:`~.cv.case_ranks` skips such a group, where a raised exception would abort
+    the whole cross-validation run and a zero vector would silently rank the pool by emission order.
+
+    Untested before this: ``weight_set`` RAISES on a missing dynamic set, so the guard that turns that into
+    a ``None`` is the only thing standing between an unfittable fold and a crashed run.
+
+    Static pools still score normally on the same model: it is the missing WEIGHT SET that is the limit,
+    not the model."""
+    static_only = LinearModel(
+        weights={"D_threads": 1.0},
+        weights_dynamic=None,
+        scale=0.1,
+        atomic_free_weight=0.0,
+        atomic_free_split_threshold=4.0,
+    )
+    rows = [{"D_threads": float(i), "S_ext_n_symbolic_axis": 1.0} for i in range(5)]
+    dyn = Group.from_dicts("x/d", "d", "dyn", "x", "d", 0, rows)
+    static = Group.from_dicts("x/s", "s", "warp", "x", "s", 0, [{"D_threads": float(i)} for i in range(5)])
+
+    assert dyn.dynamic and not static.dynamic
+    for caller in (static_only, LinearFit(static_only, [], [])):  # the model, and the fit that forwards to it
+        assert caller.score_rows(dyn) is None
+        assert caller.score_rows(static) is not None
+
+
 def test_model_artifact_round_trips():
     """``LinearModel`` → artifact → ``LinearModel`` is exact, so the file a fit ships and the model
     that produced it rank identically. The params block keeps its full key set (order is free — the

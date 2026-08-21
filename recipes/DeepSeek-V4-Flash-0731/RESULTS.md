@@ -55,6 +55,49 @@ two distributions overlap and neither shift is established here. The engine imag
 The recipe's zero-JIT intent is still not fully met: eight Triton kernels JIT-compile once during the first repeat's
 warm-up and none recurs, so they cost the priming repeat only.
 
+## These numbers are vLLM without Emmy kernels
+
+Every serving number in this report was produced by vLLM alone, with no Emmy kernels in the process. The deployed
+container runs 1Cat/vLLM; the recipe sets no `EMMY_*` variable, passes no Emmy plugin, and the archived server log for
+the reported run contains no mention of Emmy at all. The `VLLM_SM70_*` variables it does set are the 1Cat fork's own
+Volta features — flash attention, and the turbomind FP8 / MXFP4 quantized paths — not Emmy code. So the baseline a
+reader usually wants, "vLLM without Emmy", is exactly what the throughput, TTFT and TPOT figures above already measure.
+
+What does not exist for this model is the other arm: vLLM **with** Emmy kernels. Emmy's serving A/B is
+`emmy serve <model> --bench` against `emmy serve <model> --bench --stock`, and neither side of it can run here, for two
+independent reasons.
+
+**The Emmy side has no executable serving path for this architecture.** `emmy/serving/twins.py` routes DeepSeek V4 away
+from the serving twins to a config-only provider, because "its HCA/CSA compressors and hyper-connection residual
+streams do not fit the classic external-attention seam"; `emmy/serving/ARCHITECTURE.md` adds that they "cannot be
+represented by the classic `(q, k, v)` serving seam, so claiming split twins would omit deployed operations", and that
+executable split capture rejects DeepSeek's shared-`kv_proj` layout. That provider exists for the in-model golden
+audit, not for serving. Consistent with that, `docker/vllm-emmy-serve/models/` holds serving configs only for
+`gemma-4-12b`, and no `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` image exists. This is the same Emmy-eligibility
+gate recorded at the top of this report.
+
+**The stock side has no Volta kernels.** Measured on the target host with `vllm/vllm-openai@sha256:03768d94…`, the
+exact stock image the sibling `DeepSeek-V4-Flash` recipe pins for this checkpoint on H200 (vLLM
+`0.22.1rc1.dev332+g2c9c07c85`, torch `2.11.0+cu130`):
+
+| Check | Result |
+| --- | --- |
+| `torch.cuda.get_device_capability(0)` | `(7, 0)` — Tesla V100-SXM3-32GB |
+| `torch.cuda.get_arch_list()` | `sm_75, sm_80, sm_86, sm_90, sm_100, sm_120` — **no `sm_70`** |
+| A plain 256×256 fp16 matmul | `CUDA error: no kernel image is available for execution on the device` |
+
+PyTorch warns the device is unsupported before any vLLM code runs, and a single matmul fails, so the engine never
+reaches model loading. That is an architecture gap rather than anything specific to DeepSeek V4, and it is why every
+V100 recipe in this repository pins a 1Cat SM70 build instead of a stock image. `emmy serve` invokes `vllm serve` from
+the Python environment (`vllm` is the optional `serving` extra), so its stock lane would hit exactly this wall; the
+SM70 build that does run Volta is delivered as a container, not a wheel.
+
+**What the numbers therefore are.** A pure vLLM result on the only engine build that runs this checkpoint on Volta,
+measured against itself across repository revisions. They are not a speedup over anything: there is no Emmy-accelerated
+arm to beat, and no stock arm that survives the architecture gap. The `emmy bench` reproduction accordingly has no
+second engine lane to filter to. The compiler work recorded below is kernel-level evidence (the golden) and is
+independent of serving eligibility.
+
 ## Context and accuracy
 
 The engine allocated KV capacity for 4,244,903 tokens on PP0 and 4,281,497 tokens on PP1, reporting 4.05×/4.08×

@@ -9,11 +9,13 @@ offers, so the merge semantics have exactly one home.
 from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, _ExprOps
 from emmy.compiler.ir.loop import Accum, Assign, Loop, LoopOp
 from emmy.compiler.ir.pure.fold import deep_defines, deep_reads
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import is_pure_indexmap as _is_pure_indexmap
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 _BLOWUP_FACTOR = 8
@@ -153,6 +155,85 @@ def _chains_statistic_in_sweep(loop_op: LoopOp) -> bool:
     return walk(loop_op.body, False)
 
 
+def _mentions_plain(expr, axis: str) -> bool:
+    """Whether ``axis`` occurs in ``expr`` outside every floor-division-by-literal subtree. A
+    ``%``-by-literal counts as plain: ``n % 16`` varies within the class ``n / 16`` names, so a
+    read carrying both (the packed-word decode of a coded weight) covers ``n`` fully."""
+    import dataclasses  # noqa: PLC0415
+
+    if isinstance(expr, Var):
+        return expr.name == axis
+    if isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal):
+        return False
+    if not dataclasses.is_dataclass(expr):
+        return False
+    for f in dataclasses.fields(expr):
+        v = getattr(expr, f.name)
+        for child in v if isinstance(v, (tuple, list)) else (v,):
+            if isinstance(child, _ExprOps) and _mentions_plain(child, axis):
+                return True
+    return False
+
+
+def _replays_reduce_under_composite_axis(loop_op: LoopOp) -> bool:
+    """Whether a reduce ``Loop`` sits under a free axis its reads depend on ONLY through a
+    floor-division quotient (``flat / 256``): the reduce's value is constant across each class of that
+    axis, so it is replayed — 256× for the flattened ``(head, d)`` output of softmax·V, whose
+    per-head statistic then recomputes for every ``d`` — and no loop exists to hoist it out of
+    (the lift hoists a loop-INVARIANT statistic ahead of a sweep; a composite-indexed one is
+    neither invariant nor addressable by a ``PLACE`` seam). A reduce that does not read the axis
+    at all is the hoistable norm→linear shape and stays."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def walk(stmts: Body, free: list[str]) -> bool:
+        for stmt in stmts:
+            if not isinstance(stmt, Loop):
+                continue
+            if stmt.axis.name in reduce_names:
+                exprs = [e for s in _deep_stmts(stmt.body) for e in s.exprs()]
+                for axis in free:
+                    mentioned = [e for e in exprs if axis in e.free_vars()]
+                    if mentioned and not any(_mentions_plain(e, axis) for e in mentioned):
+                        return True
+                continue  # nested reduces read as the step's composed producers
+            if walk(stmt.body, [*free, stmt.axis.name]):
+                return True
+        return False
+
+    return walk(loop_op.body, [])
+
+
+def _deep_stmts(body: Body):
+    for s in body:
+        yield s
+        for b in s.nested():
+            yield from _deep_stmts(b)
+
+
+def _collapsing_indexmap(loop_op: LoopOp) -> bool:
+    """A pure indexmap whose loads address the producer through a div/mod-by-literal of its own
+    axes — a reshape that collapses (or splits) loop axes, as opposed to a permutation or slice."""
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+
+    if not _is_pure_indexmap(loop_op):
+        return False
+
+    def composite(expr) -> bool:
+        import dataclasses  # noqa: PLC0415
+
+        if isinstance(expr, BinaryExpr) and expr.op in ("/", "//", "%") and isinstance(expr.right, Literal) and expr.left.free_vars():
+            return True
+        if not dataclasses.is_dataclass(expr):
+            return False
+        for f in dataclasses.fields(expr):
+            v = getattr(expr, f.name)
+            if any(isinstance(c, _ExprOps) and composite(c) for c in (v if isinstance(v, (tuple, list)) else (v,))):
+                return True
+        return False
+
+    return any(composite(e) for s in _deep_stmts(loop_op.body) if isinstance(s, Load) for e in s.index or ())
+
+
 def _total_work(loop_op: LoopOp) -> int:
     """Sum enclosing-loop iterations over arithmetic leaves.
 
@@ -171,6 +252,13 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
+    if _collapsing_indexmap(sink.op) and any(graph.nodes[node_id].op.reduce_axis_names for node_id in region - {sink.id}):
+        # Splicing a reduce-bearing producer at a collapsing reshape's load sites re-runs its
+        # reduces per output element, indexed by the flat axis's quotient — the per-head softmax
+        # statistic replayed for every ``d`` of the ``(head, d)`` flatten, with no loop to hoist it
+        # out of and no seam to cut. ``030_fold_output_reshape`` retargets the producer's writes
+        # onto the flat buffer instead, keeping its loop nest; a non-identity copy stays a kernel.
+        raise RuleSkipped("sink collapses axes of a reduce-bearing producer — the reshape folds into its writes instead")
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
@@ -185,6 +273,10 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
         raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
     if _chains_statistic_in_sweep(merged) and not any(_chains_statistic_in_sweep(graph.nodes[node_id].op) for node_id in region):
         raise RuleSkipped("merge chains a per-step statistic into a fold inside a free sweep — an unreadable seam")
+    if _replays_reduce_under_composite_axis(merged) and not any(
+        _replays_reduce_under_composite_axis(graph.nodes[node_id].op) for node_id in region
+    ):
+        raise RuleSkipped("merge replays a reduce under a free axis it reads only through a floor-division quotient — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:

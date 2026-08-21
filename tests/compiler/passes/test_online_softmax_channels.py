@@ -436,3 +436,108 @@ def test_fusion_refuses_a_per_step_statistic_chained_inside_a_sweep() -> None:
     # The same statistic hoisted above the sweep (norm→linear's readable form): one fold per step.
     hoisted = LoopOp(body=Body((Loop(axis=n, body=Body((row_stat, rs, Loop(axis=m, body=Body((dot, store)))))),)))
     assert not _chains_statistic_in_sweep(hoisted)
+
+
+def test_fusion_refuses_a_reduce_replayed_under_a_composite_axis() -> None:
+    """softmax·V spliced into its ``(head, d)`` flatten: the kernel's free axis is the flat
+    ``head*256 + d`` and the per-head statistic reads it only as ``flat / 256`` — recomputed for
+    every ``d`` with no loop to hoist it out of. Refused; a reduce that does not read the axis
+    (the hoistable norm→linear statistic) is not."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.pipeline.passes.loop.fusion._merge import _replays_reduce_under_composite_axis
+
+    q, flat, k = Axis("q", Dim(8)), Axis("f", Dim(512)), Axis("k", Dim(16))
+    head = BinaryExpr("/", Var("f"), Literal(256, "int"))
+    stat = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="s", input="scores", index=(head, Var("q"), Var("k"))),
+                Accum(name="mx", value="s", op=ElementwiseImpl("maximum"), axes=("k",)),
+            )
+        ),
+    )
+    store = Write(output="out", index=(Var("q"), Var("f")), value="mx")
+    replayed = LoopOp(body=Body((Loop(axis=q, body=Body((Loop(axis=flat, body=Body((stat, store))),))),)))
+    assert _replays_reduce_under_composite_axis(replayed)
+    invariant = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="x", input="x", index=(Var("q"), Var("k"))),
+                Accum(name="ss", value="x", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    store_ss = Write(output="out", index=(Var("q"), Var("f")), value="ss")
+    hoistable = LoopOp(body=Body((Loop(axis=q, body=Body((Loop(axis=flat, body=Body((invariant, store_ss))),))),)))
+    assert not _replays_reduce_under_composite_axis(hoistable)
+
+
+def test_fusion_folds_a_collapsing_reshape_instead_of_splicing_a_reduce_into_it() -> None:
+    """softmax·V followed by its ``(head, d) → flat`` reshape: splicing the reduce-bearing
+    producer at the reshape's load sites replays its statistic per flat element (the head is
+    ``flat / 256``); the merge is refused and ``030_fold_output_reshape`` retargets the
+    producer's writes onto the flat buffer instead, whether or not the reshape is the graph
+    output. The fused graph keeps one reduce-bearing loop whose free axes are still ``(h, d)``."""
+    import math
+
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline import LOOP_PASSES
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 8, 16), F16), node_id="x")
+    h, d, k = Axis("h", Dim(4)), Axis("d", Dim(8)), Axis("k", Dim(16))
+    red = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="xv", input="x", index=(Var("h"), Var("d"), Var("k"))),
+                Accum(name="acc", value="xv", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    prod = LoopOp(
+        body=Body(
+            (Loop(axis=h, body=Body((Loop(axis=d, body=Body((red, Write(output="s", index=(Var("h"), Var("d")), value="acc")))),))),)
+        ),
+        inputs={"x": g.nodes["x"].output},
+    )
+    g.add_node(op=prod, inputs=["x"], output=Tensor("s", (4, 8), F16), node_id="s")
+    f = Axis("f", Dim(32))
+    flat = LoopOp(
+        body=Body(
+            (
+                Loop(
+                    axis=f,
+                    body=Body(
+                        (
+                            Load(
+                                name="sv",
+                                input="s",
+                                index=(BinaryExpr("/", Var("f"), Literal(8, "int")), BinaryExpr("%", Var("f"), Literal(8, "int"))),
+                            ),
+                            Write(output="r", index=(Var("f"),), value="sv"),
+                        )
+                    ),
+                ),
+            )
+        ),
+        inputs={"s": g.nodes["s"].output},
+    )
+    g.add_node(op=flat, inputs=["s"], output=Tensor("r", (32,), F16), node_id="r")
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=["r"], output=Tensor("y", (32,), F16), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    out = Pipeline.build(LOOP_PASSES).run(g)
+    loops = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)]
+    reducing = [n for n in loops if n.op.reduce_axis_names]
+    assert len(reducing) == 1, "one reduce-bearing loop — the reshape did not splice the reduce"
+    free = [lp for lp in reducing[0].op.body.iter() if isinstance(lp, Loop) and lp.axis.name not in reducing[0].op.reduce_axis_names]
+    # The free extents still cover one output element per reduce (``loop/canonicalize`` may
+    # re-fuse the clean ``(h, d)`` pair into the flat axis — a layout choice, not a replay).
+    assert math.prod(lp.axis.extent.as_static() for lp in free) == 32
+    assert not any(isinstance(s, Load) and s.input == "s" for n in loops for s in n.op.body.iter()), (
+        "the copy folded into the producer's writes"
+    )

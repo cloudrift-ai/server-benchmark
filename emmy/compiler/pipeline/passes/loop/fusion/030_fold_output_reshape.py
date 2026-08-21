@@ -1,4 +1,4 @@
-"""Fold a graph-output memcpy-identity reshape into its producer's ``Write``.
+"""Fold a memcpy-identity reshape into its producer's ``Write``.
 
 A traced flatten that survives to a GRAPH OUTPUT cannot fuse the normal way: ``010_merge_loop_ops``
 inlines a producer's compute at the consumer's load sites, which would re-run a reduce-bearing
@@ -16,7 +16,7 @@ the output strides, each dim's slot range-checked against its extent). The produ
 loops and its body verbatim; the copy kernel disappears and the producer's node takes the
 consumer's place as the graph output.
 
-Bails conservatively (``RuleSkipped``) on: a non-output consumer (ordinary fusion territory), a
+Bails conservatively (``RuleSkipped``) on: a
 producer with other consumers or that is itself a graph output, dtype / numel mismatch, a
 non-identity map, symbolic extents, a domain too large to verify exactly, or a write offset whose
 affine terms don't partition cleanly onto the output strides."""
@@ -143,8 +143,6 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         raise RuleSkipped("producer or consumer is no longer a LoopOp")
     if producer.id not in consumer.inputs:
         raise RuleSkipped("producer is not an input of consumer")
-    if consumer.id not in graph.outputs:
-        raise RuleSkipped("consumer is not a graph output — ordinary fusion territory")
     if producer.id in graph.outputs:
         raise RuleSkipped("producer is itself a graph output — it must stay materialized")
     others = [n for n in graph.nodes.values() if n.id != consumer.id and producer.id in n.inputs]

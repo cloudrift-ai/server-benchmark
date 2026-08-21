@@ -34,9 +34,23 @@ import numpy as np
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 
 # Features that SELECT a weight set rather than contribute a term. Owned here because routing is the model's
-# business; ``fit/group.py`` imports this to hold the columns out of the fitted matrix entirely, so a routing
-# feature cannot become a descent coordinate by accident.
+# business: :func:`descent_cols` keeps them out of the linear descent, and no other model class is bound by that.
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
+
+
+def descent_cols(names) -> tuple[str, ...]:
+    """``names`` minus the routing stamps — the coordinates a linear descent may walk (why: the module
+    docstring's identifiability argument).
+
+    The narrowing lives with the model class, not with the dataset: the dataset packs every column it is
+    given, and a tree splits on this one. A dataset that withheld it to protect THIS model class would be
+    deciding for both — and did, leaving the tree a column of NaN.
+
+    Filtering preserves relative order, so ``descent_cols(sorted(union | routing))`` is
+    ``sorted(union - routing)`` exactly, which is why packing the column left every fitted artifact
+    byte-identical."""
+    return tuple(n for n in names if n not in ROUTING_FEATURES)
+
 
 # The scalar params the FIT searches, in descent-coordinate order — the atomic-free interaction, the one term
 # the deployed quality cannot express as a linear weight. ``fit/linear.py`` walks exactly these coordinates.
@@ -129,6 +143,25 @@ class LinearModel:
     # alongside the weights. A constant the fit cannot see is a constant the fit optimizes around.
     atomic_free_weight: float
     atomic_free_split_threshold: float
+
+    def __post_init__(self) -> None:
+        """A routing feature may never carry a fitted weight.
+
+        Withholding the column from the matrix used to make this structural. It is a convention now that
+        every column is packed and each model class narrows for itself (:func:`descent_cols`), so it gains
+        a guard at construction — the one place a hand-edited artifact is also caught.
+
+        Worth being precise about the harm, since the module docstring above says such a term "cancels
+        exactly": within one candidate pool it does, and it cancels out of the greedy argmin, out of
+        ``normalize_policy`` and out of ``TiltBlend`` for the same reason. The exception is
+        ``policy/greedy._resolved_price``, which SUMS per-kernel scores to compare whole kernel sets — a
+        routing weight there scales every symbolic-axis kernel's price and biases the fusion comparison."""
+        for name, w_set in (("weights", self.weights), ("weights_dynamic", self.weights_dynamic)):
+            if bad := set(w_set or {}) & set(ROUTING_FEATURES):
+                raise ValueError(
+                    f"{name} carries a fitted weight for routing feature(s) {sorted(bad)} — a routing stamp is "
+                    f"constant within a candidate pool, so it selects a weight set and never contributes a term"
+                )
 
     # --- the shared model surface (Prior's own names) ---------------------------------------------------
 

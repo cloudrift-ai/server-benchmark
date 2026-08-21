@@ -42,8 +42,8 @@ from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES, L
 # (32 for the f32-accumulate atom, 16 for the f16-accumulate one). The ``S_*`` / ``H_*`` shape/regime features
 # are constant within a shape, so they drop out of a within-shape ranking — a weight on one is invisible to the
 # rank objective (it shifts every candidate in the pool by the same amount) and therefore unidentifiable. The
-# routing stamp is the same kind of quantity, which is why it is held out of the matrix entirely rather than
-# merely excluded from a view: see :data:`~..linear_model.ROUTING_FEATURES`.
+# routing stamp is the same kind of quantity, which is why the LINEAR model narrows it out of its own
+# coordinates (:func:`~..linear_model.descent_cols`) while the matrix still carries it for a tree to split on.
 #
 # ``MMA_acc_bits`` is load-bearing: the f16-accumulate fork is spelled in the TILE codec's atom token, so a row
 # taking it is identical under every ``D_*`` feature to its f32-accumulate sibling. While the view dropped it,
@@ -110,8 +110,8 @@ TREE_FEATURES = (
 # Both exclusions are expressiveness-neutral by construction — the model can express exactly the same
 # ranking functions with these 53 coordinates as with all 72 — so this buys a smaller, faster,
 # better-identified fit, not a different model. (Naming no ``S_ext_*`` stamp costs the view nothing on the
-# weight-set choice either: the routing stamp never reaches the matrix in the first place, and ``Group.dynamic``
-# carries the answer.)
+# weight-set choice either: :attr:`Group.dynamic` carries the answer, and the linear fit narrows the stamp
+# out of its coordinates regardless of the view.)
 #
 # ``D_stage_prefetch`` is the one feature here that is a step rather than a measurement — see its
 # definition in ``search/features.py`` for why the linear model cannot form it from ``D_stage_depth``.
@@ -148,10 +148,12 @@ def feature_view(spec: str):
     model ignores it.
 
     :data:`~..linear_model.ROUTING_FEATURES` are kept by EVERY view, named or not, and cannot be excluded.
-    They select a weight set rather than contribute a term, and :meth:`Group.from_dicts` lifts them out of
-    the matrix afterwards, so keeping them costs a view nothing. A view that could drop them would instead
-    route every pool to the static weight set and report a fit with zero dynamic cases — silently, since
-    nothing downstream can tell an unfittable dynamic set from a genuinely static dataset."""
+    They select a weight set rather than contribute a term, and the packed column is what a tree splits the
+    two regimes on, so keeping them costs a view nothing. A view that could drop them would instead route
+    every pool to the static weight set and report a fit with zero dynamic cases — silently, since nothing
+    downstream can tell an unfittable dynamic set from a genuinely static dataset. What keeps the stamp out
+    of a LINEAR descent is the model class narrowing its own coordinates
+    (:func:`~..linear_model.descent_cols`), not the dataset withholding the column."""
     pats = [p.strip() for p in spec.split(",") if p.strip()]
     keep = _matcher([p for p in pats if not p.startswith("-")])
     drop = _matcher([p[1:] for p in pats if p.startswith("-")])
@@ -209,7 +211,8 @@ class Group:
         total: int | None = None,
     ) -> Group:
         """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
-        union of the pool's keys, the matrix a column per name (absent key = 0.0). Callers
+        union of the pool's keys, the matrix a column per name (absent key = ``NaN``, the more
+        informative of the two fills — see :meth:`matrix`). Callers
         drop the dicts after this — the matrix is the stored representation.
 
         ``pinned`` is the pool's positive row index, or several of them; either spelling normalizes to a sorted
@@ -218,9 +221,10 @@ class Group:
         to "nothing was sampled" - see :attr:`total`.
 
         The routing features (:data:`~..linear_model.ROUTING_FEATURES`) are read off the pool into
-        :attr:`dynamic` and then LEFT OUT of ``feat_names``, so a weight-set selector can never
-        become a descent coordinate. Reading row 0 is exact: the stamp comes from the shape, which
-        every candidate in a pool shares.
+        :attr:`dynamic` AND packed like every other column: a tree splits the two regimes on it, and the
+        linear model narrows it out of its own coordinates (:func:`~..linear_model.descent_cols`). Packing
+        every column is what keeps one model class from deciding for the other. Reading row 0 is exact: the
+        stamp comes from the shape, which every candidate in a pool shares.
 
         The stamp must agree with ``tier``, and disagreeing is a hard error. The two reach here by
         different routes — the stamp through the featurizer, the tier from the source record's own
@@ -234,7 +238,7 @@ class Group:
                 f"the source record's flag and its featurized rows disagree about the weight set"
             )
         rows = (pinned,) if isinstance(pinned, int) else pinned
-        names = tuple(sorted({k for f in feats for k in f} - set(ROUTING_FEATURES)))
+        names = tuple(sorted({k for f in feats for k in f}))
         positives = tuple(sorted({int(i) for i in rows}))
         matrix = feature_matrix(feats, list(names), fill=np.nan)
         return cls(key, name, tier, gpu, shape, dynamic, positives, names, matrix, len(feats) if total is None else total)

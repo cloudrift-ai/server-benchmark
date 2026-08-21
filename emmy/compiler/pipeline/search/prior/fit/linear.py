@@ -38,6 +38,7 @@ from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,
     GATE_DEFAULTS,
     LinearModel,
+    descent_cols,
     gate_columns,
     quality_columns,
 )
@@ -249,7 +250,7 @@ class LinearTrainer:
 
         The static group list must be non-empty — the dynamic stage seeds from it. Callers guard
         that; this does not."""
-        names = list(self.feature_names)
+        names = list(descent_cols(self.feature_names))
         static_groups = [g for g in groups if not g.dynamic]
         dyn_groups = [g for g in groups if g.dynamic]
         rng = np.random.default_rng(self.random_state)

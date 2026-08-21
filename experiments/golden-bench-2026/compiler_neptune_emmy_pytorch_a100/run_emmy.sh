@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Comparison lane: bench one common attention operator's sequence sweep as
-# eager PyTorch / torch.compile / Emmy. Emmy replays the setup's committed golden, so this lane only
-# measures — the search happens outside the recipe, through the tune-kernels skill. The greedy row in
-# each record remains untuned Emmy; the golden's pinned rows carry the searched schedules, re-measured
-# here at -O3.
+# eager PyTorch / torch.compile / Emmy. Two arms per setup:
+#
+#   replay     `emmy run --golden` re-measures the setup's committed tuned schedules at -O3.
+#              `emmy trace --code` stores a single-op program's post-fusion targets as Loop IR
+#              (every kernel shares one provenance selector), and a Loop IR target has no torch
+#              twin, so this arm times Emmy only — the reference and the correctness gate are the
+#              second arm's job.
+#   reference  `emmy run -c` re-traces the same snippet and benches eager, torch.compile, and the
+#              UNTUNED Emmy deploy under --strict, so every setup carries an eager reference, an
+#              Inductor reference, and a direct Emmy-vs-eager correctness proof. When that arm
+#              fails, run_pytorch.py still preserves the two PyTorch references on their own.
+#
+# The search happens outside the recipe, through the tune-kernels skill.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -22,7 +31,7 @@ source "$here/operators.sh"
 
 mkdir -p "$results/json" "$results/dumps" "$results/logs"
 status_file=$results/setup-status.tsv
-printf "operator\tsequence_length\tstatus\n" > "$status_file"
+printf "operator\tsequence_length\treplay\treference\n" > "$status_file"
 successful_setups=0
 missing_goldens=0
 
@@ -30,33 +39,42 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
   setup="${operator}-b1-s${sequence_length}"
   golden=$golden_dir/$setup.golden.yaml
   if [ ! -f "$golden" ]; then
-    printf "%s\t%s\t%s\n" "$operator" "$sequence_length" "missing-golden" >> "$status_file"
+    printf "%s\t%s\t%s\t%s\n" "$operator" "$sequence_length" "missing-golden" "skipped" >> "$status_file"
     missing_goldens=$((missing_goldens + 1))
     continue
   fi
+  source_code=$(operator_code "$operator" "$sequence_length")
 
   # --json takes a path per target: a file for a single-target golden, a directory when the
   # traced program lowered to several post-fusion kernels.
   if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 600s \
-    "$emmy" run --golden "$golden" --bench --strict \
-    --bench-backends eager,tcompile,emmy --warmup 1 --iters 15 --no-record-nodes \
+    "$emmy" run --golden "$golden" --bench --bench-backends emmy \
+    --warmup 1 --iters 15 --no-record-nodes \
     --json "$results/json/$setup" --dump-dir "$results/dumps/$setup" \
     2>&1 | tee "$results/logs/$setup.log"; then
-    status=ok
+    replay=ok
     successful_setups=$((successful_setups + 1))
   else
-    emmy_status=$?
+    replay="failed:$?"
+  fi
+
+  if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 600s \
+    "$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy \
+    --warmup 1 --iters 15 --no-record-nodes --json "$results/json/$setup.reference.json" \
+    2>&1 | tee "$results/logs/$setup.reference.log"; then
+    reference=ok
+  else
+    reference_status=$?
     if timeout --signal=TERM --kill-after=30s 600s \
       "$python" "$pytorch_runner" "$operator" "$sequence_length" \
       --warmup 1 --iters 15 --json "$results/json/$setup.pytorch.json" \
       2>&1 | tee "$results/logs/$setup.pytorch.log"; then
-      status="pytorch-only:emmy-failed:$emmy_status"
-      successful_setups=$((successful_setups + 1))
+      reference="pytorch-only:emmy-failed:$reference_status"
     else
-      status="failed:emmy=$emmy_status,pytorch=$?"
+      reference="failed:emmy=$reference_status,pytorch=$?"
     fi
   fi
-  printf "%s\t%s\t%s\n" "$operator" "$sequence_length" "$status" >> "$status_file"
+  printf "%s\t%s\t%s\t%s\n" "$operator" "$sequence_length" "$replay" "$reference" >> "$status_file"
 done
 
 # A missing golden is a broken lane input, not a measurement: fail rather than silently

@@ -11,12 +11,26 @@ Two vocabularies meet here and they point opposite ways, so every function names
 - **rank** questions (:func:`rank_of_golden`, :func:`dual_rank`, and their ``best_`` set forms) take a
   ranking QUALITY vector, higher = predicted faster, and ask where a known-good row landed in it. They
   need no measurements — a golden is a row someone already verified.
-- **regret** and **correlation** questions (:func:`topk_regret`, :func:`spearman`) take a PREDICTED
-  LATENCY vector, lower = predicted faster, alongside the measured latencies, and ask how much the
-  prediction costs. They are only answerable where every candidate was actually benched.
+- **regret** and **correlation** questions (:func:`topk_regret`, :func:`spearman`) take a ``predicted_cost``
+  vector, lower = predicted faster, alongside the measured latencies, and ask what the prediction costs.
+  They are only answerable where every candidate was actually benched.
 
 Reading one as the other silently reverses the answer, which is why the two families are spelled apart
 rather than sharing one ``scores`` parameter.
+
+``predicted_cost`` is deliberately not called µs. **Only its ORDER is ever read** — the regret family sorts
+by it and takes every value it reports from the measurements, and Spearman is a rank correlation — so any
+monotone-decreasing-in-goodness quantity is a valid input. That is what makes these metrics answerable for
+the offline prior, which is fitted on RANKS and whose output is an ordinal quality with no latency meaning
+at all, exactly as it is for the online prior, which regresses µs.
+
+It does mean the caller decides how much of the model's ordering survives into the metric, and the two
+available spellings of the offline prior's opinion are not equally good. Prefer the raw quality (negated:
+``-Prior.score_rows(group)``) over the deployed ``mean_score`` proxy. The proxy is ``exp(-scale · quality)``
+with the argument clipped to ±700, and outside the resolvable range distinct qualities collapse onto one
+float — ties that the model never expressed, which :func:`topk_pick` then charges it for. Measured on a
+40-row synthetic pool driven into saturation: 40 distinct qualities became 23 distinct proxy values, ρ fell
+from 0.851 to 0.842, and top-1 regret rose from 2.40 to 3.29. Unsaturated the two spellings agree exactly.
 
 Both families charge the model for a tie, but they charge it differently, and the difference is not a
 detail. :func:`rank_of_golden` models EMISSION ORDER — the row greedy actually deploys out of a plateau —
@@ -81,7 +95,7 @@ def best_dual_rank(scores, pinned: Sequence[int]) -> tuple[int, int]:
     return dual_rank(scores, min(pinned, key=lambda i: rank_of_golden(scores, i)))
 
 
-def topk_pick(predicted_us: Sequence[float], measured_us: Sequence[float], k: int) -> int | None:
+def topk_pick(predicted_cost: Sequence[float], measured_us: Sequence[float], k: int) -> int | None:
     """The index a search keeps after benching the model's top ``k`` predictions and taking the measured
     best of them — the ONE selection rule this module has.
 
@@ -99,14 +113,14 @@ def topk_pick(predicted_us: Sequence[float], measured_us: Sequence[float], k: in
     reason that has nothing to do with the model, and indistinguishable in an aggregate from a model that
     genuinely found the optimum. A report must count the excluded groups rather than average them in; at the
     measurement freeze's median group size of 5, ``k = 10`` excludes most of the corpus."""
-    n = len(predicted_us)
+    n = len(predicted_cost)
     if n <= k:
         return None
-    order = sorted(range(n), key=lambda i: (predicted_us[i], -measured_us[i]))
+    order = sorted(range(n), key=lambda i: (predicted_cost[i], -measured_us[i]))
     return min(order[:k], key=lambda i: measured_us[i])
 
 
-def topk_regret(predicted_us: Sequence[float], measured_us: Sequence[float], k: int) -> float | None:
+def topk_regret(predicted_cost: Sequence[float], measured_us: Sequence[float], k: int) -> float | None:
     """What :func:`topk_pick` costs, as a ratio to the pool's measured best: ``1.0`` = the model's frontier
     contains the optimum, ``1.4`` = 40% slower than was achievable.
 
@@ -117,17 +131,18 @@ def topk_regret(predicted_us: Sequence[float], measured_us: Sequence[float], k: 
     is a label that is not a latency rather than a fast one. Note that a FAILED bench is not that case: it
     carries :data:`~.bench_record.FAIL_SENTINEL_US`, a large POSITIVE number, and would divide perfectly
     well into a meaningless ratio. Excluding failures is the caller's status filter, not this function's."""
-    i = topk_pick(predicted_us, measured_us, k)
+    i = topk_pick(predicted_cost, measured_us, k)
     if i is None:
         return None
     best = min(measured_us)
     return None if best <= 0 else measured_us[i] / best
 
 
-def spearman(predicted_us: Sequence[float], measured_us: Sequence[float]) -> float | None:
-    """Rank correlation between predicted and measured latency over one pool. BOTH arguments point the
-    same way — lower = faster — so ``+1`` means the model orders the candidates exactly as the hardware
-    does and ``0`` means it carries no ordering information at all.
+def spearman(predicted_cost: Sequence[float], measured_us: Sequence[float]) -> float | None:
+    """Rank correlation between the predicted and the measured ordering over one pool. BOTH arguments
+    point the same way — lower = faster — so ``+1`` means the model orders the candidates exactly as the
+    hardware does and ``0`` means it carries no ordering information at all. Ranks only, so the predicted
+    side needs no units (see the module docstring).
 
     The whole-pool counterpart of :func:`topk_regret`: regret asks what the model's best guesses cost,
     correlation asks whether it understands the pool at all. A model can score well on one and badly on
@@ -144,7 +159,7 @@ def spearman(predicted_us: Sequence[float], measured_us: Sequence[float]) -> flo
     except ImportError:
         return None
 
-    if len(predicted_us) < 2:
+    if len(predicted_cost) < 2:
         return None
     with warnings.catch_warnings():
         # A constant vector is a HANDLED case here (it returns ``None`` below), and a report walks hundreds
@@ -153,5 +168,5 @@ def spearman(predicted_us: Sequence[float], measured_us: Sequence[float]) -> flo
         # from scipy 1.9 — an older scipy would then take the ImportError path and report every pool as
         # unmeasurable, which reads exactly like scipy being absent and would quietly void the deploy gate.
         warnings.simplefilter("ignore")
-        rho = spearmanr(list(predicted_us), list(measured_us)).statistic
+        rho = spearmanr(list(predicted_cost), list(measured_us)).statistic
     return None if math.isnan(rho) else float(rho)

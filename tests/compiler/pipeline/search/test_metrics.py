@@ -112,6 +112,38 @@ def test_topk_regret_refuses_a_label_that_is_not_a_latency():
     assert topk_regret([1.0, 2.0], [1e9, 1e9], 1) == pytest.approx(1.0)  # a ratio, and a meaningless one
 
 
+def test_the_predicted_side_is_read_ordinally_so_a_rank_trained_model_works():
+    """The offline prior is fitted on RANKS: its output is an ordinal quality with no latency meaning, while
+    the online prior regresses µs. Both must be answerable here, and they are — the regret family sorts by
+    the prediction and takes every value it reports from the MEASUREMENTS, and Spearman is a rank
+    correlation. So any monotone-decreasing-in-goodness transform is the same input.
+
+    Pinning it because the alternative is a metric that silently means something different depending on
+    which prior produced the vector."""
+    rng = np.random.default_rng(4)
+    pred = rng.normal(0, 30, 25).tolist()
+    meas = rng.uniform(1.0, 500.0, 25).tolist()
+
+    for transform in (lambda v: [x * 7.5 for x in v], lambda v: [x + 1000 for x in v], np.exp):
+        same = list(transform(pred))  # strictly increasing: a different scale, the same ORDER
+        assert topk_pick(same, meas, 1) == topk_pick(pred, meas, 1)
+        assert topk_regret(same, meas, 5) == pytest.approx(topk_regret(pred, meas, 5))
+        assert spearman(same, meas) == pytest.approx(spearman(pred, meas))
+
+
+def test_collapsing_distinct_predictions_onto_one_float_costs_the_model():
+    """...and the caller's choice of spelling is therefore load-bearing. The deployed ``mean_score`` proxy
+    is ``exp(-scale · quality)``, so outside the exponential's resolvable range distinct qualities land on
+    one float — ties the model never expressed, which the pessimistic rule then charges it for. A report
+    should rank by the raw quality, not the proxy."""
+    quality = np.linspace(0, 1, 12) * 1e4
+    meas = np.linspace(500.0, 10.0, 12)
+    proxy = np.exp(np.clip(-0.1 * quality, -700, 700))  # exactly OfflinePrior.mean_score_features
+    assert len(set(proxy.tolist())) < len(quality)  # the collapse is real, not hypothetical
+    assert spearman((-quality).tolist(), meas.tolist()) == pytest.approx(1.0)  # the model is in fact perfect
+    assert spearman(proxy.tolist(), meas.tolist()) < 1.0  # ...and the proxy cannot show it
+
+
 # --- correlation -------------------------------------------------------------------
 
 

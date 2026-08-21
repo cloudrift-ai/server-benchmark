@@ -15,7 +15,7 @@ plus ``excluded`` folds with reasons: a fold whose training slice can't fit a we
 the holdout needs is dropped loudly, never scored with a stale or empty vector.
 
 A case is ONE candidate pool, which the builder may have matched several goldens into. Its rank
-is then the best over those positives (:func:`~.rank.best_dual_rank`), and every ``per_golden``
+is then the best over those positives (:func:`~..metrics.best_dual_rank`), and every ``per_golden``
 row carries ``positives`` so a merged case is never mistaken for a single-golden one — the count
 moves when the corpus grows a sibling, and two metrics files are only comparable knowing that.
 
@@ -49,7 +49,7 @@ from __future__ import annotations
 import statistics
 
 from emmy.compiler.pipeline.search.data.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import best_dual_rank
+from emmy.compiler.pipeline.search.metrics import best_dual_rank
 
 TOP_KS = (1, 10, 25, 50, 100)
 

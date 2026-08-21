@@ -9,7 +9,7 @@ runs on identical inputs give models that differ in the last bits. Deliberate: t
 
 This module owns what is specific to the model class; everything a different model class would also need lives
 elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``search/data/group.py``, the rank
-metrics in :mod:`.rank`, the fold harness in :mod:`.cv`).
+metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
 sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
@@ -43,8 +43,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
-from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
+from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ class CatBoostTrainer:
     @staticmethod
     def _ranks(model: CatBoostModel, pools, groups: list[Group]) -> list[int]:
         """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
-        (:func:`~.rank.best_rank`), matching what the linear fit reports per round."""
+        (:func:`~..metrics.best_rank`), matching what the linear fit reports per round."""
         return [best_rank(model.quality_rows(m), g.pinned) for m, g in zip(pools, groups, strict=True)]
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:

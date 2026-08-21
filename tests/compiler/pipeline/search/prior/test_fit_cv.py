@@ -17,14 +17,7 @@ from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_comman
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, Group, feature_view
 from emmy.compiler.pipeline.search.pool import Candidates
-from emmy.compiler.pipeline.search.prior.fit import (
-    LinearFit,
-    LinearTrainer,
-    best_dual_rank,
-    best_rank,
-    dual_rank,
-    rank_of_golden,
-)
+from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
@@ -64,52 +57,6 @@ def test_feature_view_globs_and_names():
     keep = feature_view("MMA_*, D_waves")
     assert keep("MMA_tier") and keep("MMA_acc_bits") and keep("D_waves")
     assert not keep("D_bk_gap") and not keep("S_ext_free_prod") and not keep("MMA")
-
-
-# --- dual-rank tie semantics -------------------------------------------------------
-
-
-def test_dual_rank_tie_plateau():
-    """Pessimistic counts strictly-greater rows plus EARLIER ties (the deploy tiebreak);
-    optimistic counts strictly-greater only — they diverge by exactly the earlier-tie
-    plateau width."""
-    scores = [5.0, 3.0, 5.0, 5.0, 7.0]  # golden at 2: one strict winner (7.0), one earlier tie (idx 0)
-    rank, opt = dual_rank(scores, 2)
-    assert (rank, opt) == (2, 1)
-    assert rank - opt == 1  # the earlier-tie plateau width, not the full tie count (idx 3 is later)
-
-    assert dual_rank(scores, 4) == (0, 0)  # the strict winner: no plateau, no gap
-    assert dual_rank([1.0, 1.0, 1.0], 0) == (0, 0)  # golden emitted first wins its plateau
-    assert dual_rank([1.0, 1.0, 1.0], 2) == (2, 0)  # emitted last, the whole plateau deploys first
-
-
-# --- several positives per candidate pool ------------------------------------------
-
-
-def test_best_rank_collapses_to_the_single_golden_functions_at_one_positive():
-    """THE compatibility guard. A pool with one positive must score exactly what it scored before the field
-    became a set — otherwise every fitted artifact moves, and nothing in the suite compares a fit against the
-    previous release's numbers. Checked at every index, so the tie conventions are covered on both sides of a
-    plateau, not just at the winner."""
-    scores = np.array([5.0, 3.0, 5.0, 5.0, 7.0])
-    for i in range(len(scores)):
-        assert best_rank(scores, (i,)) == rank_of_golden(scores, i)
-        assert best_dual_rank(scores, (i,)) == dual_rank(scores, i)
-
-
-def test_best_rank_takes_the_minimum_over_the_positives():
-    """Deploy ships ONE config, so a pool with several verified-good rows is scored on whichever of them the
-    model ranks highest — a mean would spend weights pushing up the runner-up, which changes nothing that
-    ships. The reported dual rank comes from that same row, keeping the emission-order tiebreak honest."""
-    scores = np.array([5.0, 3.0, 5.0, 5.0, 7.0])
-    assert (rank_of_golden(scores, 1), rank_of_golden(scores, 4)) == (4, 0)  # worst and best row of the pool
-    assert best_rank(scores, (1, 4)) == 0
-    assert best_dual_rank(scores, (1, 4)) == dual_rank(scores, 4) == (0, 0)
-    # Positives that TIE on the objective resolve to the earliest-emitted one — the row greedy would deploy,
-    # so the pessimistic count is the smaller of the two rather than an arbitrary pick.
-    tied = np.array([1.0, 1.0, 1.0])
-    assert best_rank(tied, (1, 2)) == rank_of_golden(tied, 1) == 2
-    assert best_dual_rank(tied, (1, 2)) == dual_rank(tied, 1) == (1, 0)
 
 
 def test_from_dicts_normalizes_one_or_many_positives():

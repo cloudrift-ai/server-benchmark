@@ -35,12 +35,13 @@ blend that measurement showed to be inert.
 from __future__ import annotations
 
 import logging
-import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
 import numpy as np
+
+from emmy.compiler.pipeline.search.metrics import spearman
 
 logger = logging.getLogger(__name__)
 
@@ -378,10 +379,6 @@ class Prior(ABC):
         predictions → ρ ≈ 0)."""
         if not self.fitted or not self._dataset:
             return None
-        try:
-            from scipy.stats import spearmanr  # noqa: PLC0415
-        except ImportError:
-            return None
         groups: dict[tuple, list[tuple[dict, float]]] = defaultdict(list)
         for knobs, label in self._dataset:
             if label <= 0:
@@ -392,10 +389,9 @@ class Prior(ABC):
         for rows in groups.values():
             if len(rows) < _CALIBRATION_MIN_GROUP:
                 continue
-            preds = self.mean_scores([k for k, _ in rows])
-            rho = spearmanr(preds, [v for _, v in rows]).statistic
-            if not math.isnan(rho):
-                rhos.append(float(rho))
+            rho = spearman(self.mean_scores([k for k, _ in rows]), [v for _, v in rows])
+            if rho is not None:
+                rhos.append(rho)
         return statistics.median(rhos) if rhos else None
 
     def record_bench(self, knobs: dict, median: float, status: str) -> None:
@@ -467,9 +463,4 @@ class Prior(ABC):
                 continue
             pred.append(self.mean_score(knobs))
             latency.append(us)
-        if len(pred) < 3:
-            return None
-        from scipy.stats import spearmanr  # noqa: PLC0415
-
-        rho = float(spearmanr(pred, latency).statistic)
-        return None if math.isnan(rho) else rho
+        return spearman(pred, latency) if len(pred) >= 3 else None

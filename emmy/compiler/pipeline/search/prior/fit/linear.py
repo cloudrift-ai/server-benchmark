@@ -11,7 +11,7 @@ raw-space L2 regularizer (:func:`l2_penalty`), the optimizer (:func:`fit_weights
 coordinate descent), and the static→dynamic chaining. Anything a different model class would also need lives
 elsewhere: the scoring function itself in :mod:`..linear_model`, the dataset representation in
 ``search/data/group.py``,
-the model-agnostic rank metrics in :mod:`.rank`, and the fold/metrics harness in :mod:`.cv`.
+the model-agnostic rank metrics in :mod:`~..metrics`, and the fold/metrics harness in :mod:`.cv`.
 
 What is optimized is the **deployed** scoring function, not a proxy for it. The descent scores through
 :func:`~..linear_model.quality_columns`, the same arithmetic ``OfflinePrior`` ranks with, and the atomic-free
@@ -34,7 +34,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from emmy.compiler.pipeline.search.data.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
+from emmy.compiler.pipeline.search.metrics import best_rank
+from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,
     LinearModel,
@@ -67,7 +68,7 @@ def eval_weights(mats, pinned: list[Sequence[int]], gates, w: np.ndarray, params
     objective is the deployed ranking itself rather than a proxy that omits the interaction term.
 
     A pool with several verified-optimum rows contributes ONE term, the best of them
-    (:func:`~.rank.best_rank`), so the loss keeps its units: still one int rank per group."""
+    (:func:`~..metrics.best_rank`), so the loss keeps its units: still one int rank per group."""
     return [
         best_rank(quality_columns(m, w, g, weight=params[0], threshold=params[1]), pin)
         for m, g, pin in zip(mats, gates, pinned, strict=True)

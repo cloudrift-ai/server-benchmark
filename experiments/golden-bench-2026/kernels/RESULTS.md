@@ -74,10 +74,11 @@ searched winner and every measured proposal against a cold greedy pick. A realiz
 replays a knob map that every one of the target's CUDA kernels realized, and only when it beat that cold greedy
 pick; the other targets keep an inventory realization and deploy the greedy schedule.
 
-The sequence-512 attention statistics target re-keyed when fusion learned to refuse a per-step statistic chained
-into a fold inside a free sweep: it now splits into two gather kernels, a k-norm/RoPE kernel, and an mma score
-kernel. Those four targets were tuned fresh; every other realization carried its earlier committed schedule over
-verbatim and was re-measured beside the fresh ones.
+The attention statistics targets re-keyed twice while fusion learned to refuse a per-step statistic chained into a
+fold inside a free sweep, and again when a computing sink stopped absorbing the same splice. At sequence 512 the
+target now splits into two RoPE gather kernels, a k-norm/RoPE kernel, and an mma score kernel; at sequence 1 into a
+q/k-norm reduce and a score kernel. Each re-keyed target was tuned fresh; every other realization carried its
+earlier committed schedule over verbatim and was re-measured beside the fresh ones.
 
 ### Per-kernel result (median of five processes, µs)
 
@@ -86,36 +87,36 @@ exists and the greedy pick otherwise.
 
 | seq | target | role | eager | torch.compile | untuned | tuned | vs eager | vs tcompile |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 512 | k_mean_20f978 | input RMSNorm | 191.88 | 8.89 | 3.83 | 3.17 | 60.59x | 2.81x |
-| 512 | k_linear_reduce_06a42b | v_proj | 12.12 | 12.54 | 74.67 | 17.50 | 0.69x | 0.72x |
-| 512 | k_linear_1fd3d5 | q_proj + reshape to heads | 100.50 | 21.65 | 133.41 | 22.35 | 4.50x | 0.97x |
-| 512 | k_linear_a09c5a | k_proj + reshape to heads | 59.79 | 14.73 | 70.00 | 17.23 | 3.47x | 0.85x |
-| 512 | k_unsqueeze_636992 | RoPE cos gather | 1.50 | 1.48 | 1.41 | 1.32 | 1.13x | 1.12x |
-| 512 | k_unsqueeze_636992.unsqueeze_1 | RoPE sin gather | 1.48 | 1.48 | 1.43 | 1.32 | 1.12x | 1.12x |
-| 512 | k_sdpa_linear_reduce_c0a378 | softmax·V, computed V | 45.74 | 46.04 | 159.57 | 159.57 | 0.29x | 0.29x |
-| 512 | k_linear_sdpa_reduce_e24efe | o_proj + residual | 60.16 | 61.27 | 315.05 | 315.05 | 0.19x | 0.19x |
-| 512 | k_linear_mean_reduce_dc067d | post-attn norm + gate/up + SiLU | 246.47 | 49.62 | 67.17 | 67.24 | 3.67x | 0.74x |
-| 512 | k_linear_6b4b5f | down_proj + residual | 30.72 | 35.84 | 243.46 | 46.57 | 0.66x | 0.77x |
-| 512 | k_mean_6cb2c7 | q/k norm + RoPE + scores + softmax stats | 271.56 | failed | 6.34 | 5.43 | 50.03x | — |
-| 1 | k_mean_b8e46d | input RMSNorm | 121.86 | 2.99 | 3.06 | 2.38 | 51.26x | 1.26x |
-| 1 | k_linear_reduce_7ef15d | v_proj | 7.49 | 7.17 | 11.19 | 4.74 | 1.58x | 1.51x |
-| 1 | k_linear_49a16b | q_proj + reshape to heads | 35.04 | 6.79 | 21.57 | 4.84 | 7.24x | 1.40x |
-| 1 | k_linear_dfb21f | k_proj + reshape to heads | 33.74 | 5.25 | 11.16 | 4.74 | 7.11x | 1.11x |
-| 1 | k_sdpa_linear_reduce_d0f5c0 | softmax·V, computed V | 11.92 | 10.63 | 25.28 | 25.28 | 0.47x | 0.42x |
-| 1 | k_linear_sdpa_reduce_14c8c7 | o_proj + residual | 14.04 | 12.17 | 36.99 | 36.99 | 0.38x | 0.33x |
-| 1 | k_linear_mean_reduce_549927 | post-attn norm + gate/up + SiLU | 154.62 | 16.38 | 3614.72 | 393.56 | 0.39x | 0.04x |
-| 1 | k_linear_2dcd0c | down_proj + residual | 9.52 | 7.59 | 33.97 | 9.45 | 1.01x | 0.80x |
-| 1 | k_sdpa_mean_reduce_0a2624 | q/k norm + RoPE + scores + softmax stats | 334.54 | failed | 39.78 | 39.78 | 8.41x | — |
+| 512 | k_mean_20f978 | input RMSNorm | 191.66 | 8.76 | 3.83 | 3.17 | 60.53x | 2.77x |
+| 512 | k_linear_reduce_06a42b | v_proj | 12.89 | 13.40 | 74.59 | 17.44 | 0.74x | 0.77x |
+| 512 | k_linear_1fd3d5 | q_proj + reshape to heads | 100.50 | 21.50 | 132.68 | 22.32 | 4.50x | 0.96x |
+| 512 | k_linear_a09c5a | k_proj + reshape to heads | 59.86 | 14.73 | 69.85 | 17.27 | 3.47x | 0.85x |
+| 512 | k_unsqueeze_636992 | RoPE cos gather | 1.49 | 1.48 | 1.47 | 1.32 | 1.13x | 1.12x |
+| 512 | k_unsqueeze_636992.unsqueeze_1 | RoPE sin gather | 1.48 | 1.54 | 1.46 | 1.32 | 1.12x | 1.17x |
+| 512 | k_sdpa_linear_reduce_c0a378 | softmax·V, computed V | 45.70 | 46.08 | 159.57 | 159.57 | 0.29x | 0.29x |
+| 512 | k_linear_sdpa_reduce_e24efe | o_proj + residual | 60.19 | 61.27 | 315.73 | 315.73 | 0.19x | 0.19x |
+| 512 | k_linear_mean_reduce_dc067d | post-attn norm + gate/up + SiLU | 246.47 | 49.94 | 67.17 | 67.24 | 3.67x | 0.74x |
+| 512 | k_linear_6b4b5f | down_proj + residual | 30.38 | 35.50 | 243.46 | 46.52 | 0.65x | 0.76x |
+| 512 | k_mean_6cb2c7 | k-norm + RoPE | 271.52 | failed | 6.34 | 5.43 | 50.04x | — |
+| 1 | k_mean_b8e46d | input RMSNorm | 121.81 | 2.87 | 3.07 | 2.38 | 51.22x | 1.20x |
+| 1 | k_linear_reduce_7ef15d | v_proj | 7.56 | 7.52 | 11.15 | 4.74 | 1.59x | 1.59x |
+| 1 | k_linear_49a16b | q_proj + reshape to heads | 35.11 | 6.77 | 21.57 | 4.84 | 7.26x | 1.40x |
+| 1 | k_linear_dfb21f | k_proj + reshape to heads | 33.63 | 5.25 | 11.13 | 4.74 | 7.09x | 1.11x |
+| 1 | k_mean_37b56e | q/k norm + RoPE | 34.57 | 4.28 | 1.61 | 1.52 | 22.71x | 2.81x |
+| 1 | k_sdpa_linear_reduce_d0f5c0 | softmax·V, computed V | 11.91 | 10.61 | 25.22 | 25.22 | 0.47x | 0.42x |
+| 1 | k_linear_sdpa_reduce_14c8c7 | o_proj + residual | 14.05 | 12.16 | 36.86 | 36.86 | 0.38x | 0.33x |
+| 1 | k_linear_mean_reduce_549927 | post-attn norm + gate/up + SiLU | 154.62 | 16.38 | 3615.74 | 393.22 | 0.39x | 0.04x |
+| 1 | k_linear_2dcd0c | down_proj + residual | 9.92 | 7.70 | 33.97 | 9.45 | 1.05x | 0.81x |
+| 1 | k_sdpa_mean_reduce_5dfb29 | scores + softmax stats | 300.65 | failed | 39.40 | 39.40 | 7.63x | — |
 
-The sequence-512 `k_sdpa_mean_reduce_7968d0` mma score kernel is the twelfth target: `emmy run` exits at the first
-strict failure, and `k_mean_6cb2c7` already fails on its missing Inductor reference, so the score kernel measured in
-none of the five repeats. Its cold greedy deploy timed 114.05 µs in the tuning A/B against 745 µs eager for the
-whole pre-split attention statistics target.
+The sequence-512 `k_sdpa_mean_reduce_7968d0` mma score kernel is the twelfth target and measured in none of the five
+repeats: `emmy run` exits at the first strict failure and `k_mean_6cb2c7` already fails on its missing Inductor
+reference. Its cold greedy deploy timed 114.05 µs in the tuning A/B.
 
-Layer totals as the sum of those medians: sequence 512 is 1021.90 eager, 253.54 Inductor (two targets missing), and
-656.74 Emmy over the eleven measured targets; sequence 1 is 722.78 eager, 68.97 Inductor (one target missing), and
-521.76 Emmy. Emmy's sequence-512 layer was 21744 µs before the attention fusion fix and the re-tune, so the corpus
-moved 33x; sequence 1 moved from 4027.74 untuned to 521.76.
+Layer totals as the sum of those medians: sequence 512 is 1022.13 eager, 254.19 Inductor (two targets missing), and
+657.33 Emmy over the eleven measured targets; sequence 1 is 723.83 eager, 73.53 Inductor (one target missing), and
+522.37 Emmy. Emmy's sequence-512 layer was 21744 µs before the attention fusion fixes and the re-tune, so the corpus
+moved 33x; sequence 1 moved from 4028 untuned to 522.
 
 ### Repeat variation
 
@@ -124,16 +125,17 @@ reproduce their tuning-time -O3 measurement to within 0.5%.
 
 ### Conclusion
 
-Emmy now beats eager on both layer totals (1.56x at sequence 512, 1.39x at sequence 1) and beats or matches Inductor
-on eight of the twenty measured targets. Every remaining loss is one of three structural cases:
+Emmy beats eager on both layer totals (1.56x at sequence 512, 1.39x at sequence 1) and beats or matches Inductor on
+nine of the twenty-one measured targets. Every remaining loss is one of three structural cases:
 
 1. `softmax·V` and `o_proj + residual` lower to three CUDA kernels each whose schedule knobs disagree, so the golden
    format — one knob map per realization — cannot carry any searched schedule and they deploy the greedy pick.
    `emmy eval variants` shows the softmax·V kernel offered only the scalar tier (seven configs, all
    `REDUCE@a2=coop` with `WORK` from `t4` to `t128`; no warp/mma row exists), while the o_proj kernel's searched
-   pick is rank 3 of 10 at 1.72x the best measured config.
+   pick is rank 3 of 10 at 1.72x the best measured config. A uniform pin does make the map conflict-free but only
+   until the schedule splits a fourth, knob-free epilogue kernel out.
 2. The sequence-1 fused post-attention norm + gate/up + SiLU still runs a 393 µs cooperative fold against 155 µs
-   eager and 16 µs Inductor, even though tuning already took it from 3615 µs.
+   eager and 16 µs Inductor, even though tuning already took it from 3616 µs.
 3. The remaining projection losses (v_proj and down_proj at 512, down_proj at 1) are code-generation quality: the
    correct staged warp tier is reached and still trails cuBLAS by 1.2–1.5x.
 
@@ -147,22 +149,21 @@ on eight of the twenty measured targets. Every remaining loss is one of three st
 - The Inductor column is missing for those targets, so a geometric mean over the full corpus is not available; the
   measured denominators are stated above.
 - The five repeats share one deployed host and run back to back, so they capture process-level, not day-level,
-  variation. The experiment record reports `git_dirty: true` because unrelated experiment files were still
-  uncommitted when the run staged; the staged paths themselves were clean.
+  variation.
 
 ### Run and system
 
 - Status: failed (2/2 rows, `torch.compile` reference unavailable on the RoPE targets; all other targets measured)
-- Result timestamp: 2026-08-21T04:25:20Z; run ID: `20260821T042520Z`
-- Rows: `...sl1_scommon` (row ID `551082cef77b`, 442.77 s) and `...sl512_scommon` (row ID `3a4d139974b8`, 1861.3 s)
-- Git revision: `651d6cfd`
+- Result timestamp: 2026-08-21T10:01:28Z; run ID: `20260821T100128Z`
+- Rows: `...sl1_scommon` (row ID `551082cef77b`, 493.44 s) and `...sl512_scommon` (row ID `3a4d139974b8`, 1891.78 s)
+- Git revision: `e2f61e2e`; dirty: false
 - Host: `riftvm`; Ubuntu 24.04.1 LTS; kernel `6.8.0-51-generic`; AMD EPYC 7742 64-Core Processor
 - GPU: NVIDIA A100-SXM4-80GB, UUID `GPU-b0354a1a-37c2-086d-f6fe-953b6fac5c3e`
 - Host NVCC `12.9.86`; cuBLAS `12.9.1.4`; PyTorch 2.13.0+cu130
 
 ### Durable files
 
-- Raw-results archive: `results_a100x1.tar.gz`; archived root `2026-08-21_04-25-20/`
+- Raw-results archive: `results_a100x1.tar.gz`; archived root `2026-08-21_10-01-28/`
 - Members: both `*.experiment.yaml` records, both `*_artifacts.tar.gz` task archives (per-repeat verification JSON
   per target, per-repeat logs and exit statuses, package freeze), and the two runner logs
 - Committed goldens: `golden/qwen3-06b-s1_a100.golden.yaml`, `golden/qwen3-06b-s512_a100.golden.yaml`

@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Highest-capability agentic model with dedicated glm47 parser on eight H200s at 200K context."
-  heat: 75
+  rationale: "Overshadowed by GLM-5.2. Lack of evidence indicates low interest."
+  heat: 30
 engine:
   llm:
     tensor_parallel_size: 8

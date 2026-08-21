@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Only coding MoE with a one-RTX-5090 consumer path and 1.2M downloads at the 30B class."
-  heat: 70
+  rationale: "Qwen3 Coder family strong on OR yet outshined by Qwen3.8 Coder variants."
+  heat: 50
 engine:
   llm:
     tensor_parallel_size: 1

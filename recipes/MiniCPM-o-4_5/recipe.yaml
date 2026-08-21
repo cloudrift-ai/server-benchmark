@@ -1,0 +1,11 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: openbmb/MiniCPM-o-4_5
+  rationale: "Reddit mindshare and downloads confirm strong multimodal demand."
+  heat: 78
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "FP8 35B MoE on one Pro 6000, A100, or H200 at 262K context complements the two-GPU BF16."
-  heat: 55
+  rationale: "FP8 niche variant with minimal traction compared to the base model."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

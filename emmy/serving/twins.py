@@ -25,6 +25,11 @@ whole trunk: GLM-4.5-Air 2.25 stores q/k/v at 4 bits on 42 layers and 3 bits on 
 recorded in the inventory, so a coded twin is emitted once per distinct rate profile and named
 ``<twin>@b<rates>`` before equivalent generic targets are deduplicated.
 
+A DeepSeek V4 layer takes the attention-sublayer seam instead of the q/k/v one: its carrier is the
+``hc_mult`` hyper-connection residual streams flattened to ``[num_tokens, hc_mult * hidden]``, ``pre`` emits the
+normalized ``[num_tokens, hidden]`` input of the 1Cat fork's paged MLA attention, and ``post`` takes that
+sublayer's output back (see ``hyper_connection_seam``).
+
 Consumed by ``emmy eval golden GOLDEN_YAML --serving-config PATH`` and the serving-image release gate. Note the traced
 graph tracks the installed ``transformers`` modeling code: a transformers bump that
 changes the model's forward changes these twins — exactly as it would change serving.
@@ -45,97 +50,6 @@ logger = logging.getLogger(__name__)
 #: Serving's default static widths (``EmmyGenRunner`` / ``capture_gen_twins`` conventions).
 DECODE_BUCKET = 32
 PREFILL_BUCKET = 256
-#: DeepSeek V4's canonical compiler inventory width. Four complete HCA windows and
-#: 128 complete CSA windows exercise both compressor families without tracing a whole model.
-DEEPSEEK_V4_AUDIT_WIDTH = 512
-
-
-def capture_in_model_graphs(model: str, *, extra_widths: tuple[int, ...] = ()) -> dict[str, Graph]:
-    """Capture the sound graph provider for an in-model golden audit.
-
-    Most generative models use the exact serving ``pre`` / ``post`` / expert twins below.
-    DeepSeek V4 cannot: its HCA/CSA compressors and hyper-connection residual streams do
-    not fit the classic external-attention seam. Audit that architecture through the exact
-    representative full-layer inventory path instead. Both providers are config-only and
-    track the installed Transformers modeling code.
-    """
-    from transformers import AutoConfig  # noqa: PLC0415
-
-    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
-
-    if any(width <= 0 for width in extra_widths):
-        raise ValueError(f"in-model audit widths must be positive, got {extra_widths}")
-    repo, revision = split_revision(model)
-    cfg = AutoConfig.from_pretrained(repo, revision=revision)
-    text = getattr(cfg, "text_config", cfg)
-    if getattr(text, "model_type", None) == "deepseek_v4":
-        if extra_widths:
-            raise ValueError(
-                "DeepSeek V4 in-model audit uses the fixed full-layer architecture width "
-                f"{DEEPSEEK_V4_AUDIT_WIDTH}; additional serving-twin widths {extra_widths} cannot be claimed by this provider"
-            )
-        return _capture_deepseek_v4_architecture_graphs(model, text)
-    return capture_twin_graphs(model, extra_widths=extra_widths)
-
-
-def _capture_deepseek_v4_architecture_graphs(model: str, config, *, seq_len: int = DEEPSEEK_V4_AUDIT_WIDTH) -> dict[str, Graph]:
-    """Trace one exact full decoder layer per DeepSeek V4 structural profile."""
-    import torch  # noqa: PLC0415
-
-    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
-    from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
-        find_text_decoder,
-        load_architecture_trace_twin,
-        trace_selected_layer,
-    )
-
-    repo, revision = split_revision(model)
-    graphs: dict[str, Graph] = {}
-    for layer, attention_type, mlp_type in _deepseek_v4_profiles(config):
-        twin = load_architecture_trace_twin(repo, torch.float16, layer, revision=revision)
-        decoder = find_text_decoder(twin)
-        if not bool(getattr(getattr(decoder.layers[layer], "mlp", None), "_emmy_traceable_expert", False)):
-            raise NotImplementedError(
-                f"DeepSeek V4 in-model profile at layer {layer} lacks confirmed representative routed-expert replacement"
-            )
-        graph, _bundle = trace_selected_layer(twin, layer, seq_len, torch.float16)
-        name = f"layer{seq_len}-{_attention_label(attention_type)}-{mlp_type.replace('_', '-')}"
-        if name in graphs:
-            raise ValueError(f"DeepSeek V4 in-model profile name collision for {name!r}")
-        graphs[name] = graph
-    return graphs
-
-
-def _deepseek_v4_profiles(config) -> list[tuple[int, str, str]]:
-    """First layer index for every installed DeepSeek V4 attention/MLP pairing."""
-    count = getattr(config, "num_hidden_layers", None)
-    attention_types = list(getattr(config, "layer_types", None) or [])
-    mlp_types = list(getattr(config, "mlp_layer_types", None) or [])
-    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
-        raise ValueError(f"DeepSeek V4 in-model audit requires positive num_hidden_layers, got {count!r}")
-    if len(attention_types) != count or len(mlp_types) != count:
-        raise ValueError(
-            "DeepSeek V4 in-model audit requires one attention and MLP type per layer: "
-            f"layers={count}, attention={len(attention_types)}, mlp={len(mlp_types)}"
-        )
-    allowed_attention = {"sliding_attention", "heavily_compressed_attention", "compressed_sparse_attention"}
-    allowed_mlp = {"hash_moe", "moe"}
-    unknown_attention = set(attention_types) - allowed_attention
-    unknown_mlp = set(mlp_types) - allowed_mlp
-    if unknown_attention or unknown_mlp:
-        raise NotImplementedError(
-            "DeepSeek V4 in-model audit does not recognize installed layer signatures: "
-            f"attention={sorted(unknown_attention)}, mlp={sorted(unknown_mlp)}"
-        )
-
-    profiles = []
-    seen = set()
-    for layer, pair in enumerate(zip(attention_types, mlp_types, strict=True)):
-        if pair in seen:
-            continue
-        seen.add(pair)
-        profiles.append((layer, *pair))
-    return profiles
 
 
 def _serving_twin_buckets(
@@ -189,6 +103,7 @@ def capture_twin_graphs(
     from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
         build_attention_split_wrapper,
         build_moe_split_wrapper,
+        hyper_connection_seam,
         moe_block_parts,
     )
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
@@ -196,11 +111,6 @@ def capture_twin_graphs(
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
-    if getattr(text, "model_type", None) == "deepseek_v4":
-        raise NotImplementedError(
-            "DeepSeek V4 cannot be captured as classic serving twins: HCA/CSA compressors and hyper-connection "
-            "residuals do not fit the (q, k, v) seam; use capture_in_model_graphs for its full-layer audit provider"
-        )
     storage = coded_tensor_storage(model, cfg, revision=revision)
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
@@ -259,17 +169,19 @@ def capture_twin_graphs(
         # hangs off ``block.mlp`` (4.8 GiB for one Laguna layer).
         pre_w.to_empty(device="cpu").to(td)
         post_w.to_empty(device="cpu").to(td)
-        _num_heads, attn_width = _attention_query_layout(block.self_attn)
+        # The classic seam carries ``[T, hidden]`` in and ``[T, num_heads·head_dim]`` attention out; a
+        # hyper-connection layer carries its flattened residual streams and the attention sublayer's output.
+        carrier, attn_width = hyper_connection_seam(block) or (hidden, _attention_query_layout(block.self_attn)[1])
         for name, m in buckets:
             # The symbolic program traces at the example width serving uses (8) and ties
             # axis-0 to a ``num_tokens`` Dim; a static twin traces at its bucket, no Dim.
             rows = 8 if m is None else m
             halves = [
-                ("pre", pre_w, [torch.zeros(rows, hidden, dtype=td)], ["hidden"] if m is None else None),
+                ("pre", pre_w, [torch.zeros(rows, carrier, dtype=td)], ["hidden"] if m is None else None),
                 (
                     "post",
                     post_w,
-                    [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, hidden, dtype=td)],
+                    [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, carrier, dtype=td)],
                     ["attn_out", "residual"] if m is None else None,
                 ),
             ]

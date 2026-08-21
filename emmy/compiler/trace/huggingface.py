@@ -597,6 +597,11 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     them, corrupting outputs."""
     import torch.nn as nn
 
+    if hyper_connection_seam(block) is not None:
+        raise NotImplementedError(
+            "build_attention_split_wrapper: a hyper-connection block (DeepSeek V4) carries hc_mult residual streams and a "
+            "self-contained attention sublayer; it takes the attention-sublayer seam of build_moe_split_wrapper"
+        )
     pre = _build_pre_wrapper(block, float32_residual=float32_residual)  # carries PLE / clip_qkv rejects before attribute reads
     attn = block.self_attn
 
@@ -789,6 +794,87 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
             op.source_parts = tuple((key_map.get(path, path), shape) for path, shape in op.source_parts)
 
 
+def hyper_connection_seam(block):
+    """``(carrier_width, attn_out_width)`` of a hyper-connection decoder block, or ``None``.
+
+    DeepSeek V4 keeps ``hc_mult`` parallel residual streams per token (mHC); the serving carrier is
+    that stack flattened to ``[num_tokens, hc_mult * hidden]``, and the attention seam carries the whole
+    attention sublayer's ``[num_tokens, hidden]`` output rather than q/k/v (the 1Cat fork's paged MLA
+    attention owns the projections, compressors, indexer and output projection)."""
+    attn_hc = getattr(block, "attn_hc", None)
+    if attn_hc is None:
+        return None
+    hidden = int(block.input_layernorm.weight.shape[0])
+    return int(attn_hc.hc_mult) * hidden, hidden
+
+
+def place_routed_streams(mixed, routed, mix):
+    """Close the hyper-connection MoE seam: ``mixed[T, hc·H] + mix[T, hc] ⊗ routed[T, H]``.
+
+    The post program already placed the shared expert and mixed the streams (``post ⊗ shared +
+    combᵀ · streams``); the routed combine runs in torch afterwards and lands on the streams through the
+    same per-stream ``post`` weights, which the program returns as ``mix``."""
+    t = routed.shape[0]
+    return mixed + (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1)
+
+
+def _build_hyper_connection_split(block):
+    """``(pre, post)`` of one DeepSeek V4 layer over the flattened stream carrier.
+
+    - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site stream collapse and ``input_layernorm``:
+      exactly what the fork's ``DeepseekV4Attention.forward(positions, x)`` consumes.
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` —
+      attention-site stream mixing (the collapse weights are recomputed from ``residual``, one small
+      GEMM, so nothing but the carrier crosses the seam), feed-forward collapse + ``post_attention_layernorm``,
+      the always-on shared expert placed on the streams, and the feed-forward ``post`` weights for the
+      routed combine (:func:`place_routed_streams`).
+
+    Both mirror ``DeepseekV4DecoderLayer.forward`` by calling the block's own hyper-connection modules on a
+    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's."""
+    import torch
+    import torch.nn as nn
+
+    hc = int(block.attn_hc.hc_mult)
+    hidden_size = int(block.input_layernorm.weight.shape[0])
+    shared_experts = block.mlp.shared_experts
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hc = block.attn_hc
+            self.input_layernorm = block.input_layernorm
+
+        def forward(self, hidden):  # ``hidden`` is the seam's arg name (the symbolic num_tokens spec keys on it)
+            t = hidden.shape[0]
+            _post, _comb, collapsed = self.attn_hc(hidden.view(1, t, hc, hidden_size))
+            return self.input_layernorm(collapsed).view(t, hidden_size)
+
+    class Post(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hc = block.attn_hc
+            self.ffn_hc = block.ffn_hc
+            self.post_attention_layernorm = block.post_attention_layernorm
+            self.shared_experts = shared_experts
+
+        def forward(self, attn_out, residual):
+            t = attn_out.shape[0]
+            dtype = residual.dtype
+            streams = residual.view(1, t, hc, hidden_size)
+            post, comb, _ = self.attn_hc(streams)
+            streams = post.to(dtype).unsqueeze(-1) * attn_out.view(1, t, 1, hidden_size) + torch.matmul(
+                comb.to(dtype).transpose(-1, -2), streams
+            )
+            post, comb, collapsed = self.ffn_hc(streams)
+            xn = self.post_attention_layernorm(collapsed)
+            mixed = post.to(dtype).unsqueeze(-1) * self.shared_experts(xn).unsqueeze(-2) + torch.matmul(
+                comb.to(dtype).transpose(-1, -2), streams
+            )
+            return mixed.view(t, hc * hidden_size), xn.view(t, hidden_size), post.to(dtype).view(t, hc)
+
+    return Pre(), Post()
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
@@ -845,7 +931,10 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     expert_scaling_factor = 1.0 if routed_scale_folded else routed_scaling_factor
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
-    pre = _build_pre_wrapper(block, float32_residual=float32_residual)
+    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
+    if hyper is not None and (float32_residual or split_gate_up):
+        raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
+    pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
     attn = block.self_attn
 
     class PostAttn(nn.Module):
@@ -926,15 +1015,21 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 return (((up + 1) * glu) @ w_down + b_down) * expert_scaling_factor
 
     elif not transposed and not has_bias and act_fn is not None:
+        # DeepSeek V4 clamps both SwiGLU branches before the activation (``swiglu_limit``); OLMoE has no limit.
+        limit = getattr(experts, "limit", None)
+        limit = None if limit is None else float(limit)
 
         class ExpertFFN(nn.Module):
-            # OLMoE: (out, in) weights applied via F.linear; plain gated activation.
+            # OLMoE / DeepSeek: (out, in) weights applied via F.linear; gated activation, optionally clamped.
             def __init__(self) -> None:
                 super().__init__()
                 self.act_fn = act_fn
 
             def forward(self, x, w_gate_up, w_down):
                 gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
                 return nn.functional.linear(self.act_fn(gate) * up, w_down) * expert_scaling_factor
 
     else:
@@ -944,7 +1039,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
         )
 
-    return pre, PostAttn(), ExpertFFN()
+    return pre, hyper[1] if hyper is not None else PostAttn(), ExpertFFN()
 
 
 def promote_shared_expert_float32(graph) -> None:

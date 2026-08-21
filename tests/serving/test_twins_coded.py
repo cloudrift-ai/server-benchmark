@@ -16,8 +16,6 @@ from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.loader.safetensors import split_revision
 from emmy.serving.twins import (
     _attention_query_layout,
-    _capture_deepseek_v4_architecture_graphs,
-    _deepseek_v4_profiles,
     _profile_layers,
     _spell_coded_twins,
     _spell_expert_twins,
@@ -196,155 +194,17 @@ def test_attention_query_layout_rejects_partial_or_inconsistent_signature():
         _attention_query_layout(attention)
 
 
-def test_deepseek_profiles_are_distinct_attention_mlp_pairs():
-    from types import SimpleNamespace
-
-    config = SimpleNamespace(
-        num_hidden_layers=6,
-        layer_types=[
-            "heavily_compressed_attention",
-            "heavily_compressed_attention",
-            "compressed_sparse_attention",
-            "heavily_compressed_attention",
-            "compressed_sparse_attention",
-            "sliding_attention",
-        ],
-        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe", "moe", "moe"],
-    )
-    assert _deepseek_v4_profiles(config) == [
-        (0, "heavily_compressed_attention", "hash_moe"),
-        (2, "compressed_sparse_attention", "hash_moe"),
-        (3, "heavily_compressed_attention", "moe"),
-        (4, "compressed_sparse_attention", "moe"),
-        (5, "sliding_attention", "moe"),
-    ]
-
-
-def test_deepseek_provider_pins_four_profiles_and_propagates_revision(monkeypatch):
-    from types import SimpleNamespace
-
-    import torch
-    import torch.nn as nn
-
-    import emmy.compiler.trace.huggingface as huggingface
-
-    class Block(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.mlp = nn.Identity()
-            self.mlp._emmy_traceable_expert = True
-
-    class Decoder(nn.Module):
-        def __init__(self, config):
-            super().__init__()
-            self.layers = nn.ModuleList(Block() for _ in range(config.num_hidden_layers))
-            self.rotary_emb = nn.Identity()
-            self.config = config
-
-    class Twin(nn.Module):
-        def __init__(self, config):
-            super().__init__()
-            self.decoder = Decoder(config)
-
-    config = SimpleNamespace(
-        model_type="deepseek_v4",
-        num_hidden_layers=6,
-        layer_types=[
-            "sliding_attention",
-            "sliding_attention",
-            "compressed_sparse_attention",
-            "heavily_compressed_attention",
-            "compressed_sparse_attention",
-            "heavily_compressed_attention",
-        ],
-        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe", "moe", "moe"],
-    )
-    loads = []
-
-    def fake_load(repo, dtype, layer, *, revision=None):
-        loads.append((repo, dtype, layer, revision))
-        return Twin(config)
-
-    monkeypatch.setattr(huggingface, "load_architecture_trace_twin", fake_load)
-    monkeypatch.setattr(huggingface, "trace_selected_layer", lambda *_args, **_kwargs: (object(), None))
-    graphs = _capture_deepseek_v4_architecture_graphs("deepseek-ai/model@0123456789abcdef", config)
-    assert list(graphs) == [
-        "layer512-sliding-hash-moe",
-        "layer512-compressed-sparse-hash-moe",
-        "layer512-heavily-compressed-moe",
-        "layer512-compressed-sparse-moe",
-    ]
-    assert loads == [
-        ("deepseek-ai/model", torch.float16, 0, "0123456789abcdef"),
-        ("deepseek-ai/model", torch.float16, 2, "0123456789abcdef"),
-        ("deepseek-ai/model", torch.float16, 3, "0123456789abcdef"),
-        ("deepseek-ai/model", torch.float16, 4, "0123456789abcdef"),
-    ]
-
-
-def test_deepseek_provider_rejects_unconfirmed_representative_expert(monkeypatch):
-    from types import SimpleNamespace
-
-    import emmy.compiler.trace.huggingface as huggingface
-
-    config = SimpleNamespace(
-        num_hidden_layers=1,
-        layer_types=["heavily_compressed_attention"],
-        mlp_layer_types=["moe"],
-    )
-    monkeypatch.setattr(huggingface, "load_architecture_trace_twin", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(
-        huggingface,
-        "find_text_decoder",
-        lambda _twin: SimpleNamespace(layers=[SimpleNamespace(mlp=SimpleNamespace())]),
-    )
-    monkeypatch.setattr(
-        huggingface,
-        "trace_selected_layer",
-        lambda *_args, **_kwargs: pytest.fail("unconfirmed representative expert reached trace"),
-    )
-    with pytest.raises(NotImplementedError, match="lacks confirmed representative routed-expert replacement"):
-        _capture_deepseek_v4_architecture_graphs("deepseek-ai/model@revision", config, seq_len=8)
-
-
-def test_in_model_capture_dispatches_deepseek_to_architecture_provider(monkeypatch):
-    from types import SimpleNamespace
-
-    import transformers
-
-    import emmy.serving.twins as twins
-
-    config = SimpleNamespace(model_type="deepseek_v4")
-    sentinel = {"layer512-hca-moe": object()}
-    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda repo, revision=None: config)
-    monkeypatch.setattr(twins, "_capture_deepseek_v4_architecture_graphs", lambda model, text: sentinel)
-    monkeypatch.setattr(twins, "capture_twin_graphs", lambda *_args, **_kwargs: pytest.fail("classic twins selected"))
-    assert twins.capture_in_model_graphs("org/deepseek@revision") is sentinel
-    with pytest.raises(ValueError, match="additional serving-twin widths"):
-        twins.capture_in_model_graphs("org/deepseek@revision", extra_widths=(64,))
-
-
-def test_classic_twin_capture_rejects_deepseek_split(monkeypatch):
-    from types import SimpleNamespace
-
-    import transformers
-
-    from emmy.serving.twins import capture_twin_graphs
-
-    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: SimpleNamespace(model_type="deepseek_v4"))
-    with pytest.raises(NotImplementedError, match="HCA/CSA compressors and hyper-connection"):
-        capture_twin_graphs("org/deepseek")
-
-
-def test_deepseek_in_model_provider_traces_full_layers_weight_free(tmp_path):
+def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tmp_path):
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
 
     config = transformers.DeepseekV4Config(
         vocab_size=64,
         hidden_size=32,
         moe_intermediate_size=16,
-        num_hidden_layers=2,
+        num_hidden_layers=3,
         num_attention_heads=4,
         head_dim=8,
         q_lora_rank=16,
@@ -358,23 +218,29 @@ def test_deepseek_in_model_provider_traces_full_layers_weight_free(tmp_path):
         index_topk=2,
         hc_mult=2,
         hc_sinkhorn_iters=2,
-        layer_types=["heavily_compressed_attention", "compressed_sparse_attention"],
-        mlp_layer_types=["hash_moe", "moe"],
+        layer_types=["sliding_attention", "heavily_compressed_attention", "compressed_sparse_attention"],
+        mlp_layer_types=["hash_moe", "moe", "moe"],
         compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
         sliding_window=4,
         swiglu_limit=10.0,
         max_position_embeddings=64,
     )
     config.save_pretrained(tmp_path)
-    graphs = _capture_deepseek_v4_architecture_graphs(str(tmp_path), config, seq_len=8)
-    assert set(graphs) == {"layer8-heavily-compressed-hash-moe", "layer8-compressed-sparse-moe"}
-    assert all(graph.nodes and graph.outputs for graph in graphs.values())
-    assert all(tuple(graph.nodes[graph.inputs[0]].output.shape) == (1, 8, 2, 32) for graph in graphs.values())
-    assert all(tuple(graph.nodes["attention_mask"].output.shape) == (1, 1, 8, 8) for graph in graphs.values())
-    assert all(
-        any(type(node.op).__name__ == "CatOp" and tuple(node.output.shape) == (1, 1, 8, 10) for node in graph.nodes.values())
-        for graph in graphs.values()
-    )
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    # One profile per distinct (mlp, attention) pairing; the attention sublayer is the fork's, so the
+    # attention type only names the profile — every twin carries the same seam shapes.
+    suffixes = ("-hash_moe-sliding", "-moe-heavily-compressed", "-moe-compressed-sparse")
+    assert set(graphs) == {f"{half}{width}{suffix}" for half in ("pre", "post", "expert") for width in ("4", "-sym") for suffix in suffixes}
+    for suffix in suffixes:
+        pre, post, expert = (graphs[f"{half}4{suffix}"] for half in ("pre", "post", "expert"))
+        assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
+        assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
+        assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
+        assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+        assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
+        sym = graphs[f"pre-sym{suffix}"]
+        token_dim = sym.nodes[sym.inputs[0]].output.shape[0]
+        assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
 def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():

@@ -143,9 +143,28 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
   The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
   gate, query-projection, and head widths, covering older built-in Laguna modules without a model-name special case.
+  The `F.linear` expert form applies the module's `swiglu_limit` when the experts carry one (DeepSeek V4: gate clamped
+  above, up clamped on both sides, then SwiGLU and the down projection); OLMoE has no limit and is unchanged.
   Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
-  DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
-  above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
+  DeepSeek V4 requires that replacement to be confirmed and preserves the same clamp. Missing the replacement fails
+  closed.
+
+  A DeepSeek V4 block (`hyper_connection_seam(block)` is not `None`: it carries `attn_hc` / `ffn_hc`) takes the
+  **attention-sublayer seam** instead of the q/k/v one, because the 1Cat vLLM fork's paged MLA attention owns the
+  whole sublayer — low-rank q projection, shared-KV projection, HCA/CSA compressors, the lightning indexer and the
+  grouped output projection are fused with its paged caches, and nothing external can hand it compressed latents.
+  The carrier is the `hc_mult` hyper-connection residual streams flattened to `[num_tokens, hc_mult * hidden]`:
+  `pre(hidden[T, hc·H]) → x[T, H]` is the attention-site stream collapse plus `input_layernorm` (exactly what the
+  fork's `DeepseekV4Attention.forward(positions, x)` consumes); `post(attn_out[T, H], residual[T, hc·H]) → (mixed[T,
+  hc·H], xn[T, H], mix[T, hc])` recomputes the attention-site collapse weights from the carrier (one small GEMM, so
+  only the carrier crosses the seam), mixes the attention output onto the streams, runs the feed-forward collapse and
+  `post_attention_layernorm`, places the shared expert on the streams, and returns the feed-forward per-stream `post`
+  weights. The routed combine runs in torch as before and lands through `place_routed_streams(mixed, routed, mix)`
+  (`mixed + mix ⊗ routed`). Both halves call the block's own `DeepseekV4HyperConnection` modules on a `[1, T, hc, H]`
+  view, so the sigmoid / Sinkhorn / float32 contract is the installed modeling code's. `build_attention_split_wrapper`
+  rejects these blocks (no dense DeepSeek V4 layer exists), and the seam has no coded-trunk or float32-residual form
+  (`tests/serving/test_deepseek_v4_split.py` proves the carve against the eager layer for sliding, HCA and CSA
+  layers with both hash and top-k routers).
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
   quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at

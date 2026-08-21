@@ -809,24 +809,14 @@ class EmmyGenRunner:
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
+                is_nvfp4_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ reconstruction algebra is dissolved before lowering, so its
+            # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
             # checkpoint sources can stay coded on the card. FP8 keeps the existing value-trunk
             # lane; only its routed experts are input-spelled today.
-            #
-            # NVFP4 is DELIBERATELY ABSENT, though :func:`is_nvfp4_checkpoint` recognizes it and the
-            # loader honours ``compress_trunk`` for it. A coded weight arrives as a ``torch.empty``
-            # placeholder that something downstream must re-source from the checkpoint's codes, and
-            # for NVFP4 only some of the layer's matmuls get that far. The rest read the
-            # uninitialized placeholder, which is silent: the program compiles, the packed drain
-            # appears in the emitted source, and the numbers are wrong. Measured on
-            # nvidia/Qwen3-8B-NVFP4, one decoder layer, identical input — coded absmax 0.472
-            # against decoded 5.328. Serving therefore keeps the decoded trunk, which costs device
-            # memory and bandwidth but computes the right answer. Restore NVFP4 here in the same
-            # change that completes the re-sourcing, never before, and make parity the evidence.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir)
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.

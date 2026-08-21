@@ -117,22 +117,16 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
 
 @pytest.mark.parametrize(
     ("quant_method", "coded_trunk"),
-    [("exl3", True), ("awq", True), ("fp8", False), ("modelopt", False)],
+    [("exl3", True), ("awq", True), ("fp8", False), ("modelopt", True)],
 )
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ stay checkpoint-coded; FP8 and NVFP4 preserve the decoded trunk lane.
+    """EXL3/AWQ/NVFP4 stay checkpoint-coded; FP8 preserves the decoded trunk lane.
 
-    NVFP4 (``modelopt``) belongs in the coded column on its merits — the loader honours
-    ``compress_trunk`` for it and the packed byte-slab lowering consumes the result. It sits in the
-    decoded column because the re-sourcing is INCOMPLETE: a coded weight arrives as a
-    ``torch.empty`` placeholder, only some of a layer's matmuls get re-sourced from the
-    checkpoint's codes, and the rest read the placeholder. Nothing about that is loud — the program
-    compiles and the packed drain shows up in the emitted source — so this case is the guard that
-    the wrongness cannot return silently. Measured on nvidia/Qwen3-8B-NVFP4, one decoder layer,
-    identical input: coded absmax 0.472 against decoded 5.328.
-
-    Flip this row to ``True`` in the same change that completes the re-sourcing, with parity as the
-    evidence, and not before.
+    NVFP4 (``modelopt``) sat in the decoded column while two defects made a coded trunk compute
+    silently wrong numbers — a packed operand that dropped its split-K slice base, and a plan-keyed
+    constant read that decoded the e4m3 block scales a second time. Both are fixed, and serving
+    parity against eager torch is what moved this row: the coded and decoded trunks agree
+    bit-for-bit on a layer's q/k/v, and both match eager torch on the rest of the layer.
     """
     import json
 

@@ -1233,8 +1233,8 @@ configs:
       TILE: ''
       WORK: t256
     measurements:
-      emmy_us: 3.1598
-      reference_us: 191.5469
+      emmy_us: 3.1663
+      reference_us: 191.9
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1253,8 +1253,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x4/k8
       WORK: w2x2
     measurements:
-      emmy_us: 17.4446
-      reference_us: 11.6907
+      emmy_us: 17.5158
+      reference_us: 12.9707
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1275,8 +1275,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       WORK: w4x1
     measurements:
-      emmy_us: 22.2777
-      reference_us: 100.4983
+      emmy_us: 22.3651
+      reference_us: 100.6446
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1298,7 +1298,47 @@ configs:
       WORK: w2x2
     measurements:
       emmy_us: 17.2844
-      reference_us: 59.7858
+      reference_us: 59.8646
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - unsqueeze
+  realizations:
+  - name: k_unsqueeze_636992.e0770b339983
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 1.321
+      reference_us: 1.4967
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - unsqueeze_1
+  realizations:
+  - name: k_unsqueeze_636992.e0770b339983.unsqueeze_1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: ''
+      STAGE: ''
+      TILE: f4
+      WORK: ''
+    measurements:
+      emmy_us: 1.3205
+      reference_us: 1.4689
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1356,8 +1396,8 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f1x8/k8
       WORK: w8x2
     measurements:
-      emmy_us: 67.0379
-      reference_us: 246.4689
+      emmy_us: 67.3792
+      reference_us: 246.5477
       reference_backend: torch-eager
 - program: 0
   target:
@@ -1378,56 +1418,73 @@ configs:
       WORK: w2x2
     measurements:
       emmy_us: 46.5189
-      reference_us: 32.768
+      reference_us: 30.0373
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - add_2
+    - add_2_c1_bc
+    - add_4
+    - cat_1
+    - mean_2
+    - mul_4
+    - mul_5
+    - mul_8
+    - mul_9
+    - n0
+    - n1
+    - neg_1
+    - p_attn_k_norm_weight_bc
+    - pow_3
+    - rsqrt_2
+    - rsqrt_2_bc
+    - slice_3
+    - slice_4
+    - to_5
+    - transpose_1
+  realizations:
+  - name: k_mean_6cb2c7.159833359fae
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t64
+    measurements:
+      emmy_us: 5.4038
+      reference_us: 271.5479
       reference_backend: torch-eager
 - program: 0
   target:
     origins:
     - add_1
     - add_1_c1_bc
-    - add_2
-    - add_2_c1_bc
     - add_3
-    - add_4
     - cat
-    - cat_1
     - mean_1
-    - mean_2
     - mul_2
     - mul_3
-    - mul_4
-    - mul_5
     - mul_6
     - mul_7
-    - mul_8
-    - mul_9
-    - n0
-    - n1
     - neg
-    - neg_1
-    - p_attn_k_norm_weight_bc
     - p_attn_q_norm_weight_bc
     - pow_2
-    - pow_3
     - rsqrt_1
     - rsqrt_1_bc
-    - rsqrt_2
-    - rsqrt_2_bc
     - scaled_dot_product_attention
     - slice_1
     - slice_2
-    - slice_3
-    - slice_4
     - to_3
-    - to_5
     - transpose
-    - transpose_1
-    - unsqueeze
-    - unsqueeze_1
     - unsqueeze_1_bc
     - unsqueeze_bc
   realizations:
-  - name: k_sdpa_mean_reduce_29d3df.171afed452e2
+  - name: k_sdpa_mean_reduce_7968d0.c530162a5c99
     bindings: {}
     pins:
       FAST_MATH: false

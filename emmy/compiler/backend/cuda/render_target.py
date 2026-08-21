@@ -121,7 +121,9 @@ _NATIVE_FP16_OPS: frozenset[str] = frozenset(
         "copy",
         "reciprocal",
         "relu",
-        "sigmoid",
+        # Not ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up
+        # to two half-ulps from torch's compute-in-f32-round-once value and fails the strict
+        # ``rtol=1e-3`` gate; the non-native path below computes it in f32 and converts once.
     }
 )
 

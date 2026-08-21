@@ -65,22 +65,25 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
 
     head_dim = q_shape[-1] if len(q_shape) >= 2 else 64
     seq_len = q_shape[-2] if len(q_shape) >= 3 else q_shape[-1]
+    # The key length is K's own, not the query's: a decode step (one query over a populated
+    # cache) scores every key, and a kt/scores shape read off the query would score only key 0.
+    kv_len = k_shape[-2] if len(k_shape) >= 3 else k_shape[-1]
     q_batch = q_shape[:-2] if len(q_shape) > 2 else ()
     k_batch = k_shape[:-2] if len(k_shape) > 2 else ()
     v_batch = v_shape[:-2] if len(v_shape) > 2 else ()
-    scores_shape = q_batch + (seq_len, seq_len)
+    scores_shape = q_batch + (seq_len, kv_len)
 
     exts = [inp_q, inp_k, inp_v] + ([inp_mask] if inp_mask is not None else [])
     frag = open_fragment(graph, exts)
 
     # K^T then GQA broadcast.
-    kt_shape = k_batch + (head_dim, seq_len) if head_dim.is_static else k_shape
+    kt_shape = k_batch + (head_dim, kv_len) if head_dim.is_static else k_shape
     kt_id = frag.add_node(
         op=TransposeOp(axes=(-2, -1)),
         inputs=[inp_k],
         output=Tensor(f"{name}_kt", kt_shape, inp_k.output.dtype),
     )
-    kt = _maybe_gqa(frag, kt_id, q_batch, k_batch, (head_dim, seq_len), name=f"{name}_kt_gqa")
+    kt = _maybe_gqa(frag, kt_id, q_batch, k_batch, (head_dim, kv_len), name=f"{name}_kt_gqa")
 
     # QK^T matmul.
     qk = matmul_decompose(frag, inp_q, kt, name=f"{name}_qk")

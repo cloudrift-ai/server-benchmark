@@ -126,3 +126,14 @@ def test_static_axis_unchanged_behavior():
     assert ctx.ranges["a"] == Interval(0, 31)
     # i % 32 with i in [0,32) folds to i (literal path).
     assert BinaryExpr("%", Var("a"), Literal(32, "int")).simplify(ctx) == Var("a")
+
+
+def test_scaled_term_div_folds_through_a_larger_divisor():
+    """``(h*128 + c) / 1024`` with ``c < 128`` is ``h / 8``: the collapsed GQA-group index of a
+    decode sweep. Unfolded, every statistic indexed by it looked column-dependent and was replayed
+    per head-dim column by fusion."""
+    ctx = extend_simplify_ctx(extend_simplify_ctx(SimplifyCtx.empty(), Axis("h", 64)), Axis("c", 128))
+    idx = BinaryExpr("+", BinaryExpr("*", Var("h"), Literal(128, "int")), Var("c"))
+    assert BinaryExpr("/", idx, Literal(1024, "int")).simplify(ctx) == BinaryExpr("/", Var("h"), Literal(8, "int"))
+    rem = BinaryExpr("%", idx, Literal(1024, "int")).simplify(ctx)
+    assert rem == BinaryExpr("+", BinaryExpr("*", BinaryExpr("%", Var("h"), Literal(8, "int")), Literal(128, "int")), Var("c"))

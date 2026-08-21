@@ -985,3 +985,39 @@ def test_full_self_attn_tinyllama_seq512(_chain_tile_pins):
     (default on sm_90+) reorders FMAs vs cp.async. Catches order-of-magnitude regressions, not
     bit-equivalence."""
     _run_self_attn_tinyllama(seq_len=512, threshold=2.0)
+
+
+class _GqaDecodeBatch(torch.nn.Module):
+    """The Neptune ``decode_gqa`` spelling: the query heads of one KV group as a broadcast batch dim."""
+
+    def forward(self, q, k, v):
+        return F.scaled_dot_product_attention(
+            q.reshape(1, 2, 4, 1, 16), k.reshape(1, 2, 1, 64, 16), v.reshape(1, 2, 1, 64, 16), is_causal=False
+        ).reshape(1, 8, 1, 16)
+
+
+@requires_cuda
+@pytest.mark.parametrize("variant", ["plain", "gqa_batch"])
+def test_decode_sdpa_matches_torch(variant):
+    """One query over a populated key set — the shape every decode step takes. Three defects hid
+    behind it: the SDPA decomposition read the KEY length off the query (scores ``(1, 1)``, so the
+    output was ``ΣV``), the fused softmax·V view took the heads as the mma rows while V varied
+    per head (B must never read the row axis), and the GQA batch spelling sank ``1/den`` into the
+    joined expectation channel, streaming it against the running denominator (NaN)."""
+    torch.manual_seed(0)
+    if variant == "plain":
+        module, q = _Sdpa(), torch.randn(1, 8, 1, 16)
+        ref_shape = (1, 8, 64, 16)
+    else:
+        module, q = _GqaDecodeBatch(), torch.randn(1, 8, 1, 16)
+        ref_shape = (1, 2, 64, 16)
+    k, v = (torch.randn(*ref_shape) for _ in range(2))
+    backend, compiled, _graph, kernels = _trace(module, (q, k, v))
+    assert kernels
+    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
+
+    def rc():
+        with torch.no_grad():
+            return module(cq, ck, cv).cpu().flatten().numpy()
+
+    assert _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, rc) < 1e-4

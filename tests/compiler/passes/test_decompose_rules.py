@@ -836,3 +836,19 @@ def test_transpose_fold_is_capability_and_shape_unconditional():
             target_mod.set_target(None)
         assert folded_m1, f"M=1 matvec weight must fold at {cap}"
         assert folded_m64, f"M>1 weight must fold at {cap} — the sub-sm_90 no-fold gate is deleted"
+
+
+def test_sdpa_scores_take_the_key_length_from_k():
+    """A decode step scores one query against every key: the scores and K^T shapes read the key
+    length off K, not the query (the query-length reading scored key 0 alone)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("Q", (2, 1, 8)), node_id="Q")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("K", (2, 16, 8)), node_id="K")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("V", (2, 16, 8)), node_id="V")
+    g.add_node(op=SdpaOp(is_causal=False, scale=None), inputs=["Q", "K", "V"], output=Tensor("out", (2, 1, 8)), node_id="sdpa_out")
+    g.inputs, g.outputs = ["Q", "K", "V"], ["sdpa_out"]
+    result = _apply(g, "010_sdpa.py")
+    shapes = {n.output.name: tuple(d.as_static() for d in n.output.shape) for n in result.nodes.values()}
+    assert shapes["out_kt"] == (2, 8, 16)
+    assert shapes["out_scaled"] == (2, 1, 16)
+    assert shapes["out_softmax"] == (2, 1, 16)

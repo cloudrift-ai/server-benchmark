@@ -884,12 +884,23 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
         for k_side, other_side in ((expr.right, expr.left), (expr.left, expr.right)):
             if not (isinstance(k_side, Literal) and k_side.dtype == "int" and isinstance(k_side.value, int)):
                 continue
-            if k_side.value <= 0 or k_side.value % n != 0:
+            if k_side.value <= 0:
                 continue
             rng = other_side.range(ctx)
-            if rng is not None and rng.lo >= 0:
-                q_expr = BinaryExpr("*", other_side, _make_int_literal(k_side.value // n)).simplify(ctx)
+            if rng is None or rng.lo < 0:
+                continue
+            k = k_side.value
+            if k % n == 0:
+                q_expr = BinaryExpr("*", other_side, _make_int_literal(k // n)).simplify(ctx)
                 return (q_expr, _make_int_literal(0))
+            if n % k == 0:
+                # ``x*k = n*(x / d) + k*(x % d)`` for ``d = n/k``: the collapsed-reshape index
+                # ``(head*128 + col) / 1024`` (a GQA group fold over the head-dim sweep) reads as
+                # ``head / 8`` once the remainder ``(head % 8)*128 + col`` proves below ``n``.
+                d = _make_int_literal(n // k)
+                q_expr = BinaryExpr("/", other_side, d).simplify(ctx)
+                r_expr = BinaryExpr("*", BinaryExpr("%", other_side, d), _make_int_literal(k)).simplify(ctx)
+                return (q_expr, r_expr)
     if isinstance(expr, BinaryExpr) and expr.op == "+":
         L = _div_mod_decompose(expr.left, n, ctx)
         R = _div_mod_decompose(expr.right, n, ctx)

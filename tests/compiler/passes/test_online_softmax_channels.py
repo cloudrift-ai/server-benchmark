@@ -219,7 +219,7 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     bound = fused_view(tile)
     assert bound is not None, "the sweep must bind as a computed-A contraction over the twisted statistic"
     node, n_axis, _stores = bound
-    con = node.operands[0]
+    con = node
     assert is_contraction(con) and con.axis.extent == Dim(128), "one contraction over the whole reduce axis"
     assert n_axis.extent == Dim(32), "the output column axis joins the grid"
     assert con.a.operands[0].operands == (stat,), "the A cone's source is the pair, its K seam the node boundary"
@@ -247,7 +247,7 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)))
     again = fused_view(relifted)
     assert again is not None, "the round trip must not cost the region its computed-A binding"
-    assert is_contraction(again[0].operands[0]), "and it must come back as the SAME one contraction"
+    assert is_contraction(again[0]), "and it must come back as the SAME bare contraction"
 
 
 # --------------------------------------------------------------------------------------------

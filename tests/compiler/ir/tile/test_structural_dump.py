@@ -9,11 +9,11 @@ evaluation (the per-cell step, the nodes synthesized inside it, the lowered nest
 of the stored params and is never printed: showing it beside storage is the inversion the layer
 exists to prevent, and it was the bulk of the output.
 
-These pin: (a) every stored param of each node kind reaches the dump; (b) edges nest, are labelled
-by inhabitant, and appear exactly once; (c) nothing derived appears — including the one slice whose
-site is synthesized, which lands in the schedule region rather than reconstructing its node;
-(d) schedule slices annotate a node only when the owning ``TileOp`` supplies them — never from the
-term; (e) a λ that is not closed says what it captures.
+These pin: (a) every stored param of each node kind reaches the dump; (b) edges say which lambda
+params they bind, nest, are labelled by inhabitant, and appear exactly once; (c) nothing derived
+appears — including the one slice whose site is synthesized, which lands in the schedule region
+rather than reconstructing its node; (d) schedule slices annotate a node only when the owning
+``TileOp`` supplies them — never from the term; (e) a λ that is not closed says what it captures.
 """
 
 from __future__ import annotations
@@ -85,10 +85,12 @@ def test_fold_dump_shows_every_stored_param() -> None:
 def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
     text = "\n".join(pretty(_product()))
     assert "Fold[k in 0..256] contraction" in text
-    assert "├─ operand[a]: a_e = load x[m, k]" in text
+    assert "├─ operand[a_e]: load x[m, k]" in text
     # Sharing is arity: one ``a``, one branch per channel, each naming its own accumulator.
-    assert "├─ operand[b0] -> acc_g: acc_g_b = load Wg[k, n]" in text
-    assert "├─ operand[b1] -> acc_u: acc_u_b = load Wu[k, n]" in text
+    assert "├─ operand[acc_g_b] -> acc_g: load Wg[k, n]" in text
+    assert "├─ operand[acc_u_b] -> acc_u: load Wu[k, n]" in text
+    # The binding labels connect role-ordered edges above to their actual positional lift params.
+    assert "lift: λ(k, acc_g_b, a_e, acc_u_b) -> (acc_g__v, acc_u__v)" in text
 
 
 def test_map_dump_shows_the_binder_and_its_sources() -> None:
@@ -98,9 +100,18 @@ def test_map_dump_shows_the_binder_and_its_sources() -> None:
     m = Fold.projection(operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
     assert text.splitlines()[0] == "Fold  free"
-    assert "├─ operand[0]: Fold[k in 0..512] planar" in text
+    assert "├─ operand[acc0]: Fold[k in 0..512] planar" in text
     assert "└─ lift: λ(acc0) -> (o)" in text
     assert "     o = rsqrt(acc0)" in text  # the body, indented two under the signature
+
+
+def test_a_product_edge_shows_every_lambda_param_it_binds() -> None:
+    """One operand edge can supply several result components, so the dump names every scalar
+    substituted for that edge instead of leaving the positional binding implicit."""
+    node = Fold.projection(operands=(_product(),), body=Body((Assign(name="o", op="add", args=("acc_g", "acc_u")),)))
+    text = "\n".join(pretty(node))
+    assert "operand[acc_g, acc_u]: Fold[k in 0..256] contraction" in text
+    assert "lift: λ(acc_g, acc_u) -> (o)" in text
 
 
 def test_the_fn_branch_survives_an_empty_body() -> None:
@@ -121,7 +132,7 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     """The two inhabitants of an operand edge, told apart in the dump: the cone recurses into its
     own node, the gmem loads do not."""
     lines = pretty(_product(a=_cone()))
-    (a_line,) = [ln for ln in lines if "operand[a]:" in ln]
+    (a_line,) = [ln for ln in lines if "operand[xhat]:" in ln]
     assert "‹computed›" in a_line and "Fold  free" in a_line
     assert any("‹materialized›" in ln and "load Wg" in ln for ln in lines)
     # The cone's own body is reached BELOW the a edge — the subtree is really rendered.
@@ -172,7 +183,7 @@ def test_an_edge_is_rendered_once_not_once_per_derived_position() -> None:
     assert any(s is fold.operands[0] for s in fold.step_stmts())  # the premise: one object, two positions
     text = "\n".join(pretty(fold))
     assert text.count("Fold[kslice in 0..128] contraction") == 1
-    assert text.count("operand[a]: a_e = load x[m, kslice]") == 1
+    assert text.count("operand[a_e]: load x[m, kslice]") == 1
 
 
 def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() -> None:

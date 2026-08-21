@@ -1413,9 +1413,24 @@ def _packed_operands(
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
 
+    # The bits address through the ORIGINAL ``Load``'s own index, σ-evaluated — never a fresh
+    # spelling built from the chunk offset. That index carries whatever BASE the contraction axis
+    # picked up: a split-K partition shrinks the axis and hangs the slice's absolute base on it
+    # (``ksplit·(K/w) + k``), so a hand-built ``k0 / 2`` drops the base and every partition re-reads
+    # the FIRST slice's bytes. The block scales never had the bug because they are evaluated by
+    # rewriting the decode cone's own body, which carries the same index — this puts the bits on
+    # that footing too, which is also what ``_box_origin`` / ``_slab_index`` do for every other
+    # staged operand.
+    #
+    # One column of this slab is one BYTE, so a column step is TWO logical k: the σ substitutes
+    # ``k0 + 2·col`` and the index's own ``k / 2`` turns that back into the byte offset.
+    def _bits_at(k_expr: Expr, n_expr: Expr) -> tuple:
+        sig = Sigma({n.axis.name: n_expr, k_axis.name: k_expr, **_sibling_sigma(m)})
+        return tuple(sig.apply(e) for e in packed.bits.index)
+
     def bits_index(k0):
         def gmem(row, col):
-            return (n_coord(row), BinaryExpr("+", BinaryExpr("/", k0, two), col))
+            return _bits_at(BinaryExpr("+", k0, BinaryExpr("*", col, two)), n_coord(row))
 
         return gmem
 
@@ -1423,7 +1438,7 @@ def _packed_operands(
         tag="b",
         buf=packed.bits.input,
         shape=(n.tile, bk_elems // 2),
-        coords=lambda k0: (col_base, BinaryExpr("/", k0, two)),
+        coords=lambda k0: _bits_at(k0, col_base),
         index=bits_index,
         trans=True,
         pad_cols=pad,

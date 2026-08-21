@@ -483,3 +483,45 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
     ref = x_ref @ dequantize_nvfp4(packed, scale_bits, s2).T
     denom = max(float(np.abs(ref).max()), 1e-9)
     assert float(np.abs(y - ref).max()) / denom < tol
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma"])
+@pytest.mark.xdist_group("cuda")
+def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
+    """A SPLIT contraction axis must reach the packed bytes of ITS OWN slice.
+
+    A split partition shrinks the K axis and hangs the slice's absolute base on it, so every
+    operand's gmem address carries a ``ksplit·(K/w)`` term. The bits operand used to rebuild its
+    address from the chunk offset alone, which dropped that base: every partition re-read the
+    FIRST slice's bytes and the contraction summed the wrong weights. The block scales were
+    always right — they are evaluated by rewriting the decode cone's own body, which carries the
+    base — so the two disagreed and the result was silently wrong rather than obviously broken.
+
+    Found on an 8B serving compile, where the down projection is the one the scheduler splits;
+    every unsplit shape passes, which is why the isolated drain tests missed it.
+    """
+    import torch  # noqa: F401  — the CUDA backend needs it loaded
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import dequantize_nvfp4
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m, n, k = 16, 512, 4096
+    g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k, dtype="f16")
+    rng = np.random.default_rng(23)
+    x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
+
+    backend = CudaBackend()
+    with pinned_knobs({**_packed_pins("f16", stage), "REDUCE": "g8k"}):
+        compiled = backend.compile(g)
+    src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
+    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
+
+    data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
+    result, _ = backend.run(compiled, input_data={**data, "x": x})
+    y = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
+    ref = x.astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
+    denom = max(float(np.abs(ref).max()), 1e-9)
+    assert float(np.abs(y - ref).max()) / denom < 1e-3

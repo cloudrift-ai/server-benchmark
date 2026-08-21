@@ -194,6 +194,16 @@ class Group:
             raise ValueError(f"{self.key}: pinned rows asked of a {self.label_kind!r}-labelled group")
         return tuple(int(i) for i in np.flatnonzero(self.labels))
 
+    @property
+    def latency_us(self) -> np.ndarray:
+        """The measured µs per row — the :data:`LATENCY` label read as what the regret and correlation metrics
+        take. The twin of :attr:`pinned`, and guarded for the same reason: :attr:`labels` is storage, and
+        reading it without asking the kind is how a report ends up correlating a model's scores against a
+        column of 0/1 verification markers and publishing the number."""
+        if self.label_kind != LATENCY:
+            raise ValueError(f"{self.key}: measured latencies asked of a {self.label_kind!r}-labelled group")
+        return self.labels
+
     def with_pin(self, row: int) -> Group:
         """This group with one more verified row marked — how the golden builder merges a second golden that
         landed on an already-open pool. Copies rather than writing in place: the array is shared with whatever

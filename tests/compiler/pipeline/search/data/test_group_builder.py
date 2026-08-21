@@ -102,13 +102,22 @@ def test_every_row_is_either_grouped_or_counted():
 # --- the two label kinds -----------------------------------------------------------
 
 
-def test_a_measured_group_has_no_pinned_rows_to_offer():
-    """One array, two meanings, and asking the wrong question of it is an error rather than a plausible
-    answer. On a measured pool "which row is the answer" is a matter of degree, not of record."""
+def test_each_kind_answers_only_its_own_question():
+    """One array, two meanings, and asking the wrong one of it is an error rather than a plausible answer.
+
+    Both directions matter, and the second is the dangerous one: a rank metric handed a measured group would
+    at least be asking for something absent, but a correlation handed a PINNED group gets a perfectly
+    well-formed vector of 0/1 verification markers, correlates against it, and publishes the number."""
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(3)]
-    (group,), _ = group_measured(rows)
+    (measured,), _ = group_measured(rows)
+    pinned = Group.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
+
+    assert measured.latency_us.tolist() == [200.0, 300.0, 400.0]
+    assert pinned.pinned == (1,)
     with pytest.raises(ValueError, match="pinned rows asked of a 'latency'-labelled group"):
-        _ = group.pinned
+        _ = measured.pinned
+    with pytest.raises(ValueError, match="measured latencies asked of a 'pinned'-labelled group"):
+        _ = pinned.latency_us
 
 
 def test_pinning_reads_back_as_the_index_set_the_rank_metrics_take():

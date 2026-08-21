@@ -457,6 +457,7 @@
  "tests/serving/generation/test_generate_gpu.py::test_generate_loop_runs_end_to_end@cuda": 6.6,
  "tests/serving/generation/test_generate_gpu.py::test_generate_oracle_matches_eager_fp16@cuda": 6.5,
  "tests/serving/generation/test_generate_gpu.py::test_slice_last_logits_lowers_cold@cuda": 5.5,
+ "tests/serving/generation/test_generate_loop.py::test_slice_last_logits_wrapper_matches_full_logits": 5.0,
  "tests/serving/generation/test_runner_batched_gpu.py::test_runner_batched_matches_eager@cuda": 8.4,
  "tests/serving/generation/test_runner_batched_gpu.py::test_runner_batched_symbolic_matches_eager@cuda": 13.1,
  "tests/serving/test_moe_split.py::test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals": 0.1,

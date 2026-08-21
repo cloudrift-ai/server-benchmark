@@ -1,8 +1,9 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Verification refresh of 2026-08-19 on a
-second 16× V100 SXM3 host. Emmy serving remains ineligible: the DeepSeek V4 compressor and hyper-connection path has
-no executable external-attention serving ABI, so `EMMY_FAST_MATH` is not set and there is no Emmy comparison lane.
+Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Reverified 2026-08-21 on 16× V100 SXM3 at
+repository revision `fd7b09041`. Emmy serving remains ineligible: the DeepSeek V4 compressor and hyper-connection
+path has no executable external-attention serving ABI, so `EMMY_FAST_MATH` is not set and there is no Emmy
+comparison lane.
 
 ## Qualified deployment
 
@@ -32,7 +33,7 @@ ensure `nvidia-fabricmanager` matching the driver is running first.
 
 ## Best recipe performance
 
-Measured 2026-08-19 with the pinned 1,048,576-context recipe at repository revision `12bb850e`. Four client repeats;
+Measured 2026-08-21 with the pinned 1,048,576-context recipe at repository revision `fd7b09041`. Four client repeats;
 the first primes the prompt set after deployment and is excluded. Each repeat used eight unique 1,024-token prompts at
 concurrency 8 and requested 64 output tokens with greedy decoding and ignored EOS. All 24 reported requests completed
 with exact token counts. Spread is the population standard deviation across the three steady repeats.
@@ -40,22 +41,19 @@ with exact token counts. Spread is the population standard deviation across the 
 | Metric | Three-repeat mean ± standard deviation |
 | --- | ---: |
 | Successful / failed requests | 24 / 0 |
-| Benchmark duration | 16.5267 ± 0.0492 s |
-| Request throughput | 0.4833 ± 0.0047 requests/s |
-| Output throughput | 30.9800 ± 0.0942 tokens/s |
-| Total token throughput | 526.6367 ± 1.6402 tokens/s |
-| Mean TTFT | 3,838.67 ± 26.92 ms |
-| Mean TPOT / ITL | 201.360 ± 0.493 ms |
+| Benchmark duration | 16.6300 ± 0.0787 s |
+| Request throughput | 0.4800 ± 0.0000 requests/s |
+| Output throughput | 30.7933 ± 0.1482 tokens/s |
+| Total token throughput | 523.5033 ± 2.4875 tokens/s |
+| Mean TTFT | 3,465.04 ± 260.39 ms |
+| Mean TPOT / ITL | 208.453 ± 3.042 ms |
 
-This is about 9% below the 2026-08-11 qualification on the previous 16× V100 host (driver 580.173.02), which measured
-34.1830 ± 0.2886 output tokens/s. Decode cost is nearly unchanged (TPOT 201.36 ms vs 195.949 ms, +2.8%); essentially
-all of the gap is prefill (TTFT 3,838.67 ms vs 2,580.88 ms, +48.7%). Both runs are internally stable, so this is a
-machine-level difference rather than noise; the two runs differ in both host and driver version, and this evidence
-cannot separate them.
+Throughput is unchanged from the 2026-08-19 measurement (30.9800 ± 0.0942 tokens/s) across 16 merged pull requests.
+TTFT reads about 10% lower and TPOT about 3% higher, but the steady TTFT spread grew from 27 ms to 260 ms, so those
+two distributions overlap and neither shift is established here. The engine image is byte-identical between the runs.
 
-The recipe's zero-JIT intent is not fully met. Eight Triton kernels JIT-compile once during the first repeat's
-warm-up — including the prefill-metadata and SM70 quantized-attention paths — and none recurs, so they cost the
-priming repeat only. The per-kernel list is in the experiment report.
+The recipe's zero-JIT intent is still not fully met: eight Triton kernels JIT-compile once during the first repeat's
+warm-up and none recurs, so they cost the priming repeat only.
 
 ## Context and accuracy
 
@@ -116,7 +114,7 @@ therefore ran against the committed inventory rather than a freshly re-derived o
 | --- | --- | --- |
 | Repository-level validation | committed file | passes |
 | Strict decode of every realization | committed file | 279 / 279 |
-| Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0, 3 min 54 s |
+| Reconstruct and lower every target | Tesla V100-SXM3-32GB (sm_70) | 279 / 279, exit 0, 3 min 16 s |
 
 ### `REDUCE=g2a`: a validator false negative, now fixed and re-measured
 
@@ -151,38 +149,54 @@ Each row keeps its `g2a` knobs — the configuration is real and ties with greed
 runs on each side. Across the file, realizations materially slower than greedy fall from 41 to 11, and the remaining
 eleven are sub-microsecond pointwise kernels.
 
-### Tuning: equal-budget hybrid versus MCTS-only
+### Tuning: equal-budget hybrid versus MCTS-only (2026-08-21, whole model)
 
-Scope: the 9 `g2a` realizations. The other 270 are at or above greedy and carry no headroom, and a full 279-target arm
-measured out at roughly ten hours per arm. This is a scoped kernel result, not a whole-model performance claim.
+The previous round had to scope its A/B to nine targets because `emmy tune` re-validated and rewrote the whole
+document on every incremental persist. With that fixed upstream, both arms now sweep the **entire 279-target
+inventory** at roughly 15 measured rows per minute against about 3.4 before — 1 h 18 m per arm instead of an
+estimated ten hours.
 
-Both arms started from the same inventory-only base (no knobs, timings, or ranking), an empty tune DB and online prior,
-separate empty cubin caches, `--max-candidates 8`, `--patience 4`, `--seed 731`, 9 GPUs, same compiler revision, MCTS
-arm first. The hybrid arm added 4 knob proposals per target, each reserving a candidate slot before MCTS. MCTS
-completed 9/9 targets with 145 benches; hybrid 9/9 with 171. On the O1 ranking lane MCTS produced the better candidate
-on 6 targets, hybrid on 1, with 2 ties.
+Both arms started from the same inventory-only base (no knobs, timings, or ranking), an empty tune DB and online
+prior, separate empty cubin caches, `--max-candidates 8`, `--patience 4`, `--seed 731`, all 16 GPUs, same compiler
+revision, MCTS arm first. The hybrid arm added 18 knob proposals across 8 realizations, each reserving a candidate
+slot before MCTS. The arms came out closely matched, which is what makes the comparison fair:
 
-The O1 ranking lane misranks this model badly, so every conclusion below is from repeated deployable O3 measurement:
+| Arm | Wall clock | Benches | Measured rows | ok / bench_fail | Prior calibration |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MCTS-only | 1:17:57 | 9,156 | 3,312 | 2,279 / 1,033 | +0.96 |
+| Hybrid | 1:18:56 | 9,200 | 3,343 | 2,296 / 1,047 | +0.93 |
 
-| Target | Candidate | O3 run 1 | O3 run 2 |
-| --- | --- | ---: | ---: |
-| `model-seam.k_linear_db1eb0` | greedy (isolated) | 2,854.9 µs | 2,855.9 µs |
-| | MCTS winner `TILE=f2x8, WORK=t64x8` | 2,804.7 µs | 2,510.8 µs |
-| | **hybrid proposal `REDUCE=coop, WORK=t128`** | **1,014.8 µs** | **902.1 µs** |
-| `layer0.i003.k_linear_reduce_f6a146` | greedy (isolated) | 910.3 µs | 910.3 µs |
-| | MCTS winner `TILE=f1x2, WORK=t32x8` | 2,526.2 µs | 2,520.1 µs |
-| | hybrid `REDUCE=coop, TILE=f2x2, WORK=t16x8` | 2,367.5 µs | 2,487.3 µs |
-| `layer3.i064.k_linear_reduce_f6a146` | greedy (isolated) | 912.4 µs | 909.3 µs |
-| | MCTS winner `TILE=f1x2, WORK=t32x8` | 2,401.3 µs | 2,522.1 µs |
+**Outcome: no winner, and nothing promoted.** Across 279 targets the O1 ranking lane put hybrid ahead on 44, MCTS
+ahead on 44, and tied the remaining 169. The golden is unchanged by this round.
 
-The hybrid proposal wins decisively on the one target with real headroom — 2.8–3.2× faster than greedy and about
-2.5× faster than the MCTS-only winner — and it is exactly the hypothesis the `g2a` evidence suggested: drop `g2a`
-and use the cooperative reduce with a thread work inventory. It is promoted into the golden with its two O3
-measurements.
+That result is less interesting than why. After the previous round resolved the `g2a` cluster, this golden loses
+19.2 ms to greedy in total, and **19.2 ms of it sits in one realization** — `model-seam.k_linear_d74dc7` at 0.876×
+(154.2 ms against greedy's 135.0 ms). Every other slower-than-greedy row is under 3 µs. It is also the last
+`model-seam` row still on the Volta MMA warp tile, while its winning siblings all use a cooperative reduce over a
+thread work inventory — the same swap that won 2.82× on `k_linear_db1eb0` last round. So the hybrid arm proposed
+exactly that.
 
-The eight `k_linear_reduce_f6a146` realizations keep their `g2a` knobs. No searched or proposed candidate beat
-greedy there, and once the validator fix let the incumbent bench, `g2a` measured as a tie with greedy on all
-eight — so the recorded configuration stands and only its stale measurements needed refreshing.
+**Every candidate for that target was killed by a watchdog rather than measured.** In the tune lane the proposals hit
+the 2.0 s GPU-time budget; only the alternative MMA work shape survived, at 176.2 ms, worse than the incumbent. The
+O3 verification lane cannot settle it either: there the *greedy baseline itself* exceeds the 100 s wall budget and is
+SIGKILL'd, so the run produces no comparable output at all. This kernel is simply too large for the budgets the
+benchmark harness applies, and its 19.2 ms of headroom is currently unreachable by tuning — not refuted, unmeasurable.
+
+**Bench failures.** About 31% of rows in each arm failed to bench, near-identically in both, so they do not bias the
+comparison:
+
+| Class | MCTS | Hybrid |
+| --- | ---: | ---: |
+| nvcc compile failed | 451 | 462 |
+| bench worker exceeded the 16 s wall budget | 434 | 460 |
+| benchmark run exceeded the 2.0 s GPU-time budget | 137 | 129 |
+| hung kernel | 7 | 3 |
+
+Every one of the nvcc failures is the same defect: generated CUDA for a `k_div_*` kernel emits `float v0 = in0 + in2;`
+where `in0` was never declared, and nvcc rejects it (2,173 occurrences in the hybrid log, one kernel family, no other
+compiler message). It reaches only searched variants — the golden's own recorded configurations compile and replay
+cleanly — so it costs search coverage rather than deployed correctness. Knob values do not separate failing from
+passing rows and all 462 failing rows are distinct ops, so the trigger is structural to that kernel family.
 
 ### Reproducing the compiler work
 

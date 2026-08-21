@@ -1,0 +1,11 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: openbmb/MiniCPM5-1B
+  rationale: "Modest edge demand without trending signals."
+  heat: 45
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 1

@@ -1,11 +1,3 @@
-from emmy.compiler.pipeline.search.prior.fit.group import (
-    DEFAULT_FEATURES,
-    MATMUL_FEATURES,
-    TREE_FEATURES,
-    Group,
-    feature_matrix,
-    feature_view,
-)
 from emmy.compiler.pipeline.search.prior.fit.linear import (
     DEFAULT_L2,
     LinearFit,
@@ -20,19 +12,13 @@ from emmy.compiler.pipeline.search.prior.fit.linear import (
 from emmy.compiler.pipeline.search.prior.fit.rank import best_dual_rank, best_rank, dual_rank, rank_of_golden, topk_table
 
 __all__ = [
-    "DEFAULT_FEATURES",
     "DEFAULT_L2",
-    "MATMUL_FEATURES",
-    "TREE_FEATURES",
-    "Group",
     "LinearFit",
     "LinearTrainer",
     "best_dual_rank",
     "best_rank",
     "dual_rank",
     "eval_weights",
-    "feature_matrix",
-    "feature_view",
     "fit_weights",
     "gate_columns",
     "l2_penalty",

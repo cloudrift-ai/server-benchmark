@@ -17,11 +17,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
 from emmy.compiler.pipeline.search.prior.fit.catboost import CatBoostTrainer
-from emmy.compiler.pipeline.search.prior.fit.group import Group
 
 FEATURES = ("D_a", "D_b")
 

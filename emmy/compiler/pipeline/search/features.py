@@ -3,7 +3,8 @@
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
 :func:`tile_signature` is the schema-agnostic structural identity used to join golden YAML rows
-against enumerated candidates. Lives in the same package as :mod:`.space` so the whole search space
+against enumerated candidates; :data:`ROUTING_FEATURES` and :func:`is_dynamic_row` are the routing stamp's
+spelling and its one reader. Lives in the same package as :mod:`.space` so the whole search space
 (dimensions × values × encoding) is analyzable in one place; the ``Knob`` descriptor / registry /
 env plumbing stays in :mod:`~emmy.compiler.pipeline.knob`.
 """
@@ -49,6 +50,23 @@ from emmy.compiler.pipeline.knob import (
 # Until then: the prior loses the ``ring`` signal (collinear with ``depth >= 2 AND async``, so no
 # real loss) and cannot price ``split`` (weightless, scores 0 — and nothing enumerates it yet).
 FEATURIZER_VERSION = 3
+
+# The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
+# a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
+# spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
+# (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
+# descent because a pool-constant term cancels out of a within-pool ranking).
+ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
+
+
+def is_dynamic_row(feats: dict) -> bool:
+    """Whether a featurized row carries the symbolic-axis (masked-tile) routing stamp — the ONE reading of it.
+
+    What the stamp SELECTS is the reader's business: the linear model routes to a second weight vector
+    (``LinearModel.weight_set``), a tree splits on the column, and ``ShapeKey.is_dyn`` records it as part of a
+    shape's identity. All three ask this one question, because a second spelling of "is the stamp set" would be
+    a second chance to disagree about which regime a pool belongs to."""
+    return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
 
 def _row_values(knobs: dict) -> tuple:

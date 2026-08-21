@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from emmy.compiler.pipeline.search.features import is_dynamic_row
+
 
 @dataclass(frozen=True)
 class ShapeKey:
@@ -162,7 +164,7 @@ class ShapeKey:
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
             is_warp=kind == "fused" or f8 or not s.get("S_dtype_f32", 0),
-            is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
+            is_dyn=is_dynamic_row(s),
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
             dtype_class="f8" if f8 else "",

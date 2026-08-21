@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import statistics
 
-from emmy.compiler.pipeline.search.prior.fit.group import Group
+from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import best_dual_rank
 
 TOP_KS = (1, 10, 25, 50, 100)

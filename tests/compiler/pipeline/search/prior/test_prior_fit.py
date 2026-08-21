@@ -17,13 +17,12 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from emmy.compiler.pipeline.search.data.group import Group, feature_matrix
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
-    Group,
     LinearFit,
     LinearTrainer,
-    feature_matrix,
     fit_weights,
     gate_columns,
     mean_log_rank,

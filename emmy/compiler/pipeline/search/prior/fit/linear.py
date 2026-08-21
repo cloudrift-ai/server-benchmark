@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.prior.fit.group import Group
+from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,

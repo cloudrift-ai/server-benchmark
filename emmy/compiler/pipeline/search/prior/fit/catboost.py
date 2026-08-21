@@ -42,8 +42,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
-from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 
 logger = logging.getLogger(__name__)

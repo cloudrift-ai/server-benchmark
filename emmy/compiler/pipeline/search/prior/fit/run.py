@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import logging
 
+from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_folds
-from emmy.compiler.pipeline.search.prior.fit.group import Group
 
 
 def run_fit(groups: list[Group], skipped: list[tuple[str, str, str]], *, trainer, fold_trainer, folds, header):

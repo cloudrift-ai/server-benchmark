@@ -227,20 +227,17 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     )
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
-    # One profile per distinct (mlp, attention) pairing; the attention sublayer is the fork's, so the
-    # attention type only names the profile — every twin carries the same seam shapes.
-    suffixes = ("-hash_moe-sliding", "-moe-heavily-compressed", "-moe-compressed-sparse")
-    assert set(graphs) == {f"{half}{width}{suffix}" for half in ("pre", "post", "expert") for width in ("4", "-sym") for suffix in suffixes}
-    for suffix in suffixes:
-        pre, post, expert = (graphs[f"{half}4{suffix}"] for half in ("pre", "post", "expert"))
-        assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
-        assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
-        assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
-        assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
-        assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
-        sym = graphs[f"pre-sym{suffix}"]
-        token_dim = sym.nodes[sym.inputs[0]].output.shape[0]
-        assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
+    # The attention sublayer is the fork's and routing runs outside the twins, so the three attention kinds and two
+    # router kinds of this config all compile the same programs: ONE profile, not one per (mlp, attention) pairing.
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")}
+    pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
+    assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
+    assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
+    assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
+    token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
+    assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
 def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():

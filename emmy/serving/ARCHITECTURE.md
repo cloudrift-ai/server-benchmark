@@ -110,10 +110,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`hyper_connection_seam` in `compiler/trace/huggingface.py`): the carrier is the `hc_mult` hyper-connection residual
   streams flattened to `[num_tokens, hc_mult * hidden]`, `pre` emits the normalized `[num_tokens, hidden]` input of the
   1Cat fork's paged MLA attention and `post` takes that sublayer's output back, with the routed experts on the
-  ordinary third seam. Its twins are named per distinct (MLP, attention) pairing (`-hash_moe-sliding`,
-  `-moe-heavily-compressed`, `-moe-compressed-sparse`); the attention type only names the profile, since the
-  attention sublayer itself is the fork's. The checked-in V100 golden was traced as full layers (`emmy trace
-  --layer`), so the first release gate on the host must record these serving forms before the image can warm.
+  ordinary third seam. The pinned checkpoint pairs its layers four ways (hash/top-k router × sliding/HCA/CSA
+  attention), but none of that reaches the twins — the attention sublayer is the fork's and the router runs outside
+  the programs — so `_layer_signatures` folds every hyper-connection layer into ONE profile (`pre-sym`, `post-sym`,
+  `expert-sym`) and the post twin is lowered once, not once per pairing. The checked-in V100 golden was traced as full
+  layers (`emmy trace --layer`), so the first release gate on the host must record these serving forms before the
+  image can warm; on that host the `pre`/`expert` forms realize in minutes while the `post` twin's lowering sits in
+  the Loop splicer's merge-region dependency resolution for hours — the fresh-trace stall the recipe's RESULTS.md
+  already records for full DeepSeek V4 layers.
   For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific

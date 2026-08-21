@@ -1018,6 +1018,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         # DeepSeek V4 clamps both SwiGLU branches before the activation (``swiglu_limit``); OLMoE has no limit.
         limit = getattr(experts, "limit", None)
         limit = None if limit is None else float(limit)
+        if limit is not None and not limit > 0:
+            raise ValueError(f"build_moe_split_wrapper: expert clamp limit must be positive, got {limit!r}")
 
         class ExpertFFN(nn.Module):
             # OLMoE / DeepSeek: (out, in) weights applied via F.linear; gated activation, optionally clamped.

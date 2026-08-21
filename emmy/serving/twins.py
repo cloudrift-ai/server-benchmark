@@ -241,7 +241,7 @@ def _profile_layers(trunk, config) -> list[tuple[int, object, str]]:
 
 def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
     """The construction-relevant per-layer fields that select a serving program."""
-    from emmy.compiler.trace.huggingface import moe_block_parts  # noqa: PLC0415
+    from emmy.compiler.trace.huggingface import hyper_connection_seam, moe_block_parts  # noqa: PLC0415
 
     types = list(getattr(config, "layer_types", None) or [])
     mlp_types = list(getattr(config, "mlp_layer_types", None) or [])
@@ -252,9 +252,15 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
 
     out = []
     for i, block in enumerate(trunk.layers):
+        inferred_heads, _width = _attention_query_layout(block.self_attn)
+        if hyper_connection_seam(block) is not None:
+            # The attention sublayer is the fork's and the router runs outside the twins, so every
+            # DeepSeek V4 layer compiles the same pre/post/expert programs whatever its attention
+            # (sliding/HCA/CSA) or router (hash/top-k) kind: one profile, lowered once.
+            out.append(("sparse", "hyper_connection", int(inferred_heads)))
+            continue
         attn = at(types, i, "homogeneous")
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
-        inferred_heads, _width = _attention_query_layout(block.self_attn)
         nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))
     return out

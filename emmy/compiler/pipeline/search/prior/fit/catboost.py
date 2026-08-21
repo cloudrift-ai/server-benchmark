@@ -29,10 +29,9 @@ A further round instead mines **hard negatives** — the rows the current model 
 implemented and reachable (``--rounds 2``) but OFF by default, because the one measurement of it says it hurts;
 :data:`DEFAULT_ROUNDS` carries the numbers and the likely reason.
 
-The routing feature (``S_ext_n_symbolic_axis``) is an ordinary column here, re-added from ``Group.dynamic``,
-which :meth:`~.group.Group.from_dicts` holds out of the matrix so it can never become a linear descent
-coordinate. For a tree it is simply a feature to split on — one model prices both regimes, where the linear model
-needs a second weight set.
+The routing feature (``S_ext_n_symbolic_axis``) is an ordinary packed column here, read like any other.
+For a tree it is simply a feature to split on — one model prices both regimes, where the linear model needs a
+second weight set and therefore narrows the column out (:func:`~..linear_model.descent_cols`).
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ import numpy as np
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
-from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +90,6 @@ class CatBoostTrainer:
     random_state: int = 0
     scale: float = DEFAULT_SCALE
 
-    @property
-    def cols(self) -> tuple[str, ...]:
-        """The model's column order: the feature view plus the routing stamp the dataset holds out of its
-        matrix. Spelled once, so the training matrix and the deployed model's ``cols`` cannot disagree."""
-        return (*self.feature_names, *ROUTING_FEATURES)
-
     def fit(self, groups: list[Group]) -> CatBoostFit:
         """Fit over ``groups``, mining hard negatives across :attr:`rounds`.
 
@@ -106,7 +98,7 @@ class CatBoostTrainer:
         rounds they have survived, and the point of mining is to shift the distribution, not to accumulate
         emphasis on the first draw."""
         rng = np.random.default_rng(self.random_state)
-        cols = list(self.cols)
+        cols = list(self.feature_names)
         pools = [g.matrix(cols, fill=ABSENT) for g in groups]
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
@@ -186,7 +178,7 @@ class CatBoostTrainer:
             nan_mode="Min",  # absent (NaN) features get their own split-off bucket — see catboost_model
         )
         booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)))
-        return CatBoostModel(booster=booster, cols=self.cols, scale=self.scale)
+        return CatBoostModel(booster=booster, cols=self.feature_names, scale=self.scale)
 
 
 @dataclass(frozen=True)

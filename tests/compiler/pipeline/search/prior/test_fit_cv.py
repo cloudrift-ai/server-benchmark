@@ -31,7 +31,7 @@ from emmy.compiler.pipeline.search.prior.fit import (
 )
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
 
 # --- feature view ------------------------------------------------------------------
 
@@ -255,15 +255,16 @@ def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
 
 
 def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
-    """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. A ``dyn``
-    case carries the routing stamp on every row, exactly as the golden case builder writes it —
-    that stamp, not the tier label, is what puts the group on the dynamic weight set.
+    """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. EVERY case
+    carries the routing stamp on every row, as the featurizer writes it (``passes/identity._extents``
+    emits the key unconditionally, 0.0 when no axis is symbolic) — that stamp's VALUE, not the tier
+    label, is what puts the group on the dynamic weight set.
 
     ``pinned`` is the pool's positive row, or several of them (a pool the builder matched more than
     one golden into). ``shape`` is the fold group; it defaults to the name with any ``.dynM`` suffix
     stripped, which mirrors what the builder does for real: a dynamic golden enumerates its static
     twin's pool, so the twins share a group."""
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if tier == "dyn" else {}
+    stamp = {"S_ext_n_symbolic_axis": 1.0 if tier == "dyn" else 0.0}
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
     shape = shape or name.removesuffix(".dynM")
     return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
@@ -286,17 +287,23 @@ def _cases():
 
 
 def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
-    """``S_ext_n_symbolic_axis`` picks the weight set and is then held OUT of the fitted matrix.
+    """``S_ext_n_symbolic_axis`` picks the weight set, is PACKED like any other column, and is narrowed
+    out by the linear model class rather than by the dataset.
 
-    Holding it out is structural, not a feature-view choice: the stamp is constant across a pool, so
-    a weight on it shifts every candidate equally and cancels out of the within-shape ranking. The
-    rank objective cannot see it, which makes any value a descent lands on there noise — so it must
-    not be reachable as a coordinate at all."""
+    A weight on it would be noise — the stamp is constant across a pool, so a term on it shifts every
+    candidate equally and cancels out of the within-shape ranking, leaving its value to the regularizer.
+    That is a fact about additive models, though, not about the data: a tree splits on the regime
+    happily. So the dataset packs the column and :func:`descent_cols` withholds it from the descent,
+    which is what keeps the two model classes from constraining each other."""
     static, dyn = _case("m.512", "warp", "gpuA"), _case("m.512.dynM", "dyn", "gpuA")
     assert (static.dynamic, dyn.dynamic) == (False, True)
+    # Packed, and carrying the real stamp — not a name the matrix cannot fill. A NaN column here rather
+    # than 1.0 is the train/serve skew this replaced: live candidates always carry the value.
+    assert "S_ext_n_symbolic_axis" in dyn.feat_names
+    assert (dyn.matrix(["S_ext_n_symbolic_axis"], fill=np.nan) == 1.0).all()
     for case in (static, dyn):
-        assert "S_ext_n_symbolic_axis" not in case.feat_names
         assert case.feats.shape[1] == len(case.feat_names)
+        assert "S_ext_n_symbolic_axis" not in descent_cols(case.feat_names)
     # The tier decides nothing, but it still has to AGREE: it and the stamp are the same fact arriving
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
     # under the wrong weight set with nothing reporting it.
@@ -304,6 +311,18 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
         Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
     with pytest.raises(ValueError, match="disagree about the weight set"):
         Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
+
+
+def test_a_routing_feature_may_never_carry_a_fitted_weight():
+    """The guard that replaced the structural one. While the dataset withheld the routing column, no descent
+    could reach it; now that every column is packed, the rule is enforced where a violation would do harm —
+    a routing weight in a shipped artifact becomes an additive term on every live candidate. Checking at
+    construction catches every route in, a hand-edited artifact included."""
+    for field in ("weights", "weights_dynamic"):
+        sets = {"weights": {"D_a": 1.0}, "weights_dynamic": {"D_a": 1.0}}
+        sets[field] = {**sets[field], "S_ext_n_symbolic_axis": 0.5}
+        with pytest.raises(ValueError, match="never contributes a term"):
+            LinearModel(scale=0.1, atomic_free_weight=0.0, atomic_free_split_threshold=4.0, **sets)
 
 
 def test_matrix_fill_declares_the_absent_semantics():

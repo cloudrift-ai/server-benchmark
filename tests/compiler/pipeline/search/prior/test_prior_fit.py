@@ -44,7 +44,7 @@ _INTERACTION_FEATURES = {"D_finalize_kernel", "D_splitk"}
 
 def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
     """A small fixed case set in the fitter's input shape (:class:`Group`), with sparse
-    rows so the absent-feature = 0.0 path (the matrix packing's zero columns) is live."""
+    rows so the absent-feature path (the matrix packing's fill columns) is live."""
     rng = np.random.default_rng(seed)
     names = [f"D_f{i}" for i in range(n_feats)]
     cases = []
@@ -54,12 +54,14 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
             row = {n: float(rng.integers(-4, 5)) for n in names}
             feats.append({k: v for k, v in row.items() if rng.random() > 0.25})
         tier = ["thread", "warp", "reduce", "dyn"][c % 4]
-        # The dynamic cases carry the routing stamp on every row, as the golden case builder writes
-        # it; ``Group.from_dicts`` lifts it into ``Group.dynamic`` and out of the fitted matrix.
-        if tier == "dyn":
-            feats = [{**f, "S_ext_n_symbolic_axis": 1.0} for f in feats]
+        # EVERY pool carries the routing stamp, as the featurizer writes it (``passes/identity._extents``
+        # emits the key unconditionally, 0.0 when no axis is symbolic) — a static pool stamps 0.0, it does
+        # not omit the key. ``Group`` packs it like any other column and the linear trainer narrows it out.
+        feats = [{**f, "S_ext_n_symbolic_axis": 1.0 if tier == "dyn" else 0.0} for f in feats]
         cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", f"shape{c}", int(rng.integers(0, n_rows)), feats))
-    return cases, names
+    # The feature list the trainer is given is the union of the PACKED columns, exactly as
+    # ``commands/fit.py`` builds it — so it includes the routing stamp, and the fit has to narrow it out.
+    return cases, sorted({n for c in cases for n in c.feat_names})
 
 
 # The incumbent a synthetic fit chains from: no weights to warm-start (the fits below set
@@ -90,6 +92,10 @@ def test_fit_twice_is_byte_identical():
     assert a == b
     art = json.loads(a)
     assert art["weights"] and art["weights_dynamic"]  # a real fit, not an empty pass-through
+    # The trainer was handed the routing stamp among its feature names (the union of packed columns) and
+    # must not have fitted a weight for it: constant within a pool, so any value there is noise, and it
+    # would become an additive term on every symbolic-axis kernel in the cross-kernel price sum.
+    assert not {n for n in (*art["weights"], *art["weights_dynamic"]) if n.startswith("S_ext")}
 
 
 def test_one_trainer_instance_refits_identically():

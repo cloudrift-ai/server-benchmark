@@ -428,8 +428,9 @@ What a newcomer needs to know about the fit:
   the prior object). A weight key that is no longer used, inside an artifact of the current version, is
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
-  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**, and the fit holds it out of
-  the feature matrix structurally rather than by feature view. The reason is identifiability: the stamp is constant
+  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**: the dataset packs it like
+  any other column, and the linear fit narrows it out of its own descent coordinates (`descent_cols`) while a tree
+  splits on it to price both regimes in one model. The reason is identifiability: the stamp is constant
   across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
   ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
   noise rather than a fitted quantity.

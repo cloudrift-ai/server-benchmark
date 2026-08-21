@@ -31,13 +31,13 @@ there is decided by the regularizer and noise. It routes; it is never a coordina
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, ROUTING_FEATURES, is_dynamic_row
+from emmy.compiler.pipeline.search.prior.base import latency_proxy
 
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
@@ -176,12 +176,10 @@ class LinearModel:
         """Latency proxy (``exp(-scale · quality)``), lower is better. A row the weights have no opinion on
         scores the neutral ``1.0``, so ties fall to enumeration order.
 
-        The clip is on the exp ARGUMENT, never the quality: a former ±80 quality clip sat inside the live range
-        (at scale 0.1 thousands of good warp tiles score past 80), so the whole good region collapsed onto one
-        ``exp(-8)`` plateau and greedy's argmin fell through to emission order. Within ±700 the proxy stays
-        strictly ordered; beyond it ``exp`` would overflow or underflow anyway. Consumers needing a BOUNDED value
-        (the ``FallbackPrior`` tilt multiplier) clamp on their side."""
-        return math.exp(max(min(-self.scale * self.quality(feats), 700.0), -700.0))
+        The transform, its exponent bound and the warning that bound fires live in
+        :func:`~.base.latency_proxy` — one definition, so this model class and the tree cannot drift on what a
+        deployed score means."""
+        return latency_proxy(self.quality(feats), self.scale)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score_features`, element-wise — this model has no vectorized per-dict path, and

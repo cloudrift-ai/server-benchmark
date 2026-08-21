@@ -35,6 +35,7 @@ blend that measurement showed to be inert.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -70,6 +71,51 @@ _O3_OPT = 3.0
 CALIBRATION_MIN = 0.5
 # Minimum rows an op group needs to contribute to the calibration median (smaller groups are noise).
 _CALIBRATION_MIN_GROUP = 8
+
+
+# The exponent bound for :func:`latency_proxy`. ``exp`` overflows a float64 just past 709.8, so this is a
+# float-representation boundary rather than a modelling choice, and it is one the shipped artifact cannot
+# approach: over all 1377 recorded goldens its quality spans 0 to 277, an exponent of at most 27.7.
+#
+# It is reachable only by a weight vector nothing bounds. The rank objective is indifferent to that vector's
+# MAGNITUDE — scaling it preserves every ordering — so the raw-space L2 is the only thing that pins it, which
+# is why ``--l2``'s help calls it a tie-breaker rather than a shrinkage term. ``--l2 0`` removes it.
+PROXY_CLIP = 700.0
+
+# Warn once per process. If this fires at all the run is already producing garbage rankings, and a pool holds
+# ~78k rows — a line each would bury the finding under itself.
+_clip_warned = False
+
+
+def latency_proxy(quality: float, scale: float) -> float:
+    """``exp(-scale · quality)`` — the latency proxy BOTH model classes return from ``mean_score_features``,
+    so the two cannot drift on the transform that turns a ranking quality into a deployed score. Lower is
+    better, matching the online prior's predicted µs, which is what lets one greedy argmin and one policy
+    normalization consume either model.
+
+    Clipping is the last resort and it is LOUD, because a clipped exponent silently destroys a ranking: every
+    row past the bound lands on the same float, and a greedy argmin over a plateau of equal scores falls
+    through to enumeration order. That is not hypothetical — it is the 2026-07 incident, caused by a ±80 clip
+    on the QUALITY, which sat inside the live range and collapsed the whole good region onto one ``exp(-8)``
+    value. Moving the bound onto the exponent put it two orders of magnitude outside anything reachable; the
+    warning is what makes a return to that regime visible instead of silent.
+
+    Consumers needing a BOUNDED value (the ``FallbackPrior`` tilt multiplier) clamp on their side."""
+    global _clip_warned
+    arg = -scale * quality
+    if not -PROXY_CLIP <= arg <= PROXY_CLIP:
+        if not _clip_warned:
+            _clip_warned = True
+            logger.warning(
+                "[prior] latency proxy exponent %.1f is outside +/-%.0f and was clipped — every row past the "
+                "bound now scores identically, so this ranking is decided by enumeration order, not by the "
+                "model. The shipped artifact peaks near 28; a weight vector this large means a fit with no "
+                "effective L2 (--l2 0) or a hand-edited artifact.",
+                arg,
+                PROXY_CLIP,
+            )
+        arg = max(min(arg, PROXY_CLIP), -PROXY_CLIP)
+    return math.exp(arg)
 
 
 def normalize_policy(scores: list[float]) -> list[float]:

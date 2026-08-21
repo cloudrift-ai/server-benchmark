@@ -1,12 +1,11 @@
 """``Group`` — one candidate pool plus its labels: the comparison set every ranking question is asked over.
 
 A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. Today
-that supervision is a SET of pinned verified-optimum rows (``pinned`` — the row indices of every golden the
-builder matched into this pool); the planned measurement-freeze datasets add per-row measured labels when they
-land, so builders other than the golden case builder can populate groups from measurement sources. Groups are
-built by plain functions (the golden builder lives in ``emmy/commands/fit.py`` — case building needs the snippet
-tracer, which ``pipeline/`` must not import) and consumed by trainers and the CV harness through this one shape;
-there is no iterator/batching layer — the whole dataset is a small in-memory list.
+that supervision is one of two kinds and :attr:`label_kind` says which: the rows a golden verified, or the
+latency every row measured. Groups are built by plain functions — :func:`group_measured` below for benched rows,
+and the golden one in ``emmy/commands/fit.py``, because case building needs the snippet tracer that ``pipeline/``
+must not import — and are consumed by the trainers and the fold harness through this one shape; there is no
+iterator/batching layer, the whole dataset is a small in-memory list.
 
 It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
 fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and
@@ -36,12 +35,19 @@ the answer.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row
+from emmy.compiler.pipeline.search.data.freeze import freeze_reason
+from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
+
+# What a group's ``labels`` array means. Fixed by the builder that made the group and never mixed: a pool is
+# either a golden's candidate set (which rows someone verified) or a measured set (what each row cost).
+PINNED = "pinned"
+LATENCY = "latency"
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -144,17 +150,27 @@ class Group:
     name: str
     tier: str
     gpu: str
-    # The cross-validation fold group: this pool's extent identity, spelled by the builder from the source
-    # record's ``ShapeKey``. Goldens sharing it compete over the same candidates, so they must be held out
-    # TOGETHER by the fold harness. Unlike ``gpu`` (a report axis) this decides folds; unlike
-    # ``tier`` (a label) it is load-bearing.
+    # The cross-validation fold group: this pool's extent identity — spelled by the golden builder from the
+    # source record's ``ShapeKey``, and by :func:`group_measured` as the op's own signature. Goldens sharing it
+    # compete over the same candidates, so they must be held out TOGETHER by the fold harness. Unlike ``gpu``
+    # (a report axis) this decides folds; unlike ``tier`` (a label) it is load-bearing.
     shape: str
     dynamic: bool
-    # The verified-optimum rows of this pool, ascending: every golden the builder matched into it. Deploy ships
-    # ONE config, so any of them ranked first is a win — which is why the fit's per-group term is the best rank
-    # over this set, and the reported one the matching dual rank. At one positive both collapse to the
-    # single-golden functions exactly.
-    pinned: tuple[int, ...]
+    # ONE label per row, and :attr:`label_kind` says what the numbers mean. The two kinds are never wanted
+    # together — a pool is either a golden's candidate set, where what is known is WHICH rows someone verified,
+    # or a measured set, where every row carries its own latency — so this is one array rather than two
+    # optional ones, and the kind is fixed by whichever builder made the group.
+    #
+    # :data:`PINNED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere. Several goldens can land on one
+    # pool (the same shape recorded twice, or under two names), so this is a SET. Deploy ships one config, so
+    # any of them ranked first is a win — which is why the fit's per-group term is the best rank over the set,
+    # and the reported one the matching dual rank. At one positive both collapse to the single-golden functions
+    # exactly. Read the indices through :attr:`pinned`.
+    #
+    # :data:`LATENCY`: the row's measured µs, lower = faster. This is what the regret and correlation metrics
+    # take, and it is only ever populated from rows that were actually benched.
+    labels: np.ndarray = field(repr=False)
+    label_kind: str
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
     # The size of the candidate pool ``feats`` was drawn from, equal to ``len(feats)`` unless the
@@ -168,6 +184,23 @@ class Group:
     # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
     # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
     _cache: tuple | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def pinned(self) -> tuple[int, ...]:
+        """The verified-optimum row indices, ascending — the :data:`PINNED` label read as the index set the
+        rank metrics take. Raises on a measured group, where "which row is the answer" is not a question the
+        labels answer: every row has a latency and the best one is a matter of degree, not of record."""
+        if self.label_kind != PINNED:
+            raise ValueError(f"{self.key}: pinned rows asked of a {self.label_kind!r}-labelled group")
+        return tuple(int(i) for i in np.flatnonzero(self.labels))
+
+    def with_pin(self, row: int) -> Group:
+        """This group with one more verified row marked — how the golden builder merges a second golden that
+        landed on an already-open pool. Copies rather than writing in place: the array is shared with whatever
+        already holds this group, exactly as :meth:`matrix` results are."""
+        labels = self.labels.copy()
+        labels[row] = 1.0
+        return replace(self, labels=labels)
 
     @classmethod
     def from_dicts(
@@ -202,17 +235,40 @@ class Group:
         flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
         would otherwise train and be scored under the wrong weight set with nothing reporting it.
         This is what keeps ``tier``, a label that decides nothing, honest."""
-        dynamic = bool(feats) and is_dynamic_row(feats[0])
+        names, matrix, dynamic = cls._pack(feats)
         if dynamic != (tier == "dyn"):
             raise ValueError(
                 f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
                 f"the source record's flag and its featurized rows disagree about the weight set"
             )
         rows = (pinned,) if isinstance(pinned, int) else pinned
+        labels = np.zeros(len(feats), dtype=float)
+        labels[list({int(i) for i in rows})] = 1.0
+        return cls(key, name, tier, gpu, shape, dynamic, labels, PINNED, names, matrix, len(feats) if total is None else total)
+
+    @classmethod
+    def from_measured(cls, key: str, gpu: str, op_sig: str, latency_us: Sequence[float], feats: list[dict[str, float]]) -> Group:
+        """The other label kind: a pool where every row was benched, labelled with its own measured µs.
+
+        Same packing as :meth:`from_dicts`; what differs is what is KNOWN about the rows, and therefore which
+        identities exist. ``op_sig`` serves as both ``name`` and ``shape`` — a measured pool IS one op, so
+        there is no second identity to spell — and ``tier`` is empty, because the golden tiers are a closed
+        report vocabulary about how a CASE was built and a sixth value would mean nothing to the two places
+        that read it. For the same reason there is no tier cross-check here: :meth:`from_dicts` can catch a
+        routing disagreement because a golden record carries that fact twice, and a measured row carries it
+        once.
+
+        No ``total`` either: a measured pool is not a sample of a larger enumeration, it is exactly the
+        configs someone ran, and a rank against anything else would be against candidates never measured."""
+        names, matrix, dynamic = cls._pack(feats)
+        return cls(key, op_sig, "", gpu, op_sig, dynamic, np.asarray(latency_us, dtype=float), LATENCY, names, matrix, len(feats))
+
+    @staticmethod
+    def _pack(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.ndarray, bool]:
+        """The representation both constructors share: the sorted column union, the NaN-filled matrix over it,
+        and the routing stamp read off row 0. One place, so the two differ only in their labels."""
         names = tuple(sorted({k for f in feats for k in f}))
-        positives = tuple(sorted({int(i) for i in rows}))
-        matrix = feature_matrix(feats, list(names), fill=np.nan)
-        return cls(key, name, tier, gpu, shape, dynamic, positives, names, matrix, len(feats) if total is None else total)
+        return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``
@@ -251,3 +307,65 @@ class Group:
             out.flags.writeable = False
             object.__setattr__(self, "_cache", (want, out))  # frozen dataclass; the cache is not part of its value
         return self._cache[1]
+
+
+def group_measured(rows) -> tuple[list[Group], dict[str, int]]:
+    """Benched :class:`~..db.NodeRow`s as :data:`LATENCY`-labelled groups, keyed
+    ``(gpu, op_sig, H_opt)`` — one group per set of configs that genuinely competed, plus a count of
+    what was dropped and why.
+
+    Takes ``NodeRow``s rather than :class:`Sample`s because three of the four decisions below read
+    columns a ``Sample`` does not carry. ``load_node_rows`` accepts a live tune DB or a measurement
+    freeze, so both sources reach this the same way.
+
+    Each part of the key is load-bearing, and each has a plausible wrong answer:
+
+    - **``op_sig``, not the ``S_*`` signature.** Descent stamps its own deltas into the ``S_*``
+      features, so keying on them would split alternative schedules for ONE op into separate groups
+      and destroy the comparison the metric is asking for. ``op_sig`` is the DB's own op identity and
+      survives the freeze round-trip verbatim. It is also the axis ``fold_node_rows(by="op")`` splits
+      on, so grouping and folding coincide by construction rather than by coincidence.
+    - **``H_opt`` from the features, never ``context_key``.** (Present and numeric by then: the
+      admission filter has already rejected a row missing its ``H_*`` stamps.) A live DB spells the regime as
+      ``digest(Context, cap, flags)`` and a freeze spells the same one ``capX.Y-OZ``, so grouping on
+      ``context_key`` would key one regime two ways depending on which side of the loader the rows
+      came from. It looks like the first-class column; that is the trap. The regimes must not pool
+      either way — ``-O1`` and ``-O3`` invert often enough that a merged group measures neither.
+    - **``gpu``.** Cards never pool.
+
+    Admission is :func:`freeze_reason`, the sanity filter the freeze writer already applies — not a
+    second list of rules. It rejects a non-leaf (whose ``value_us`` is a min over its explored subtree,
+    a coverage bound rather than something anyone benched), a row spelled in a retired featurizer
+    vocabulary, and a row failing the shared plausibility predicates. That last one is why re-deriving
+    the filter here would have been a defect rather than a duplication: an implausibly fast row becomes
+    the group's ``min`` and every regret in the group is then measured against a latency no kernel
+    produced. A freeze has passed this at write time, so on freeze input it drops nothing — which is
+    exactly why the rule cannot be verified against a freeze, and why it must not be re-spelled.
+
+    ONE rule is this function's own: **``bench_fail`` excluded.** ``freeze_reason`` deliberately keeps
+    failures, as durable negative examples; a pool being ranked by measured latency wants them gone,
+    because the watchdog sentinel is a huge positive that any model gets right for free and that
+    inflates every correlation over the pool.
+
+    The counts are returned rather than logged because a report has to publish them: "Spearman 0.6 over
+    340 groups" means something different when 143 rows were dropped than when none were. Reasons are
+    keyed by their leading clause, the same normalization ``write_freeze`` counts its own drops by, so
+    the two publish one vocabulary."""
+    dropped: dict[str, int] = defaultdict(int)
+    buckets: dict[tuple, list] = defaultdict(list)
+    for r in rows:
+        reason = freeze_reason(r)
+        if reason is not None:
+            dropped[reason.split(":")[0]] += 1
+        elif r.status != "ok":
+            dropped[r.status] += 1
+        elif not r.op_sig or not r.gpu:
+            dropped["unkeyed"] += 1
+        else:
+            buckets[(r.gpu, r.op_sig, r.features["H_opt"])].append(r)
+
+    groups = []
+    for (gpu, op_sig, h_opt), grp in sorted(buckets.items()):
+        feats = [knob_features(r.features) for r in grp]
+        groups.append(Group.from_measured(f"{gpu}/{op_sig}@O{h_opt:g}", gpu, op_sig, [r.value_us for r in grp], feats))
+    return groups, dict(dropped)

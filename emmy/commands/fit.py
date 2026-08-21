@@ -262,11 +262,11 @@ def build_golden_groups(
         at = by_pool.get(identity := _pool_identity(group))
         if at is not None:
             # Same pool as an earlier golden: this one is another verified answer to it, not a second case.
-            # ``replace`` shares the packed matrix — only the pin tuple grows. A golden recorded twice at the
+            # ``with_pin`` shares the packed matrix and copies only the labels. A golden recorded twice at the
             # same config pins the same row and folds away entirely, where it used to become a ``#2`` case
             # that double-counted one fact in every metric.
             joined += 1
-            cases[at] = replace(cases[at], pinned=tuple(sorted({*cases[at].pinned, gidx})))
+            cases[at] = cases[at].with_pin(gidx)
             continue
         # A NEW pool. The ``#N`` suffix exists only to keep ``Group.key`` unique (``cv.run_folds`` keys its
         # train accumulator on it), so it is spent here rather than once per record: same-name goldens that

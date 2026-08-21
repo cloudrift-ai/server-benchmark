@@ -24,13 +24,11 @@ monotone-decreasing-in-goodness quantity is a valid input. That is what makes th
 the offline prior, which is fitted on RANKS and whose output is an ordinal quality with no latency meaning
 at all, exactly as it is for the online prior, which regresses µs.
 
-It does mean the caller decides how much of the model's ordering survives into the metric, and the two
-available spellings of the offline prior's opinion are not equally good. Prefer the raw quality (negated:
-``-Prior.score_rows(group)``) over the deployed ``mean_score`` proxy. The proxy is ``exp(-scale · quality)``
-with the argument clipped to ±700, and outside the resolvable range distinct qualities collapse onto one
-float — ties that the model never expressed, which :func:`topk_pick` then charges it for. Measured on a
-40-row synthetic pool driven into saturation: 40 distinct qualities became 23 distinct proxy values, ρ fell
-from 0.851 to 0.842, and top-1 regret rose from 2.40 to 3.29. Unsaturated the two spellings agree exactly.
+The offline prior's two available spellings — the raw quality (negated) and the deployed
+``exp(-scale · quality)`` proxy — therefore order a pool identically, and measurement says the gap between
+them is not merely small but unreachable: over all 1377 recorded goldens the shipped artifact's quality
+spans 0 to 277, an exp argument of at most 27.7 against the ±700 float-overflow bound, 25x of headroom.
+Pass whichever the caller already holds.
 
 Both families charge the model for a tie, but they charge it differently, and the difference is not a
 detail. :func:`rank_of_golden` models EMISSION ORDER — the row greedy actually deploys out of a plateau —

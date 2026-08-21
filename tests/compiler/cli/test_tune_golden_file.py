@@ -181,6 +181,25 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert "measurements" not in winner
 
 
+def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
+    document, targets = load_working_targets(path)
+    target = targets[0]
+    rankings = [{"status": "ok", "latency_us": 8.0, "compile_flags": "-O1", "measured_knobs": {"TILE": "f2x2"}}] * len(target.proposals)
+
+    # ``tune`` persists per target and reuses the pools it loaded; the file must still be the
+    # one a full revalidating dump of the same document writes.
+    persist_proposal_rankings(path, document, target, rankings)
+    canonical = tmp_path / "canonical.yaml"
+    dump_golden_file(document, canonical)
+    assert path.read_bytes() == canonical.read_bytes()
+
+    document["configs"][0]["realizations"][0]["pins"] = "not-a-mapping"
+    with pytest.raises(ValueError, match="pins must be a mapping"):
+        persist_proposal_rankings(path, document, target, rankings)
+
+
 def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm")), path)

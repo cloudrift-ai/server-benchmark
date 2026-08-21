@@ -399,14 +399,14 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 
 
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
-    """Atomically persist measured proposal feedback."""
+    """Atomically persist measured proposal feedback for one target of a loaded document."""
     configs = document["configs"]
     for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
         if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
         realization["ranking"] = {**ranking, "source": "proposal"}
-    dump_golden_file(document, path, overwrite=True)
+    dump_golden_file(document, path, overwrite=True, incremental=True)
 
 
 def persist_tune_winner(
@@ -417,7 +417,7 @@ def persist_tune_winner(
     *,
     compile_flags: str,
 ) -> None:
-    """Atomically persist one unambiguous directly searched winner."""
+    """Atomically persist one unambiguous directly searched winner into a loaded document."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     configs = document["configs"]
@@ -458,4 +458,4 @@ def persist_tune_winner(
             seed["ranking"] = {**winner_ranking, "tune_winner": True}
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
-    dump_golden_file(document, path, overwrite=True)
+    dump_golden_file(document, path, overwrite=True, incremental=True)

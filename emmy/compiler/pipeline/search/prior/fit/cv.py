@@ -1,7 +1,7 @@
 """Cross-validated golden-rank evaluation for offline-prior fits — the fold machinery
 behind :func:`~.run.run_fit` (the ``emmy fit`` run harness).
 
-Works entirely on pre-built :class:`~.group.Group` lists (the command layer owns case
+Works entirely on pre-built :class:`Group` lists (the command layer owns case
 building, which needs the snippet tracer ``pipeline/`` must not import) and produces the
 run's metrics dict, so every piece here is testable on synthetic cases with no tracing.
 

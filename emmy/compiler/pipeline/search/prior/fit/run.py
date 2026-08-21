@@ -4,7 +4,7 @@ pure function, the run structure shared by every trainer and dataset combination
 :func:`run_fit` owns the *shape* of a fit run and none of its *content*: the trainer arrives as two
 configured objects (the shippable model's and the CV folds' — they differ only in seeding policy,
 which is the caller's to decide and to record in its header), the dataset as pre-built
-:class:`~.group.Group` lists, and every non-deterministic input (dates, repo commit, CLI args)
+:class:`Group` lists, and every non-deterministic input (dates, repo commit, CLI args)
 pre-rendered inside ``header``. No I/O, no clock, no argparse: the same inputs produce the same
 ``(metrics, fit)`` pair, so the harness is testable on synthetic groups with a stub trainer.
 

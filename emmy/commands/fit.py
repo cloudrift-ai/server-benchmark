@@ -31,7 +31,7 @@ from pathlib import Path
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, TREE_FEATURES, Group, feature_view
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, Group, feature_view
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
@@ -361,11 +361,11 @@ def _catboost_trainers(args, names: list[str]):
 
 # Each trainer's factory and its default feature view. The views differ because the model classes do: the
 # linear one needs the engineered step / fold / interaction features, having no way to form them, and the
-# tree re-derives every one of them from the columns :data:`TREE_FEATURES` keeps. ``--features`` overrides
+# tree re-derives every one of them from the columns ``fit_catboost.TREE_FEATURES`` keeps. ``--features`` overrides
 # either, which is how the two views are compared on one model class.
 TRAINERS = {
     "linear": (_linear_trainers, DEFAULT_FEATURES),
-    "catboost": (_catboost_trainers, TREE_FEATURES),
+    "catboost": (_catboost_trainers, fit_catboost.TREE_FEATURES),
 }
 
 

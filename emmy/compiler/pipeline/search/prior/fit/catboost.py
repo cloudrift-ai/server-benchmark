@@ -1,15 +1,15 @@
 """The CatBoost trainer — the offline learning-to-rank fit of a :class:`CatBoostModel`.
 
 :class:`CatBoostTrainer` holds the hyperparameters and :meth:`~CatBoostTrainer.fit` turns a
-:class:`~.group.Group` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
+:class:`Group` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
 trainer is immutable and one instance serves every cross-validation fold — with one contract the linear trainer
 keeps and this one does not: **a fit is not byte-reproducible**. CatBoost's histogram build is threaded, so two
 runs on identical inputs give models that differ in the last bits. Deliberate: the alternative is
 ``thread_count=1``, and the metrics file plus the rank tables are what a fit is compared by, not a checksum.
 
 This module owns what is specific to the model class; everything a different model class would also need lives
-elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in :mod:`.group`, the rank metrics in
-:mod:`.rank`, the fold harness in :mod:`.cv`).
+elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``search/data/group.py``, the rank
+metrics in :mod:`.rank`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
 sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
@@ -47,6 +47,41 @@ from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_S
 from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 
 logger = logging.getLogger(__name__)
+
+# The tree view: the default view MINUS every feature that exists only because an additive model cannot
+# form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
+# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
+# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
+# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
+#
+# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
+#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
+#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
+# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
+#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
+#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
+#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
+#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
+# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
+#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
+#   ``D_bm_band``, ``D_tilen_clean``.
+# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
+#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
+#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
+#
+# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
+# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
+# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
+# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
+# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
+# candidate column at all, so no split on the pool can recover it.
+TREE_FEATURES = (
+    "D_*,MMA_tier,MMA_acc_bits,"
+    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
+    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
+    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
+    "-D_tma_*,-D_l2_cells_occ"
+)
 
 # Sampled negatives per pool per round. ~500 against a pool's handful of positives puts the softmax denominator in
 # the range the loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.

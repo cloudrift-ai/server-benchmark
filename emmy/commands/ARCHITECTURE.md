@@ -657,7 +657,7 @@ Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DI
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
 the trainer's own**: `search/data/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
-`search/data/group.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an
+`prior/fit/catboost.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an
 additive model cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*`
 interaction mirrors), each of which a tree re-derives by splitting on columns the view keeps.
 `search/data/group.MATMUL_FEATURES` is a third ready spec, holding just the 53 features that can move a matmul

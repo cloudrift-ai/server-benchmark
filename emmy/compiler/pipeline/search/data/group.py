@@ -58,41 +58,6 @@ from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_
 # The remaining ``MMA_*`` (``MMA_atom_m/n/k``, ``MMA_a_bits``) measured exactly neutral, so they stay out.
 DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 
-# The tree view: the default view MINUS every feature that exists only because an additive model cannot
-# form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
-# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
-# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
-# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
-#
-# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
-#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
-#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
-# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
-#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
-#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
-#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
-#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
-# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
-#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
-#   ``D_bm_band``, ``D_tilen_clean``.
-# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
-#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
-#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
-#
-# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
-# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
-# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
-# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
-# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
-# candidate column at all, so no split on the pool can recover it.
-TREE_FEATURES = (
-    "D_*,MMA_tier,MMA_acc_bits,"
-    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
-    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
-    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
-    "-D_tma_*,-D_l2_cells_occ"
-)
-
 # The matmul view: every feature that can actually move a matmul candidate's rank, and no other. An
 # ordinary spec for :func:`feature_view` — pass it as ``--features``; nothing else filters.
 #

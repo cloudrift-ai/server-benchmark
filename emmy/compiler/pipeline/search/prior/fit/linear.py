@@ -37,7 +37,6 @@ from emmy.compiler.pipeline.search.data.group import Group
 from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,
-    GATE_DEFAULTS,
     LinearModel,
     descent_cols,
     gate_columns,
@@ -307,16 +306,10 @@ class LinearFit:
     dyn_ranks: list[int] | None
 
     def score_rows(self, group: Group) -> np.ndarray | None:
-        """The group's per-row quality (higher = predicted faster), scored exactly as the shipped
-        prior ranks. ``None`` when the group needs the dynamic set and this fit has none."""
-        if group.dynamic and self.model.weights_dynamic is None:
-            return None
-        # The gate columns must be present whether or not the weight dict names them (a pruned
-        # zero weight drops the key), so score over the union. The weight set itself comes from
-        # the model, which is where the static-vs-dynamic choice is made — this must not become a
-        # second copy of that routing.
-        names = sorted(set(self.model.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
-        return self.model.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
+        """The trainer protocol's scoring entry point (:func:`~.cv.case_ranks` calls it), answered by the
+        fitted model itself — the column choice and the weight-set routing are the model's, not a copy of
+        them kept here."""
+        return self.model.score_rows(group)
 
     @property
     def notes(self) -> str:

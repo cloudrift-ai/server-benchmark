@@ -5,10 +5,13 @@ Two access shapes over one arithmetic: :meth:`LinearModel.quality` takes a featu
 scores a live candidate) and :meth:`LinearModel.quality_rows` takes a packed pool matrix (what ``emmy fit``
 descends on — one fp16 golden enumerates ~78k rows, so the per-dict path is not an option there). Before this
 module the two were separate transcriptions of the same formula kept in step by a parity test; drift between them
-would mean the fitter optimizing something other than what deploys.
+would mean the fitter optimizing something other than what deploys. :meth:`LinearModel.score_rows` is the front
+door onto the matrix shape rather than a third shape: it takes a whole candidate pool and decides, once and here,
+which columns this model class wants out of it.
 
 The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features``,
-``mean_scores_features`` and ``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution
+``mean_scores_features`` and ``explain_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this
+module's own vocabulary, not ``Prior``'s). That is deliberate: ``FallbackPrior`` and the attribution
 diagnostics already compose priors on exactly those, so a holder can delegate to any model through them without a
 second vocabulary. :mod:`.catboost_model` is the other model class answering the same surface.
 :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
@@ -30,10 +33,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, ROUTING_FEATURES, is_dynamic_row
+
+if TYPE_CHECKING:
+    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
+    # subprocess) onto the deploy path, which loads none of it today.
+    from emmy.compiler.pipeline.search.data.group import Group
 
 
 def descent_cols(names) -> tuple[str, ...]:
@@ -223,6 +232,26 @@ class LinearModel:
         return quality_columns(
             mat, vec, gate_columns(mat, names), weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
         )
+
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """:meth:`quality_rows` over a whole packed pool — the pool-shaped entry point, and the ONE place the
+        linear model's column choice is made. :class:`~..catboost_model.CatBoostModel` answers the same
+        shape, which is what lets the trainer and the fold harness hand either model class a group and rank it
+        without knowing which one they hold.
+
+        Two things a caller must not re-derive, which is why they live here rather than at each call site.
+        The COLUMNS are the weight set's names UNION :data:`GATE_DEFAULTS`: the interaction's two inputs have
+        to be present whether or not the weight dict names them, since a pruned zero weight drops the key.
+        The WEIGHT SET comes from :meth:`weight_set`, so the static-vs-dynamic choice is made once, here,
+        and a second copy of that routing cannot drift from it.
+
+        ``None`` when the group needs the dynamic set and this model has none — the unfittable
+        cross-validation fold. Asking :meth:`weight_set` instead would raise, and a fold harness wants an
+        answer it can skip on, not an exception."""
+        if group.dynamic and self.weights_dynamic is None:
+            return None
+        names = sorted(set(self.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
+        return self.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
 
     def weight_set(self, dynamic: bool) -> dict[str, float]:
         """The weight dict a row of this kind scores under — the ONE place the two sets are chosen between.

@@ -229,9 +229,10 @@ class CatBoostFit:
     rows: int
 
     def score_rows(self, group: Group) -> np.ndarray:
-        """The group's per-row quality (higher = predicted faster) over its FULL pool, scored exactly as the
-        shipped prior ranks. Training sampled negatives; the metric never does."""
-        return self.model.quality_rows(group.matrix(list(self.model.cols), fill=ABSENT))
+        """The trainer protocol's scoring entry point, answered by the fitted model itself — the column
+        choice is the model's, not a copy of it kept here. Over the group's FULL pool: training sampled
+        negatives, the metric never does."""
+        return self.model.score_rows(group)
 
     @property
     def notes(self) -> str:

@@ -168,9 +168,8 @@ def test_row_accounting_covers_every_positive():
     """``rows`` is what the fit reports it trained on, so a pool with two pins must count two — otherwise the
     number silently understates the training set as the corpus grows siblings."""
     trainer = CatBoostTrainer(feature_names=FEATURES, negatives=4)
-    # `with_pin` ADDS to the pool's existing pin (row 29), which is exactly how the golden builder merges a
-    # second golden onto an already-open pool — so two calls make three positives, not two.
-    extra = replace(_groups(n_pools=1)[0], key="gpuA/p1").with_pin(0).with_pin(1)
+    rows = [{"D_a": float(i), "D_b": 0.0, "S_ext_n_symbolic_axis": 0.0} for i in range(30)]
+    extra = Group.from_dicts("gpuA/p1", "p1", "warp", "gpuA", "s1", (0, 1, 29), rows)
     groups = [_groups(n_pools=1)[0], extra]
     assert (len(groups[0].pinned), len(extra.pinned)) == (1, 3)
     assert trainer._n_rows([np.arange(4), np.arange(4)], groups) == (4 + 1) + (4 + 3)

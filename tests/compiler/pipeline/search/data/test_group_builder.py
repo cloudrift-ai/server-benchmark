@@ -121,17 +121,15 @@ def test_each_kind_answers_only_its_own_question():
 
 
 def test_pinning_reads_back_as_the_index_set_the_rank_metrics_take():
-    """The golden path is unchanged from the caller's side: pins go in as row indices and come back as row
-    indices, whatever the storage underneath. ``with_pin`` is how a second golden joins an open pool, and it
-    copies rather than writing through — the array is shared with whatever already holds the group."""
+    """Pins go in as row indices and come back as row indices, whatever the storage underneath — a group is
+    built ONCE, already knowing every verified row it holds, so there is no amend-after-construction path."""
     feats = [{"D_a": float(i)} for i in range(5)]
-    g = Group.from_dicts("g/x", "x", "warp", "g", "x", 2, feats)
-    assert g.label_kind == PINNED and g.pinned == (2,)
-    assert g.labels.tolist() == [0.0, 0.0, 1.0, 0.0, 0.0]
+    one = Group.from_dicts("g/x", "x", "warp", "g", "x", 2, feats)
+    assert one.label_kind == PINNED and one.pinned == (2,)
+    assert one.labels.tolist() == [0.0, 0.0, 1.0, 0.0, 0.0]
 
-    merged = g.with_pin(4)
-    assert merged.pinned == (2, 4)
-    assert g.pinned == (2,), "the original is untouched"
+    several = Group.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats)
+    assert several.pinned == (2, 4), "sorted and duplicate-free, whichever order the builder found them in"
 
 
 def test_a_row_the_freeze_would_refuse_is_refused_here_too():

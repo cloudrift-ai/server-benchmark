@@ -25,8 +25,10 @@ the two so neither model constrains the other.
 
 ``key`` is ``"<gpu>/<name>"`` of the FIRST golden that opened the pool, disambiguated by the builder when one
 name opens several distinct pools (``#2``, ``#3``, … in dataset order); goldens that join an already-open pool
-become further entries in ``pinned`` rather than a group of their own. ``tier`` is the fit's case tier
-(``thread`` / ``warp`` / ``dyn`` / ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it decides nothing.
+are further entries in its pin set rather than a group of their own — the builder resolves that before it
+constructs anything, so a group is built once, already knowing every verified row it holds. ``tier`` is the
+fit's case tier (``thread`` / ``warp`` / ``dyn`` / ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it
+decides nothing.
 The weight set a group scores under is ``dynamic``, read off the routing stamp exactly as the deployed prior
 reads it. ``shape`` is the cross-validation fold group, and is the one identity here that decides something
 structural: two goldens sharing it enumerate the same candidates, so a fold that separated them would train on
@@ -37,7 +39,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -103,6 +105,26 @@ MATMUL_FEATURES = (
     "D_tma_log2_area,D_w_grid_aspect,D_w_grid_m,D_w_grid_n,D_w_l2_bk,D_w_near_bk,D_wspec_warps,"
     "MMA_a_bits,MMA_acc_bits"
 )
+
+
+def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.ndarray, bool]:
+    """Per-row feature dicts as ``(feat_names, matrix, dynamic)`` — the stored representation, without the
+    labels. Separate from :class:`Group` because a builder needs it BEFORE it can say what a pool's labels
+    are: two goldens share a pool when their packed rows are identical, so the packing is what decides
+    which groups exist, and only then is it known how many verified rows each one has.
+
+    Callers drop the dicts after this. That is the whole point of packing — a per-row dict of ~63 floats
+    costs ~4 KB, and holding the corpus in that form OOM-killed whole fit runs."""
+    names = tuple(sorted({k for f in feats for k in f}))
+    return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
+
+
+def pinned_labels(rows: Sequence[int], n: int) -> np.ndarray:
+    """The :data:`PINNED` label array: ``1.0`` on every verified row of an ``n``-row pool. The one place
+    that encoding is written, so no caller has to know that a pin is a ``1.0``."""
+    labels = np.zeros(n, dtype=float)
+    labels[list({int(i) for i in rows})] = 1.0
+    return labels
 
 
 def _matcher(pats: list[str]):
@@ -204,14 +226,6 @@ class Group:
             raise ValueError(f"{self.key}: measured latencies asked of a {self.label_kind!r}-labelled group")
         return self.labels
 
-    def with_pin(self, row: int) -> Group:
-        """This group with one more verified row marked — how the golden builder merges a second golden that
-        landed on an already-open pool. Copies rather than writing in place: the array is shared with whatever
-        already holds this group, exactly as :meth:`matrix` results are."""
-        labels = self.labels.copy()
-        labels[row] = 1.0
-        return replace(self, labels=labels)
-
     @classmethod
     def from_dicts(
         cls,
@@ -245,16 +259,15 @@ class Group:
         flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
         would otherwise train and be scored under the wrong weight set with nothing reporting it.
         This is what keeps ``tier``, a label that decides nothing, honest."""
-        names, matrix, dynamic = cls._pack(feats)
+        names, matrix, dynamic = pack_features(feats)
         if dynamic != (tier == "dyn"):
             raise ValueError(
                 f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
                 f"the source record's flag and its featurized rows disagree about the weight set"
             )
         rows = (pinned,) if isinstance(pinned, int) else pinned
-        labels = np.zeros(len(feats), dtype=float)
-        labels[list({int(i) for i in rows})] = 1.0
-        return cls(key, name, tier, gpu, shape, dynamic, labels, PINNED, names, matrix, len(feats) if total is None else total)
+        packed = (names, matrix, dynamic)
+        return cls.from_packed(key, name, tier, gpu, shape, packed, pinned_labels(rows, len(feats)), PINNED, total)
 
     @classmethod
     def from_measured(cls, key: str, gpu: str, op_sig: str, latency_us: Sequence[float], feats: list[dict[str, float]]) -> Group:
@@ -270,15 +283,27 @@ class Group:
 
         No ``total`` either: a measured pool is not a sample of a larger enumeration, it is exactly the
         configs someone ran, and a rank against anything else would be against candidates never measured."""
-        names, matrix, dynamic = cls._pack(feats)
-        return cls(key, op_sig, "", gpu, op_sig, dynamic, np.asarray(latency_us, dtype=float), LATENCY, names, matrix, len(feats))
+        return cls.from_packed(key, op_sig, "", gpu, op_sig, pack_features(feats), np.asarray(latency_us, dtype=float), LATENCY)
 
-    @staticmethod
-    def _pack(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.ndarray, bool]:
-        """The representation both constructors share: the sorted column union, the NaN-filled matrix over it,
-        and the routing stamp read off row 0. One place, so the two differ only in their labels."""
-        names = tuple(sorted({k for f in feats for k in f}))
-        return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
+    @classmethod
+    def from_packed(
+        cls,
+        key: str,
+        name: str,
+        tier: str,
+        gpu: str,
+        shape: str,
+        packed: tuple[tuple[str, ...], np.ndarray, bool],
+        labels: np.ndarray,
+        label_kind: str,
+        total: int | None = None,
+    ) -> Group:
+        """A group from an already-packed pool (:func:`pack_features`) and its finished labels — the entry
+        point for a builder that had to pack before it could know the labels, which is every builder that
+        deduplicates pools. The two named constructors above are this one with the label array spelled the
+        way that kind of label is naturally spelled."""
+        names, matrix, dynamic = packed
+        return cls(key, name, tier, gpu, shape, dynamic, labels, label_kind, names, matrix, len(matrix) if total is None else total)
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``

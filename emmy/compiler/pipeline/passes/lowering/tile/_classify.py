@@ -135,7 +135,7 @@ def _exp_weight(defs: dict, name: str, mx: str) -> str | None:
     return None
 
 
-def _components(t: Fold, mx: str, canon: str) -> list[tuple[str, tuple, list, tuple]] | None:
+def _components(t: Fold, mx: str, canon: str, states: tuple[str, ...] = ()) -> list[tuple[str, tuple, list, tuple]] | None:
     """Read EVERY additive component of sibling fold ``t`` as a carrier component joining a pair:
     each lifted value factors (``split_invariant_factors``) into loop-invariant factors × the
     pair's own per-element weight (``exp(score′ − mx)``, score′ α-equal to ``canon``) × a residual
@@ -179,8 +179,11 @@ def _components(t: Fold, mx: str, canon: str) -> list[tuple[str, tuple, list, tu
         stmts = list(vcone.members)
         if any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
             return None
-        if ({mx} | set(t.combine.results) | edge_results) & {a for s in stmts for a in s.deps()}:
-            return None  # the value cone must be free of the pair's carried states / dropped edges
+        if ({mx, *states} | set(t.combine.results) | edge_results) & {a for s in stmts for a in s.deps()}:
+            # The value cone must be free of the pair's carried states (its own, the max's, and
+            # every sibling already joined — a ``1/den`` sunk into the channel's λ would stream
+            # against the RUNNING denominator once merged) and of the dropped edges.
+            return None
         covered |= {id(s) for s in Body(tuple(body)).backward_cone([value]).members}
         out.append((state, inv, stmts, tuple(values)))
     if any(id(s) not in covered for s in body):
@@ -221,7 +224,7 @@ def _pair(fmax, rest: list) -> tuple[Fold, int, list] | None:
     for t in rest:
         comps = None
         if isinstance(t, Fold) and t.axis is not None and t.axis.extent == fmax.axis.extent:
-            comps = _components(t, mx, canon)
+            comps = _components(t, mx, canon, tuple(states))
         if comps is None:
             break
         ren = {t.axis.name: fmax.axis.name} if t.axis.name != fmax.axis.name else {}
@@ -364,7 +367,9 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
         return None
     stat_defs = set(_operand_result_names(stat)) | {nm for s in stat_epi for nm in s.defines()}
     edge_names = frozenset(nm for e in edges for nm in _operand_result_names(e))
-    bound = _bind_stat_channels(fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name}, edge_names)
+    bound = _bind_stat_channels(
+        fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name}, edge_names, m_name=free[-1].name if free else None
+    )
     if bound is None:
         return None
     cone, channels = bound
@@ -459,7 +464,7 @@ def _channel_product(f: Fold) -> object:
 
 
 def _bind_stat_channels(
-    f: Fold, n_name: str, stat_defs: set, axes: frozenset, edge_names: frozenset = frozenset()
+    f: Fold, n_name: str, stat_defs: set, axes: frozenset, edge_names: frozenset = frozenset(), m_name: str | None = None
 ) -> tuple[list, tuple] | None:
     """The computed-A channel read for the fused view: per additive component, a two-arg ⊗
     (distributing over the carrier's one commutative-monoid ⊕) whose directly-named B load is
@@ -491,6 +496,12 @@ def _bind_stat_channels(
             return None
         reads.append((lift, loads[b_arg], a_arg))
     if len({lift.op for lift, _, _ in reads}) != 1:
+        return None
+    if m_name is not None and any(m_name in _idx_vars(b) for _, b, _ in reads):
+        # B must be (n, k)-indexed and never read the row axis — the mirror of the A-cone check
+        # below. A row-dependent B is a batched matvec, not a bilinear form: the mma emitter
+        # addresses ONE B slab per tile, so binding it reads the first row's slab for all 16
+        # (decode attention with the heads as rows, V read per head).
         return None
     # ONE shared A value across channels, by VALUE-TREE equality: fusion duplicates the cone SSA
     # per channel (fresh names, interleaved order, per-copy operand order), so name equality is

@@ -342,7 +342,13 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
     for i, block in enumerate(trunk.layers):
         attn = at(types, i, "homogeneous")
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
-        inferred_heads, _width = _attention_query_layout(block.self_attn)
+        attention = getattr(block, "self_attn", None)
+        if attention is None:
+            raise NotImplementedError(
+                f"serving twins: layer {i} ({type(block).__name__}, {attn}) has no self_attn; "
+                "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"
+            )
+        inferred_heads, _width = _attention_query_layout(attention)
         nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))
     return out

@@ -108,7 +108,7 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -480,11 +480,16 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
 
     No view's rows depend on whether its sibling produced any: each gate is a local predicate on
     its own term (a 16-bit atom, a resolvable fill, an inventory a value can spell against)."""
-    base = _Term(tile, tile.place.on_grid(), ctx)
+    # The per-cell reading of a CHAINED root is itself a derivation (``demoted_chain`` — the
+    # statistic back at the root, the column as its captured loop): the reduce tiers partition
+    # the root node, so that is the tree they schedule and materialize.
+    cell_op = demoted_chain(tile.op)
+    cell = replace(tile, op=cell_op) if cell_op is not tile.op else tile
+    base = _Term(cell, tile.place.on_grid(), ctx)
     pro = fused_view(tile)
     if pro is not None:
         fused = _view(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
-        return [_Term(tile, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+        return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base], 0

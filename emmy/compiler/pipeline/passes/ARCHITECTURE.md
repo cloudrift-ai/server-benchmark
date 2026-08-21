@@ -189,6 +189,22 @@ a term has at most TWO views (`_schedule._views`):
 (The old mixed-A promotion "reading" is gone: a materialized edge whose dtype the atom cannot bind directly takes the
 CONVERTING smem compute fill on the one tree — a stage resolution, not a derivation.)
 
+**The stored tree is a CHAIN, never a demoted loop.** Root formation (`_lift._form_root` / `_chain`) closes every
+fold over the values it reads from the cell: a fold whose λ reads a name a pure cell stmt defines (a normalized row's
+scale, a sibling statistic's projected result) takes that value through a zero-axis PROJECTION EDGE — the producing
+pure stmts as the edge's body, the folds they read as its operands, any fold state the consumer also reads passed
+through as a result — bound positionally to a new lift param. λ stays closed; the edge is the `make_cone` prologue
+generalized. A fold reading a boundary store's sweep axis runs once per swept element, so it stays the projection's
+fold BODY member — a stored node in place — rather than an operand (operands lower ahead of the sweep). Every node
+keeps its `PLACE` seam: the k-norm → RoPE → `Q·Kᵀ` region used to lose its statistic and dot to the raw-loop escape
+the moment one read the other's projected value, which no pin could then name. Edges that do not read the fold's
+axis lower ONCE ahead of the loop (`Fold.lower`, the reduce tier's `_emit`), so the captured loop stays byte-exact.
+The two readings above derive from the chain: `fused_view` reads a chained column (its edge's statistic and epilogue,
+the column minus the edge regenerating the raw column loop), and the per-cell reading is the chain UNDONE
+(`_classify.demoted_chain` — the statistic back at the root, the column as its captured loop), which is what the
+reduce tiers schedule and materialize. Cuts under a sweep are legal: the sweep axis is an iteration axis of the cut
+piece, not a captured value.
+
 A row carries NO view ownership: the derived contraction view offers only warp tiles (a computed operand's scalar
 list is empty) and the per-cell view only scalar / per-cell ones, so the row's `WORK` tier decodes its view by
 construction — replay is a function of `(stored op, row)` and nothing else. The union carries two obligations:

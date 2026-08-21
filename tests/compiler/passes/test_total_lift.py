@@ -279,8 +279,13 @@ def test_fold_reading_a_body_defined_name_is_restored_verbatim():
     tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None and not node.operands
-    raw_loops = [s for s in node.body if isinstance(s, Loop) and s.is_reduce]
-    assert len(raw_loops) == 2, "the consumer restored beside the escape, order preserved"
+    # The escape stays a raw loop; the consumer reads its typed accumulator, which no projection
+    # edge can close over (an effectful producer), so it stays a body member — as a NODE, in
+    # place, lowering byte-exact beside the escape.
+    kinds = [("loop" if isinstance(s, Loop) and s.is_reduce else "fold" if isinstance(s, Fold) else "other") for s in node.body]
+    assert kinds[:2] == ["loop", "fold"], "the consumer beside the escape, order preserved"
+    # ``LoopOp`` normalization renames axes; the node's loop is the consumer's by extent and body length.
+    assert node.body[1].axis.extent == consumer.axis.extent and len(node.body[1].loop.body) == len(consumer.body)
 
 
 def test_non_distributing_lift_declines_to_planar():
@@ -329,3 +334,46 @@ def test_recognize_fires_through_the_pipeline():
 
     tiles = [n.op for n in lowered.nodes.values() if isinstance(n.op, TileOp)]
     assert tiles, "the lift fired and nothing downstream traffics in LoopOp"
+
+
+def test_prologue_read_by_an_earlier_raw_loop_is_not_sunk_past_it():
+    """A pure prologue value read by a reduce loop that DECLINED the lift (so it stands raw, ahead
+    of a later reduce) must stay ahead of that raw loop. Sinking it into the later loop's λ leaves
+    the raw loop reading an undefined name — the decode-attention ``v1`` / ``v3`` miscompile."""
+    m = Axis("m", Dim(8))
+    k1, k2, k3 = (Axis(nm, Dim(1)) for nm in ("k", "k2", "k3"))
+    # ``sc`` feeds pass1 AND the epilogue-side chain, so pass1 cannot take it and stays raw.
+    prologue = (
+        Load(name="s", input="x", index=(Var("m"),)),
+        Assign(name="sc", op=ElementwiseImpl("add"), args=("s", "s")),
+    )
+    pass1 = Loop(axis=k1, body=Body((Accum(name="mx", value="sc", op=ElementwiseImpl("maximum"), axes=("k",)),)))
+    mid = (
+        Assign(name="sh", op=ElementwiseImpl("subtract"), args=("sc", "mx")),
+        Assign(name="ex", op=ElementwiseImpl("exp"), args=("sh",)),
+    )
+    pass2 = Loop(axis=k2, body=Body((Accum(name="den", value="ex", op=ElementwiseImpl("add"), axes=("k2",)),)))
+    tail = (
+        Assign(name="pr", op=ElementwiseImpl("divide"), args=("ex", "den")),
+        Load(name="vv", input="v", index=(Var("m"),)),
+        Assign(name="pv", op=ElementwiseImpl("multiply"), args=("vv", "pr")),
+    )
+    pass3 = Loop(axis=k3, body=Body((Accum(name="acc", value="pv", op=ElementwiseImpl("add"), axes=("k3",)),)))
+    cell = (*prologue, pass1, *mid, pass2, *tail, pass3, Write(output="out", index=(Var("m"),), value="acc"))
+    tile = _tile(Body((Loop(axis=m, body=Body(cell)),)))
+
+    # Every name a stmt reads is defined by an earlier stmt at the same or an enclosing level.
+    def check(body, defined):
+        for s in body:
+            if isinstance(s, Loop):
+                check(list(s.body), set(defined) | {s.axis.name})
+                defined |= set(deep_defines(s))
+                continue
+            reads = set(s.deps()) if not isinstance(s, Fold) else set()
+            assert reads <= defined, f"{s} reads {sorted(reads - defined)} before definition"
+            defined |= set(s.defines()) if not isinstance(s, Fold) else set(deep_defines(s))
+
+    from emmy.compiler.ir.pure.fold import deep_defines
+
+    root = tile.op
+    check(list(root.lower()), {a.name for a in tile.place.free})

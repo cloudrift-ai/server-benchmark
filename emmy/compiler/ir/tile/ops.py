@@ -398,7 +398,15 @@ def head(op):
     node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns, so a scheduling
     read never needs :func:`reduce_loop` (which synthesizes a whole nest) to reach it."""
-    node = op.operands[0] if isinstance(op, Fold) and op.axis is None and op.operands else op
+    node = op
+    if isinstance(op, Fold) and op.axis is None:
+        if op.operands:
+            node = op.operands[0]
+        else:
+            # The chain form's sweep case: the column fold reads the boundary store's sweep axis,
+            # so root formation keeps it as the projection's one fold BODY member.
+            members = [s for s in op.body if isinstance(s, Fold)]
+            node = members[0] if len(members) == 1 else op
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 

@@ -379,6 +379,11 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in fam_sites))
         raise ValueError(f"{parsed.family} is ambiguous: use {cands}")
     matches = _match(parsed, fam_sites)
+    if not matches and parsed.axis is None and parsed.ordinal is not None and parsed.segments and parsed.segments[-1] in ("a", "b"):
+        # The strict parse read ``a2`` as the second ``a`` edge; an axis the loop stamp named
+        # ``a2`` is the other reading, and the literal axis name comes first.
+        as_axis = _Key(family=parsed.family, segments=parsed.segments[:-1], axis=f"{parsed.segments[-1]}{parsed.ordinal}", ordinal=None)
+        matches = _match(as_axis, fam_sites)
     if not matches and parsed.axis is not None and parsed.ordinal is None:
         m = _AXIS_ORDINAL_RE.match(parsed.axis)
         if m and m.group(1):

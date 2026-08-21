@@ -602,15 +602,28 @@ class Fold:
         bound param (:func:`splice_operands` — positional binding names the edges, ties in
         operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
         that carried them in its body."""
-        stmts = splice_operands(self._splice_edges(), _flatten_nodes(self.step_stmts()))
+        stmts = splice_operands(self._step_edges(), _flatten_nodes(self.step_stmts()))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role)
+
+    def _hoisted_edges(self) -> tuple:
+        """The operand edges the loop does NOT re-evaluate per step: a computed edge whose subtree
+        never reads the fold's iteration var (a chained producer — the normalized row's
+        statistic, a sibling fold's projected result) is loop-invariant and lowers ONCE, ahead of
+        the loop. A gmem ``Load`` edge always rides the step (its index is the operand slab)."""
+        if self.axis is None:
+            return ()
+        return tuple(e for e in self._splice_edges() if isinstance(e, Fold) and self.axis.name not in deep_reads(list(e.lower())))
+
+    def _step_edges(self) -> tuple:
+        hoisted = {id(e) for e in self._hoisted_edges()}
+        return tuple(e for e in self._splice_edges() if id(e) not in hoisted)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
         """The (derived) step with every operand edge's body spliced before its first use — the
         stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
         :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
         consumed (a twisted fold's head node / expectation Load) never splice twice."""
-        return splice_operands(self._splice_edges(), self.step_stmts())
+        return splice_operands(self._step_edges(), self.step_stmts())
 
     @property
     def out(self) -> str:
@@ -633,8 +646,8 @@ class Fold:
         import back into :mod:`~emmy.compiler.ir.tile.ops`."""
         if self.axis is None:
             prefix = [s for e in self.operands for s in operand_body(e)]
-            return [*prefix, *self.body]
-        return [self.loop]
+            return [*prefix, *_flatten_nodes(tuple(self.body))]
+        return [*(s for e in self._hoisted_edges() for s in operand_body(e)), self.loop]
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
     # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its

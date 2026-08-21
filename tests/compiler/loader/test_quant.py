@@ -1104,6 +1104,41 @@ def _nvfp4_matmul_graph(tmp_path):
     return g, y, (packed, scale_bits, s2)
 
 
+def test_both_loaders_bind_an_f8_bits_constant_identically(tmp_path):
+    """The DOUBLE-DECODE guard: the graph-keyed and plan-keyed loaders must agree bit-for-bit.
+
+    An NVFP4 block scale is stored e4m3 and consumed as an ``f8e4m3`` graph constant, which its own
+    ``from_f8e4m3`` cone decodes. The graph-keyed loader keys that raw-bits rule on the node's
+    dtype. The plan-keyed loader reaches the checkpoint without a graph, so its caller supplies the
+    same rule from ``WeightSpec.graph_dtype``. Before that field existed the plan-keyed read
+    decoded the scales to f32, the cone decoded them AGAIN, and serving computed silently wrong
+    numbers while every kernel compiled and ran.
+
+    The third assertion is the point: without the flag the two loaders genuinely disagree, so the
+    flag is what makes them agree rather than the checkpoint happening to be read the same way.
+    """
+    from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors, load_sources_by_path
+
+    g, _y, _ = _nvfp4_matmul_graph(tmp_path)
+    f8 = set(F8_SAFETENSORS_DTYPES.values())
+    bits = {
+        nid: op.source_path for nid, op in g.loadable_constants() if op.source_path is not None and g.nodes[nid].output.dtype.name in f8
+    }
+    assert bits, "the spelled NVFP4 graph must carry an f8-dtype constant for this to test anything"
+
+    by_graph = load_constants_from_safetensors(g, str(tmp_path))
+    by_path = load_sources_by_path(str(tmp_path), set(bits.values()), bits_paths=frozenset(bits.values()))
+    decoded = load_sources_by_path(str(tmp_path), set(bits.values()))
+
+    for nid, path in bits.items():
+        want, got = np.asarray(by_graph[nid]), np.asarray(by_path[path])
+        assert want.dtype == np.uint8, f"{nid}: an f8-dtype constant binds RAW BITS, got {want.dtype}"
+        assert want.dtype == got.dtype, f"{nid}: {want.dtype} through the graph, {got.dtype} through the plan"
+        np.testing.assert_array_equal(want, got, err_msg=f"{nid} binds different bytes through the two loaders")
+        assert np.asarray(decoded[path]).dtype != np.uint8, "without the flag the plan-keyed read decodes — the bug this guards"
+
+
 def test_spelled_nvfp4_matmul_matches_oracle(tmp_path):
     """The spelled graph's numpy execution: matmul through the decode cone equals the
     oracle. Runs on graph-op forwards (pre-lowering), so it needs no Cling."""

@@ -326,12 +326,24 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
             f"(e.g. {unbindable[0]!r}) — a trellis linear that fell back to the folded checkpoint-basis cone "
             f"binds nothing here and the program would run weightless"
         )
+    from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES
+
+    f8_dtypes = set(F8_SAFETENSORS_DTYPES.values())
     want = set()
+    bits = set()  # paths whose consuming node wants RAW fp8 bits, not decoded values
     for w in plan.weights.values():
-        want.update(p for p, _shape in w.source_parts)
+        paths = {p for p, _shape in w.source_parts}
         if w.source_path is not None:
-            want.add(w.source_path)
-    sources = load_sources_by_path(ckpt_dir, want) if want else {}
+            paths.add(w.source_path)
+        want |= paths
+        # ``graph_dtype`` is the constant node's OWN dtype in the graph — not
+        # ``ConstantOp.source_dtype``, which names the STORED dtype and is the opposite fact. An f8
+        # graph dtype owns its own decode (an NVFP4 block scale feeds a ``from_f8e4m3`` cone), so
+        # decoding it here would decode it twice. A plan written before the field carries ``None``
+        # and keeps the stored-dtype read.
+        if w.graph_dtype in f8_dtypes:
+            bits |= paths
+    sources = load_sources_by_path(ckpt_dir, want, bits_paths=frozenset(bits)) if want else {}
     missing = want - set(sources)
     if missing:
         for path, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False)):

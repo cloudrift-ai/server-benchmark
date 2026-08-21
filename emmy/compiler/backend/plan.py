@@ -128,12 +128,24 @@ class WeightSpec:
     exactly one of ``source_path`` / ``source_parts`` is set. ``generated`` is the third,
     self-contained alternative for deterministic source-free bind records: ``(numpy dtype
     string, shape, raw bytes)``. Assemble the pre-chain source via
-    ``loader.binder.assemble_source`` (duck-typed over both specs)."""
+    ``loader.binder.assemble_source`` (duck-typed over both specs).
+
+    ``graph_dtype`` is this constant node's OWN dtype in the graph, which is not always what the
+    checkpoint stores. Deliberately NOT called ``source_dtype``: ``ConstantOp`` already has a field
+    by that name meaning the STORED dtype — the opposite fact — and :func:`assemble_source` is
+    duck-typed over both types, so one name for two opposite meanings would be a trap. It exists so
+    a plan describes its own binding without the graph: an f8-stored tensor whose node dtype is an f8 dtype must arrive as
+    RAW BITS, because the graph's own decode cone owns the value semantics, while the same stored
+    tensor bound for a non-f8 node decodes to values. A plan-keyed loader cannot tell those apart
+    from the path alone, and reading the wrong one decodes twice and computes silently wrong
+    numbers. ``None`` means the field was never written (a pack serialized before it existed); the
+    loader then keeps the historical stored-dtype read."""
 
     source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
     generated: tuple[str, tuple[int, ...], bytes] | None = None
+    graph_dtype: str | None = None
 
 
 @dataclass
@@ -247,11 +259,13 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             else:
                 logger.warning("plan: constant %r rides a bind record with unresolved leaves; weight will not rebind from a pack", nid)
                 load_ops = None
+        node = graph.nodes.get(nid)
         weights[nid] = WeightSpec(
             source_path=op.source_path,
             load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
             generated=generated,
+            graph_dtype=(node.output.dtype.name if node is not None and node.output is not None else None),
         )
 
     return ExecutionPlan(
@@ -508,6 +522,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                     else {}
                 ),
                 **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
+                **({"dtype": w.graph_dtype} if w.graph_dtype is not None else {}),
             }
             for nid, w in plan.weights.items()
         },
@@ -584,6 +599,9 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                     if "generated" in w
                     else None
                 ),
+                # Absent in packs written before the field existed: keep ``None``, which the
+                # loader reads as the historical stored-dtype behaviour rather than guessing.
+                graph_dtype=w.get("dtype"),
             )
             for nid, w in d.get("weights", {}).items()
         },

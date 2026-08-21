@@ -74,7 +74,7 @@ def test_plan_projection():
     assert roles == {"x": "input", "eps": "constant", "w": "constant", "div": "constant", "y": "output"}
     assert plan.constants == {"eps": 1e-6}
     assert plan.runtime_constants == {"div": Var("seq_len")}
-    assert plan.weights == {"w": WeightSpec(source_path="model.w", load_ops=(("transpose", (1, 0)),))}
+    assert plan.weights == {"w": WeightSpec(source_path="model.w", load_ops=(("transpose", (1, 0)),), graph_dtype="f32")}
     assert set(plan.kernels) == {"k_test"}
     assert plan.kernels["k_test"].arch_specific and plan.kernels["k_test"].source.startswith("__global__")
     assert plan.symbolic_bindings == {"seq_len": ("x", 0)}
@@ -97,6 +97,32 @@ def test_a_plan_stored_under_the_old_tma_key_still_reads():
     assert spec.pop("arch_specific") is True
     spec["uses_tma"] = True
     assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
+
+
+def test_a_plan_without_the_dtype_field_keeps_the_stored_dtype_read():
+    """A pack baked before ``WeightSpec.graph_dtype`` existed must keep loading.
+
+    The field tells a plan-keyed loader when a constant wants RAW fp8 bits rather than decoded
+    values. Absent, the spec reads ``None`` and the loader keeps its historical stored-dtype
+    behaviour — the old pack binds exactly as it did, rather than the field's absence being read
+    as some third thing.
+    """
+    wire = json.loads(json.dumps(plan_to_dict(plan_from_graph(_sample_graph()))))
+    for spec in wire["weights"].values():
+        spec.pop("dtype", None)
+    plan = plan_from_dict(wire)
+    assert plan.weights, "the sample graph binds at least one weight"
+    assert all(w.graph_dtype is None for w in plan.weights.values())
+
+
+def test_a_plan_records_the_graph_dtype_of_every_weight_it_binds():
+    """Plan construction writes the CONSUMING node's dtype, so the plan describes its own binding
+    without needing the graph back. This is what lets the serving trunk bind an f8-stored constant
+    as raw bits when the graph's own cone owns the decode."""
+    graph = _sample_graph()
+    plan = plan_from_graph(graph)
+    for nid, w in plan.weights.items():
+        assert w.graph_dtype == graph.nodes[nid].output.dtype.name
 
 
 def test_plan_round_trip_preserves_binary_key():

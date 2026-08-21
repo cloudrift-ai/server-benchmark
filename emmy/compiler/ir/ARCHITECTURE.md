@@ -607,9 +607,10 @@ downstream in `lowering/kernel` against the op tree + schedule. The older tile-l
 **The structural dump** (`tile/_dump.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
 `.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
-(`operands` first, then `init` / `lift` / `combine`, with the bilinear reading labelling its edges `operand[a]` /
-`operand[b<i>]` — the same `a` / `b` tokens the path codec spells, so a dump line matches a `PLACE@a` key by eye),
-and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
+(`operands` first, then `init` / `lift` / `combine`). Every edge uses its bound lift parameter or parameters as its
+label (`operand[p]:` or `operand[p, q]:`), making the positional substitution explicit even though the bilinear view
+prints A before B while its stored operand order is `(b₀, a, b₁…)`, and every operand edge is recursed into and tagged
+with its inhabitant — `‹computed›`
 for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. **A λ-valued field labels its own branch with its
 signature and nests its body two under it** — `lift:` / `combine:` / `fn:` all read the same way, so a binder is always
 adjacent to what it binds; none of them ride the node header, where on a big fold the signature sat a screenful above

@@ -678,8 +678,9 @@ rides the engine's splice event, which every fragment goes through. (The histori
 `loop/stamp` and `lowering/tile` plus a recognize-time deferral guarding their ordering — is gone with it.)
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
-tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; the cone edge spells `PLACE@a`
-through the view-role label), spelled/resolved by the same tree-path codec as the schedule families. Resolution is
+tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; a cone edge accepts the
+`PLACE@a` view-role spelling and canonicalizes to bare `PLACE` when it is the root contraction's shallowest seam),
+spelled/resolved by the same tree-path codec as the schedule families. Resolution is
 decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
 bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
 STRUCTURAL fork — the fused form beside one cut fragment per legal seam, so tune discovers cuts and a compile

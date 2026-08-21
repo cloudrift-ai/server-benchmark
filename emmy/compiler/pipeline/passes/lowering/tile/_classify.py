@@ -287,9 +287,11 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     one :class:`Channel` per ⊗-fold, the column axis joining the grid.
 
     Returns the same ``(Fold, column Axis, stores)`` the old recognize-time binder returned — or
-    ``None`` (not this shape). A VIEW, not a rewrite: ``classify`` stores the canonical projection
-    tree; this derivation runs on demand at the schedule (``_views``) and the golden decode,
-    because which of the two readings a fork row realizes is a decision about the SCHEDULE.
+    ``None`` (not this shape). The returned contraction keeps a wrapping projection only when its
+    body has real work; an empty identity projection carries no information. A VIEW, not a rewrite:
+    ``classify`` stores the canonical projection tree; this derivation runs on demand at the
+    schedule (``_views``) and the golden decode, because which of the two readings a fork row
+    realizes is a decision about the SCHEDULE.
 
     The statistic's OWN composed score binds too (the old ``bound_producer``): a single fold edge
     on the statistic re-binds through :func:`bind_bilinear` — tried against each free axis as the
@@ -408,7 +410,9 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     )
     from emmy.compiler.ir.tile.ir import Store  # noqa: PLC0415
 
-    return Fold.projection(body=Body((*prefix, *tail)), operands=(con,)), n_ax, tuple(Store(write=w) for w in writes)
+    projection = Body((*prefix, *tail))
+    root = Fold.projection(body=projection, operands=(con,)) if projection else con
+    return root, n_ax, tuple(Store(write=w) for w in writes)
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:

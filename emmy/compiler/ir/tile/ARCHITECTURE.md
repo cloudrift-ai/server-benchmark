@@ -76,7 +76,10 @@ positionally per scope with the cross-scope aliasing pattern kept). Consumed by 
 
 ## An operand edge has two inhabitants
 
-MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `ops.make_cone`).
+MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `ops.make_cone`). The
+structural dump puts each bound result directly in the edge label (`operand[result]:`) before the load or subtree; a
+product-valued edge lists every bound result. This keeps the lift's positional substitutions visible when a derived
+reading presents the edges in role order instead of stored operand order.
 
 **Edge iff closed** holds BY CONSTRUCTION — operands bind positionally, so a subtree that reads a name from its
 enclosing body cannot be one. The closure SCAN survives only as the validation reading, living with its one consumer
@@ -136,8 +139,9 @@ Every schedule slice lives in **`TileOp.schedule`**, a dict keyed by the tree-pa
 ONE walker plus one resolver, short-path-canonical: bare for the primary node, axis-suffixed where a kernel holds
 several sites of one family. Read
 and written through `ops.Sched`, which is also the one home of the `(m, n)` binding rule (`Sched.placed` /
-`Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings — `PLACE@a`'s
-golden rows depend on it. A sliced axis's window is the one `Axis.window`.
+`Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings. A computed-A
+cone accepts the explicit `PLACE@a` spelling; when it is the root contraction's shallowest seam, short-path
+canonicalization spells it as bare `PLACE`. A sliced axis's window is the one `Axis.window`.
 
 Since step 7 the wire forms are SITE-LOCAL: the worker inventory is spelled once in `WORK`
 (`w<M>x<N>[+p<np>]` / `t<N>[x<M>]`, the producer band riding `+p`), and `TILE` / `REDUCE` values shed their worker

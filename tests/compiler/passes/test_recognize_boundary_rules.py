@@ -345,8 +345,9 @@ def test_norm_linear_cone_is_an_inline_node_tree():
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
-    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
-    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper drops with its last stmt).
+    fold = tile.op
+    assert fold.role is AxisRole.CONTRACTION, "an empty identity projection must not wrap the product fold"
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
     c = fold
     assert not isinstance(c.a, Load)

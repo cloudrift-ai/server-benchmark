@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Consumer deployment signal but overshadowed by 27B variant dominance."
-  heat: 20
+  rationale: "Overshadowed by the 27B variant despite underlying momentum."
+  heat: 25
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition

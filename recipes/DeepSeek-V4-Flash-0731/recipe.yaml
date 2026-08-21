@@ -8,8 +8,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "Strong OR serving with 2.3M HF downloads and solid momentum."
-  heat: 72
+  rationale: "High HF trending and strong OR support indicate sustained attention."
+  heat: 85
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 

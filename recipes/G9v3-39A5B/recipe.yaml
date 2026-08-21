@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: ai9stars/G9v3-39A5B
-  rationale: Novel 39B MoE with 5B active params; fresh architecture for coverage.
-  heat: 42
+  rationale: "Novel MoE architecture provides fresh hardware coverage without hype."
+  heat: 45
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

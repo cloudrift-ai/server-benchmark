@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3-235B-A22B
-  rationale: "Extreme HF momentum despite Qwen3.8 breakout; strong serving signal."
-  heat: 85
+  rationale: "Strong OpenRouter serving and MoE flagship status with high current interest."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

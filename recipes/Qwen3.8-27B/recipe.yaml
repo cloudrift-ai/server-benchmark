@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Breakout model with 800+ Reddit comments and top arena benchmarks."
+  rationale: "Undisputed breakout model of the era with maximum community attention."
   heat: 98
   task: generate
 matrices:

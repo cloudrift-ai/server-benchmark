@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Strong OR presence (heat 58) with 31B dense VLM signal."
+  rationale: "Strong OR presence and 31B dense VLM signal."
   heat: 58
 engine:
   llm:

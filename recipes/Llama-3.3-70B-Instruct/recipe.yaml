@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: meta-llama/Llama-3.3-70B-Instruct
-  rationale: Huge HF momentum and downloads make this a must-add dense model.
+  rationale: "Huge HF momentum and serving value warrant breakout heat."
   heat: 92
   task: generate
 matrices:

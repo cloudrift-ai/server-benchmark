@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "HF likes strong but minimal evidence on Reddit or OR discovery."
-  heat: 20
+  rationale: "Strong HF likes provide solid attention despite less Reddit proof."
+  heat: 72
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

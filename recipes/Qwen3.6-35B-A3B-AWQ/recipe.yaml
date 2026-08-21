@@ -39,7 +39,7 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Specific quant eclipsed by standard Qwen3.6-35B and Qwen3.8 variants."
+  rationale: "FP8 base known; AWQ quant eclipsed. Modest HF trending scores."
   heat: 30
 engine:
   llm:

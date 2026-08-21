@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "FP8 coding variant on OpenRouter with strong serving signal."
-  heat: 60
+  rationale: "FP8 coding variant overshadowed by Qwen3.8 Coder waves."
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

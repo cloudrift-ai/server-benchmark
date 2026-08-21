@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Low current momentum; overshadowed by Flash-0731 variant."
-  heat: 30
+  rationale: "Overshadowed by the newer Flash-0731 variant."
+  heat: 35
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).
 # Engine = vLLM; deepseek_v4 tokenizer/tool/reasoning parsers, kv-cache fp8, block-size 256 (vLLM recipe + HF card).

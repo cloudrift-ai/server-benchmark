@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Niche quant overshadowed by Qwen3.8 Coder momentum and newer variants."
-  heat: 35
+  rationale: "Qwen3 Coder family strong on OR yet outshined by Qwen3.8 Coder variants."
+  heat: 50
 engine:
   llm:
     tensor_parallel_size: 1

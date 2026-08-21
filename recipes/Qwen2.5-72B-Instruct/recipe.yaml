@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen2.5-72B-Instruct
-  rationale: Consistently highest HF downloads and likes; fills 72B gap.
-  heat: 88
+  rationale: "Top HF downloads but overshadowed by Qwen3.5 and Qwen3.8 families."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

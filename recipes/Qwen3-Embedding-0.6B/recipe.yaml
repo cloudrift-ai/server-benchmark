@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Sustained HF download momentum in the hot Qwen embedding family."
+  rationale: "Sustained HF download momentum in the embedding family."
   heat: 55
   task: embed
 

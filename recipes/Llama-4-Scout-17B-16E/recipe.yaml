@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
-  rationale: "OR serving active with strong gated release and upvote signals."
-  heat: 60
+  rationale: "Gated release signals and active OR serving justify strong attention."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H100 80GB

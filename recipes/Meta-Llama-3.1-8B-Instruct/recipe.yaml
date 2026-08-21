@@ -5,8 +5,8 @@ tags:
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
-  rationale: "Aged out by Llama 3.3 and 4; no current momentum or community buzz."
-  heat: 15
+  rationale: "Llama 3.1 aged out; succeeded by 3.3 and newer. Moderate HF presence but low current momentum."
+  heat: 35
   revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
     FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned
     public mirror is byte-identical to the official Meta model payload.

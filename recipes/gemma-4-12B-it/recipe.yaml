@@ -22,7 +22,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B-it"
-  rationale: "Stable OR serving but eclipsed by Qwen3.8 and more capable variants."
+  rationale: "Stable OR serving but eclipsed by Qwen3.8."
   heat: 30
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7
 

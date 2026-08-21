@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-R1
-  rationale: "Arena dominance and 13.5K HF likes; massive open-weights impact."
-  heat: 85
+  rationale: "Arena dominance and massive impact commanding breakout attention across sources."
+  heat: 98
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

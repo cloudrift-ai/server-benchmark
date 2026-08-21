@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "Zero evidence across all discovery sources; minimal presence."
+  rationale: "Zero evidence across sources. Minimal presence."
   heat: 10
   task: generate
 matrices:

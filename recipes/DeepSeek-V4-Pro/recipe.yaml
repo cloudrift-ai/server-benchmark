@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "Established 1.6T MoE served on OR; moderate sustained interest."
-  heat: 55
+  rationale: "Established 1.6T MoE served on OR with moderate sustained interest."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

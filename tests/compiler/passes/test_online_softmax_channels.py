@@ -389,3 +389,50 @@ def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:
 
 def _wrap_rows(body: Body) -> Body:
     return Body.coerce((Loop(axis=Axis(name="a0", extent=Dim(8)), body=body),))
+
+
+def test_fusion_refuses_a_per_step_statistic_chained_inside_a_sweep() -> None:
+    """The attention ``k-norm → Q·Kᵀ`` shape: fused greedily, the key statistic is recomputed once
+    per query row INSIDE the key sweep and feeds the dot there — a step recognition can only keep
+    as the raw-loop escape (21 ms scalar against a 360 µs eager on Qwen3-0.6B layer 0). The merge
+    is refused; the single-fold-per-step sweeps (norm→linear, expectation channels) are not."""
+    from emmy.compiler.pipeline.passes.loop.fusion._merge import _chains_statistic_in_sweep
+
+    m, n, k, k2 = Axis("m", Dim(8)), Axis("n", Dim(8)), Axis("k", Dim(16)), Axis("k2", Dim(16))
+    dot = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+                Assign(name="ws", op=ElementwiseImpl("multiply"), args=("wv", "rs")),
+                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("xv", "ws")),
+                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    row_stat = Loop(
+        axis=k2,
+        body=Body(
+            (
+                Load(name="wq", input="w", index=(Var("n"), Var("k2"))),
+                Assign(name="sq", op=ElementwiseImpl("multiply"), args=("wq", "wq")),
+                Accum(name="ss", value="sq", op=ElementwiseImpl("add"), axes=("k2",)),
+            )
+        ),
+    )
+    rs = Assign(name="rs", op=ElementwiseImpl("rsqrt"), args=("ss",))
+    store = Write(output="out", index=(Var("m"), Var("n")), value="acc")
+    outer_stat = Loop(
+        axis=Axis("k3", Dim(16)),
+        body=Body(
+            (Load(name="xq", input="x", index=(Var("m"), Var("k3"))), Accum(name="qs", value="xq", op=ElementwiseImpl("add"), axes=("k3",)))
+        ),
+    )
+
+    # Statistic replayed per sweep step and chained into the dot: refused.
+    chained = LoopOp(body=Body((Loop(axis=m, body=Body((outer_stat, Loop(axis=n, body=Body((row_stat, rs, dot, store)))))),)))
+    assert _chains_statistic_in_sweep(chained)
+    # The same statistic hoisted above the sweep (norm→linear's readable form): one fold per step.
+    hoisted = LoopOp(body=Body((Loop(axis=n, body=Body((row_stat, rs, Loop(axis=m, body=Body((dot, store)))))),)))
+    assert not _chains_statistic_in_sweep(hoisted)

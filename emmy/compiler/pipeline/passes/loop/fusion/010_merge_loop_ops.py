@@ -18,7 +18,9 @@ form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, an
 entangle a multi-statistic compound (the online-softmax pair) beyond its readable tails — the
 flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
 expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
-one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
+one streaming loop) — and must not chain a per-step statistic into a fold inside a free sweep (a
+reduce another reduce in the same sweep reads: attention's k-norm replayed per query row ahead
+of ``Q·Kᵀ``) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
 ``PLACE`` seam), so evidence could never price the split back — plus one boundedness bound:
 ``_total_work`` sums the
 enclosing free×reduce iteration count of every compute leaf, and a merge that grows it by more

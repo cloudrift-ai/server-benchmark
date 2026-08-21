@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import Accum, Assign, Loop, LoopOp
+from emmy.compiler.ir.pure.fold import deep_defines, deep_reads
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Match, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
@@ -114,6 +115,44 @@ def _entangled_multi_stat(loop_op: LoopOp) -> bool:
     return walk(loop_op.body)
 
 
+def _chains_statistic_in_sweep(loop_op: LoopOp) -> bool:
+    """Whether a free sweep replays a reduce ``Loop`` whose accumulators feed a LATER reduce
+    ``Loop`` in the same sweep — a per-step statistic chained into a contraction.
+
+    One fold per sweep step is readable: the fused norm→linear sweep (the row statistic is the
+    sweep's outer sibling, each step is one dot) and softmax·V's expectation channels (one
+    additive fold per channel). A statistic recomputed INSIDE the sweep and consumed by a second
+    fold there is not — recognition cannot hoist it to an operand (its reads are sweep-local) and
+    keeps the whole step as the raw-loop escape, with no schedule tier and no ``PLACE`` seam, so
+    evidence could never price the split back. Attention's k-norm → RoPE → ``Q·Kᵀ`` region is the
+    case: fused greedily, the key statistic replays once per query row and the contraction runs
+    scalar."""
+    reduce_names = loop_op.reduce_axis_names
+
+    def walk(stmts: Body, in_sweep: bool) -> bool:
+        # Names carrying a statistic computed at THIS level: a reduce loop's accumulators and the
+        # pure stmts derived from them. Names from enclosing levels are the readable outer state.
+        tainted: set[str] = set()
+        seen_reduce = False
+        for stmt in stmts:
+            if not isinstance(stmt, Loop):
+                if set(stmt.deps()) & tainted:
+                    tainted |= set(stmt.defines())
+                continue
+            is_reduce = stmt.axis.name in reduce_names
+            if is_reduce:
+                if in_sweep and tainted & deep_reads(list(stmt.body)):
+                    return True
+                tainted |= deep_defines(stmt)
+            # A free loop is a sweep once a sibling reduce precedes it (or it sits inside one).
+            if walk(stmt.body, in_sweep or (not is_reduce and seen_reduce)):
+                return True
+            seen_reduce = seen_reduce or is_reduce
+        return False
+
+    return walk(loop_op.body, False)
+
+
 def _total_work(loop_op: LoopOp) -> int:
     """Sum enclosing-loop iterations over arithmetic leaves.
 
@@ -144,6 +183,8 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
         # expectation channels the pairing joins). A merge that entangles the pair with any
         # other tail produces a cell recognition keeps as the raw-loop escape.
         raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
+    if _chains_statistic_in_sweep(merged) and not any(_chains_statistic_in_sweep(graph.nodes[node_id].op) for node_id in region):
+        raise RuleSkipped("merge chains a per-step statistic into a fold inside a free sweep — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
     if post_work > _BLOWUP_FACTOR * pre_work:

@@ -282,7 +282,9 @@ refusals are semantic (region ownership, a real splicer rejection, the fence aro
 and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
 entangling a multi-statistic compound beyond its readable tails: the flat same-extent normalize sweep, or a free
 sweep of flat same-extent additive folds — the value folds of a fused softmax·V region, which read as one
-contraction over the pair; other shapes fall to the raw-loop
+contraction over the pair; and no per-step statistic chained into a fold inside a free sweep — a reduce whose
+result another reduce in the same sweep reads, the shape attention's k-norm → RoPE → `Q·Kᵀ` region takes when
+fused greedily, replaying the key statistic once per query row; other shapes fall to the raw-loop
 escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
 nest that no schedule can run and recognition cannot certify.

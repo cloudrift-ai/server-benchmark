@@ -780,7 +780,12 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
             abs_sum += float(absolute.sum())
             count += int(absolute.size)
             if failure is None and not np.all(absolute <= tolerance):
-                failure = f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}"
+                worst = int(np.argmax(absolute - tolerance))
+                failure = (
+                    f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}: "
+                    f"{int((absolute > tolerance).sum())}/{absolute.size} elements, "
+                    f"worst at flat index {worst}: emmy={actual.flat[worst]:.6g} eager={expected.flat[worst]:.6g}"
+                )
 
     proof = {
         "status": "fail" if failure else "pass",
@@ -792,7 +797,7 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         "max_rel_error": max_rel,
     }
     if failure:
-        proof["error"] = failure
+        proof["error"] = f"{failure} (max_abs={max_abs:.3g}, mean_abs={proof['mean_abs_error']:.3g}, max_rel={max_rel:.3g})"
     return proof
 
 

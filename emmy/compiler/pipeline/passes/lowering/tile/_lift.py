@@ -39,7 +39,7 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
     """Split a body into ``(free_axes, per_cell_stmts)``.
 
     The outer chain of **free** loops becomes the parallel axes. At every level of the
-    chain a leading run of pure stmts (``Load`` / ``Assign`` / ``Init`` — loop-invariant
+    chain a leading run of pure stmts (``Load`` / ``Assign`` / ``Init`` / ``Select`` — loop-invariant
     loads hoisted above or between the free loops, e.g. a broadcast row scale ``rs[m]``
     read once per ``m``) is sunk into the per-cell body, re-evaluated per cell. The chain
     stops at the first reduce loop, branch, or non-pure stmt — everything from there down
@@ -49,7 +49,7 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
     cur = list(body)
     while True:
         i = 0
-        while i < len(cur) and isinstance(cur[i], (Load, Assign, Init)):
+        while i < len(cur) and isinstance(cur[i], (Load, Assign, Init, Select)):
             i += 1
         head, rest = cur[:i], cur[i:]
         if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:
@@ -76,18 +76,22 @@ def _route_prologue(pending: list, loop: Loop, suffix_reads: set[str]) -> tuple[
     need = set(deep_reads(list(loop.body)))
     take: set[int] = set()
     dup: dict[int, dict[str, str]] = {}
+    # Reads by stmts that stay AHEAD of the loop: the suffix, plus — walking backwards — every
+    # pending stmt that does not sink (a raw loop, a fold, a kept stmt). A value one of those
+    # reads cannot move past it into the λ, or it would read an undefined name.
+    outside = set(suffix_reads)
     for i in range(len(pending) - 1, -1, -1):
         s = pending[i]
-        if not isinstance(s, (Load, Assign, Select)):
-            continue  # a fold / raw loop / Init never sinks; its results read as free names
-        defs = set(s.defines())
+        defs = set(s.defines()) if isinstance(s, (Load, Assign, Select)) else set()
         if not defs & need:
+            outside |= set(deep_reads([s]))  # a fold / raw loop / Init never sinks
             continue
-        if defs & suffix_reads:
+        if defs & outside:
             if isinstance(s, Load) and not s.deps() and not any(e.free_vars() for e in s.index or ()):
                 dup[i] = {nm: f"{nm}__stat" for nm in defs}
                 take.add(i)
                 continue
+            outside |= set(s.deps())
             continue  # feeds both sides and cannot be duplicated — the λ read stays free
         take.add(i)
         need |= set(s.deps())

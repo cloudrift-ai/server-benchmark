@@ -7,6 +7,8 @@ target identity needed by search consumers directly as data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import tempfile
@@ -176,6 +178,31 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
+
+    @cached_property
+    def pool_key(self) -> tuple:
+        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
+        consumer that groups goldens groups them the same way.
+
+        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
+        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
+        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
+        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
+        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
+        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
+        does not go stale when the scheduler changes.
+
+        When a group identity is recorded with the golden instead, this property returns it and its callers
+        do not change."""
+        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+        kind = "loop" if self.loop_wire is not None else "prog"
+        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True, default=str).encode(), digest_size=16).digest()
+        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+
+    @cached_property
+    def pin_key(self) -> tuple:
+        """This record's pins as a hashable, order-stable tuple."""
+        return tuple((k, str(v)) for k, v in self.pins)
 
     @cached_property
     def program(self):

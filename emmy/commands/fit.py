@@ -142,33 +142,14 @@ class _Pool:
     goldens: list[int]
 
 
-def _recorded_pool_key(g) -> tuple:
-    """Which ENUMERATION a golden will run, read off the record — so the corpus can be grouped before the
-    scheduler is touched and each enumeration paid once.
-
-    ``enumerate_graph(g.target_program, ctx)`` under ``g.pin_map`` reads exactly: the card, the wire the
-    target is specialized from, which node the target selects, the bindings, and the pins. Records agreeing
-    on all five run the same enumeration.
-
-    Sufficient, not necessary — this key only ever splits, never fuses, which is what makes it safe to
-    enumerate on. It splits two recordings of one program made in different sessions, whose node ids differ
-    and whose pools do not; folding those back together is :func:`_pool_identity`'s job.
-
-    It keys on what the enumeration READS, never on what it produced. A recorded pool would go stale the
-    moment the scheduler changes; which records share an enumeration stays true across compiler versions."""
-    wire = g.loop_wire if g.loop_wire is not None else g.program_wire
-    kind = "loop" if g.loop_wire is not None else "prog"
-    digest = hashlib.blake2b(json.dumps(wire, sort_keys=True, default=str).encode(), digest_size=16).digest()
-    return (g.gpu_name, tuple(g.compute_cap), kind, digest, tuple(g.origins), tuple(g.bindings), tuple((k, str(v)) for k, v in g.pins))
-
-
 def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool]) -> tuple:
     """A candidate pool's identity: everything about it except which golden pinned which row.
 
     Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
     one enumeration's row index addresses the same row the other's does, and the goldens behind them are
     several verified answers to one question. Deciding it from the packed pool rather than from a key is what
-    catches the same program recorded twice, which :func:`_recorded_pool_key` cannot see.
+    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_key`
+    cannot see.
 
     The identity fields ride along with the matrix digest because they decide things the matrix does not: the
     weight set (``dynamic``), the fold group (``shape``) and the report axes. Requiring them to agree can only
@@ -215,9 +196,9 @@ def build_golden_groups(
 
     **A group is a candidate pool, not a golden.** Several goldens can land on one pool — the same shape
     recorded under two names, or a name recorded twice — and they then share ONE group, each contributing a
-    row to its pin set. Which goldens share a pool is read off the records by :func:`_recorded_pool_key`
-    BEFORE anything is enumerated, so each pool is enumerated, featurized and packed exactly once and every
-    group is built knowing all of its answers. This logs how many goldens merged, and the caller records
+    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_key``)
+    BEFORE anything is enumerated, so each pool is enumerated, featurized and packed once, then folded by
+    :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
     groups against positives in the metrics header.
 
     Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
@@ -259,12 +240,12 @@ def build_golden_groups(
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
     keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
-    # Group the records by the pool each will enumerate, from what the file already records, before
-    # touching the scheduler. Insertion order is corpus order, so the cases come out in the order they
-    # always did.
+    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_key`) before touching
+    # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the cases
+    # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
-        by_pool[_recorded_pool_key(g)].append(g)
+        by_pool[g.pool_key].append(g)
 
     for members in by_pool.values():
         g = members[0]  # the pool is a property of the KEY; every member spells it identically

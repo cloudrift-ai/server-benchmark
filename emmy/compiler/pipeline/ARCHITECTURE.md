@@ -1159,16 +1159,22 @@ is what stops measurements from a manual sweep evaporating.
   loop dialect that carries `S_*` features, and falls back to the deepest one in the tile dialect. The mma
   tile-lowering keeps no `LoopOp` in `.source`, so without that fallback every tensor-core kernel was silently
   unrecordable. Both paths digest to the same `op_sig` a tune would write, verified on an RTX 4090.
-- **A row's key and its features must describe the same work**, or the pool it lands in is not a comparison. The two
-  arrive by different routes — the key from the fork point, the features from the kernel that actually ran — and a
-  structural fork can break the correspondence: when it splits a site, one piece's own `source_chain` may still bottom
-  out at the un-split site, so the piece gets filed as a rival of the whole op. The recorder compares the kernel's
-  `S_ext_*` extents against its fork point's and drops the row when they differ. Extents are what settles it because
-  tiling and split-K rewrite the loop nest but preserve them, so a kernel that realizes the whole fork point runs the
-  fork point's extents. Measured on the RTX 5090 freeze written before the check, nine pools held such a pair: a 5.9 µs
-  row scored against a 131 ms one, both honest at about 35 TFLOP/s, a median 8192x apart in work. Consumers cannot
+- **A row's key and its features must account for the same thing**, or the pool it lands in is not a comparison. The
+  two arrive by different routes — the key from the fork point, the features from the kernel that actually ran. A fork
+  point realized as SEVERAL kernels is where it breaks: the grouping below exists to sum those into one leaf, but it
+  can only sum kernels that resolved to the same fork point, and one piece's own `source_chain` may bottom out at the
+  un-split one while its sibling's does not. The piece is then recorded alone, as a rival of the whole op. The
+  recorder compares the kernel's `S_ext_*` extents against its fork point's and drops the row when they differ:
+  tiling and split-K rewrite the loop nest but preserve the extents, so a kernel realizing the whole fork point runs
+  the fork point's extents. Measured on the RTX 5090 freeze written before the check, nine pools held such a pair — a
+  fused `rms_norm`→linear megakernel beside a row for one kernel of the same op's unfused realization, a 5.9 µs norm
+  kernel against a 131 ms whole-op row; where the sibling was recorded too, the pair costs 24–191 µs. The extents are
+  a detector, not a work measure — their product double-counts for a sweep riding a reduction, which is why
+  `implausible_value_reason` abstains from its own `free × reduce` formula on that stamp shape. Consumers cannot
   repair this after the fact, which is why the reader (`data/group.py`'s `group_measured`) also keys on the extents —
-  the writer stops producing the rows, the reader stops trusting the ones already written.
+  the writer stops producing the rows, the reader stops trusting the ones already written. The guard is not the whole
+  repair: the unfused realization still gets no leaf of its own, because its kernels never resolve to a common fork
+  point for the summing to find.
 - The kernels of one variant (a split-K main kernel plus its combine kernel) are grouped under one fork point and
   recorded as ONE leaf for the whole variant. If every kernel in a graph loses its fork point, the recorder warns
   loudly rather than silently recording nothing. Rows that were flagged (a pin that did not match, a wrong answer, an

@@ -36,15 +36,31 @@ Rows are keyed with the tune's own recipes (same ``node_key`` / ``op_sig`` /
 diagnostics skip — and stamped with a ``bench-…`` ``run_id`` so freeze headers show the
 provenance.
 
-**The invariant that keeps a pool comparable: a row's key and its features must describe
-the same work.** They arrive by different routes — the key from the offer site, the
-features from the kernel that ran — and a structural fork can break the correspondence:
-when it splits a site, one piece's own source chain may still bottom out at the un-split
-site, so the piece is filed as a rival of the whole. Nothing downstream can tell:
+**The invariant that keeps a pool comparable: a row's key and its features must account
+for the same thing.** They arrive by different routes — the key from the offer site, the
+features from the kernel that ran — and nothing above makes them agree. A site realized as
+SEVERAL kernels is where it breaks: the grouping above exists to sum those into one leaf,
+but it can only sum kernels that resolved to the same site, and one piece's own source
+chain may bottom out at the un-split site while its sibling's does not. The piece is then
+filed alone, as a rival of the whole op, and nothing downstream can tell.
+
 :func:`bench_leaves` therefore compares the recorded kernel's ``S_ext_*`` extents against
-its site's and drops the row when they differ. Measured on the RTX 5090 freeze written
-before the check, nine pools held such a pair — a 5.9 µs row scored against a 131 ms one,
-both honest at about 35 TFLOP/s, a median 8192x apart in work.
+its site's and drops the row when they differ. On the RTX 5090 freeze written before the
+check, nine pools held such a pair: a fused ``rms_norm``->linear megakernel beside a row
+for one kernel of the same op's unfused realization — a 5.9 µs norm kernel against a 131 ms
+whole-op row. In the four where the sibling was also recorded, under its own key, the pair
+costs 24-191 µs against the fused row's 28-212 ms.
+
+The extents are a DETECTOR, not a work measure. Their product double-counts for these
+kernels, a sweep riding the reduction, which is why
+:func:`~.db.implausible_value_reason` abstains from its own ``free x reduce`` formula on
+exactly this stamp shape. What the mismatch proves is that the row does not account for
+its site, which is enough to know it must not be recorded under it.
+
+**This guard is not the whole repair.** It stops a wrong row; it does not produce the right
+one. The unfused realization still has no leaf of its own, because its kernels never
+resolved to a common site for the summing above to find — so the tune's data still cannot
+say that on these shapes not fusing wins by two to three orders of magnitude.
 """
 
 from __future__ import annotations

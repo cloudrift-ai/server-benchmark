@@ -2,8 +2,9 @@
 
 Every row carries two structural facts that arrive by different routes: its POOL KEY, digested from the
 pre-descent offer site, and its FEATURES, taken from the kernel that actually ran. Nothing made them agree, and
-when they disagree the row is filed as a rival of configs that did different work — which is how a 5.9 µs
-kernel came to be scored against a 131 ms one, both honest measurements at about 35 TFLOP/s.
+when they disagree the row accounts for a piece of its pool's work while claiming to be a rival of the whole —
+which is how a 5.9 µs ``rms_norm`` kernel came to be scored against the 131 ms fused megakernel it was split out
+of.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ from dataclasses import dataclass
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.pipeline.search.bench_record import FAIL_SENTINEL_US, bench_leaves
 
-# One reduce axis vs two: the fused-versus-split pair every mixed pool in the RTX 5090 freeze turned out to be.
+# The fused rms_norm->linear megakernel and one kernel of the same op's unfused realization — the pair every
+# mixed pool in the RTX 5090 freeze turned out to hold.
 WHOLE = {"S_reduce_add": 2.0, "S_ext_free_prod": 69632.0, "S_ext_reduce_prod": 14745600.0, "S_ext_n_reduce_axis": 2.0}
 PIECE = {"S_reduce_add": 1.0, "S_ext_free_prod": 30720.0, "S_ext_reduce_prod": 3840.0, "S_ext_n_reduce_axis": 1.0}
 

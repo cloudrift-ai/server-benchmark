@@ -328,6 +328,7 @@ URLs, which the workflow runs because PyPI renders the README detached from the 
     - [inspect_graph.py](emmy/commands/inspect_graph.py) — `inspect` command (graph summary)
   - [compiler/](emmy/compiler/) — PyTorch → Graph IR → CUDA compiler (see [ARCHITECTURE.md](emmy/compiler/ARCHITECTURE.md))
     - [graph.py](emmy/compiler/graph.py) — `Graph`, `Node`, `Tensor`, `Hints` container
+    - [pretty.py](emmy/compiler/pretty.py) — graph dumps as Rust-shaped pseudocode (see [IR-PSEUDOCODE-TORCH.md](emmy/compiler/IR-PSEUDOCODE-TORCH.md))
     - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
     - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
     - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see [ARCHITECTURE.md](emmy/compiler/pipeline/ARCHITECTURE.md))

@@ -98,10 +98,13 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
 
     document = load_golden_file(output)
     records = load_golden_records(document)
+    # The audit's graph set (``emmy eval golden``): the symbolic programs plus the config's static widths.
     assert captured == {
         "model": str(tmp_path / "local-checkpoint"),
         "decode_bucket": 0,
         "prefill_bucket": 0,
+        "extra_widths": (1, 64, 512, 1024),
+        "symbolic": True,
     }
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
@@ -148,8 +151,10 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
 
     assert captured == {
         "model": "org/model",
-        "decode_bucket": 0,
+        "decode_bucket": 1,
         "prefill_bucket": 0,
+        "symbolic": False,
+        "static_only": True,
     }
     records = load_golden_records(load_golden_file(output))
     assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}

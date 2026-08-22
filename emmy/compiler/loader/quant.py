@@ -74,6 +74,17 @@ _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
 _AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
 
 
+def scale_is_reciprocal(scale_key: str) -> bool:  # noqa: ARG001 — the key is the one fact a caller has
+    """Whether a checkpoint's stored scale is the RECIPROCAL of the dequant multiplier. It never
+    is: DeepSeek's ``weight_scale_inv`` (Laguna, DeepSeek-V3/V4 lineage) names the inverse of the
+    QUANTIZATION scale — ``q = w / s`` stored beside ``s`` — so the dequant is ``q * s`` exactly
+    as for ``weight_scale`` (DeepSeek's own ``weight_dequant`` and vLLM's block-fp8 path
+    multiply by it). Dividing by it, as the suffix once suggested here, scaled every
+    ``_scale_inv`` weight by ``1/s²``. The ``inverse=`` plumbing stays for a checkpoint that
+    declares a true reciprocal; the suffix alone never selects it."""
+    return False
+
+
 def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) -> np.ndarray:
     """Apply a quantization scale to a decoded weight, deriving the block from the shapes.
 
@@ -393,7 +404,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
         if qc is not None and key in fp8_keys and not _is_skipped(key, patterns):
             scale_key = next((k for k in (key + "_scale", key + "_scale_inv") if k in index), None)
             if scale_key is not None:
-                out[key] = dequantize(sources[key], sources[scale_key], inverse=scale_key.endswith("_inv"))
+                out[key] = dequantize(sources[key], sources[scale_key], inverse=scale_is_reciprocal(scale_key))
                 consumed.add(scale_key)
                 continue
         out[key] = sources[key]
@@ -528,7 +539,7 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
         shape=shape,
         out_dtype=out.dtype,
         out_name=out.name,
-        inverse=scale_key.endswith("_inv"),
+        inverse=scale_is_reciprocal(scale_key),
         grid=grid,
         block=block,
         degenerate=degenerate,

@@ -29,10 +29,10 @@ pool buckets onto measured cells and guarantee empty rows, so each builder decla
 **Every cell publishes what it was computed over.** ``groups`` is how many pools keyed into it and ``unscored``
 how many of those the model could not score at all. The measured metrics each add their OWN group count, because
 they have different minimums: regret needs a pool of at least two rows (a one-row pool is trivially perfect) and
-Spearman at least :data:`MIN_SPEARMAN_ROWS`. On the v3 freeze's 410 pools that is 339 and 211 — so an aggregate
+Spearman at least :data:`MIN_SPEARMAN_ROWS`. On the v3 freeze's 336 pools that is 297 and 216 — so an aggregate
 that quietly averaged the excluded pools in would be reporting mostly arithmetic. ``regret@10`` is the strictest:
-it needs eleven rows, which 81 pools have, so at the freeze's median pool size of five it excludes most of the
-corpus. The rank metrics have no minimum, so they carry no count of their own.
+it needs eleven rows, which 90 pools have, so at the freeze's median pool size of seven it still excludes most of
+the corpus. The rank metrics have no minimum, so they carry no count of their own.
 
 Polarity is handled once, here. ``score`` returns ranking QUALITY (higher = predicted faster, the
 :meth:`Prior.score_rows` contract); the regret and correlation families take a cost (lower = faster), so this
@@ -57,7 +57,7 @@ from emmy.compiler.pipeline.search.metrics import best_dual_rank, spearman, topk
 # Deliberately below the deploy gate's :data:`~.base._CALIBRATION_MIN_GROUP` (8), which is the same statistic on
 # a different job. That one decides whether a model may own deploys, over the model's OWN reservoir, where more
 # rows are always available and a false pass is expensive. This one describes an external corpus of fixed size:
-# raising it to 8 would drop the freeze well below its 211 measurable pools and report a card as unmeasured
+# raising it to 8 would drop the freeze well below its 216 measurable pools and report a card as unmeasured
 # rather than measured noisily.
 MIN_SPEARMAN_ROWS = 5
 

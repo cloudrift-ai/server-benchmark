@@ -30,25 +30,40 @@ def test_configs_that_competed_land_in_one_group():
     assert len(group.feats) == 4 and group.gpu == _GPU
 
 
-def test_the_key_separates_cards_ops_and_nvcc_regimes():
-    """Three axes, three reasons. Cards never pool. Ops never pool — and ``op_sig`` is the DB's own identity,
-    not the ``S_*`` signature, which descent stamps its own deltas into and which would therefore split one
-    op's alternative schedules apart. Regimes never pool because ``-O1`` and ``-O3`` invert."""
+def test_the_key_separates_cards_and_nvcc_regimes():
+    """Two axes, two reasons. Cards never pool. Regimes never pool because ``-O1`` and ``-O3`` invert."""
     rows = [
         _row("a", value_us=200.0, features=_feats(opt=3.0)),
-        _row("b", value_us=300.0, features=_feats(opt=1.0)),  # same op, other regime
-        _row("c", value_us=400.0, features=_feats(opt=3.0), op_sig="other"),
+        _row("b", value_us=300.0, features=_feats(opt=1.0)),  # same kernel, other regime
         _row("d", value_us=500.0, features=_feats(opt=3.0), gpu=_GPU2),
     ]
     groups, dropped = group_measured(rows)
     assert not dropped
-    assert len(groups) == 4 and all(len(g.feats) == 1 for g in groups)
+    assert len(groups) == 3 and all(len(g.feats) == 1 for g in groups)
+
+
+def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
+    """The key is the KERNEL's structure, not the ``op_sig`` column, which digests the pre-descent offer op.
+
+    A kernel a placement cut minted is an independent kernel — ``_cut.py`` mints it and the identity strategy
+    stamps it at birth — so tuning it is the same question as tuning an identical kernel nobody split, and
+    the deploy path already joins their evidence that way (``Prior.evidence_pick`` indexes on ``S_*``).
+    Keyed on ``op_sig`` the two land in different pools and get searched twice: on the RTX 5090 freeze 73
+    structures were fragmented like that, the losing pool's best coming in a median 1.46x behind the
+    winning pool's."""
+    rows = [
+        _row("from-a-cut", value_us=200.0, features=_feats(TILE="f2x2"), op_sig="site-of-the-fused-parent"),
+        _row("standalone", value_us=150.0, features=_feats(TILE="f4x4"), op_sig="its-own-site"),
+    ]
+    (group,), dropped = group_measured(rows)
+    assert not dropped
+    assert sorted(group.latency_us.tolist()) == [150.0, 200.0]
 
 
 def test_one_offer_site_over_different_work_is_not_one_group():
-    """``op_sig`` names where a decision was OFFERED, not what got computed: it digests the pre-descent offer
-    op's stamps, and one site can be realized as a single kernel or as several. Both rows are then honest
-    measurements — of a whole op and of a piece of one — and comparing their latencies is not.
+    """The over-merging half of the same mistake. ``op_sig`` names where a decision was OFFERED, not what got
+    computed, so one site can be realized as a single kernel or as several — and then both rows are honest
+    measurements, of a whole op and of a piece of one, while comparing their latencies is not.
 
     Left merged this cost a real number: nine pools of the RTX 5090 freeze paired a fused rms_norm->linear
     megakernel with one kernel of the same op's unfused realization, and the report priced a 5.9 µs norm
@@ -61,17 +76,19 @@ def test_one_offer_site_over_different_work_is_not_one_group():
 
     groups, dropped = group_measured(rows)
     assert not dropped
-    assert [g.latency_us.tolist() for g in groups] == [[2000.0], [131496.0]]
+    assert sorted(g.latency_us.tolist() for g in groups) == [[2000.0], [131496.0]]
 
 
-def test_one_op_scheduled_two_ways_stays_one_group():
-    """The other side of the same line: the key is ``op_sig`` plus the EXTENTS, not the whole structural
-    signature. These two rows are alternative SCHEDULES for one op over identical extents — descent moved an
-    ``S_*`` stamp that is not one — and a key that split them would leave two groups of one row each,
-    nothing to rank, and the comparison the metric exists for silently gone."""
+def test_alternative_schedules_of_one_kernel_stay_one_group():
+    """Two schedules of one kernel share every ``S_*`` stamp, so they share a pool — which is what makes a
+    pool a comparison at all.
+
+    They share them by construction, not by luck: the identity strategy stamps a kernel at BIRTH, in
+    recognition, before ``020_schedule`` offers the first fork — that pass's own error text says so. Nothing
+    a schedule fork decides can move an ``S_*`` value, which is what makes keying on them safe."""
     rows = [
-        _row("a", value_us=200.0, features=_feats(TILE="f2x2", S_loop_depth=3.0)),
-        _row("b", value_us=400.0, features=_feats(TILE="f8x8", S_loop_depth=2.0)),  # descent moved an S_* stamp
+        _row("a", value_us=200.0, features=_feats(TILE="f2x2", WORK="w1x8")),
+        _row("b", value_us=400.0, features=_feats(TILE="f8x8", WORK="w4x2")),
     ]
     (group,), _ = group_measured(rows)
     assert len(group.feats) == 2

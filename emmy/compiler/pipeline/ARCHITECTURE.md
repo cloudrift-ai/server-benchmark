@@ -1370,9 +1370,9 @@ both halves answer, projecting the packed matrix onto each model's own columns w
 where a score comes from.
 
 - A MEASURED pool (`--dataset nodes`: freeze or `node`-table rows, every candidate benched, grouped by
-  `(gpu, op_sig, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1 (the deploy
-  question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten, keep the
-  measured best). This is the half that tracks deployed speed.
+  `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1
+  (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten,
+  keep the measured best). This is the half that tracks deployed speed.
 - A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
   aggregate is dominated by pools small enough to rank by accident, so golden cells are stratified by pool size.
@@ -1381,20 +1381,24 @@ where a score comes from.
 `H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
 many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
 cell holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
-so on the v3 freeze's 410 pools those counts are 339, 211 and 81. An aggregate that averaged the excluded pools in
+so on the v3 freeze's 336 pools those counts are 297, 216 and 90. An aggregate that averaged the excluded pools in
 would be reporting mostly arithmetic.
 
-**The extents are part of the measured key, beside `op_sig`.** `op_sig` digests the **pre-descent offer op's**
-stamps — it names where a decision was offered, not what got computed — so one site can be realized as a single
-kernel or as several. Nine pools of the RTX 5090 freeze paired a fused `rms_norm`→linear megakernel with a row for
-just one kernel of the same op's unfused realization: a 5.9 µs norm kernel filed as a rival of a 131 ms whole-op
-row. A part's latency is not the realization's cost — where the sibling kernel was recorded too, the pair costs
-24–191 µs against the fused row's 28–212 ms. Every `S_ext_*` stamp therefore joins the key. Differing extents are
-what make the mismatch detectable and nothing more: the extent product is not a work measure for these kernels
-(a sweep rides the reduction, so it double-counts — `implausible_value_reason` abstains from its own
-`free × reduce` formula on exactly this stamp shape). That makes the grouping key a REFINEMENT of
-`fold_node_rows(by="op")`'s, which splits on `op_sig` alone — deliberately, since a fold must keep a whole op's
-tree on one side while a comparison must not merge rows that computed different things.
+**A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the row's own `S_*`
+stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
+structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
+evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
+because the identity strategy stamps a kernel **at birth**, in recognition, before `020_schedule` offers the first
+fork — so nothing a schedule fork decides can move an `S_*` value, and sibling schedules cannot be split apart.
+
+Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
+**over-merges**, because `op_sig` digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
+megakernel with a row for just one kernel of the same op's unfused realization — a 5.9 µs norm kernel filed as a
+rival of a 131 ms whole-op row, where the unfused pair actually costs 24–191 µs. And it **fragments**: 73 structures
+were searched in two separate pools, the losing pool's best landing a median 1.46× behind the winning pool's (p90
+3.89×, worst 14×) — the same kernel tuned twice because a placement cut minted one copy of it. Against `op_sig` the
+kernel key gives 336 pools rather than 401, but more rows sitting beside a rival (3778 of 3817 against 3760) and a
+median pool of 7 rather than 5; the pool count falls because merging is the point.
 
 **`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
 pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it

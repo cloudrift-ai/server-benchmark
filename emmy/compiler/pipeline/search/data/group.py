@@ -50,6 +50,7 @@ import numpy as np
 
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
+from emmy.compiler.structural import digest
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -343,18 +344,19 @@ class GoldenGroup(Group):
         return cls(key, name, tier, gpu, shape, dynamic, packed[0], matrix, len(matrix) if total is None else total, golden_ids=ids)
 
 
-def _extent_key(feats: dict) -> tuple:
-    """The loop extents a row's kernel actually ran over — the ``S_ext_*`` stamps, sorted.
+def kernel_sig(feats: dict) -> str:
+    """The op signature of the kernel a row actually measured, digested from its own ``S_*`` stamps.
 
-    What makes two measured latencies comparable at all. Every stamped row carries the whole set (the
-    stamp pass emits them unconditionally), so a missing one would be a row from a vocabulary this
-    featurizer version cannot read, which the admission filter has already rejected."""
-    return tuple(sorted((k, v) for k, v in feats.items() if k.startswith("S_ext_")))
+    Exactly what :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's
+    recorded stamps instead — so this is the SAME identity, asked of the kernel that ran rather than of the
+    site it came from. On the RTX 5090 freeze the two agree for 83% of rows; the rest are where the
+    distinction matters."""
+    return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
 
 
 def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     """Benched :class:`~..db.NodeRow`s as groups labelled with measured µs, keyed
-    ``(gpu, op_sig, H_opt, extents)`` — one group per set of configs that genuinely competed, plus a count of
+    ``(gpu, kernel_sig, H_opt)`` — one group per set of configs that genuinely competed, plus a count of
     what was dropped and why.
 
     Takes ``NodeRow``s rather than :class:`Sample`s because three of the four decisions below read
@@ -363,28 +365,25 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
-    - **``op_sig``, not the full ``S_*`` signature.** Descent stamps its own deltas into the ``S_*``
-      features, so keying on the whole signature would split alternative schedules for ONE op apart and
-      destroy the comparison the metric is asking for. Measured over the RTX 5090 freeze it also MERGES
-      what ``op_sig`` rightly keeps apart, collapsing 410 pools to 336. ``op_sig`` is a digest over the
-      **pre-descent offer op's** stamps and survives the freeze round-trip verbatim.
-    - **The EXTENTS, beside ``op_sig``, because the offer site is not the computation.** ``op_sig`` names
-      where a decision was offered, and one site can be realized either as a single kernel or as several.
-      Nine pools of that freeze paired a FUSED ``rms_norm``->linear megakernel with a row for just ONE
-      KERNEL of the same op's unfused realization — a 5.9 µs norm kernel filed as a rival of a 131 ms
-      whole-op row. A part's latency is not the realization's cost: in the four pools where the sibling
-      kernel was recorded too, the pair costs 24-191 µs against the fused row's 28-212 ms.
+    - **The KERNEL's own signature, not the offer site's** (:func:`kernel_sig`, the digest the row's
+      recorded ``op_sig`` column holds when the two agree, which is 83% of the RTX 5090 freeze). Two kernels
+      of the same structure on the same card are ONE tuning problem whatever produced them — which is
+      already how the deploy path joins evidence (``Prior.evidence_pick`` and
+      ``policy/greedy._db_measured_pick`` both index on the ``S_*`` signature), so this makes the
+      comparison sets agree with the tier that consumes them.
 
-      Differing extents are what make that detectable, and detection is all they are claimed for here. The
-      extent PRODUCT is not a work measure for these kernels — a sweep rides the reduction, so the product
-      double-counts, which is why :func:`~..db.implausible_value_reason` abstains from its own
-      ``free x reduce`` formula on exactly this stamp shape. The rows are incomparable because one accounts
-      for the whole op and the other for a piece of it, not because of a measured work ratio.
+      Keying on the recorded ``op_sig`` instead gets it wrong in both directions, and the freeze shows
+      both. It **over-merges**: ``op_sig`` digests the PRE-DESCENT offer op, and a site realized as several
+      kernels can leave one piece filed as a rival of the whole — nine pools paired a fused
+      ``rms_norm``->linear megakernel with a row for a single kernel of the same op's unfused realization,
+      a 5.9 µs norm kernel against a 131 ms whole-op row. And it **fragments**: 73 structures were searched
+      in two separate pools, the losing pool's best landing a median 1.46x behind the winning pool's
+      (p90 3.89x, worst 14x) — the same kernel tuned twice, once badly, because the two arrived from
+      different sites.
 
-      It costs almost nothing: it splits 9 pools of 401 and leaves 339 with the two rows regret needs (was
-      344), after which NO ``S_*`` stamp varies within any pool at all. ``(S_ext_free_prod,
-      S_ext_reduce_prod)`` alone gives the identical partition; the full tuple is spelled because "the
-      extents" is the thing being said, not two fields that happened to suffice.
+      Measured against ``op_sig``: 336 pools rather than 401, but MORE rows sitting beside a rival
+      (3778 of 3817, against 3760) and a median pool of 7 rather than 5. Pool count falls because merging
+      is the point; what a metric needs is rivals per row.
     - **``H_opt`` from the features, never ``context_key``.** (Present and numeric by then: the
       admission filter has already rejected a row missing its ``H_*`` stamps.) A live DB spells the regime as
       ``digest(Context, cap, flags)`` and a freeze spells the same one ``capX.Y-OZ``, so grouping on
@@ -392,21 +391,6 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
       came from. It looks like the first-class column; that is the trap. The regimes must not pool
       either way — ``-O1`` and ``-O3`` invert often enough that a merged group measures neither.
     - **``gpu``.** Cards never pool.
-
-    This key is a REFINEMENT of ``fold_node_rows(by="op")``'s, which splits on ``op_sig`` alone. The two
-    answer different questions and should not be made to agree: a fold must keep a whole op's tree on one
-    side or the value-correlated parent/child chains leak across the split, while a comparison must not
-    merge rows that computed different things. Refinement is what makes both safe at once — a group never
-    straddles two folds.
-
-    Admission is :func:`freeze_reason`, the sanity filter the freeze writer already applies — not a
-    second list of rules. It rejects a non-leaf (whose ``value_us`` is a min over its explored subtree,
-    a coverage bound rather than something anyone benched), a row spelled in a retired featurizer
-    vocabulary, and a row failing the shared plausibility predicates. That last one is why re-deriving
-    the filter here would have been a defect rather than a duplication: an implausibly fast row becomes
-    the group's ``min`` and every regret in the group is then measured against a latency no kernel
-    produced. A freeze has passed this at write time, so on freeze input it drops nothing — which is
-    exactly why the rule cannot be verified against a freeze, and why it must not be re-spelled.
 
     ONE rule is this function's own: **``bench_fail`` excluded.** ``freeze_reason`` deliberately keeps
     failures, as durable negative examples; a pool being ranked by measured latency wants them gone,
@@ -428,14 +412,10 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
         elif not r.op_sig or not r.gpu:
             dropped["unkeyed"] += 1
         else:
-            buckets[(r.gpu, r.op_sig, r.features["H_opt"], _extent_key(r.features))].append(r)
+            buckets[(r.gpu, kernel_sig(r.features), r.features["H_opt"])].append(r)
 
     groups = []
-    for (gpu, op_sig, h_opt, extents), grp in sorted(buckets.items()):
+    for (gpu, sig, h_opt), grp in sorted(buckets.items()):
         feats = [knob_features(r.features) for r in grp]
-        # The extents ride in the key string too: two realizations of one offer site over different work are
-        # now two groups, and a report keys its per-pool rows on this.
-        free, reduce = dict(extents).get("S_ext_free_prod", 0.0), dict(extents).get("S_ext_reduce_prod", 0.0)
-        key = f"{gpu}/{op_sig}@O{h_opt:g}/{free:g}x{reduce:g}"
-        groups.append(MeasuredGroup.from_measured(key, gpu, op_sig, h_opt, [r.value_us for r in grp], feats))
+        groups.append(MeasuredGroup.from_measured(f"{gpu}/{sig}@O{h_opt:g}", gpu, sig, h_opt, [r.value_us for r in grp], feats))
     return groups, dict(dropped)

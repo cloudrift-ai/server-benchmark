@@ -156,7 +156,7 @@ def feature_matrix(feats: list[dict[str, float]], names: list[str], *, fill: flo
 
 @dataclass(frozen=True)
 class Group:
-    """One golden's featurized candidate pool, plus the identity the fold axes and metrics keys need."""
+    """One featurized candidate pool, plus the identity the fold axes and metrics keys need."""
 
     key: str
     name: str
@@ -183,7 +183,7 @@ class Group:
     # sample - so each group's rows carry weight ``total / len(feats)`` in those two passes.
     # Without it a 5-row pool and a 325k one would weigh the same under fixed-size sampling, which
     # silently changes the standardization and with it the raw-space L2 the artifact ships.
-    total: int = 0
+    total: int
     # The last ``matrix()`` projection, ``((names, fill), array)`` — a cache, not part of the group's value, so
     # it stays out of ``__eq__`` / ``repr``. See :meth:`matrix`.
     _cache: tuple | None = field(default=None, repr=False, compare=False)
@@ -198,23 +198,8 @@ class Group:
 
         No ``total`` either: a measured pool is not a sample of a larger enumeration, it is exactly the
         configs someone ran, and a rank against anything else would be against candidates never measured."""
-        return cls._over(key, op_sig, "", gpu, op_sig, pack_features(feats), np.asarray(latency_us, dtype=float), None)
-
-    @classmethod
-    def _over(
-        cls,
-        key: str,
-        name: str,
-        tier: str,
-        gpu: str,
-        shape: str,
-        packed: tuple[tuple[str, ...], np.ndarray, bool],
-        labels: np.ndarray,
-        total: int | None,
-    ) -> Group:
-        """The one construction: an already-packed pool (:func:`pack_features`) plus its finished labels."""
-        names, matrix, dynamic = packed
-        return cls(key, name, tier, gpu, shape, dynamic, labels, names, matrix, len(matrix) if total is None else total)
+        names, matrix, dynamic = pack_features(feats)
+        return cls(key, op_sig, "", gpu, op_sig, dynamic, np.asarray(latency_us, dtype=float), names, matrix, len(matrix))
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``
@@ -230,7 +215,7 @@ class Group:
 
         Which is why the STORED matrix holds ``NaN``: it is strictly the more informative of the two, so the
         0.0 view is derivable from it and the reverse is not. Packing 0.0 would have destroyed the
-        distinction at :meth:`from_dicts` time, before any model got a say.
+        distinction at :func:`pack_features` time, before any model got a say.
 
         **The result is memoized and READ-ONLY.** Building it is a strided column copy of the whole pool, and a
         cross-validated run asks for the same projection over and over — once per fold's fit and again per
@@ -324,11 +309,11 @@ class GoldenGroup(Group):
         rows = (goldens,) if isinstance(goldens, int) else goldens
         labels = np.zeros(len(matrix), dtype=float)
         labels[list({int(i) for i in rows})] = 1.0
-        return cls._over(key, name, tier, gpu, shape, packed, labels, total)
+        return cls(key, name, tier, gpu, shape, dynamic, labels, packed[0], matrix, len(matrix) if total is None else total)
 
 
 def group_measured(rows) -> tuple[list[Group], dict[str, int]]:
-    """Benched :class:`~..db.NodeRow`s as :data:`LATENCY`-labelled groups, keyed
+    """Benched :class:`~..db.NodeRow`s as groups labelled with measured µs, keyed
     ``(gpu, op_sig, H_opt)`` — one group per set of configs that genuinely competed, plus a count of
     what was dropped and why.
 

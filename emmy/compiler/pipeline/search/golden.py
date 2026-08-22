@@ -196,12 +196,12 @@ class GoldenRecord:
         do not change."""
         wire = self.loop_wire if self.loop_wire is not None else self.program_wire
         kind = "loop" if self.loop_wire is not None else "prog"
-        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True, default=str).encode(), digest_size=16).digest()
+        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
         return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
 
     @cached_property
     def pin_key(self) -> tuple:
-        """This record's pins as a hashable, order-stable tuple."""
+        """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
         return tuple((k, str(v)) for k, v in self.pins)
 
     @cached_property

@@ -35,7 +35,7 @@ from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
-from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, GoldenRecord
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
@@ -135,7 +135,7 @@ class _Pool:
     pool and then fail to match a row in it, and naming a case after a golden the same run reports as
     skipped would put a rank in ``metrics.json`` under a name nothing pinned."""
 
-    namer: object
+    namer: GoldenRecord
     tier: str
     packed: tuple[tuple[str, ...], np.ndarray, bool]
     total: int
@@ -166,7 +166,7 @@ def _pool_bucket(g) -> tuple:
     one that matters: an over-broad bucket costs a few extra retained rows, while a too-narrow one
     would hand two goldens over one pool different keep-sets, retain different rows, and stop them
     merging into a single training case."""
-    return (g.gpu_name, tuple(g.compute_cap), tuple(sorted((k, str(v)) for k, v in g.pin_map.items())))
+    return (g.gpu_name, tuple(g.compute_cap), g.pin_key)
 
 
 def _keep_sets(records) -> dict[tuple, frozenset]:
@@ -323,7 +323,7 @@ def build_golden_groups(
             )
         )
     logger.info(
-        "  %d matched goldens over %d candidate pools (%d joined a pool an earlier golden opened)",
+        "  %d matched goldens over %d candidate pools (%d beyond one golden per pool)",
         matched,
         len(cases),
         matched - len(cases),

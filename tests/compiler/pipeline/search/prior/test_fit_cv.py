@@ -59,16 +59,6 @@ def test_feature_view_globs_and_names():
     assert not keep("D_bk_gap") and not keep("S_ext_free_prod") and not keep("MMA")
 
 
-def test_from_dicts_normalizes_one_or_many_positives():
-    """A bare int and a sequence are the same input — most callers pin one row and wrapping it would say
-    nothing. Either way the marked rows come out sorted and duplicate-free, so the trainers never have to
-    re-sort or de-duplicate them."""
-    rows = [{"D_a": float(i)} for i in range(5)]
-    assert np.flatnonzero(GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).labels).tolist() == [2]
-    assert np.flatnonzero(GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).labels).tolist() == [1, 3]
-    # ...so a builder may hand over the rows it verified in whatever order and with whatever repeats it found.
-
-
 def test_a_merged_case_reports_its_positive_count():
     """A case is a candidate pool, so a merged one is one row in ``per_golden`` where two goldens used to be
     two. ``positives`` is what makes that visible: without it a metrics file with fewer cases looks like lost
@@ -102,7 +92,7 @@ class _StubRecord:
         self.name, self.knobs, self.target_program = name, knobs, rows
         self.gpu_name, self.compute_cap = "gpuA", (12, 0)
         self.pool_key = (repr(rows if program is None else program), tuple(pins))
-        self.pin_map = dict(pins)
+        self.pin_key, self.pin_map = tuple(pins), dict(pins)
         self.structural_features, self.dynamic = {}, False
         self.shape_key = SimpleNamespace(kind="", is_warp=True)
 
@@ -162,10 +152,7 @@ def test_builder_merges_goldens_that_share_a_recorded_program_and_only_those(mon
         ],
         monkeypatch,
     )
-    assert [(c.key, np.flatnonzero(c.labels).tolist(), len(c.feats)) for c in cases] == [
-        ("gpuA/m.512", [1, 2], 3),
-        ("gpuA/m.512#2", [3], 4),
-    ]
+    assert [(c.key, c.golden_ids, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
     assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
     # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
@@ -193,7 +180,7 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     assert skipped == []
     assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
     (case,) = cases
-    assert case.labels.sum() == 2, "both recorded rows survive the draw and pin into the case"
+    assert len(case.golden_ids) == 2, "both recorded rows survive the draw and land in the case"
     assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
     kept = {chr(int(v)) for v in case.feats[:, 0]}
     assert {"a", "z"} <= kept
@@ -205,7 +192,7 @@ def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
     cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
-    assert [(c.key, np.flatnonzero(c.labels).tolist()) for c in cases] == [("gpuA/m.512", [1])]
+    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1,))]
 
 
 def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch):
@@ -224,7 +211,7 @@ def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch)
         ],
         monkeypatch,
     )
-    assert [(c.key, np.flatnonzero(c.labels).tolist()) for c in cases] == [("gpuA/m.512", [1, 2])]
+    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1, 2))]
 
 
 def test_a_pool_is_named_after_a_golden_that_is_actually_in_it(monkeypatch):

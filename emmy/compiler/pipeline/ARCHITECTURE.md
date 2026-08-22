@@ -1154,7 +1154,7 @@ a `configs` list), beside a `manifest.json` holding the provenance header and th
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
   `load_node_rows` sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze
   pointer) and yields `NodeRow`s from either, which is what lets every nodes consumer
-  (`eval online --dataset nodes --db`, `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably
+  (`eval prior --dataset nodes --db`, `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably
   with the live DB.
 - Rows loaded from a freeze have no parent and `depth=0`, which is how the diagnostics recognize that no tree
   structure is available. The fork-regret view skips them, and the golden-anchored descent prints its loud "no
@@ -1356,12 +1356,41 @@ come from an unpinned `REDUCE`. Golden rows attach to the run's SHAPE rather tha
 whose shape matches no greedy kernel — because greedy deployed a split partial+finalize pair — still prints and still
 lands in the record.
 
-## Part 8: Evaluating the prior (`emmy eval`)
+## Part 8: Evaluating the prior (`emmy eval prior`)
 
-`emmy eval` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. The views
-below run over the goldens, the tune DB's `node` table, or a measurement freeze.
+`emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
+over the goldens, the tune DB's `node` table, or a measurement freeze, and it reports BOTH halves of the composite
+prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
-**A golden's rank counts ties against it** (`eval offline` / `eval online`, via `golden_eval.evaluate_record`). The
+**Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
+(`--json`), so comparing two models is a `diff`. `emmy fit` still writes its own metrics layout and adopts these
+cells with the fold harness. The report computes nothing itself:
+`search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
+both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
+where a score comes from.
+
+- A MEASURED pool (`--dataset nodes`: freeze or `node`-table rows, every candidate benched, grouped by
+  `(gpu, op_sig, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1 (the deploy
+  question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten, keep the
+  measured best). This is the half that tracks deployed speed.
+- A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
+  known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
+  aggregate is dominated by pools small enough to rank by accident, so golden cells are stratified by pool size.
+
+**Every cell publishes what it covered.** Cells carry the axes they were keyed on as a dict — measured: `gpu` ×
+`H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
+many the model could not score at all, and a per-metric group count. The metrics have different minimums (regret
+needs two rows, Spearman five, regret@10 eleven), so on the v3 freeze's 401 pools those counts are 344, 211 and 81.
+An aggregate that averaged the excluded pools in would be reporting mostly arithmetic.
+
+**`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
+pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it
+(`golden_deploy_perf`, read from the reservoir with no re-bench).
+
+**`--dataset db` is rejected.** Those rows are fully-decided leaves with no op identity or compile regime to group a
+comparison set by; the same DB read as `--dataset nodes` has both.
+
+**A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
@@ -1371,14 +1400,19 @@ the one that gates, and the strictly-better **optimistic** rank is reported besi
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**Golden evaluations build their features for the golden's own GPU.** `eval offline` / `eval online` rebuild each
-golden's compile context as `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file
-along with its known SM count and smem specs — never the host's. Building them for the host's context makes golden
-ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
-from. The offline fitter's case builder always did this correctly; the
-eval now matches it.
+**Golden evaluations build their features for the golden's own GPU.** They go through ONE case builder — `emmy fit`'s
+`build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the same corpus, the
+same sampling draw and the same rows. Each golden's compile context is rebuilt as
+`Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
+count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
+because the occupancy features then describe tiles for a GPU that is not the one the row came from.
 
-**Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
+The eval builds its pools over the FULL featurization while a fit trains under its trainer's feature view. The view is
+a property of the model being fitted, and the eval scores two model classes: the linear half reads only its own weight
+names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
+view drops and would otherwise be asked about a kernel with no shape.
+
+**Fork-sibling regret** (`eval prior --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
 GPU**, what following the prior's choice at each fork costs. It groups nodes by `parent_key` and computes
 `value_us(the child the prior predicted best) / value_us(the truly best child)`; 1.00x means the prior steers into the
 best subtree reachable from there, and ties in predicted score count against the prior, since greedy breaks them by
@@ -1418,10 +1452,10 @@ setting matched (the `golden_deploy_perf` convention). This is a diagnostic, not
 sibling is near-equal is fine, and the gap column is what tells you so.
 
 Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
-(`EMMY_ONLINE_FILE`), and `--offline-file` (on `eval offline` / `eval online`; env `EMMY_OFFLINE_FILE`) swaps the
+(`EMMY_ONLINE_FILE`), and `--offline-file` (env `EMMY_OFFLINE_FILE`) swaps the
 offline weights artifact — comparing two fits is running the same eval against two files and diffing the reports.
 
-**Which feature is to blame** (`eval online --dataset nodes --blame / --ablate`). Both views consume one shared
+**Which feature is to blame** (`eval prior --dataset nodes --blame / --ablate`). Both views consume one shared
 per-fork record (`diagnostics.fork_records`: the siblings, their rows in feature form, their scores, the
 tie-pessimistic pick and the measured best), so all three views agree on what "the pick" means by construction. They
 score through the `Prior`'s feature-level entry points — `mean_score_features` / `mean_scores_features` take a row

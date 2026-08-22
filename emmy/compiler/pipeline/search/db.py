@@ -527,7 +527,7 @@ class SearchDB:
             if magic and magic != b"SQLite format 3\x00":  # empty file = valid empty DB
                 hint = (
                     " — this looks like a v1 JSONL measurement freeze; freezes are now per-GPU YAML directories, "
-                    "accepted only by the nodes-dataset consumers, e.g. `eval online --dataset nodes --db`"
+                    "accepted only by the nodes-dataset consumers, e.g. `eval prior --dataset nodes --db`"
                     if magic.startswith(b"{")
                     else ""
                 )
@@ -894,7 +894,7 @@ class SearchDB:
 
     def iter_nodes(self, *, context_key: str | None = None, op_sig: str | None = None) -> Iterator[NodeRow]:
         """Yield one :class:`NodeRow` per stored search-tree node (the value-of-position
-        dataset backing ``eval online --dataset nodes``). Self-contained — no join.
+        dataset backing ``eval prior --dataset nodes``). Self-contained — no join.
         A read-only open of a pre-``node`` DB has no such table, so this degrades to
         yielding nothing instead of raising (mirrors ``iter_perf_samples``'
         missing-column degrade). Optional ``context_key`` / ``op_sig`` scope to one

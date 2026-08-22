@@ -169,18 +169,28 @@ buried, while making sure the offline factor's arbitrary magnitude never touches
 
 ## See it yourself
 
-Evaluate each half against the golden configurations — where each recorded configuration ranks among the candidates it
-competed against:
+Evaluate both halves against the golden configurations — where each recorded configuration ranks among the candidates
+it competed against. Both halves are reported side by side, labelled, because they fail for different reasons:
 
 ```bash
-emmy eval offline
-emmy eval online
+emmy eval prior --dataset golden
 ```
+
+A rank is only a screen. It says where a good configuration landed in the ordering, never what missing it costs — two
+neighbouring ranks in a large pool can be a fraction of a percent apart or three times apart. The question a rank
+cannot answer is asked over configurations that were actually measured, which is the next page's dataset:
+
+```bash
+emmy eval prior --dataset nodes
+```
+
+That one reports, per card and compile setting, how closely the model's ordering follows the hardware's and what its
+best guess costs against the fastest configuration measured.
 
 Print the feature row the model actually sees for each golden:
 
 ```bash
-emmy eval online --features
+emmy eval prior --dataset golden --features
 ```
 
 And refit the offline half from the golden configurations, with cross-validation, no GPU required:

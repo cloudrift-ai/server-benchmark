@@ -26,7 +26,7 @@ def test_configs_that_competed_land_in_one_group():
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(4)]
     (group,), dropped = group_measured(rows)
     assert not dropped
-    assert group.labels.tolist() == [200.0, 300.0, 400.0, 500.0]
+    assert group.latency_us.tolist() == [200.0, 300.0, 400.0, 500.0]
     assert len(group.feats) == 4 and group.gpu == _GPU
 
 
@@ -67,7 +67,7 @@ def test_a_branchs_value_is_not_a_measurement():
     ]
     (group,), dropped = group_measured(rows)
     assert dropped == {"non-leaf (branch or pre-enrichment row)": 2}
-    assert group.labels.tolist() == [500.0]
+    assert group.latency_us.tolist() == [500.0]
 
 
 def test_a_failed_bench_carries_a_sentinel_not_a_latency():
@@ -79,7 +79,7 @@ def test_a_failed_bench_carries_a_sentinel_not_a_latency():
     ]
     (group,), dropped = group_measured(rows)
     assert dropped == {"bench_fail": 1}
-    assert group.labels.tolist() == [500.0]
+    assert group.latency_us.tolist() == [500.0]
 
 
 def test_every_row_is_either_grouped_or_counted():
@@ -102,14 +102,28 @@ def test_every_row_is_either_grouped_or_counted():
 def test_only_a_golden_pool_can_be_asked_which_rows_are_the_answer():
     """The two kinds differ in what can be ASKED of them, which is why they are two types. A measured pool
     has no ``golden_ids`` at all — not an empty one, not a raising one — so a rank metric that needs them
-    says so by taking :class:`GoldenGroup`, and nothing has to check a flag at runtime."""
+    says so by taking :class:`GoldenGroup`, and nothing has to check a flag at runtime. The supervision lives
+    on the subclasses for the same reason: on the base it would be one field with two meanings."""
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(3)]
     (measured,), _ = group_measured(rows)
     golden = GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
 
-    assert measured.labels.tolist() == [200.0, 300.0, 400.0]  # the measurement IS the label
+    assert measured.latency_us.tolist() == [200.0, 300.0, 400.0]  # per row, in microseconds
     assert golden.golden_ids == (1,)
     assert isinstance(golden, Group) and not hasattr(measured, "golden_ids")
+    assert not hasattr(golden, "latency_us")  # and the reverse: a golden pool has no measurement to report
+
+
+def test_a_measured_pool_carries_the_regime_it_was_measured_under():
+    """``h_opt`` is on the group, not recovered from its packed columns, because it is what DECIDED the
+    group: rows measured under different nvcc regimes never competed. A report keys a cell on it, so it has
+    to survive the trip from the row to the pool."""
+    rows = [
+        _row("a", value_us=200.0, features=_feats(opt=3.0)),
+        _row("b", value_us=300.0, features=_feats(opt=1.0)),
+    ]
+    groups, _ = group_measured(rows)
+    assert sorted(g.h_opt for g in groups) == [1.0, 3.0]
 
 
 def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
@@ -135,5 +149,5 @@ def test_a_row_the_freeze_would_refuse_is_refused_here_too():
         _row("phantom", value_us=0.05, features=_feats(TILE="f8x8")),
     ]
     groups, dropped = group_measured(rows)
-    assert [g.labels.tolist() for g in groups] == [[500.0]]
+    assert [g.latency_us.tolist() for g in groups] == [[500.0]]
     assert sorted(dropped) == ["implausible value", "stale feat_ver 1 != current 3"]

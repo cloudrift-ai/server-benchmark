@@ -217,3 +217,11 @@ class OfflinePrior(Prior):
         """Per-term decomposition of the quality score, summing to it exactly — the linear model's per-weight
         terms or the tree's TreeSHAP values. See each model's ``explain_features`` for its invariant."""
         return self._model.explain_features(feats)
+
+    def score_rows(self, group):
+        """The whole packed pool's ranking quality — straight through to the model, which is the object that
+        knows its own columns. This adapter adds nothing here precisely because there is no knob dict to
+        featurize: the pool arrives already packed, which is the same form ``emmy fit`` trains and scores it
+        in, so a golden's rank under a fitted artifact and under this deployed prior are the same number by
+        construction rather than by two paths agreeing."""
+        return self._model.score_rows(group)

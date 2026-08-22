@@ -169,17 +169,22 @@ Gathered in one place, honestly.
 The per-fork views need a tuning database, or a frozen snapshot in its place:
 
 ```bash
-emmy eval online --dataset nodes
-emmy eval online --dataset nodes --blame
-emmy eval online --dataset nodes --ablate
+emmy eval prior --dataset nodes
+emmy eval prior --dataset nodes --blame
+emmy eval prior --dataset nodes --ablate
 ```
 
+The first of those also reports what the measurements can say and the golden rankings cannot: per card and compile
+setting, how closely each half's ordering follows the hardware's, and what its best guess costs against the fastest
+configuration measured. Every number carries the count of comparison sets behind it, because the small ones are
+excluded rather than averaged in — most sets in the current snapshot are too small for some of the numbers.
+
 And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two
-fits are judged against each other:
+fits are judged against each other, with `--json` writing the report in the same shape a fit records:
 
 ```bash
-emmy eval offline --offline-file /tmp/candidate-weights.json
-emmy eval online --online-file /tmp/candidate-checkpoint.json
+emmy eval prior --offline-file /tmp/candidate-weights.json --json /tmp/candidate.json
+emmy eval prior --online-file /tmp/candidate-checkpoint.json --json /tmp/incumbent.json
 ```
 
 ## Where to go next

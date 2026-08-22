@@ -7,7 +7,7 @@ guarantees the extraction from the original fit script must keep:
 2. The fit-time rank evaluation and the deployed :class:`OfflinePrior` scoring
    order candidates identically for the shipped incumbent weights — including the
    atomic-free interaction, which both sides now read through one shared definition.
-   That is the invariant that makes fit-time golden ranks transfer to ``eval offline``
+   That is the invariant that makes fit-time golden ranks transfer to ``eval prior``
    and greedy-deploy ranks.
 """
 

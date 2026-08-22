@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
+
+from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
 
 
 def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> None:
@@ -565,79 +568,117 @@ def test_failures_old_db_without_error_column(run_cli, tmp_path):
     assert "(no error recorded)" in stdout
 
 
-# --- eval online --dataset db --------------------------------------------------
+# --- eval prior ----------------------------------------------------------------
 
 
-def test_prior_db_reachability_smoke(run_cli, tmp_path):
-    """``eval online --dataset db`` on a 2-row DB renders the aggregate reachability
-    view — the groups must reach ``diagnostics.reachability`` as ``Sample``s, not
-    ``(knobs, latency)`` tuples (the shape mismatch that crashed it)."""
+def test_prior_rejects_the_leaf_only_db_dataset(run_cli, tmp_path):
+    """``--dataset db`` reads fully-decided leaf rows with no op identity or compile regime on them, so there is
+    nothing to group a comparison set by. The same DB read as ``--dataset nodes`` has both, and the error says
+    so rather than emitting an empty table."""
     db = tmp_path / "r.db"
-    # A realistic stamped matmul histogram (``_matmul_sig``: product → reduce-add
-    # over 2 distinct inputs). Real rows never carry ``S_n_mma > 0`` — the stamp
-    # runs before the tile tier emits ``Mma`` — so the label keys on the histogram.
-    mm = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
-    _make_tune_db(
-        db,
-        [
-            ("a", "k_matmul", {"BM": 8, **mm}, 30.0),
-            ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
-        ],
-    )
-    rc, stdout, stderr = run_cli("eval", "online", "--dataset", "db", "--db", str(db), "--online-file", str(tmp_path / "missing.json"))
-    assert rc == 0, f"stderr: {stderr}"
-    assert "pick reachability over DB variants" in stdout
-    assert "matmul" in stdout  # the op-label row rendered
-    assert "traceback" not in (stdout + stderr).lower()
+    _make_tune_db(db, [("a", "k_matmul", {"BM": 8}, 30.0)])
+    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db))
+    assert rc == 2
+    assert "--dataset nodes" in stdout + stderr
 
 
-def test_pre_rename_cli_aliases(run_cli, tmp_path):
-    """The pre-rename spellings — the ``eval prior`` subcommand and the ``--prior``
-    flag — keep working as aliases for the renamed ``eval online`` / ``--online-file``."""
-    db = tmp_path / "r.db"
-    mm = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
-    _make_tune_db(
-        db,
-        [
-            ("a", "k_matmul", {"BM": 8, **mm}, 30.0),
-            ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
-        ],
-    )
-    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
-    assert rc == 0, f"stderr: {stderr}"
-    assert "pick reachability over DB variants" in stdout
-
-
-def test_prior_nodes_smoke(run_cli, tmp_path):
-    """``eval online --dataset nodes`` renders the fork sibling-ranking AND the leaf
-    reachability over the search-tree node store (one fork, two leaf children) —
-    ONCE PER PRIOR HALF, explicitly labeled, so a regret number is never ambiguous
-    about which ranker (offline vs online) produced it. With no fitted checkpoint
-    the offline block carries the metrics and the online block says it's unfitted."""
+def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
+    """``eval prior --dataset nodes`` renders the shared report over the node store: one cell per card and
+    compile regime, labelled by prior half. With no fitted checkpoint the online half is named as absent
+    rather than answered for — a cold model scores every row the same constant, which in a table is
+    indistinguishable from a trained model that collapsed."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
     db.record_nodes(
         [
-            NodeRow("P", None, "ctx", "mm", s, 1.0, 1),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2),
-            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2),
+            NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=_GPU, is_leaf=False),
+            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 3.0, 2, gpu=_GPU, is_leaf=True),
+            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 1.0, 2, gpu=_GPU, is_leaf=True),
         ]
     )
     db.close()
-    rc, stdout, stderr = run_cli(
-        "eval", "online", "--dataset", "nodes", "--db", str(db_path), "--online-file", str(tmp_path / "missing.json")
+    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--online-file", str(tmp_path / "no.json"))
+    assert rc == 0, f"stderr: {stderr}"
+    assert "No fitted online prior" in stdout  # the online half is named absent, not reported as flat
+    assert "ranking quality over benched pools" in stdout
+    assert "offline" in stdout and "O3" in stdout
+    # The per-fork view still runs beside the cells: it answers what a pool of benched leaves cannot, and it is
+    # retired with the rest of the fork machinery rather than by the report landing.
+    assert "per-fork view" in stdout and "node store: 3 nodes" in stdout
+    assert "traceback" not in (stdout + stderr).lower()
+
+
+def test_report_renders_both_dataset_kinds_with_their_own_columns():
+    """The renderer picks its columns from the report's dataset, since that is what decided which metrics the
+    cells carry. Both branches are exercised here rather than through a corpus build, which costs minutes."""
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.pipeline.search.data.group import GoldenGroup, MeasuredGroup
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_cells, measured_cells
+
+    feats = [{"D_a": float(i)} for i in range(3)]
+    by_d_a = lambda g: g.matrix(["D_a"])[:, 0]  # noqa: E731 — a one-line scorer stub
+    measured = MeasuredGroup.from_measured("g/op@O3", "g", "op", 3.0, [30.0, 20.0, 10.0], feats)
+    golden = GoldenGroup.from_dicts("g/k", "k", "warp", "g", "k", 0, feats, 50_000)
+
+    lines: list[str] = []
+    with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, measured_cells("offline", [measured], by_d_a)))
+        eval_cmd._emit_report(EvalReport({"dataset": "golden", "source": "corpus"}, golden_cells("online", [golden], by_d_a)))
+    text = "\n".join(lines)
+
+    assert "rho" in text and "regret@1" in text and "1.00x (1)" in text
+    assert "SCREEN" in text  # the golden block says what a rank is not
+    assert "top1" in text and "0/1" in text  # the golden ranks last under this scorer
+    assert ">=10k" in text  # and its pool bucket, without which the rank is unreadable
+
+
+def test_an_unmeasurable_metric_renders_a_dash_rather_than_a_number():
+    """Nothing in the cell qualified — which must not read as a value of zero."""
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.pipeline.search.data.group import MeasuredGroup
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells
+
+    one_row = MeasuredGroup.from_measured("g/op@O3", "g", "op", 3.0, [10.0], [{"D_a": 1.0}])
+    cells = measured_cells("offline", [one_row], lambda g: g.matrix(["D_a"])[:, 0])
+
+    lines: list[str] = []
+    with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, cells))
+
+    assert cells[0].metrics["regret1"]["median"] is None
+    assert "—" in "\n".join(lines)
+
+
+def test_prior_writes_the_report_as_json(run_cli, tmp_path):
+    """``--json`` writes the cells, so two runs are compared with ``diff`` instead of by eye.
+
+    Also pins the pre-rename ``--prior`` spelling of ``--online-file``: it lives in shell profiles and scripts."""
+    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
+
+    db_path = tmp_path / "n.db"
+    db = SearchDB(db_path)
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
+    db.record_nodes(
+        [
+            NodeRow("c8", None, "ctx", "mm", {**s, "BM": 8}, 3.0, 2, gpu=_GPU, is_leaf=True),
+            NodeRow("c64", None, "ctx", "mm", {**s, "BM": 64}, 1.0, 2, gpu=_GPU, is_leaf=True),
+        ]
+    )
+    db.close()
+    out = tmp_path / "report.json"
+    rc, _stdout, stderr = run_cli(
+        "eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--json", str(out), "--prior", str(tmp_path / "no.json")
     )
     assert rc == 0, f"stderr: {stderr}"
-    assert "=== offline prior" in stdout
-    assert "=== online prior" in stdout
-    assert "node store: 3 nodes" in stdout  # the offline block's metrics
-    assert "fork sibling regret" in stdout
-    assert "leaf reachability" in stdout
-    assert "not fitted" in stdout  # the online block, with no checkpoint, says so instead of silently answering offline
-    assert "traceback" not in (stdout + stderr).lower()
+    obj = json.loads(out.read_text())
+    assert obj["header"]["dataset"] == "nodes" and obj["header"]["groups"] == 1
+    (cell,) = obj["cells"]
+    assert cell["axes"] == {"half": "offline", "gpu": _GPU, "H_opt": "O3"}
+    assert set(cell["metrics"]) == {"spearman", "regret1", "regret10"}
+    assert cell["metrics"]["regret1"]["groups"] == 1
 
 
 def test_nodes_dataset_rejected_by_db_only_subcommand(run_cli, tmp_path):
@@ -757,42 +798,6 @@ def test_bare_families_canonicalizes_axis_suffixed_knobs():
     assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/smem-tma", "REDUCE": "g2a"}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
-
-
-def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
-    """``eval offline`` must featurize a golden under the golden's OWN card
-    (``Context.from_target(cap, gpu_name=...)``), never the live host's. With the
-    ``gpu_name`` dropped, the SM count fell back to the host device (or the GPU-less
-    default), so the occupancy features priced tiles for a card that doesn't exist —
-    the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
-    (now ``emmy fit``'s case builder) already passed it; this pins the eval side to match."""
-    from types import SimpleNamespace
-
-    import emmy.commands.eval as eval_cmd
-
-    golden = SimpleNamespace(
-        name="gemma4_12b.q_proj",
-        knobs={"TILE": "mma_m16n8k16_f16_f32/f4x4/k2", "WORK": "w2x2"},
-        gpu_name="NVIDIA GeForce RTX 4090",
-        compute_cap=(8, 9),
-    )
-    from emmy.compiler.pipeline.search.golden_eval import Ranked
-
-    seen: list = []
-
-    def fake_evaluate_record(record, ctx):
-        seen.append(ctx)
-        return Ranked(dict(record.knobs), 0, 1, 0)
-
-    monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
-    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_record", fake_evaluate_record)
-    eval_cmd._emit_offline_eval(None)
-
-    assert len(seen) == 1
-    ctx = seen[0]
-    assert ctx.gpu_name == "NVIDIA GeForce RTX 4090"
-    assert ctx.sm_count == 128  # the 4090's registered SM count, regardless of the host GPU
-    assert ctx.compute_capability == (8, 9)
 
 
 def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, caplog):

@@ -25,10 +25,9 @@ the offline prior, which is fitted on RANKS and whose output is an ordinal quali
 at all, exactly as it is for the online prior, which regresses µs.
 
 The offline prior's two available spellings — the raw quality (negated) and the deployed
-``exp(-scale · quality)`` proxy — therefore order a pool identically, and measurement says the gap between
-them is not merely small but unreachable: over all 1377 recorded goldens the shipped artifact's quality
-spans 0 to 277, an exp argument of at most 27.7 against the ±700 float-overflow bound, 25x of headroom.
-Pass whichever the caller already holds.
+``exp(-scale · quality)`` proxy — therefore order a pool identically, so pass whichever the caller already
+holds. (The proxy would lose that only past its exponent bound, which the shipped artifact cannot reach —
+see :data:`~.prior.base.PROXY_CLIP`.)
 
 Both families charge the model for a tie, but they charge it differently, and the difference is not a
 detail. :func:`rank_of_golden` models EMISSION ORDER — the row greedy actually deploys out of a plateau —

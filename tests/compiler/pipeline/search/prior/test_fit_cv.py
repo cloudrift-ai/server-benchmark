@@ -89,11 +89,20 @@ def test_a_merged_case_reports_its_positive_count():
 
 class _StubRecord:
     """The slice of a ``GoldenRecord`` the case builder reads, with the candidate pool handed in directly
-    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads."""
+    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads.
 
-    def __init__(self, name, knobs, rows):
+    The builder groups on the RECORDED provenance — the program wire, the target, the bindings and the
+    pins — so a stub that hands its pool in must record a provenance that agrees with the pool it hands
+    in, or it is describing a world that cannot happen. ``program`` therefore defaults to the pool's own
+    content, and is passed explicitly only to build the real FAST_MATH shape: one program, two pin sets,
+    two different enumerations."""
+
+    def __init__(self, name, knobs, rows, *, pins=(), program=None):
         self.name, self.knobs, self.target_program = name, knobs, rows
-        self.gpu_name, self.compute_cap, self.pin_map = "gpuA", (12, 0), {}
+        self.gpu_name, self.compute_cap = "gpuA", (12, 0)
+        self.program_wire, self.loop_wire = {"program": rows if program is None else program}, None
+        self.origins, self.bindings, self.pins = ("op",), (), tuple(pins)
+        self.pin_map = dict(self.pins)
         self.structural_features, self.dynamic = {}, False
         self.shape_key = SimpleNamespace(kind="", is_warp=True)
 
@@ -132,22 +141,23 @@ def _build(records, monkeypatch, **kwargs):
     return build_golden_groups(**kwargs)
 
 
-def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
-    """Membership is decided by CONSTRUCTION — two goldens share a group only when the featurized pool they
-    enumerate is the same one — never by a metadata key.
+def test_builder_merges_goldens_that_share_a_recorded_program_and_only_those(monkeypatch):
+    """Membership is decided by what the RECORD says the enumeration will read — the program, the target,
+    the bindings and the pins — never by the name and never by a derived summary of the shape.
 
-    That distinction is the whole point: most same-name duplicates are ``FAST_MATH`` siblings whose pools are
-    genuinely disjoint (the fast-math enumeration offers an atom the standard one never emits), so merging on
-    the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded twice —
-    once against the standard pool and once against the fast-math one — and only the two goldens that really
-    do share a pool merge."""
+    The name is the obvious wrong answer: most same-name duplicates are ``FAST_MATH`` siblings, one program
+    under two pin sets, and the fast-math enumeration offers an atom the standard one never emits — so
+    merging on the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded
+    twice against ONE program with different pins, and only the two goldens whose provenance really does
+    agree merge."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
     fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
     cases, skipped = _build(
         [
             _StubRecord("m.512", {"TILE": "b"}, std),
-            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name over the SAME pool: merges
-            _StubRecord("m.512", {"TILE": "f"}, fastmath),  # same name, disjoint pool: stays its own case
+            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name, same provenance: merges
+            # Same name AND same program, but pinned differently — so a different enumeration, its own case.
+            _StubRecord("m.512", {"TILE": "f"}, fastmath, program=std, pins=(("FAST_MATH", True),)),
             _StubRecord("m.512.absent", {"TILE": "zz"}, std),  # matches no row: skipped, as before
         ],
         monkeypatch,
@@ -166,11 +176,11 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     """Sampling must not break the merge, and the merge is what makes two verified answers to one
     question one training case instead of two.
 
-    ``_pool_identity`` digests the packed feature matrix, so two goldens over one pool merge only if they
-    RETAIN identical rows. They do because the draw is a pure function of ``(pool size, sample, seed)`` and
-    both goldens are bucketed onto the same keep-set. Both recorded rows survive the draw even though neither
-    was picked by it: the pool's first and last rows are exactly the positions a 4-of-26 draw is least likely
-    to reach."""
+    The two are one group before the draw happens — they share a program, so they share an enumeration and
+    the builder runs it once. What sampling must not break is the PINS: both recorded rows have to survive
+    the draw, which they do because it is a pure function of ``(pool size, sample, seed)`` and both goldens
+    bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last rows are
+    exactly the positions a 4-of-26 draw is least likely to reach."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
     cases, skipped = _build(
         [

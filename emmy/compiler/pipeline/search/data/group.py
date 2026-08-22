@@ -368,13 +368,21 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
       destroy the comparison the metric is asking for. Measured over the RTX 5090 freeze it also MERGES
       what ``op_sig`` rightly keeps apart, collapsing 410 pools to 336. ``op_sig`` is a digest over the
       **pre-descent offer op's** stamps and survives the freeze round-trip verbatim.
-    - **The EXTENTS, beside ``op_sig``, because the offer site is not the work.** ``op_sig`` names where
-      a decision was offered; one site can be realized as kernels that compute different amounts. Nine
-      pools of that freeze mixed two workloads a median 8192x apart — a 5.9 µs row and a 131 ms row filed
-      as competitors, both honest measurements of different kernels at ~35 TFLOP/s. Latency is only
-      comparable between rows that did the same work, so every ``S_ext_*`` stamp joins the key. It costs
-      almost nothing: it splits 9 pools of 401 and leaves 339 with the two rows regret needs (was 344),
-      after which NO ``S_*`` stamp varies within any pool at all. ``(S_ext_free_prod,
+    - **The EXTENTS, beside ``op_sig``, because the offer site is not the computation.** ``op_sig`` names
+      where a decision was offered, and one site can be realized either as a single kernel or as several.
+      Nine pools of that freeze paired a FUSED ``rms_norm``->linear megakernel with a row for just ONE
+      KERNEL of the same op's unfused realization — a 5.9 µs norm kernel filed as a rival of a 131 ms
+      whole-op row. A part's latency is not the realization's cost: in the four pools where the sibling
+      kernel was recorded too, the pair costs 24-191 µs against the fused row's 28-212 ms.
+
+      Differing extents are what make that detectable, and detection is all they are claimed for here. The
+      extent PRODUCT is not a work measure for these kernels — a sweep rides the reduction, so the product
+      double-counts, which is why :func:`~..db.implausible_value_reason` abstains from its own
+      ``free x reduce`` formula on exactly this stamp shape. The rows are incomparable because one accounts
+      for the whole op and the other for a piece of it, not because of a measured work ratio.
+
+      It costs almost nothing: it splits 9 pools of 401 and leaves 339 with the two rows regret needs (was
+      344), after which NO ``S_*`` stamp varies within any pool at all. ``(S_ext_free_prod,
       S_ext_reduce_prod)`` alone gives the identical partition; the full tuple is spelled because "the
       extents" is the thing being said, not two fields that happened to suffice.
     - **``H_opt`` from the features, never ``context_key``.** (Present and numeric by then: the

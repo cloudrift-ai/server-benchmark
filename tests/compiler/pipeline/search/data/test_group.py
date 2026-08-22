@@ -47,12 +47,12 @@ def test_the_key_separates_cards_ops_and_nvcc_regimes():
 
 def test_one_offer_site_over_different_work_is_not_one_group():
     """``op_sig`` names where a decision was OFFERED, not what got computed: it digests the pre-descent offer
-    op's stamps, and one site can be realized as kernels doing wildly different amounts of work — a fused op
-    against one kernel of a split pair. Both rows are honest measurements; comparing their latencies is not.
+    op's stamps, and one site can be realized as a single kernel or as several. Both rows are then honest
+    measurements — of a whole op and of a piece of one — and comparing their latencies is not.
 
-    Left merged this cost a real number: nine pools of the RTX 5090 freeze mixed two workloads a median 8192x
-    apart, and the report priced a 5.9 µs row against a 131 ms one as a 22 221x miss when both ran at about
-    35 TFLOP/s."""
+    Left merged this cost a real number: nine pools of the RTX 5090 freeze paired a fused rms_norm->linear
+    megakernel with one kernel of the same op's unfused realization, and the report priced a 5.9 µs norm
+    kernel against a 131 ms whole-op row as a 22 221x miss."""
     small = _feats(S_ext_free_prod=30720.0, S_ext_reduce_prod=3840.0, REDUCE="coop")
     large = _feats(S_ext_free_prod=69632.0, S_ext_reduce_prod=14745600.0, REDUCE="coop")
     # Both latencies are plausible for their OWN extents — the point is the grouping, so neither row may be

@@ -1385,10 +1385,14 @@ so on the v3 freeze's 410 pools those counts are 339, 211 and 81. An aggregate t
 would be reporting mostly arithmetic.
 
 **The extents are part of the measured key, beside `op_sig`.** `op_sig` digests the **pre-descent offer op's**
-stamps — it names where a decision was offered, not what got computed — so one site can be realized as kernels
-doing wildly different amounts of work (a fused op against one kernel of a split pair). Nine pools of the RTX 5090
-freeze mixed two workloads a median 8192x apart, filing a 5.9 µs row and a 131 ms row as competitors when both ran
-at about 35 TFLOP/s. Every `S_ext_*` stamp therefore joins the key. That makes the grouping key a REFINEMENT of
+stamps — it names where a decision was offered, not what got computed — so one site can be realized as a single
+kernel or as several. Nine pools of the RTX 5090 freeze paired a fused `rms_norm`→linear megakernel with a row for
+just one kernel of the same op's unfused realization: a 5.9 µs norm kernel filed as a rival of a 131 ms whole-op
+row. A part's latency is not the realization's cost — where the sibling kernel was recorded too, the pair costs
+24–191 µs against the fused row's 28–212 ms. Every `S_ext_*` stamp therefore joins the key. Differing extents are
+what make the mismatch detectable and nothing more: the extent product is not a work measure for these kernels
+(a sweep rides the reduction, so it double-counts — `implausible_value_reason` abstains from its own
+`free × reduce` formula on exactly this stamp shape). That makes the grouping key a REFINEMENT of
 `fold_node_rows(by="op")`'s, which splits on `op_sig` alone — deliberately, since a fold must keep a whole op's
 tree on one side while a comparison must not merge rows that computed different things.
 

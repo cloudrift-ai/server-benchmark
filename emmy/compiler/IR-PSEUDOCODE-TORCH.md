@@ -29,13 +29,21 @@ emmy compile -c 'F.linear(torch.randn(4,64), torch.randn(16,64))' --ir torch
 ```rust
 // 3 nodes, 2 inputs, 1 outputs
 
-pub fn main(
+struct Dynamic {}
+
+struct Inputs<dynamic: Dynamic> {
     x0: f32[4,64],
     x1: f32[16,64],
-) -> f32[4,16] {
-    let linear: f32[4,16] = linear(x0, x1, has_bias=False);
+}
 
-    linear
+struct Outputs<dynamic: Dynamic> {
+    linear: f32[4,16],
+}
+
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  let linear: f32[4,16] = linear(inputs.x0, inputs.x1, has_bias=False);
+
+  Outputs { linear }
 }
 ```
 
@@ -51,15 +59,24 @@ emmy compile -c 'torch.randn(4,8) + 1' --ir torch
 ```rust
 // 4 nodes, 1 inputs, 1 outputs
 
-let add_c1: f32[1] = 1.0;
+struct Dynamic {}
 
-pub fn main(
+struct Inputs<dynamic: Dynamic> {
     x: f32[4,8],
-) -> f32[4,8] {
-    let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| add_c1[0]);
-    let add: f32[4,8] = add(x, add_c1_bc);
+}
 
-    add
+struct Outputs<dynamic: Dynamic> {
+    add: f32[4,8],
+}
+
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  // constants: checkpoint tensors, and the literals the trace captured
+  let add_c1: f32[1] = 1.0;
+
+  let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| add_c1[0]);
+  let add: f32[4,8] = add(inputs.x, add_c1_bc);
+
+  Outputs { add }
 }
 ```
 
@@ -75,17 +92,26 @@ emmy compile -c 'F.softmax(torch.randn(2,4,8).transpose(1,2), dim=-1)' --ir torc
 ```rust
 // 6 nodes, 1 inputs, 1 outputs
 
-let transpose_c1: f32[1] = 1.0;
-let transpose_c2: f32[1] = 2.0;
-let softmax_c1: f32[1] = -1.0;
+struct Dynamic {}
 
-pub fn main(
+struct Inputs<dynamic: Dynamic> {
     x: f32[2,4,8],
-) -> f32[2,8,4] {
-    let transpose: f32[2,8,4] = transpose(x, axes=(1, 2));
-    let softmax: f32[2,8,4] = softmax(transpose, axis=-1);
+}
 
-    softmax
+struct Outputs<dynamic: Dynamic> {
+    softmax: f32[2,8,4],
+}
+
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  // constants: checkpoint tensors, and the literals the trace captured
+  let transpose_c1: f32[1] = 1.0;
+  let transpose_c2: f32[1] = 2.0;
+  let softmax_c1: f32[1] = -1.0;
+
+  let transpose: f32[2,8,4] = transpose(inputs.x, axes=(1, 2));
+  let softmax: f32[2,8,4] = softmax(transpose, axis=-1);
+
+  Outputs { softmax }
 }
 ```
 
@@ -101,59 +127,49 @@ emmy compile TinyLlama/TinyLlama-1.1B-Chat-v1.0 --layer 0 --ir torch
 ```
 
 ```rust
+
 // 106 nodes, 4 inputs, 1 outputs
 
-let p_attn_q_proj_weight: f16[2048,2048] = load("self_attn.q_proj.weight");
-let p_attn_k_proj_weight: f16[256,2048] = load("self_attn.k_proj.weight");
-// … 38 constants in all
+struct Dynamic {}
 
-pub fn main(
+struct Inputs<dynamic: Dynamic> {
     hidden_states: f16[1,512,2048],
     position_embeddings_0: f16[1,512,64],
     position_embeddings_1: f16[1,512,64],
     attention_mask: f32,
-) -> f16[1,512,2048] {
-    let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
-    let to: f32[1,512,2048] = emmy::cast(hidden_states);
-    // … the norm, then the q / k / v projections
-    let scaled_dot_product_attention: f16[1,32,512,64]
-        = sdpa(add_1, add_2, transpose_2, is_causal=True, sliding_window=None, scale=0.125);
-    let linear_3: f16[1,512,2048] = linear(reshape, p_attn_o_proj_weight, has_bias=False);
-    let add_3: f16[1,512,2048] = add(hidden_states, linear_3);
-    // … the post-attention norm and the feed-forward block
-    let add_5: f16[1,512,2048] = add(add_3, linear_6);
+}
 
-    add_5
+struct Outputs<dynamic: Dynamic> {
+    add_5: f16[1,512,2048],
+}
+
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  // constants: checkpoint tensors, and the literals the trace captured
+  let p_attn_q_proj_weight: f16[2048,2048] = load("self_attn.q_proj.weight");
+  // … 38 constants in all
+
+  let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
+  let to: f32[1,512,2048] = emmy::cast(inputs.hidden_states);
+  // … the norm, then the q / k / v projections
+  let scaled_dot_product_attention: f16[1,32,512,64]
+      = sdpa(add_1, add_2, transpose_2, is_causal=True, sliding_window=None, scale=0.125);
+  let linear_3: f16[1,512,2048] = linear(reshape, p_attn_o_proj_weight, has_bias=False);
+  let add_3: f16[1,512,2048] = add(inputs.hidden_states, linear_3);
+  // … the post-attention norm and the feed-forward block
+  let add_5: f16[1,512,2048] = add(add_3, linear_6);
+
+  Outputs { add_5 }
 }
 ```
 
-The graph's constants become module-level bindings, its inputs become the parameters of `pub fn main`, every
-compute node becomes one `let`, and its outputs become the tail expression. A graph with several outputs
-returns an `Outputs` struct, declared after the function; a graph with none returns `()`.
+Three types come first. `Dynamic` carries the symbolic extents a `--dynamic` trace introduced. `Inputs` and
+`Outputs` both take it as a parameter, because a shape on either side can be a function of those extents —
+`x: f32[2,dynamic.seq_len,4]` — and that parameter is what binds the name an extent refers to. Every dump
+prints all three, empty ones included, so one shape fits every graph.
 
-```rust
-// 8 nodes, 2 inputs, 2 outputs
-
-let add_c1: f32[1] = 1.0;
-let mul_c1: f32[1] = 2.0;
-
-pub fn main(
-    x0: f32[4,8],
-    x1: f32[4,8],
-) -> Outputs {
-    let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| add_c1[0]);
-    let mul_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| mul_c1[0]);
-    let add: f32[4,8] = add(x0, add_c1_bc);
-    let mul: f32[4,8] = multiply(x1, mul_c1_bc);
-
-    Outputs { add, mul }
-}
-
-struct Outputs {
-    add: f32[4,8],
-    mul: f32[4,8],
-}
-```
+Then `main`. Its body opens with the graph's constants, in their own block under a comment; each compute node
+becomes one more `let`; and the tail expression builds `Outputs`. An input is reached through its struct,
+`inputs.hidden_states`, while a constant or an earlier result is a plain name.
 
 **Types** carry the shape: `f16[1,512,4096]`. A rank-0 tensor is just its dtype (`f32`). Dtype names are the
 repo's own, including the narrow float formats (`f8e4m3`). Under `--dynamic` an extent can be a name or an
@@ -196,17 +212,17 @@ When `EMMY_DUMP_DIR` dumps a later stage, whose nodes hold whole statement trees
 body instead:
 
 ```rust
-    let linear: f32[4,16]
-        = loop(x1, x0) {
-    for a0 in 0..4
-        for a1 in 0..16
-            for a2 in 0..64
-                in0 = load x1[a1, a2]
-                in1 = load x0[a0, a2]
-                v0 = multiply(in0, in1)
-                acc0 <- add(acc0, v0)
-            linear[a0, a1] = acc0
-    };
+  let linear: f32[4,16]
+      = loop(inputs.x1, inputs.x0) {
+        for a0 in 0..4
+            for a1 in 0..16
+                for a2 in 0..64
+                    in0 = load x1[a1, a2]
+                    in1 = load x0[a0, a2]
+                    v0 = multiply(in0, in1)
+                    acc0 <- add(acc0, v0)
+                linear[a0, a1] = acc0
+  };
 ```
 
 `acc0 <- add(acc0, v0)` is that dialect's accumulate, not an assignment this notation defines.

@@ -32,9 +32,26 @@ _WRAP = 118
 _OP_SPELLING = {"RmsNormOp": "rms_norm", "LayerNormOp": "layer_norm"}
 
 
-def fmt_type(shape: tuple, dtype) -> str:
-    """``f16[1,512,4096]``; a rank-0 tensor is just its dtype."""
-    return str(dtype) if not shape else f"{dtype}[{','.join(str(d) for d in shape)}]"
+def fmt_type(shape: tuple, dtype, syms: dict[str, Var] | None = None) -> str:
+    """``f16[1,512,4096]``; a rank-0 tensor is just its dtype. A symbolic extent
+    prints qualified by the struct that carries it — ``f32[2,dynamic.seq_len,4]``."""
+    return str(dtype) if not shape else f"{dtype}[{','.join(_fmt_dim(d, syms) for d in shape)}]"
+
+
+def _fmt_dim(d, syms: dict[str, Var] | None) -> str:
+    expr = getattr(d, "expr", None)
+    return str(d) if expr is None or not syms else expr.substitute(syms).pretty()
+
+
+def _symbols(graph) -> dict[str, Var]:
+    """Every symbolic extent in the graph, mapped to its field on ``Dynamic``."""
+    names: set[str] = set()
+    for node in graph.nodes.values():
+        for t in node.outputs:
+            for d in t.shape:
+                if (expr := getattr(d, "expr", None)) is not None:
+                    names |= expr.free_vars()
+    return {n: Var(f"dynamic.{n}") for n in sorted(names)}
 
 
 def _fields(op) -> list[str]:
@@ -50,14 +67,14 @@ def _binders(op: IndexMapOp) -> list[str]:
     return [(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}") for d, n in enumerate(_DIM_NAMES[: len(op.out_shape)])]
 
 
-def _index_expr(op: IndexMapOp, names: list[str], arg_names: list[str]) -> str:
+def _index_expr(op: IndexMapOp, names: list[str], arg_names: list[str], syms: dict[str, Var]) -> str:
     src = op.sources[0]
-    rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n.lstrip("_")) for d, n in enumerate(names)}
+    rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n.lstrip("_")) for d, n in enumerate(names)} | syms
     coords = ", ".join(e.substitute(rename).pretty() for e in src.coord_map)
     return f"{arg_names[src.input_idx]}[{coords}]"
 
 
-def fmt_expr(node, graph, names: dict[str, str]) -> str:
+def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
     """The right-hand side of one ``let``."""
     op = node.op
     args = [names.get(i, i) for i in node.inputs]
@@ -84,7 +101,7 @@ def fmt_expr(node, graph, names: dict[str, str]) -> str:
             return args[0] if same_dtype else f"emmy::cast({args[0]})"
         if len(op.sources) == 1 and op.sources[0].select is None and len(op.out_shape) <= len(_DIM_NAMES):
             names = _binders(op)
-            return f"emmy::tensor_from_fn(|{', '.join(names)}| {_index_expr(op, names, args)})"
+            return f"emmy::tensor_from_fn(|{', '.join(names)}| {_index_expr(op, names, args, syms)})"
         return f"emmy::index_map({', '.join(args)})"
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same
@@ -110,17 +127,17 @@ def fmt_expr(node, graph, names: dict[str, str]) -> str:
         # Loop / tile / kernel ops: their fields are whole statement trees, so the
         # dialect's own body rendering reads where a dataclass repr does not.
         nested = "\n".join(f"    {line}" for line in body.splitlines())
-        return f"{name}({', '.join(args)}) {{\n{nested}\n    }}"
+        return f"{name}({', '.join(args)}) {{\n{nested}\n  }}"
     return f"{name}({', '.join([*args, *_fields(op)])})"
 
 
-def fmt_constant(node) -> str:
+def fmt_constant(node, syms: dict[str, Var]) -> str:
     """Where a constant's value comes from: a literal, the launch context, or the checkpoint."""
     op: ConstantOp = node.op
     if op.value is not None:
         base = repr(op.value)
     elif getattr(op, "context_value", None) is not None:
-        base = f"context({op.context_value.pretty()})"
+        base = f"context({op.context_value.substitute(syms).pretty()})"
     elif op.source_path:
         base = f'load("{op.source_path}")'
     elif getattr(op, "source_parts", ()):
@@ -147,48 +164,52 @@ def _let(name: str, ty: str, rhs: str, indent: str, tensor_name: str = "") -> li
 
 def render_graph(graph) -> str:
     order = graph.topological_order()
+    syms = _symbols(graph)
     # A binding name is the node id — the graph's own edge key, unique by
     # construction. Two nodes can share one tensor name (``broadcast_to`` names
     # its result after its source, so one table broadcast to two head counts
     # yields the name twice), so a differing tensor name rides in a comment.
-    names = {nid: nid for nid in order}
-    outs = [(names.get(b, b), graph.buffer(b)) for b in graph.outputs]
+    # An input is reached through the struct it arrives in.
+    names = {nid: (f"inputs.{nid}" if nid in graph.inputs else nid) for nid in order}
+    ins = [(buf, graph.buffer(buf)) for buf in graph.inputs]
+    outs = [(names.get(buf, buf).removeprefix("inputs."), graph.buffer(buf)) for buf in graph.outputs]
+
+    def struct(name: str, fields: list[tuple[str, str]]) -> list[str]:
+        if not fields:
+            return [f"struct {name} {{}}", ""]
+        return [f"struct {name} {{", *[f"    {n}: {ty}," for n, ty in fields], "}", ""]
 
     lines = [f"// {len(graph.nodes)} nodes, {len(graph.inputs)} inputs, {len(graph.outputs)} outputs", ""]
+    # ``Inputs`` and ``Outputs`` depend on the runtime extents, so both take
+    # ``dynamic`` as a parameter and every symbolic extent names one of its fields.
+    lines += struct("Dynamic", [(n, "usize") for n in syms])
+    lines += struct("Inputs<dynamic: Dynamic>", [(buf, fmt_type(t.shape, t.dtype, syms)) for buf, t in ins])
+    lines += struct("Outputs<dynamic: Dynamic>", [(n, fmt_type(t.shape, t.dtype, syms)) for n, t in outs])
+    lines.append("fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {")
 
     consts = [n for n in order if isinstance(graph.nodes[n].op, ConstantOp)]
+    if consts:
+        lines.append("  // constants: checkpoint tensors, and the literals the trace captured")
     for nid in consts:
         t = graph.nodes[nid].output
-        lines += _let(names[nid], fmt_type(t.shape, t.dtype), fmt_constant(graph.nodes[nid]), "", t.name)
+        lines += _let(names[nid], fmt_type(t.shape, t.dtype, syms), fmt_constant(graph.nodes[nid], syms), "  ", t.name)
     if consts:
         lines.append("")
 
-    ret = "Outputs" if len(outs) > 1 else fmt_type(outs[0][1].shape, outs[0][1].dtype) if outs else "()"
-
-    lines.append("pub fn main(")
-    for buf in graph.inputs:
-        t = graph.buffer(buf)
-        lines.append(f"    {names.get(buf, buf)}: {fmt_type(t.shape, t.dtype)},")
-    lines.append(f") -> {ret} {{")
-
     for nid in (n for n in order if not isinstance(graph.nodes[n].op, (InputOp, ConstantOp))):
         node = graph.nodes[nid]
-        rhs = fmt_expr(node, graph, names)
+        rhs = fmt_expr(node, graph, names, syms)
         if len(node.outputs) == 1:
             t = node.output
-            lines += _let(names[nid], fmt_type(t.shape, t.dtype), rhs, "    ", t.name)
+            lines += _let(names[nid], fmt_type(t.shape, t.dtype, syms), rhs, "  ", t.name)
         else:
             # A node writing several buffers destructures, so every buffer a later
             # line can name is bound here. Slot 0 travels under the node id, the
             # rest under their own buffer names.
             slots = ", ".join(node.buffer_names())
-            types = ", ".join(fmt_type(t.shape, t.dtype) for t in node.outputs)
-            lines += _let(f"({slots})", f"({types})", rhs, "    ")
+            types = ", ".join(fmt_type(t.shape, t.dtype, syms) for t in node.outputs)
+            lines += _let(f"({slots})", f"({types})", rhs, "  ")
 
-    lines.append("")
-    tail = "Outputs { " + ", ".join(n for n, _ in outs) + " }" if len(outs) > 1 else outs[0][0] if outs else "()"
-    lines += [f"    {tail}", "}"]
-    if len(outs) > 1:
-        # Declared after the function, next to its only use.
-        lines += ["", "struct Outputs {", *[f"    {n}: {fmt_type(t.shape, t.dtype)}," for n, t in outs], "}"]
+    lines += ["", "  Outputs { " + ", ".join(n for n, _ in outs) + " }", "}"]
+
     return "\n".join(lines)

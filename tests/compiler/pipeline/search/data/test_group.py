@@ -8,9 +8,7 @@ misgrouped or mislabelled pool still produces a confident-looking correlation.
 
 from __future__ import annotations
 
-import numpy as np
-
-from emmy.compiler.pipeline.search.data.group import LATENCY, VERIFIED, Group, group_measured
+from emmy.compiler.pipeline.search.data.group import GoldenGroup, Group, group_measured
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS
 from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
 from tests.compiler.pipeline.search.helpers import node_row as _row
@@ -28,7 +26,6 @@ def test_configs_that_competed_land_in_one_group():
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(4)]
     (group,), dropped = group_measured(rows)
     assert not dropped
-    assert group.label_kind == LATENCY
     assert group.labels.tolist() == [200.0, 300.0, 400.0, 500.0]
     assert len(group.feats) == 4 and group.gpu == _GPU
 
@@ -102,27 +99,26 @@ def test_every_row_is_either_grouped_or_counted():
 # --- the two label kinds -----------------------------------------------------------
 
 
-def test_the_kind_travels_with_the_group():
-    """One array, two meanings, and ``label_kind`` is how a consumer knows which it holds. Nothing derives
-    the meaning from the numbers — a pinned pool's 0/1 markers are a perfectly well-formed vector to
-    correlate against, and a report that guessed would publish the result."""
+def test_only_a_golden_pool_can_be_asked_which_rows_are_the_answer():
+    """The two kinds differ in what can be ASKED of them, which is why they are two types. A measured pool
+    has no ``golden_ids`` at all — not an empty one, not a raising one — so a rank metric that needs them
+    says so by taking :class:`GoldenGroup`, and nothing has to check a flag at runtime."""
     rows = [_row(f"n{i}", value_us=200.0 + 100 * i, features=_feats(TILE=f"f2x{2 + i}")) for i in range(3)]
     (measured,), _ = group_measured(rows)
-    pinned = Group.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
+    golden = GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
 
-    assert (measured.label_kind, measured.labels.tolist()) == (LATENCY, [200.0, 300.0, 400.0])
-    assert (pinned.label_kind, pinned.labels.tolist()) == (VERIFIED, [0.0, 1.0, 0.0])
+    assert measured.labels.tolist() == [200.0, 300.0, 400.0]  # the measurement IS the label
+    assert golden.golden_ids == (1,)
+    assert isinstance(golden, Group) and not hasattr(measured, "golden_ids")
 
 
-def test_pins_go_in_as_row_indices_and_mark_those_rows():
-    """A group is built ONCE, already knowing every verified row it holds, so there is no
-    amend-after-construction path — several pins arrive together, in any order, with duplicates."""
+def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
+    """A group is built ONCE, already knowing every golden it holds, so there is no amend-after-construction
+    path — several arrive together, in any order, with duplicates, and the marker encoding never leaves the
+    class."""
     feats = [{"D_a": float(i)} for i in range(5)]
-    one = Group.from_dicts("g/x", "x", "warp", "g", "x", 2, feats)
-    assert one.labels.tolist() == [0.0, 0.0, 1.0, 0.0, 0.0]
-
-    several = Group.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats)
-    assert np.flatnonzero(several.labels).tolist() == [2, 4]
+    assert GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", 2, feats).golden_ids == (2,)
+    assert GoldenGroup.from_dicts("g/y", "y", "warp", "g", "y", (4, 2, 4), feats).golden_ids == (2, 4)
 
 
 def test_a_row_the_freeze_would_refuse_is_refused_here_too():

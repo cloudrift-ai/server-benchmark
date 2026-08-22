@@ -15,7 +15,7 @@ import pytest
 from emmy.commands import fit as fit_cmd
 from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, Group, feature_view
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -64,8 +64,8 @@ def test_from_dicts_normalizes_one_or_many_positives():
     nothing. Either way the marked rows come out sorted and duplicate-free, so the trainers never have to
     re-sort or de-duplicate them."""
     rows = [{"D_a": float(i)} for i in range(5)]
-    assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).labels).tolist() == [2]
-    assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).labels).tolist() == [1, 3]
+    assert np.flatnonzero(GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).labels).tolist() == [2]
+    assert np.flatnonzero(GoldenGroup.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).labels).tolist() == [1, 3]
     # ...so a builder may hand over the rows it verified in whatever order and with whatever repeats it found.
 
 
@@ -257,7 +257,7 @@ def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
     stamp = {"S_ext_n_symbolic_axis": 1.0 if tier == "dyn" else 0.0}
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
     shape = shape or name.removesuffix(".dynM")
-    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
+    return GoldenGroup.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
 
 
 def _cases():
@@ -298,9 +298,9 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
     # under the wrong weight set with nothing reporting it.
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
+        GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
+        GoldenGroup.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
 
 
 def test_a_routing_feature_may_never_carry_a_fitted_weight():
@@ -316,13 +316,13 @@ def test_a_routing_feature_may_never_carry_a_fitted_weight():
 
 
 def test_matrix_fill_declares_the_absent_semantics():
-    """``Group`` stores absent features as ``NaN`` and each model class projects them to what IT means by
+    """``GoldenGroup`` stores absent features as ``NaN`` and each model class projects them to what IT means by
     absent. Both kinds of absence are covered: a name the pool never stamped, and a key missing from one
     row whose siblings carry it.
 
     The ``fill=0.0`` default must stay bit-identical to ``feats.get(k, 0.0)`` — that is the linear model's
     contract, and the whole dataset is packed once for both trainers."""
-    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    g = GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
     zeros = g.matrix(["D_a", "D_b", "D_never"])
     assert zeros.tolist() == [[1.0, 2.0, 0.0], [3.0, 0.0, 0.0]]
 
@@ -330,7 +330,7 @@ def test_matrix_fill_declares_the_absent_semantics():
     assert nans[0].tolist() == [1.0, 2.0] + [pytest.approx(np.nan, nan_ok=True)]
     assert nans[1][0] == 3.0 and np.isnan(nans[1][1]) and np.isnan(nans[1][2])
     # A genuine 0.0 is never confused for an absent value under either fill.
-    z = Group.from_dicts("gpuA/z", "z", "warp", "gpuA", "z", 0, [{"D_a": 0.0}])
+    z = GoldenGroup.from_dicts("gpuA/z", "z", "warp", "gpuA", "z", 0, [{"D_a": 0.0}])
     assert z.matrix(["D_a"], fill=np.nan).tolist() == [[0.0]]
 
 
@@ -342,7 +342,7 @@ def test_matrix_is_memoized_and_read_only():
 
     One entry is enough — a fit uses one column list for its whole run — so a different request evicts
     rather than accumulating."""
-    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    g = GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
     first = g.matrix(["D_a", "D_b"])
     assert g.matrix(["D_a", "D_b"]) is first, "a repeat request must not rebuild the projection"
     assert not first.flags.writeable

@@ -1,11 +1,14 @@
 """``Group`` — one candidate pool plus its labels: the comparison set every ranking question is asked over.
 
-A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. Today
-that supervision is one of two kinds and :attr:`label_kind` says which: the rows a golden verified, or the
-latency every row measured. Groups are built by plain functions — :func:`group_measured` below for benched rows,
-and the golden one in ``emmy/commands/fit.py``, because case building needs the snippet tracer that ``pipeline/``
-must not import — and are consumed by the trainers and the fold harness through this one shape; there is no
-iterator/batching layer, the whole dataset is a small in-memory list.
+A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. The
+base carries one label per row and says nothing about what the numbers mean, because that is all a ranking
+metric needs. :class:`GoldenGroup` is the kind that means something more — its labels MARK the rows goldens
+verified rather than measuring them, so it alone can answer which rows are the answer.
+
+Groups are built by plain functions — :func:`group_measured` below for benched rows, and the golden one in
+``emmy/commands/fit.py``, because case building needs the snippet tracer that ``pipeline/`` must not import —
+and are consumed by the trainers and the fold harness through this one shape; there is no iterator/batching
+layer, the whole dataset is a small in-memory list.
 
 It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
 fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and
@@ -23,7 +26,7 @@ means by "absent": ``0.0`` for the linear model (reproducing ``feats.get(k, 0.0)
 for a tree, which can branch on not-decided as a state of its own. The dataset stores the more informative of
 the two so neither model constrains the other.
 
-``key`` is ``"<gpu>/<name>"`` of the first golden the builder VERIFIED in this pool, disambiguated when one
+``key`` is ``"<gpu>/<name>"`` of the first golden the builder found in this pool, disambiguated when one
 name opens several distinct pools (``#2``, ``#3``, … in dataset order); the other goldens over that pool are
 further entries in its label set rather than groups of their own — the builder resolves that before it
 constructs anything, so a group is built once, already knowing every verified row it holds. ``tier`` is the
@@ -45,13 +48,6 @@ import numpy as np
 
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
-
-# What a group's ``labels`` array means. Fixed by the builder that made the group and never mixed: a pool is
-# either a golden's candidate set (which rows someone verified) or a measured set (what each row cost).
-# ``VERIFIED`` rather than "pinned": a PIN is a tuning choice forced by hand (``GLOSSARY.md``), which these
-# rows are not — they are the configs a golden run confirmed.
-VERIFIED = "verified"
-LATENCY = "latency"
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -121,14 +117,6 @@ def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.nd
     return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
 
 
-def verified_labels(rows: Sequence[int], n: int) -> np.ndarray:
-    """The :data:`VERIFIED` label array: ``1.0`` on every verified row of an ``n``-row pool. The one place
-    that encoding is written, so no caller has to know that a pin is a ``1.0``."""
-    labels = np.zeros(n, dtype=float)
-    labels[list({int(i) for i in rows})] = 1.0
-    return labels
-
-
 def _matcher(pats: list[str]):
     """``name -> bool`` over a pattern list: exact names, or a trailing ``*`` making a prefix glob."""
     prefixes = tuple(p[:-1] for p in pats if p.endswith("*"))
@@ -180,21 +168,12 @@ class Group:
     # (a report axis) this decides folds; unlike ``tier`` (a label) it is load-bearing.
     shape: str
     dynamic: bool
-    # ONE label per row, and :attr:`label_kind` says what the numbers mean. The two kinds are never wanted
-    # together — a pool is either a golden's candidate set, where what is known is WHICH rows someone verified,
-    # or a measured set, where every row carries its own latency — so this is one array rather than two
-    # optional ones, and the kind is fixed by whichever builder made the group.
-    #
-    # :data:`VERIFIED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere — so ``np.flatnonzero(labels)``
-    # is the row set and ``labels.sum()`` the count. Several goldens can land on one pool (the same shape
-    # recorded twice, or under two names), so this is a SET. Deploy ships one config, so any of them ranked
-    # first is a win — which is why the fit's per-group term is the best rank over the set, and the reported
-    # one the matching dual rank. At one positive both collapse to the single-golden functions exactly.
-    #
-    # :data:`LATENCY`: the row's measured µs, lower = faster. This is what the regret and correlation metrics
-    # take, and it is only ever populated from rows that were actually benched.
+    # ONE label per row — what is KNOWN about it. The base carries only that much, because that is all a
+    # ranking metric needs: it correlates or scores against a column of numbers and does not care what they
+    # mean. What they mean is the subclass's business, and :class:`GoldenGroup` is the one that has an answer
+    # (its labels mark rows, not measure them). A measured pool needs no subclass: its labels ARE the
+    # measurement, in microseconds, lower = faster.
     labels: np.ndarray = field(repr=False)
-    label_kind: str
     feat_names: tuple[str, ...]
     feats: np.ndarray = field(repr=False)
     # The size of the candidate pool ``feats`` was drawn from, equal to ``len(feats)`` unless the
@@ -210,54 +189,19 @@ class Group:
     _cache: tuple | None = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def from_dicts(
-        cls,
-        key: str,
-        name: str,
-        tier: str,
-        gpu: str,
-        shape: str,
-        pinned: int | Sequence[int],
-        feats: list[dict[str, float]],
-        total: int | None = None,
-    ) -> Group:
-        """Pack per-row feature dicts into the matrix representation: ``feat_names`` is the sorted
-        union of the pool's keys, the matrix a column per name (absent key = ``NaN``, the more
-        informative of the two fills — see :meth:`matrix`). Callers
-        drop the dicts after this — the matrix is the stored representation.
-
-        ``pinned`` is the pool's positive row index, or several of them; either spelling normalizes to a sorted
-        duplicate-free tuple. A bare int is accepted because most callers have exactly one row to pin and
-        wrapping it would say nothing. ``total`` is the size of the pool ``feats`` was drawn from, defaulting
-        to "nothing was sampled" - see :attr:`total`.
-
-        The routing features (:data:`~..features.ROUTING_FEATURES`) are read off the pool into
-        :attr:`dynamic` AND packed like every other column: a tree splits the two regimes on it, and the
-        linear model narrows it out of its own coordinates (:func:`~..prior.linear_model.descent_cols`). Packing
-        every column is what keeps one model class from deciding for the other. Reading row 0 is exact: the
-        stamp comes from the shape, which every candidate in a pool shares.
-
-        ``tier`` is cross-checked against the routing stamp by :meth:`from_packed`."""
-        rows = (pinned,) if isinstance(pinned, int) else pinned
-        return cls.from_packed(key, name, tier, gpu, shape, pack_features(feats), verified_labels(rows, len(feats)), VERIFIED, total)
-
-    @classmethod
     def from_measured(cls, key: str, gpu: str, op_sig: str, latency_us: Sequence[float], feats: list[dict[str, float]]) -> Group:
-        """The other label kind: a pool where every row was benched, labelled with its own measured µs.
+        """A pool where every row was benched, labelled with its own measured µs.
 
-        Same packing as :meth:`from_dicts`; what differs is what is KNOWN about the rows, and therefore which
-        identities exist. ``op_sig`` serves as both ``name`` and ``shape`` — a measured pool IS one op, so
-        there is no second identity to spell — and ``tier`` is empty, because the golden tiers are a closed
-        report vocabulary about how a CASE was built and a sixth value would mean nothing to the two places
-        that read it. For the same reason :meth:`from_packed` runs its tier cross-check only on the verified kind: a
-        golden record carries that fact twice and a measured row carries it once.
+        ``op_sig`` serves as both ``name`` and ``shape`` — a measured pool IS one op, so there is no second
+        identity to spell — and ``tier`` is empty, because the golden tiers are a closed report vocabulary
+        about how a CASE was built and a sixth value would mean nothing to the two places that read it.
 
         No ``total`` either: a measured pool is not a sample of a larger enumeration, it is exactly the
         configs someone ran, and a rank against anything else would be against candidates never measured."""
-        return cls.from_packed(key, op_sig, "", gpu, op_sig, pack_features(feats), np.asarray(latency_us, dtype=float), LATENCY)
+        return cls._over(key, op_sig, "", gpu, op_sig, pack_features(feats), np.asarray(latency_us, dtype=float), None)
 
     @classmethod
-    def from_packed(
+    def _over(
         cls,
         key: str,
         name: str,
@@ -266,27 +210,11 @@ class Group:
         shape: str,
         packed: tuple[tuple[str, ...], np.ndarray, bool],
         labels: np.ndarray,
-        label_kind: str,
-        total: int | None = None,
+        total: int | None,
     ) -> Group:
-        """A group from an already-packed pool (:func:`pack_features`) and its finished labels — the entry
-        point for a builder that had to pack before it could know the labels, which is every builder that
-        deduplicates pools. The two named constructors above are this one with the label array spelled the
-        way that kind of label is naturally spelled.
-
-        A :data:`VERIFIED` group's ``tier`` must agree with the routing stamp its rows carry, and
-        disagreeing is a hard error. The two reach here by different routes — the stamp through the
-        featurizer, the tier from the source record's own flag — and they are the same fact, so a mismatch
-        means one of them is wrong and this pool would otherwise train and be scored under the wrong weight
-        set with nothing reporting it. That is what keeps ``tier``, a label that decides nothing, honest.
-        A measured group has no second route to check against, and no tier to check."""
+        """The one construction: an already-packed pool (:func:`pack_features`) plus its finished labels."""
         names, matrix, dynamic = packed
-        if label_kind == VERIFIED and dynamic != (tier == "dyn"):
-            raise ValueError(
-                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
-                f"the source record's flag and its featurized rows disagree about the weight set"
-            )
-        return cls(key, name, tier, gpu, shape, dynamic, labels, label_kind, names, matrix, len(matrix) if total is None else total)
+        return cls(key, name, tier, gpu, shape, dynamic, labels, names, matrix, len(matrix) if total is None else total)
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:
         """The pool projected onto ``names`` — column ``j`` is the stored ``names[j]`` column, or ``fill``
@@ -325,6 +253,78 @@ class Group:
             out.flags.writeable = False
             object.__setattr__(self, "_cache", (want, out))  # frozen dataclass; the cache is not part of its value
         return self._cache[1]
+
+
+@dataclass(frozen=True)
+class GoldenGroup(Group):
+    """A pool whose labels mark the rows a GOLDEN verified — the fit's supervision.
+
+    A subclass rather than a flag on :class:`Group` because the two kinds differ in what can be ASKED of
+    them, not merely in what their numbers mean. Only here is "which rows are the answer" a question with an
+    answer, so only here is :attr:`golden_ids` defined, and the rank metrics that take it say what they need
+    by taking this type. A discriminator field would have moved that check to runtime and to every caller.
+    """
+
+    @property
+    def golden_ids(self) -> tuple[int, ...]:
+        """The rows a golden verified, ascending — the index set the rank metrics take.
+
+        Several goldens can land on one pool (the same shape recorded twice, or under two names), so this is
+        a SET. Deploy ships one config, so any of them ranked first is a win, which is why the fit's
+        per-group term is the best rank over it and the reported one the matching dual rank. At one golden
+        both collapse to the single-golden functions exactly."""
+        return tuple(int(i) for i in np.flatnonzero(self.labels))
+
+    @classmethod
+    def from_dicts(
+        cls,
+        key: str,
+        name: str,
+        tier: str,
+        gpu: str,
+        shape: str,
+        goldens: int | Sequence[int],
+        feats: list[dict[str, float]],
+        total: int | None = None,
+    ) -> GoldenGroup:
+        """Pack per-row feature dicts and mark the rows the goldens verified. ``goldens`` is one row index or
+        several; a bare int is accepted because most callers have exactly one and wrapping it would say
+        nothing. ``total`` is the size of the pool ``feats`` was drawn from, defaulting to "nothing was
+        sampled" — see :attr:`Group.total`."""
+        return cls.over(key, name, tier, gpu, shape, pack_features(feats), goldens, total)
+
+    @classmethod
+    def over(
+        cls,
+        key: str,
+        name: str,
+        tier: str,
+        gpu: str,
+        shape: str,
+        packed: tuple[tuple[str, ...], np.ndarray, bool],
+        goldens: int | Sequence[int],
+        total: int | None = None,
+    ) -> GoldenGroup:
+        """The same over an already-packed pool — the entry point for a builder that had to pack before it
+        could know which goldens landed in it, which is every builder that deduplicates pools. ``goldens``
+        are row indices; the marker encoding is this class's business and no caller needs to know it.
+
+        ``tier`` must agree with the routing stamp the rows carry, and disagreeing is a hard error. The two
+        reach here by different routes — the stamp through the featurizer, the tier from the source record's
+        own flag — and they are the same fact, so a mismatch means one of them is wrong and this pool would
+        otherwise train and be scored under the wrong weight set with nothing reporting it. That is what
+        keeps ``tier``, a label that decides nothing, honest. A measured pool has no second route to check
+        against and no tier to check, which is why the check lives here and not on the base."""
+        _, matrix, dynamic = packed
+        if dynamic != (tier == "dyn"):
+            raise ValueError(
+                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
+                f"the source record's flag and its featurized rows disagree about the weight set"
+            )
+        rows = (goldens,) if isinstance(goldens, int) else goldens
+        labels = np.zeros(len(matrix), dtype=float)
+        labels[list({int(i) for i in rows})] = 1.0
+        return cls._over(key, name, tier, gpu, shape, packed, labels, total)
 
 
 def group_measured(rows) -> tuple[list[Group], dict[str, int]]:

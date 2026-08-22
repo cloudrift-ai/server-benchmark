@@ -1,7 +1,7 @@
 """The CatBoost trainer — the offline learning-to-rank fit of a :class:`CatBoostModel`.
 
 :class:`CatBoostTrainer` holds the hyperparameters and :meth:`~CatBoostTrainer.fit` turns a
-:class:`Group` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
+:class:`GoldenGroup` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
 trainer is immutable and one instance serves every cross-validation fold — with one contract the linear trainer
 keeps and this one does not: **a fit is not byte-reproducible**. CatBoost's histogram build is threaded, so two
 runs on identical inputs give models that differ in the last bits. Deliberate: the alternative is
@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
@@ -126,7 +126,7 @@ class CatBoostTrainer:
     random_state: int = 0
     scale: float = DEFAULT_SCALE
 
-    def fit(self, groups: list[Group]) -> CatBoostFit:
+    def fit(self, groups: list[GoldenGroup]) -> CatBoostFit:
         """Fit over ``groups``, mining hard negatives across :attr:`rounds`.
 
         Each round rebuilds the training set (golden + the negatives sampled so far) and fits a FRESH model
@@ -138,7 +138,7 @@ class CatBoostTrainer:
         pools = [g.matrix(cols, fill=ABSENT) for g in groups]
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
-        sampled = [self._uniform(len(m), np.flatnonzero(g.labels), rng) for m, g in zip(pools, groups, strict=True)]
+        sampled = [self._uniform(len(m), g.golden_ids, rng) for m, g in zip(pools, groups, strict=True)]
         inert = sum(1 for s, m in zip(sampled, pools, strict=True) if len(s) >= len(m) - 1)
         if inert:
             logger.warning(
@@ -154,8 +154,7 @@ class CatBoostTrainer:
         logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled, groups), topk_table(ranks))
         for r in range(1, max(1, self.rounds)):
             sampled = [
-                np.union1d(s, self._hard(model.quality_rows(m), np.flatnonzero(g.labels)))
-                for s, m, g in zip(sampled, pools, groups, strict=True)
+                np.union1d(s, self._hard(model.quality_rows(m), g.golden_ids)) for s, m, g in zip(sampled, pools, groups, strict=True)
             ]
             model = self._fit_once(pools, groups, sampled)
             ranks = self._ranks(model, pools, groups)
@@ -164,14 +163,14 @@ class CatBoostTrainer:
         return CatBoostFit(model, ranks, rows=self._n_rows(sampled, groups))
 
     @staticmethod
-    def _n_rows(sampled, groups: list[Group]) -> int:
-        return sum(len(s) + int(g.labels.sum()) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
+    def _n_rows(sampled, groups: list[GoldenGroup]) -> int:
+        return sum(len(s) + len(g.golden_ids) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
 
     @staticmethod
-    def _ranks(model: CatBoostModel, pools, groups: list[Group]) -> list[int]:
+    def _ranks(model: CatBoostModel, pools, groups: list[GoldenGroup]) -> list[int]:
         """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
         (:func:`~..metrics.best_rank`), matching what the linear fit reports per round."""
-        return [best_rank(model.quality_rows(m), np.flatnonzero(g.labels)) for m, g in zip(pools, groups, strict=True)]
+        return [best_rank(model.quality_rows(m), g.golden_ids) for m, g in zip(pools, groups, strict=True)]
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
         """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
@@ -196,14 +195,14 @@ class CatBoostTrainer:
         order = np.argsort(-scores, kind="stable")
         return np.array([i for i in order[: self.negatives + len(pins)] if i not in pins][: self.negatives])
 
-    def _fit_once(self, pools, groups: list[Group], sampled) -> CatBoostModel:
+    def _fit_once(self, pools, groups: list[GoldenGroup], sampled) -> CatBoostModel:
         """One CatBoost fit over the assembled groups — the pinned rows first in each, then its sampled
         negatives."""
         from catboost import Pool  # noqa: PLC0415
 
         x, y, gid = [], [], []
         for i, (mat, g, neg) in enumerate(zip(pools, groups, sampled, strict=True)):
-            pins = np.flatnonzero(g.labels)
+            pins = np.asarray(g.golden_ids, dtype=int)
             rows = np.concatenate((pins, np.asarray(neg, dtype=int)))
             x.append(mat[rows])
             y.append(np.concatenate((np.ones(len(pins)), np.zeros(len(rows) - len(pins)))))
@@ -233,7 +232,7 @@ class CatBoostFit:
     ranks: list[int]
     rows: int
 
-    def score_rows(self, group: Group) -> np.ndarray:
+    def score_rows(self, group: GoldenGroup) -> np.ndarray:
         """The trainer protocol's scoring entry point, answered by the fitted model itself — the column
         choice is the model's, not a copy of it kept here. Over the group's FULL pool: training sampled
         negatives, the metric never does."""

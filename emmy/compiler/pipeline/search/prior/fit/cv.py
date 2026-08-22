@@ -1,7 +1,7 @@
 """Cross-validated golden-rank evaluation for offline-prior fits — the fold machinery
 behind :func:`~.run.run_fit` (the ``emmy fit`` run harness).
 
-Works entirely on pre-built :class:`Group` lists (the command layer owns case
+Works entirely on pre-built :class:`GoldenGroup` lists (the command layer owns case
 building, which needs the snippet tracer ``pipeline/`` must not import) and produces the
 run's metrics dict, so every piece here is testable on synthetic cases with no tracing.
 
@@ -19,7 +19,7 @@ is then the best over those positives (:func:`~..metrics.best_dual_rank`), and e
 row carries ``positives`` so a merged case is never mistaken for a single-golden one — the count
 moves when the corpus grows a sibling, and two metrics files are only comparable knowing that.
 
-**Folds group by SHAPE** (:attr:`Group.shape` — the extent identity), five of them, balanced by
+**Folds group by SHAPE** (:attr:`GoldenGroup.shape` — the extent identity), five of them, balanced by
 case count. That is the deploy question stated as an experiment: a new shape, on a card we have
 data for, no measurements. Two retired axes are worth naming so they do not come back:
 
@@ -48,9 +48,7 @@ from __future__ import annotations
 
 import statistics
 
-import numpy as np
-
-from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
 
 TOP_KS = (1, 10, 25, 50, 100)
@@ -64,7 +62,7 @@ OUT_OF_SCOPE = "kernel kind not case-buildable"
 DEFAULT_FOLDS = 5
 
 
-def assign_folds(cases: list[Group], k: int = DEFAULT_FOLDS) -> dict[str, int]:
+def assign_folds(cases: list[GoldenGroup], k: int = DEFAULT_FOLDS) -> dict[str, int]:
     """Shape group → fold index, balanced by case count.
 
     Groups are wildly uneven — on the golden dataset the largest holds 122 cases, the next 14, and 162 are
@@ -86,7 +84,7 @@ def assign_folds(cases: list[Group], k: int = DEFAULT_FOLDS) -> dict[str, int]:
     return out
 
 
-def _unfittable(trainer, train: list[Group], hold: list[Group]) -> str | None:
+def _unfittable(trainer, train: list[GoldenGroup], hold: list[GoldenGroup]) -> str | None:
     """Why this fold cannot be scored, or ``None`` — the TRAINER's answer, since what makes a
     training slice unfittable is a property of the model class. The linear trainer has two such
     constraints (its weight sets); a tree fit has none, and a trainer that declares no
@@ -99,7 +97,7 @@ def _unfittable(trainer, train: list[Group], hold: list[Group]) -> str | None:
     return check(train, hold) if check is not None else None
 
 
-def case_ranks(case: Group, model) -> tuple[int, int] | None:
+def case_ranks(case: GoldenGroup, model) -> tuple[int, int] | None:
     """The case's best golden ``(rank, rank_optimistic)`` under a fitted model — any object
     with the trainer protocol's ``score_rows(group) -> scores | None`` (higher =
     predicted faster; the linear model's weight-set selection lives inside it).
@@ -109,14 +107,14 @@ def case_ranks(case: Group, model) -> tuple[int, int] | None:
     scores = model.score_rows(case)
     if scores is None:
         return None
-    return best_dual_rank(scores, np.flatnonzero(case.labels))
+    return best_dual_rank(scores, case.golden_ids)
 
 
 def _median(vals: list[float]) -> float:
     return round(float(statistics.median(vals)), 2)
 
 
-def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
+def _per_card(entries: list[tuple[GoldenGroup, tuple[int, int]]]) -> dict:
     """Per-card aggregates over ``(case, (rank, rank_optimistic))`` rows: count, median
     and top-k coverage under both tie conventions. Cards never pool."""
     by_gpu: dict[str, list[tuple[int, int]]] = {}
@@ -135,19 +133,19 @@ def _per_card(entries: list[tuple[Group, tuple[int, int]]]) -> dict:
     return out
 
 
-def evaluate_full_train(cases: list[Group], model) -> dict:
+def evaluate_full_train(cases: list[GoldenGroup], model) -> dict:
     """The ``full_train`` metrics block: every case ranked under the shippable model."""
     entries = [(c, r) for c in cases if (r := case_ranks(c, model)) is not None]
     # ``pool`` is the pool's TRUE size and ``sampled`` how many of its rows this fit saw; the rank is
     # the raw rank within those rows, never scaled up to the pool. They differ only under sampling.
     per_golden = {
-        c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": int(c.labels.sum())}
+        c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": len(c.golden_ids)}
         for c, (r, o) in entries
     }
     return {"per_golden": per_golden, "per_card": _per_card(entries)}
 
 
-def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
+def run_folds(cases: list[GoldenGroup], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     """The full cross-validation → the ``cv.shape`` metrics block.
 
     ``trainer`` is any object with ``fit(groups) -> model`` where the model satisfies
@@ -158,13 +156,13 @@ def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     held-out golden into its own holdout model. Guard: a fold is excluded (with a recorded reason)
     when the trainer declares its training slice unfittable (:func:`_unfittable`).
 
-    Folds group by :attr:`Group.shape` (:func:`assign_folds`), so every golden sharing a candidate
+    Folds group by :attr:`GoldenGroup.shape` (:func:`assign_folds`), so every golden sharing a candidate
     pool is held out together — on any card. Splitting them is not a bias, it is a hole: the fold
     model would be scored on a pool it had already been given the answer to."""
     by_shape = assign_folds(cases, k)
-    holdout: list[tuple[Group, tuple[int, int]]] = []
+    holdout: list[tuple[GoldenGroup, tuple[int, int]]] = []
     holdout_fold: dict[str, int] = {}
-    train_acc: dict[str, tuple[Group, list[int], list[int]]] = {}
+    train_acc: dict[str, tuple[GoldenGroup, list[int], list[int]]] = {}
     fold_medians: dict[str, dict] = {}
     excluded: dict[str, str] = {}
 
@@ -193,13 +191,13 @@ def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     return {
         "holdout": {
             "per_golden": {
-                c.key: {"rank": r, "rank_optimistic": o, "positives": int(c.labels.sum()), "fold": holdout_fold[c.key]}
+                c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids), "fold": holdout_fold[c.key]}
                 for c, (r, o) in holdout
             },
             "per_card": holdout_cards,
         },
         "train": {
-            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": int(c.labels.sum())} for c, (r, o) in train_entries},
+            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids)} for c, (r, o) in train_entries},
             "per_card": train_cards,
         },
         "gap": {gpu: round(holdout_cards[gpu]["median"] - train_cards[gpu]["median"], 2) for gpu in holdout_cards if gpu in train_cards},
@@ -207,7 +205,7 @@ def run_folds(cases: list[Group], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
     }
 
 
-def build_metrics(header: dict, cases: list[Group], skipped: list[tuple[str, str, str]], full_model, cv: dict[str, dict]) -> dict:
+def build_metrics(header: dict, cases: list[GoldenGroup], skipped: list[tuple[str, str, str]], full_model, cv: dict[str, dict]) -> dict:
     """Assemble the run's complete metrics dict (JSON-ready, deterministic — no
     timestamps or host info; the caller serializes with sorted keys). ``skipped`` rows
     are ``(gpu, name, reason)`` for goldens that never became cases: enumeration

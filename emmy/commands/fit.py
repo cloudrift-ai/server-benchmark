@@ -34,7 +34,7 @@ import numpy as np
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, VERIFIED, Group, feature_view, pack_features, verified_labels
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
@@ -128,9 +128,9 @@ def _shape_group(g) -> str:
 
 @dataclass
 class _Pool:
-    """One packed candidate pool and every verified row found in it, before it becomes a :class:`Group`.
+    """One packed candidate pool and every golden found in it, before it becomes a :class:`Group`.
 
-    ``namer`` is the first golden the builder verified in this pool — it supplies the group's key, name,
+    ``namer`` is the first golden the builder found in this pool — it supplies the group's key, name,
     card and fold group. Deliberately not "the first record considered": a record can be grouped onto this
     pool and then fail to match a row in it, and naming a case after a golden the same run reports as
     skipped would put a rank in ``metrics.json`` under a name nothing pinned."""
@@ -139,7 +139,7 @@ class _Pool:
     tier: str
     packed: tuple[tuple[str, ...], np.ndarray, bool]
     total: int
-    verified: list[int]
+    goldens: list[int]
 
 
 def _recorded_pool_key(g) -> tuple:
@@ -204,7 +204,7 @@ def _keep_sets(records) -> dict[tuple, frozenset]:
 
 def build_golden_groups(
     features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
-) -> tuple[list[Group], list[tuple[str, str, str]]]:
+) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, pinned rows,
     per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
@@ -245,11 +245,11 @@ def build_golden_groups(
     recording card's regime — not one global cap — for the rank objective to match
     the deployed per-card featurization."""
     keep = feature_view(features_spec)
-    cases: list[Group] = []
+    cases: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
     matched = 0
-    pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every verified row on it
+    pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every golden found in it
     # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
     # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
     # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
@@ -293,7 +293,7 @@ def build_golden_groups(
         # ``MOVE@element`` keys while the golden YAML records legacy GEMM-letter keys, so comparing
         # key-value tuples directly never matches. A member that misses is dropped on its own; the pool
         # still stands for the members that hit.
-        verified, namer = [], None
+        goldens, namer = [], None
         for m in members:
             want = features.tile_signature(m.knobs)
             gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
@@ -301,11 +301,11 @@ def build_golden_groups(
                 logger.info("  !! %s: golden not in %d candidates — skipping", m.name, len(rows))
                 skipped.append((m.gpu_name, m.name, f"golden not in {len(rows)} candidates"))
             else:
-                verified.append(gidx)
+                goldens.append(gidx)
                 namer = namer or m  # the pool is named after a golden that is actually IN it
-        if not verified:
+        if not goldens:
             continue
-        matched += len(verified)
+        matched += len(goldens)
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
         # ``MMA_tier`` — see its rationale in ``search/data/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
@@ -318,11 +318,11 @@ def build_golden_groups(
         # however many times it was recorded.
         pool = pools.get(identity := _pool_identity(namer, tier, packed))
         if pool is None:
-            pools[identity] = _Pool(namer, tier, packed, candidates.total, verified)
+            pools[identity] = _Pool(namer, tier, packed, candidates.total, goldens)
         else:
-            pool.verified.extend(verified)
+            pool.goldens.extend(goldens)
 
-    # Every pool now knows every golden verified in it, so each becomes ONE group whose labels are final at
+    # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
     # construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator
     # on it) and is spent per POOL in first-appearance order, so goldens that merged never claim one.
     for pool in pools.values():
@@ -330,15 +330,14 @@ def build_golden_groups(
         key_str = f"{g.gpu_name}/{g.name}"
         key_counts[key_str] = n = key_counts.get(key_str, 0) + 1
         cases.append(
-            Group.from_packed(
+            GoldenGroup.over(
                 key_str if n == 1 else f"{key_str}#{n}",
                 g.name,
                 pool.tier,
                 g.gpu_name,
                 _shape_group(g),
                 pool.packed,
-                verified_labels(pool.verified, len(pool.packed[1])),
-                VERIFIED,
+                pool.goldens,
                 pool.total,
             )
         )
@@ -462,7 +461,7 @@ def handle_fit(args) -> None:
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
     # ``merged`` is the positives beyond one per pool; the builder logs the record-level count, which also
     # counts a golden recorded twice at one config (it pins a row already pinned, so it adds no positive).
-    positives = sum(int(c.labels.sum()) for c in cases)
+    positives = sum(len(c.golden_ids) for c in cases)
     logger.info(
         "  %d static + %d dynamic golden cases (%d positives, %d merged), %d D_* features, %d skipped",
         len(cases) - n_dyn,

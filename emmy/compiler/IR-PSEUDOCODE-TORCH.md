@@ -6,8 +6,11 @@ back; it exists so a reader can follow what the compiler holds at that point. Th
 
 ## The program
 
-Three small ones first, from `emmy compile --code`. A whole-tensor operation, with its own fields after the
-operands:
+Three small ones first. A whole-tensor operation, with its own fields after the operands:
+
+```
+emmy compile -c 'F.linear(torch.randn(4,64), torch.randn(16,64))' --ir torch
+```
 
 ```rust
 // 3 nodes, 2 inputs, 1 outputs
@@ -25,6 +28,10 @@ pub fn main(
 A scalar added to a tensor. The scalar becomes a constant, and reaching the tensor's shape takes an explicit
 node — the closure ignores both indices, which is what a broadcast looks like:
 
+```
+emmy compile -c 'torch.randn(4,8) + 1' --ir torch
+```
+
 ```rust
 // 4 nodes, 1 inputs, 1 outputs
 
@@ -40,8 +47,14 @@ pub fn main(
 }
 ```
 
-Two operations, and the constants the trace captured along the way — `transpose_c1` and `softmax_c1` end up
-bound and unused, since the fields carry the same information:
+Two operations, and three constants that nothing refers to. Resolving a traced call's inputs materializes every
+scalar argument as a constant, and a handler that folds the scalar into a field instead — `transpose`'s `axes`,
+`softmax`'s `axis` — never wires the constant up. They are real nodes, so they print; the count in the header
+includes them:
+
+```
+emmy compile -c 'F.softmax(torch.randn(2,4,8).transpose(1,2), dim=-1)' --ir torch
+```
 
 ```rust
 // 6 nodes, 1 inputs, 1 outputs
@@ -60,15 +73,23 @@ pub fn main(
 }
 ```
 
-A model layer has the same shape, with more of it. This is `--layer 0` of a Llama-architecture model, cut down
+Those leftovers do not survive the pipeline. One Qwen3-0.6B layer carries 33 such constants at `--ir torch`
+and 4 at `--ir tensor`, and the four that remain are the norm epsilons, which really are operands. A `slice`
+keeps its captured scalars as operands too, redundantly with its own fields.
+
+A model layer has the same shape, with more of it. Below is one layer of a Llama-architecture model, cut down
 to its landmarks:
+
+```
+emmy compile TinyLlama/TinyLlama-1.1B-Chat-v1.0 --layer 0 --ir torch
+```
 
 ```rust
 // 106 nodes, 4 inputs, 1 outputs
 
-let p_input_layernorm_weight: f16[2048] = load("input_layernorm.weight");
 let p_attn_q_proj_weight: f16[2048,2048] = load("self_attn.q_proj.weight");
-// … 33 constants in all
+let p_attn_k_proj_weight: f16[256,2048] = load("self_attn.k_proj.weight");
+// … 38 constants in all
 
 pub fn main(
     hidden_states: f16[1,512,2048],
@@ -76,8 +97,7 @@ pub fn main(
     position_embeddings_1: f16[1,512,64],
     attention_mask: f32,
 ) -> f16[1,512,2048] {
-    let p_input_layernorm_weight_bc: f16[1,512,2048]
-        = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
+    let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
     let to: f32[1,512,2048] = emmy::cast(hidden_states);
     // … the norm, then the q / k / v projections
     let scaled_dot_product_attention: f16[1,32,512,64]
@@ -96,10 +116,17 @@ compute node becomes one `let`, and its outputs become the tail expression. A gr
 returns an `Outputs` struct, declared after the function; a graph with none returns `()`.
 
 ```rust
+// 8 nodes, 2 inputs, 2 outputs
+
+let add_c1: f32[1] = 1.0;
+let mul_c1: f32[1] = 2.0;
+
 pub fn main(
     x0: f32[4,8],
     x1: f32[4,8],
 ) -> Outputs {
+    let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| add_c1[0]);
+    let mul_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| mul_c1[0]);
     let add: f32[4,8] = add(x0, add_c1_bc);
     let mul: f32[4,8] = multiply(x1, mul_c1_bc);
 
@@ -113,7 +140,8 @@ struct Outputs {
 ```
 
 **Types** carry the shape: `f16[1,512,4096]`. A rank-0 tensor is just its dtype (`f32`). Dtype names are the
-repo's own, including the narrow float formats (`f8e4m3`).
+repo's own, including the narrow float formats (`f8e4m3`). Under `--dynamic` an extent can be a name or an
+expression rather than a number — `f32[2,seq_len,4]`, `f32[1,(2 * seq_len),4]`.
 
 **Order** is a dependency order, not an execution schedule.
 
@@ -121,8 +149,12 @@ repo's own, including the narrow float formats (`f8e4m3`).
 `linear(mul_1, p_attn_q_proj_weight, has_bias=False)`, `reshape(x, shape=(1, 512, -1))`. A `-1` inside `shape=`
 is the request the trace captured; the declared type on the left shows the extent it resolved to.
 
-**Constants named `<node>_c<N>`** are scalars the trace captured, named after the node that consumes them and
-the argument position they sat at: `add_c1` is the epsilon inside the node called `add`.
+**Constants named `<node>_c<N>`** are scalars the trace captured, named after the traced call they came from
+and their position in that call's resolved operand list: `add_c1` is the epsilon inside the node called `add`.
+
+**A node that writes several buffers destructures.** `let (nid, buf1): (f32[4,8], f32[4,8]) = op(x);` — slot 0
+travels under the node id, the rest under their own buffer names, so every name a later line can refer to is
+bound. Only the later dialects build such nodes; a torch or tensor dump has none.
 
 **Binding names are node ids.** Every node carries two labels: the id the graph stores it under and refers to
 it by, and its output tensor's name. They are usually the same string, because a new node takes its tensor name
@@ -131,8 +163,8 @@ name — `broadcast_to` names its result after its source, so one source broadca
 one name twice. Bindings print the id, so no two can collide, and a differing tensor name follows in a comment:
 
 ```rust
-let n0: f16[1,8,512,128] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);  // aka tensor name `unsqueeze_bc`
-let unsqueeze_bc: f16[1,32,512,128] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);
+let n0: f16[1,4,512,64] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);  // aka tensor name `unsqueeze_bc`
+let unsqueeze_bc: f16[1,32,512,64] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);
 ```
 
 **Memory, loops, threads, kernels, fusion and hardware choices are absent** because these levels cannot express
@@ -140,9 +172,9 @@ them, not because the printer hides them. They arrive with the later dialects, w
 forms.
 
 **Four fields are hidden.** Every operation carries `source` (its predecessor in a rewrite chain), `knobs` (the
-tuning choices passes stamp on it), and a map of its own input and output tensors. They record where a node
-came from rather than what it computes — `Graph.to_dict` skips the same four when it serializes a graph — and
-at the torch stage they are empty anyway, since no pass has run yet.
+tuning choices passes stamp on it), and `inputs` / `outputs`, a derived view of the tensors around it that the
+matcher fills in. None of them says what the node computes, and `Graph.to_dict` skips them too when it
+serializes a graph. At the torch stage they are empty anyway, since no pass has run yet.
 
 When `EMMY_DUMP_DIR` dumps a later stage, whose nodes hold whole statement trees, an operation prints its own
 body instead:
@@ -150,48 +182,87 @@ body instead:
 ```rust
     let linear: f32[4,16]
         = loop(x1, x0) {
-        for a0 in 0..4
-            for a1 in 0..16
-                for a2 in 0..64
-                    in0 = load x1[a1, a2]
-                    ...
+    for a0 in 0..4
+        for a1 in 0..16
+            for a2 in 0..64
+                in0 = load x1[a1, a2]
+                in1 = load x0[a0, a2]
+                v0 = multiply(in0, in1)
+                acc0 <- add(acc0, v0)
+            linear[a0, a1] = acc0
     };
 ```
+
+`acc0 <- add(acc0, v0)` is that dialect's accumulate, not an assignment this notation defines.
+
+## Two stages, one notation
+
+`--ir torch` and `--ir tensor` print through the same renderer, and every reading rule below applies to both.
+What changes is the vocabulary of operations, because decomposition runs between them.
+
+A torch dump is the trace as recorded, so it holds model-level operations — `linear`, `sdpa`, `mean`,
+`softmax`, `reshape`, `transpose`, `slice`, `cat`, `unsqueeze` — each carrying a whole idea in one node
+(`emmy/compiler/ir/frontend/ir.py`). A tensor dump has none of them. Decomposition rewrites every one into the
+generic set in `emmy/compiler/ir/tensor/ir.py`: elementwise operations, reductions, scans, the two gathers,
+scatter, index maps, casts.
+
+The same Qwen3-0.6B layer at both stages:
+
+```
+--ir torch    136 nodes    linear x7, mean x4, transpose x4, slice x4, reshape x4, sdpa, softmax
+--ir tensor   153 nodes    none of those; sum x11, divide x5, exp x2, emmy::tensor_from_fn x51
+```
+
+A `linear` becomes a broadcast, an elementwise multiply and a `sum` over the contracted axis. A `mean` becomes
+that `sum` times a reciprocal. An `sdpa` becomes masked scores, the three-pass softmax spelled out, then the
+second contraction. The layout operations become index maps carrying real arithmetic, which is why the builder
+count more than doubles: what sat inside a `slice` node's fields at the torch stage is
+`linear_4__cat__linear_5[i, j, (k + 3072)]` at the tensor stage.
+
+One node becoming several is why the count grows, even though the pipeline sweeps dead nodes on the way.
 
 ## Where a constant's value comes from
 
 | Right-hand side | Meaning |
 | --- | --- |
 | `1e-06` | a literal fixed at trace time |
-| `load("model.layers.0…")` | a tensor read by path, from the checkpoint or from the traced wrapper |
-| `load("…").reshape(shape=(1, 1))` | layout operations the loader applies after reading, in order |
+| `load("self_attn.q_proj.weight")` | a tensor read by path, from the checkpoint or from the traced wrapper |
+| `load("a.weight", "b.weight")` | several tensors read and concatenated along axis 0 |
+| `load("x.weight_scale_2").reshape(shape=(1, 1))` | layout operations the loader applies after reading |
 | `emmy::const_eval()` | a tensor the loader computes by evaluating a small graph, rather than reading one |
 | `context(num_tokens)` | a scalar bound at launch from the symbolic-dimension environment |
 | `emmy::input_data()` | a tensor the caller supplies at run time |
 
-Two notes on paths. A quantized checkpoint's dump mixes two naming schemes: parameters are rewritten to
-absolute model paths (`model.layers.0.self_attn.q_proj.weight`), while buffers keep the traced wrapper's own
-names (`causal_mask`). Unquantized dumps leave both wrapper-relative.
+A path is relative to whatever wrapper the trace ran over. A single layer gives short names
+(`self_attn.q_proj.weight`); a whole model gives long ones (`model.model.layers.0.input_layernorm.weight`), and
+buffers keep their own registered names (`causal_mask`) beside them. So one dump can carry both shapes.
 
-The last three rows are rare. `context(...)` needs a decomposition pass and a symbolic dimension, so it cannot
-appear at `--ir torch` or in a static-shape dump. A caller-supplied tensor and the multi-path form
-(`load("…a", "…b")`, concatenated on axis 0) exist in the renderer, but no traced model produces them.
+The multi-path form appears once passes have run: `035_merge_sibling_linears` fuses the sibling projections, so
+a tensor dump reads `load("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight")`.
+`emmy::const_eval()` needs a constant the loader computes rather than reads — constant folding collapsing a
+chain, or a quantized checkpoint's decode table. `context(...)` needs a decomposition pass and a symbolic
+dimension, so it cannot appear at `--ir torch` or in a static-shape dump. `emmy::input_data()` is the fallback
+when a constant has no value and no address of any kind, which also covers constants a pass synthesized and
+the loader never sees.
 
 ## Operations
 
-A bare name means what torch or numpy already means by it: `multiply`, `add`, `pow`, `mean`, `sum`, `linear`,
-`silu`, `softmax`, `reshape`, `slice`, `cat`, `transpose`. Four cases need care.
+A bare name means what torch or numpy already means by it. The model-level ones appear only in a torch dump —
+`linear`, `mean`, `softmax`, `reshape`, `slice`, `cat`, `transpose`, `sdpa`, `silu` — while `multiply`, `add`,
+`pow`, `sum`, `divide`, `exp` and the rest of the scalar and reduction names appear at both stages. Five names
+need care.
 
 A **reduction** prints as its combine's name with an `axis=` argument — `sum(pow_1, axis=-1)`,
 `maximum(x, axis=-1)`. That is the same spelling as the elementwise operation of the same name, so the `axis=`
-argument is the only mark; the reduced axis stays in the result at size 1.
+argument is the only mark; the reduced axis stays in the result at size 1. A running reduction prints
+`scan_sum(x, axis=-1)`, a name neither library has — nothing in the repo builds one today.
 
-**`transpose`** carries an `axes` field that is either a pair to swap, as torch's `transpose` takes, or a full
-permutation, as numpy's reads. Both print identically, so check the declared result type.
+**`transpose`** carries an `axes` field, and its length tells you which reading applies: two entries are the
+pair torch's `transpose` swaps, more are a full permutation, as numpy's reads.
 
-**`slice`** also carries the scalar constants the trace captured, which duplicate its own fields. **`cat`** ends
-in a captured scalar too, but that one is not a duplicate: `CatOp` has no fields, so the constant is the only
-record of the concatenation axis.
+**`slice`** takes three captured scalars as operands. Two duplicate its `dim` and `start` fields; the third is
+the end, which the declared result shape already carries. **`cat`** ends in a captured scalar too, and that one
+is not a duplicate: `CatOp` has no fields, so the constant is the only record of the concatenation axis.
 
 **`rms_norm`** and **`layer_norm`** are respellings: the class names behind them would otherwise lowercase to
 `rmsnorm` and `layernorm`. Every other operation without an `emmy::` prefix prints under its own name, `sdpa`
@@ -201,10 +272,10 @@ An `emmy::` name is emmy's own:
 
 | Name | Meaning |
 | --- | --- |
-| `emmy::tensor_from_fn(\|i, j\| …)` | build a tensor from a function of its indices |
+| `emmy::tensor_from_fn(\|i, j\| body)` | build a tensor from a function of its indices, here rank two |
 | `emmy::cast(x)` | a dtype change (see the gotchas below — no node computes it) |
 | `emmy::bitcast(x)` | reinterpret same-width elements as another dtype |
-| `emmy::index_map(…)` | a reindexing the closure form cannot hold |
+| `emmy::index_map(a, b)` | a reindexing `emmy::tensor_from_fn` cannot hold |
 | `emmy::gather(data, idx, axis=n)` | pick one element per output position |
 | `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
@@ -214,8 +285,8 @@ that torch or numpy does not already name prints under the prefix:
 
 | Name | Meaning |
 | --- | --- |
-| `emmy::intrinsics::from_f8e4m3(x)`, `emmy::intrinsics::to_f8e5m2(x)`, … | decode or encode a narrow float format |
-| `emmy::intrinsics::bitcast(x)` | the elementwise spelling of a same-width reinterpretation |
+| `emmy::intrinsics::from_f8e4m3(x)`, `from_f8e5m2`, `to_f8e4m3`, `to_f8e5m2` | decode or encode a narrow float format |
+| `emmy::intrinsics::bitcast(x)` | the same reinterpretation as `emmy::bitcast`, reached through the intrinsic table |
 | `emmy::intrinsics::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
 | `emmy::intrinsics::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
 
@@ -223,29 +294,31 @@ that torch or numpy does not already name prints under the prefix:
 
 Written as definitions in the same pseudocode, with three conventions.
 
-`T` and `U` are element types. A shape is one const parameter holding all the axis sizes — `const d: usize[n]`
-— so a definition can index it (`d[axis]`), slice it (`d[0..axis]`) and join pieces with `++`.
+`T` and `U` are element types. A shape is one const parameter holding all the axis sizes —
+`const d: usize[rank]` — so a definition can index it (`d[axis]`), slice it (`d[0..axis]`) and join pieces
+with `++`.
 
-An index into a rank-`n` tensor is itself a vector of `n` numbers, so `x[i]` with `i: usize[n]` is one element,
+An index into a rank-`r` tensor is itself a vector of `r` numbers, so `x[i]` with `i: usize[r]` is one element,
 and `x[i0, i1]` is the same thing written out. Slicing and joining work on an index too: `i[0..axis]` is the
-coordinates before the axis, and `i[0..axis] ++ [v] ++ i[axis+1..n]` is `i` with the coordinate at `axis`
-replaced by `v`.
+coordinates before the axis, and `i[0..axis] ++ [v] ++ i[axis+1..rank]` is `i` with the coordinate at `axis`
+replaced by `v`. An index *tensor* holds `i64`, the dtype a traced index carries; splicing one of its values
+into an index vector converts it.
 
 ```rust
-// Build a tensor from a function of its indices. The result type fixes how many
-// parameters the closure takes and what each one ranges over. Rank six is the
-// limit, because the printer has six index names.
-fn emmy::tensor_from_fn<T, const n: usize, const d: usize[n]>(f: |usize, …, usize| -> T) -> T[d]
+// Build a tensor from a function of its indices. The closure takes one index
+// vector; a printed line names its components instead, `|i, j, k|` for rank three,
+// which is why rank six is the limit — the printer has six index names.
+fn emmy::tensor_from_fn<T, const rank: usize, const d: usize[rank]>(f: |usize[rank]| -> T) -> T[d]
     // produces the tensor whose element at i is f(i), for every index i with
     // i[k] < d[k]
 
 // A dtype change. No node computes it: the declared result type is the whole
 // operation, and the backend converts when it materializes that type. The values
 // can still change, since a narrowing conversion rounds.
-fn emmy::cast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
+fn emmy::cast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
 
 // Reinterpret each element's bits as another type of the same width.
-fn emmy::bitcast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
+fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
     where size_of::<U>() == size_of::<T>()
 
 // One graph node covers the next two, and the operand shapes decide which: the
@@ -256,35 +329,38 @@ fn emmy::bitcast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
 // its entries says which position along `axis` that one output element reads; the
 // other coordinates come from the output position itself. Close to torch's
 // `gather`, but not the same — see the gotchas.
-fn emmy::gather<T, const n: usize, const d: usize[n], const e: usize[n]>(
+fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]>(
     data: T[d],
     idx: i64[e],
     axis: usize,
 ) -> T[e]
     where e[k] == d[k] for every k != axis
     // produces the tensor whose element at i is
-    // data[i[0..axis] ++ [idx[i]] ++ i[axis+1..n]]
+    // data[i[0..axis] ++ [idx[i]] ++ i[axis+1..rank]]
 
 // Look up whole slices by index. Each entry of `idx` names a position along `axis`,
 // and the slice of `data` sitting there is copied out; `idx`'s own axes take the
 // place of `axis`. A token embedding is this: one row of a table per token id.
-fn emmy::gather_by_axis<T, const n: usize, const m: usize, const d: usize[n], const e: usize[m]>(
+fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize[rank], const e: usize[irank]>(
     data: T[d],
     idx: i64[e],
     axis: usize,
-) -> T[d[0..axis] ++ e ++ d[axis+1..n]]
+) -> T[d[0..axis] ++ e ++ d[axis+1..rank]]
     // produces the tensor whose element at i, writing j for the index tensor's own
-    // coordinates i[axis..axis+m], is
-    // data[i[0..axis] ++ [idx[j]] ++ i[axis+m..n+m-1]]
+    // coordinates i[axis..axis+irank], is
+    // data[i[0..axis] ++ [idx[j]] ++ i[axis+irank..rank+irank-1]]
 
-// A reindexing the closure form cannot hold: no source, several sources, a
+// A reindexing the builder above cannot hold: no source, several sources, a
 // selection deciding which source feeds which output position, or rank above six.
-fn emmy::index_map<T, const n: usize, const d: usize[n]>(sources: …) -> T[d]
+// A printed call lists the operand tensors; the coordinate map that pairs each one
+// with the output index, and the condition under which it supplies a position, stay
+// inside the node.
+fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: [tensor]) -> T[d]
 
 // Decode or encode a narrow float format, element by element. Unlike `cast`, these
 // have a real implementation behind them (`emmy/compiler/ir/elementwise.py`).
-fn emmy::intrinsics::from_f8e4m3<const n: usize, const d: usize[n]>(x: f8e4m3[d]) -> f32[d]
-fn emmy::intrinsics::to_f8e4m3<const n: usize, const d: usize[n]>(x: f32[d]) -> f8e4m3[d]
+fn emmy::intrinsics::from_f8e4m3<const rank: usize, const d: usize[rank]>(x: f8e4m3[d]) -> f32[d]
+fn emmy::intrinsics::to_f8e4m3<const rank: usize, const d: usize[rank]>(x: f32[d]) -> f8e4m3[d]
 ```
 
 `emmy::const_eval()` and `emmy::input_data()` are not operations. They stand for where a constant's value comes
@@ -299,20 +375,23 @@ The closure takes one parameter per axis of the **result**, and the type gives t
 is read with brackets. An axis the body never uses takes Rust's `_` prefix, which is how a broadcast looks:
 
 ```rust
-let p_input_layernorm_weight_bc: f16[1,512,4096]
-    = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
+let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
 ```
 
-One number per column, repeated over batch and tokens. A read whose index is itself a tensor value — a table
-lookup — prints the same way, with the inner bracket producing the row:
+One number per column, repeated over batch and tokens. Coordinates can also be arithmetic over the parameters,
+which is how a slice or a dropped axis reads:
 
 ```rust
-let pairs: f16[4096,2048,2] = emmy::tensor_from_fn(|i, j, k| pair_table[idx[i, j], k]);
+let linear_5: f16[1,512,3072] = emmy::tensor_from_fn(|i, j, k| linear_4__cat__linear_5[i, j, (k + 3072)]);
+let linear_3: f16[1,512,1024] = emmy::tensor_from_fn(|i, j, k| linear_3_reduce[i, j, 0, k]);
 ```
 
-Valid: every index variable in the body comes from the closure's parameters, or is a literal, or is another
-tensor read. Invalid: a free variable, or a parameter count that disagrees with the result's rank — if you see
-either, the printer has a bug.
+The first reads the upper half of a concatenated tensor, the second drops a size-1 axis.
+
+Valid: every coordinate is arithmetic over the closure's parameters, literals, and — under `--dynamic` — the
+symbolic dimension names, which appear free in the body because the launch binds them. A coordinate is never a
+value read from another tensor; that is what `emmy::gather` and `emmy::gather_by_axis` are for. Invalid: a
+parameter count that disagrees with the result's rank, which would mean the printer has a bug.
 
 ## Gotchas
 
@@ -338,10 +417,13 @@ let to: f32[1,512,1024] = to_cast;
 
 **`emmy::gather` is not `torch.gather`.** The formula is torch's, and on the inputs emmy accepts the two agree
 element for element. But torch requires only `index.size(d) <= input.size(d)` on every axis other than the
-gathered one, while emmy demands equality there. A narrower index is a legal `torch.gather` that emmy reads as
-the other operation: data `[4,8]` with an index `[4,3]` on axis 0 gives `[4,3]` in torch and `[4,3,8]` here.
-Four ATen operators collapse onto one node and only the axis survives, so operand shapes are the only evidence
-of which was meant.
+gathered one, while emmy demands equality there. A narrower index is a legal `torch.gather` that prints as the
+other operation: `torch.gather` on data `[4,8]` with an index `[4,3]` at axis 0 prints
+`let gather: f32[4,3] = emmy::gather_by_axis(x0, x1, axis=0);`. That line is the one place a dump contradicts
+itself — the declared type is torch's answer, while `emmy::gather_by_axis` as defined above would give
+`[4,3,8]`, and that is also what emmy computes. Four ATen operators collapse onto one node and only the axis
+survives, so operand shapes are the only evidence of which was meant.
 
-**Some captured constants go unused.** `transpose` and `softmax` leave the scalars the trace captured bound at
-module level, with nothing referring to them.
+**Some captured constants go unused.** The layer above captures 29 scalars and refers to 18 of them. The 11
+left over come from `transpose` (8), `unsqueeze` (2) and `sdpa` (1) — the handlers that read a scalar argument
+off the trace and store it in a field, rather than keeping the constant the resolver had already made.

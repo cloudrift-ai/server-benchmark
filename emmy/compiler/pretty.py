@@ -173,8 +173,17 @@ def render_graph(graph) -> str:
 
     for nid in (n for n in order if not isinstance(graph.nodes[n].op, (InputOp, ConstantOp))):
         node = graph.nodes[nid]
-        t = node.output
-        lines += _let(names[nid], fmt_type(t.shape, t.dtype), fmt_expr(node, graph, names), "    ", t.name)
+        rhs = fmt_expr(node, graph, names)
+        if len(node.outputs) == 1:
+            t = node.output
+            lines += _let(names[nid], fmt_type(t.shape, t.dtype), rhs, "    ", t.name)
+        else:
+            # A node writing several buffers destructures, so every buffer a later
+            # line can name is bound here. Slot 0 travels under the node id, the
+            # rest under their own buffer names.
+            slots = ", ".join(node.buffer_names())
+            types = ", ".join(fmt_type(t.shape, t.dtype) for t in node.outputs)
+            lines += _let(f"({slots})", f"({types})", rhs, "    ")
 
     lines.append("")
     tail = "Outputs { " + ", ".join(n for n, _ in outs) + " }" if len(outs) > 1 else outs[0][0] if outs else "()"

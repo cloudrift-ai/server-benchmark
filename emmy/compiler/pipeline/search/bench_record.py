@@ -35,6 +35,16 @@ Rows are keyed with the tune's own recipes (same ``node_key`` / ``op_sig`` /
 ``context_key``), parentless with ``depth=0`` — the no-tree-schema marker the fork
 diagnostics skip — and stamped with a ``bench-…`` ``run_id`` so freeze headers show the
 provenance.
+
+**The invariant that keeps a pool comparable: a row's key and its features must describe
+the same work.** They arrive by different routes — the key from the offer site, the
+features from the kernel that ran — and a structural fork can break the correspondence:
+when it splits a site, one piece's own source chain may still bottom out at the un-split
+site, so the piece is filed as a rival of the whole. Nothing downstream can tell:
+:func:`bench_leaves` therefore compares the recorded kernel's ``S_ext_*`` extents against
+its site's and drops the row when they differ. Measured on the RTX 5090 freeze written
+before the check, nine pools held such a pair — a 5.9 µs row scored against a 131 ms one,
+both honest at about 35 TFLOP/s, a median 8192x apart in work.
 """
 
 from __future__ import annotations
@@ -86,6 +96,14 @@ def mint_bench_run_id() -> str:
     return f"bench-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
 
 
+def _extents(knobs: dict | None) -> tuple:
+    """The ``S_ext_*`` loop extents in a knob row, sorted — what the kernel actually ran over.
+
+    The one part of the structural stamp that says how much WORK was done, and so the one part two rows
+    must share before their latencies can be compared."""
+    return tuple(sorted((k, v) for k, v in (knobs or {}).items() if k.startswith("S_ext_")))
+
+
 def _offer_site(op) -> object | None:
     """The pre-descent offer op a compiled kernel lowered from. Preferred: the deepest
     loop-dialect ancestor carrying ``S_*`` stamps (the ``two_level`` decomposition-row
@@ -130,12 +148,14 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
     entries = []  # (nid, op, launch, sig-or-None) in launch order
     sig_by_nid: dict[str, str] = {}
+    site_extents: dict[str, tuple] = {}  # sig -> the offer site's own extents, for the integrity check below
     for idx, nid in enumerate(nids):
         op = compiled.nodes[nid].op
         site = _offer_site(op)
         sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_"))) if site is not None else None
         if sig is not None:
             sig_by_nid[nid] = sig
+            site_extents[sig] = _extents(site.knobs)
         entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))
 
     def attributed(nid: str, hops: int = 4) -> str | None:
@@ -181,6 +201,23 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
         # most-tunables op is the group's knob identity.
         main = max(g["ops"], key=lambda o: sum(1 for k in (o.knobs or {}) if not k.startswith(("S_", "H_"))))
         knobs = dict(main.knobs or {})
+        # A row's POOL KEY is its offer site's structure and its recorded FEATURES are this kernel's, and
+        # nothing above makes those describe the same work. When a structural fork splits a site, one piece's
+        # own source chain can bottom out at the un-split site, so the piece is filed as a rival of the whole
+        # — its latency compared against a config computing thousands of times more. Extents are what settles
+        # it: a kernel realizing the whole site runs the site's extents (tiling and split-K rewrite the nest
+        # but preserve them), so a mismatch means this row measures something else and must not be recorded
+        # under this key. Dropped rather than re-keyed: the key it SHOULD carry is its own site's, and if its
+        # source chain could name that we would not be here.
+        if _extents(knobs) != site_extents.get(sig, _extents(knobs)):
+            logger.warning(
+                "[record-nodes] op %s: kernel extents %s do not match the offer site's %s — the row would "
+                "measure a fraction of the pool it keys into; skipped",
+                sig[:12],
+                dict(_extents(knobs)),
+                dict(site_extents[sig]),
+            )
+            continue
         if status != "ok":
             leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=FAIL_SENTINEL_US, variance=None, n_samples=None, status=status))
             continue

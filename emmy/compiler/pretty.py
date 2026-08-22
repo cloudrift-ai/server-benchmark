@@ -88,10 +88,11 @@ def fmt_expr(node, graph, names: dict[str, str]) -> str:
         return f"emmy::index_map({', '.join(args)})"
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same
-        # test the evaluator applies. ``gather`` picks one element per output
-        # position, which is what torch means by the name. ``emmy::gather_by_axis``
-        # looks up whole slices by index — torch spells that ``index_select`` or
-        # ``embedding``, neither of which covers both, so the name is emmy's.
+        # test the evaluator applies. Both names are emmy's: ``gather`` picks one
+        # element per output position, close to torch's ``gather`` but demanding
+        # equal non-axis extents where torch allows a narrower index;
+        # ``gather_by_axis`` looks up whole slices, which torch splits across
+        # ``index_select`` and ``embedding``.
         data, idx = (graph.buffer(i) for i in node.inputs[:2])
         axis = op.axis
         if data is not None and idx is not None:
@@ -100,7 +101,7 @@ def fmt_expr(node, graph, names: dict[str, str]) -> str:
             per_element = len(idx.shape) == len(data.shape) and all(
                 e == d for k, (e, d) in enumerate(zip(idx.shape, data.shape, strict=True)) if k != axis
             )
-            name = "gather" if per_element else "emmy::gather_by_axis"
+            name = "emmy::gather" if per_element else "emmy::gather_by_axis"
             return f"{name}({', '.join(args)}, axis={axis})"
         return f"emmy::gather({', '.join(args)}, axis={op.axis})"
 

@@ -180,7 +180,7 @@ appear at `--ir torch` or in a static-shape dump. A caller-supplied tensor and t
 ## Operations
 
 A bare name means what torch or numpy already means by it: `multiply`, `add`, `pow`, `mean`, `sum`, `linear`,
-`silu`, `softmax`, `reshape`, `slice`, `cat`, `transpose`, `gather`. Four cases need care.
+`silu`, `softmax`, `reshape`, `slice`, `cat`, `transpose`. Four cases need care.
 
 A **reduction** prints as its combine's name with an `axis=` argument — `sum(pow_1, axis=-1)`,
 `maximum(x, axis=-1)`. That is the same spelling as the elementwise operation of the same name, so the `axis=`
@@ -205,6 +205,7 @@ An `emmy::` name is emmy's own:
 | `emmy::cast(x)` | a dtype change (see the gotchas below — no node computes it) |
 | `emmy::bitcast(x)` | reinterpret same-width elements as another dtype |
 | `emmy::index_map(…)` | a reindexing the closure form cannot hold |
+| `emmy::gather(data, idx, axis=n)` | pick one element per output position |
 | `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
 A second namespace, `emmy::intrinsics::`, holds the scalar functions emmy defines itself, the ones with no
@@ -251,13 +252,13 @@ fn emmy::bitcast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
 // per-element reading applies when `idx` matches `data` in rank and in every axis
 // but `axis`, and the slice lookup applies otherwise.
 
-// Pick one element per output position, which is what torch means by `gather`.
-// `idx` has the result's shape, and each of its entries says which position along
-// `axis` that one output element reads; the other coordinates come from the output
-// position itself.
-fn gather<T, const n: usize, const d: usize[n], const e: usize[n]>(
+// Pick one element per output position. `idx` has the result's shape, and each of
+// its entries says which position along `axis` that one output element reads; the
+// other coordinates come from the output position itself. Close to torch's
+// `gather`, but not the same — see the gotchas.
+fn emmy::gather<T, const n: usize, const d: usize[n], const e: usize[n]>(
     data: T[d],
-    idx: i32[e],
+    idx: i64[e],
     axis: usize,
 ) -> T[e]
     where e[k] == d[k] for every k != axis
@@ -269,7 +270,7 @@ fn gather<T, const n: usize, const d: usize[n], const e: usize[n]>(
 // place of `axis`. A token embedding is this: one row of a table per token id.
 fn emmy::gather_by_axis<T, const n: usize, const m: usize, const d: usize[n], const e: usize[m]>(
     data: T[d],
-    idx: i32[e],
+    idx: i64[e],
     axis: usize,
 ) -> T[d[0..axis] ++ e ++ d[axis+1..n]]
     // produces the tensor whose element at i, writing j for the index tensor's own
@@ -334,6 +335,13 @@ of an index map, so a `--ir tensor` dump carries several:
 ```rust
 let to: f32[1,512,1024] = to_cast;
 ```
+
+**`emmy::gather` is not `torch.gather`.** The formula is torch's, and on the inputs emmy accepts the two agree
+element for element. But torch requires only `index.size(d) <= input.size(d)` on every axis other than the
+gathered one, while emmy demands equality there. A narrower index is a legal `torch.gather` that emmy reads as
+the other operation: data `[4,8]` with an index `[4,3]` on axis 0 gives `[4,3]` in torch and `[4,3,8]` here.
+Four ATen operators collapse onto one node and only the axis survives, so operand shapes are the only evidence
+of which was meant.
 
 **Some captured constants go unused.** `transpose` and `softmax` leave the scalars the trace captured bound at
 module level, with nothing referring to them.

@@ -20,7 +20,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -223,3 +223,23 @@ def test_a_cut_taken_at_a_fork_mid_batch_still_reaches_the_stamp(monkeypatch) ->
 
 
 # --- routing entries drive the same realizer -------------------------------------------------------
+
+
+def test_contraction_operand_seam_takes_the_output_dtype(monkeypatch) -> None:
+    """A seam standing in for a contraction OPERAND holds what the fused slab stored — the atom's
+    16-bit element — not the f32 its cone computed in: typed f32 (an f32-computing norm over f16
+    keys), the materialized B could feed no warp atom (only ``a`` has a converting fill)."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.passes.test_recognize_boundary_rules import _normed_sdpa_graph
+
+    g = _normed_sdpa_graph()
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    with pinned_knobs({"PLACE@b": "cut"}):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
+            g, lambda fp: flatten_leaves(fp.options)[0]
+        )
+    ws = [n for n in out.nodes.values() if "__cut_" in n.id and isinstance(n.op, (LoopOp, TileOp))]
+    assert ws, [n.id for n in out.nodes.values()]
+    assert any(n.output.dtype == F16 for n in ws), [(n.id, str(n.output.dtype)) for n in ws]

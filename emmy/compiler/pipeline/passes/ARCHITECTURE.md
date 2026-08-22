@@ -205,6 +205,15 @@ the column minus the edge regenerating the raw column loop), and the per-cell re
 reduce tiers schedule and materialize. Cuts under a sweep are legal: the sweep axis is an iteration axis of the cut
 piece, not a captured value.
 
+A chained column over TWO statistics (normalized Q against normalized K — attention's score fold) binds as one
+contraction whose A and B are BOTH computed cones, each sourcing its own statistic (`bind_bilinear`'s chained
+both-computed arm; `fused_view` reads the sweep column through it). The fill evaluates a computed B per slab cell
+(its statistic with it — the `b` children are fill-realized sites, never a partition of their own), so the fused
+form stands and is priced like any other; the `b` seam is the cut that turns the per-query replay of the key
+statistic into a materialized operand the mma tier streams. A seam standing in for a contraction operand holds what
+the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
+materialized B is a slab the warp atoms can copy.
+
 A row carries NO view ownership: the derived contraction view offers only warp tiles (a computed operand's scalar
 list is empty) and the per-cell view only scalar / per-cell ones, so the row's `WORK` tier decodes its view by
 construction — replay is a function of `(stored op, row)` and nothing else. The union carries two obligations:

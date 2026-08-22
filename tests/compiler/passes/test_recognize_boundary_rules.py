@@ -22,11 +22,12 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
@@ -848,3 +849,26 @@ def test_masked_score_cone_keeps_its_predicate_per_cell():
     pro, cell, _stats = cone_seam(fold.a, fold.axis.name)
     assert any(isinstance(s, Select) for s in cell), "the mask predicates the per-cell weight"
     assert not any(isinstance(s, Select) for s in pro), "the mask is k-varying — it never joins the row prologue"
+
+
+def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
+    """Gemma-shaped attention scores: RMSNorm'd Q against RMSNorm'd K. Root formation chains the
+    score fold over both statistics' projected scales; the binder reads it as ONE contraction
+    whose A and B are both computed cones, each sourcing its own statistic. The ``b`` seam —
+    the normalized keys — is then a legal cut: the form that turns the per-query replay of the
+    key statistic into a materialized operand the mma tier streams."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.ir.tile.path import spell
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
+    scores = next(n for n in g.nodes.values() if isinstance(n.op, LoopOp) and n.id.endswith("_scaled"))
+    tile = recognized_tile(scores.op, name=scores.id)
+    pro = fused_view(tile)
+    assert pro is not None, "the chained score column binds through the fused view"
+    node = pro[0].operands[0]
+    assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
+    seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, pro[1]))]
+    assert "PLACE@b" in seams, seams

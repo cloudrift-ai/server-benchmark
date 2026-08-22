@@ -824,10 +824,17 @@ def _fill_realized(parent: _Node | None, site: Site) -> bool:
     prologue stripes a cone's statistic ONE ROW PER WARP, the warp's 32 lanes striding the fold and
     closing it on the shuffle butterfly (``lowering/kernel/_stage.sync_stat_fill``) — a single
     hardwired partition, so any value here would stamp a knob no kernel realizes."""
-    if parent is None or not is_contraction(parent.site.node) or isinstance(parent.site.node.a, Load):
+    if parent is None or not is_contraction(parent.site.node):
         return False
     depth = len(parent.site.segments)
-    return len(site.segments) > depth and site.segments[depth] == "a"
+    if len(site.segments) <= depth:
+        return False
+    role = site.segments[depth]
+    if role == "a":
+        return not isinstance(parent.site.node.a, Load)
+    # A computed B CONE (a zero-axis projection) is evaluated by the same fill per slab cell, its
+    # statistic with it; an inline B fold WITH an axis is a real nested schedule site.
+    return role == "b" and all(isinstance(ch.b, Fold) and ch.b.axis is None for ch in parent.site.node.channels if isinstance(ch.b, Fold))
 
 
 def _band_of(plan: ReducePlan) -> Workers | None:

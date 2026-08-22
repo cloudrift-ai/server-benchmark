@@ -105,6 +105,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
   GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
   `scripts/capture_gen_twins.py` remains the full-checkpoint diagnostic capture.
+  Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
+  the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
+  `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
+  `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
+  plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four).
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct

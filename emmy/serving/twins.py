@@ -184,7 +184,7 @@ def capture_twin_graphs(
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import strip_engine_quant_config  # noqa: PLC0415
+    from emmy.compiler.loader.quant import fp8_weight_profile, strip_engine_quant_config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
     from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
         build_attention_split_wrapper,
@@ -202,6 +202,7 @@ def capture_twin_graphs(
             "residuals do not fit the (q, k, v) seam; use capture_in_model_graphs for its full-layer audit provider"
         )
     storage = coded_tensor_storage(model, cfg, revision=revision)
+    fp8 = fp8_weight_profile(text)
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
     if (text.pad_token_id or 0) >= text.vocab_size:
@@ -287,6 +288,8 @@ def capture_twin_graphs(
                 expert_name = f"expert{name}{suffix}"
                 if storage:
                     graphs.update(_spell_expert_twins(expert_name, graph, storage))
+                elif fp8 is not None:
+                    graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
                 else:
                     graphs[expert_name] = graph
     return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes) if storage else graphs
@@ -426,6 +429,34 @@ def _expert_examples(experts, rows: int, hidden: int, dtype, *, split_gate_up: b
             torch.zeros(tuple(experts.down_proj_bias.shape[1:]), dtype=dtype),
         ]
     return args
+
+
+def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) -> dict[str, Graph]:
+    """The fp8 routed-expert twins of one profile, weight-free.
+
+    Serving spells the expert program from the per-layer store (``spell_quantized_inputs`` with
+    the store's bits + scale shapes); the golden must record that program, not the f16 GEMM
+    the trace promised. ``name@<fmt>`` carries ``w_gate_up`` / ``w_down`` as fp8 bits with the
+    block scales the config's ``weight_block_size`` tiles over the traced weight shapes, for
+    the layers the quantizer converted; the plain ``name`` stays beside it when any layer of the
+    profile kept its experts unquantized (Laguna's last four layers deploy f16). ``profile`` is
+    :func:`loader.quant.fp8_weight_profile`'s reading of the config."""
+    from emmy.compiler.loader.quant import _is_skipped, spell_quantized_inputs  # noqa: PLC0415
+
+    fmt, block, patterns = profile
+    coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.weight", patterns)}
+    out: dict[str, Graph] = {}
+    if coded:
+        specs = {}
+        for inp in ("w_gate_up", "w_down"):
+            n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+            specs[inp] = (fmt, (1, 1) if block is None else (-(-n // block[0]), -(-k // block[1])), "f32")
+        spelled = graph.copy()
+        spell_quantized_inputs(spelled, specs)
+        out[f"{name}@{fmt}"] = spelled
+    if layers - coded:
+        out[name] = graph
+    return out
 
 
 def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Graph]:

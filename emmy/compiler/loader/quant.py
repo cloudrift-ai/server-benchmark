@@ -311,12 +311,39 @@ def _exl3_codebook(index, base: str) -> int:
     return 1 if base + ".mcg" in index else 2 if base + ".mul1" in index else 0
 
 
+def fp8_weight_profile(hf_config) -> tuple[str, tuple[int, int] | None, list[str]] | None:
+    """``(fmt, weight block, skip patterns)`` when ``hf_config`` declares fp8 weights, else ``None``.
+
+    Read off ``quantization_config`` BEFORE :func:`strip_engine_quant_config` drops it: the
+    storage format token, the 2-D block one scale covers (``None`` = one per-tensor scale) and
+    the module patterns the quantizer left unconverted (:func:`_skip_patterns`). A weight-free
+    twin derives its scale shapes from this profile and the traced weight shapes alone."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "fmt", "weight_block_size", *_SKIP_KEYS)}
+    if qc.get("quant_method") != "fp8":
+        return None
+    block = qc.get("weight_block_size")
+    fmt = "f8e5m2" if qc.get("fmt") == "e5m2" else "f8e4m3"
+    return fmt, (None if block is None else tuple(int(b) for b in block)), _skip_patterns(qc)
+
+
+_SKIP_KEYS = ("ignored_layers", "modules_to_not_convert", "ignore")
+
+
+def _skip_patterns(qc: dict) -> list[str]:
+    """The module patterns a ``quantization_config`` leaves unquantized, every spelling pooled."""
+    return [pat for key in _SKIP_KEYS for pat in (qc.get(key) or [])]
+
+
 def _is_skipped(weight_key: str, patterns: list[str]) -> bool:
     """Whether the weight's module is excluded from quantization.
 
-    ``quant_method: fp8`` lists module names in ``modules_to_not_convert``;
-    compressed-tensors lists them in ``ignore``, where a ``re:`` prefix marks a
-    regex. Plain entries match the module path exactly or as a dotted prefix /
+    ``quant_method: fp8`` lists module names in ``modules_to_not_convert`` (the DeepSeek
+    lineage writes ``ignored_layers``); compressed-tensors lists them in ``ignore``, where a
+    ``re:`` prefix marks a regex. Plain entries match the module path exactly or as a dotted prefix /
     suffix component (``"lm_head"`` matches both ``lm_head`` and
     ``model.lm_head``; a parent-module entry covers its children).
     """
@@ -361,7 +388,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     qc = _fp8_quant_config(model_dir)
     exl3 = _exl3_quant_config(model_dir) is not None
     awq = _awq_quant_config(model_dir)
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or []) if qc else []
+    patterns = _skip_patterns(qc) if qc else []
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -813,7 +840,7 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
         return _spell_awq4_constants(graph, model_dir, awq)
     if qc is None:
         return 0
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    patterns = _skip_patterns(qc)
     index = _build_index(model_dir)
 
     spelled = 0

@@ -87,17 +87,21 @@ def fmt_expr(node, graph, names: dict[str, str]) -> str:
             return f"emmy::tensor_from_fn(|{', '.join(names)}| {_index_expr(op, names, args)})"
         return f"emmy::index_map({', '.join(args)})"
     if isinstance(op, GatherOp):
+        # One op class, two operations. The operand shapes decide which, by the same
+        # test the evaluator applies. ``gather`` picks one element per output
+        # position, which is what torch means by the name. ``emmy::gather_by_axis``
+        # looks up whole slices by index — torch spells that ``index_select`` or
+        # ``embedding``, neither of which covers both, so the name is emmy's.
         data, idx = (graph.buffer(i) for i in node.inputs[:2])
+        axis = op.axis
         if data is not None and idx is not None:
-            axis = op.axis if not isinstance(op.axis, int) or op.axis >= 0 else len(data.shape) + op.axis
-            expands = len(out.shape) == len(idx.shape) + len(data.shape) - 1
-        else:
-            axis, expands = op.axis, False
-        if expands and axis == 0:
-            names = list(_DIM_NAMES[: len(out.shape)])
-            head, tail = names[: len(idx.shape)], names[len(idx.shape) :]
-            read = ", ".join([f"{args[1]}[{', '.join(head)}]", *tail])
-            return f"emmy::tensor_from_fn(|{', '.join(names)}| {args[0]}[{read}])"
+            if isinstance(axis, int) and axis < 0:
+                axis += len(data.shape)
+            per_element = len(idx.shape) == len(data.shape) and all(
+                e == d for k, (e, d) in enumerate(zip(idx.shape, data.shape, strict=True)) if k != axis
+            )
+            name = "gather" if per_element else "emmy::gather_by_axis"
+            return f"{name}({', '.join(args)}, axis={axis})"
         return f"emmy::gather({', '.join(args)}, axis={op.axis})"
 
     name = _OP_SPELLING.get(type(op).__name__, type(op).__name__.removesuffix("Op").lower())

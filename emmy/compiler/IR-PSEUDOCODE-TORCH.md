@@ -180,7 +180,7 @@ appear at `--ir torch` or in a static-shape dump. A caller-supplied tensor and t
 ## Operations
 
 A bare name means what torch or numpy already means by it: `multiply`, `add`, `pow`, `mean`, `sum`, `linear`,
-`silu`, `softmax`, `reshape`, `slice`, `cat`, `transpose`. Four cases need care.
+`silu`, `softmax`, `reshape`, `slice`, `cat`, `transpose`, `gather`. Four cases need care.
 
 A **reduction** prints as its combine's name with an `axis=` argument — `sum(pow_1, axis=-1)`,
 `maximum(x, axis=-1)`. That is the same spelling as the elementwise operation of the same name, so the `axis=`
@@ -204,8 +204,8 @@ An `emmy::` name is emmy's own:
 | `emmy::tensor_from_fn(\|i, j\| …)` | build a tensor from a function of its indices |
 | `emmy::cast(x)` | a dtype change (see the gotchas below — no node computes it) |
 | `emmy::bitcast(x)` | reinterpret same-width elements as another dtype |
-| `emmy::gather(data, idx, axis=n)` | read positions along an axis, when the closure form below does not apply |
 | `emmy::index_map(…)` | a reindexing the closure form cannot hold |
+| `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
 A second namespace, `emmy::intrinsics::`, holds the scalar functions emmy defines itself, the ones with no
 torch or numpy function behind them. `emmy/compiler/ir/elementwise.py` holds that table, and everything in it
@@ -220,56 +220,70 @@ that torch or numpy does not already name prints under the prefix:
 
 ### What the `emmy::` helpers mean
 
-Written as definitions in the same pseudocode. `T` and `U` are element types, and each axis size is a const
-parameter — `d0, …, dn` for the result, `e0, …, em` for a second operand. A `…` stands for the rest of a list
-whose length the shapes fix.
+Written as definitions in the same pseudocode, with three conventions.
+
+`T` and `U` are element types. A shape is one const parameter holding all the axis sizes — `const d: usize[n]`
+— so a definition can index it (`d[axis]`), slice it (`d[0..axis]`) and join pieces with `++`.
+
+An index into a rank-`n` tensor is itself a vector of `n` numbers, so `x[i]` with `i: usize[n]` is one element,
+and `x[i0, i1]` is the same thing written out. Slicing and joining work on an index too: `i[0..axis]` is the
+coordinates before the axis, and `i[0..axis] ++ [v] ++ i[axis+1..n]` is `i` with the coordinate at `axis`
+replaced by `v`.
 
 ```rust
 // Build a tensor from a function of its indices. The result type fixes how many
 // parameters the closure takes and what each one ranges over. Rank six is the
 // limit, because the printer has six index names.
-fn emmy::tensor_from_fn<T, const d0: usize, …, const dn: usize>(f: |usize, …, usize| -> T) -> T[d0,…,dn]
-    // produces the tensor whose element at (i0, …, in) is f(i0, …, in), for every
-    // i0 < d0, …, in < dn
+fn emmy::tensor_from_fn<T, const n: usize, const d: usize[n]>(f: |usize, …, usize| -> T) -> T[d]
+    // produces the tensor whose element at i is f(i), for every index i with
+    // i[k] < d[k]
 
 // A dtype change. No node computes it: the declared result type is the whole
 // operation, and the backend converts when it materializes that type. The values
 // can still change, since a narrowing conversion rounds.
-fn emmy::cast<T, U, const d0: usize, …, const dn: usize>(x: T[d0,…,dn]) -> U[d0,…,dn]
+fn emmy::cast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
 
 // Reinterpret each element's bits as another type of the same width.
-fn emmy::bitcast<T, U, const d0: usize, …, const dn: usize>(x: T[d0,…,dn]) -> U[d0,…,dn]
+fn emmy::bitcast<T, U, const n: usize, const d: usize[n]>(x: T[d]) -> U[d]
     where size_of::<U>() == size_of::<T>()
 
-// Read positions along one axis, in one of two forms that the operand shapes
-// tell apart. When `idx` matches `data` in rank and in every axis but `axis`, it
-// names one position per output element:
-fn emmy::gather<T, const d0: usize, …, const dn: usize, const e0: usize, …, const en: usize>(
-    data: T[d0,…,dn],
-    idx: i32[e0,…,en],
-    axis: usize,
-) -> T[e0,…,en]
-    // produces the tensor whose element at (i0, …, in) is
-    // data[i0, …, idx[i0,…,in], …, in], with the index landing on `axis`
+// One graph node covers the next two, and the operand shapes decide which: the
+// per-element reading applies when `idx` matches `data` in rank and in every axis
+// but `axis`, and the slice lookup applies otherwise.
 
-// Otherwise `idx` replaces the gather axis, and its own axes land in that axis's
-// place:
-fn emmy::gather<T, const d0: usize, …, const dn: usize, const e0: usize, …, const em: usize>(
-    data: T[d0,…,dn],
-    idx: i32[e0,…,em],
+// Pick one element per output position, which is what torch means by `gather`.
+// `idx` has the result's shape, and each of its entries says which position along
+// `axis` that one output element reads; the other coordinates come from the output
+// position itself.
+fn gather<T, const n: usize, const d: usize[n], const e: usize[n]>(
+    data: T[d],
+    idx: i32[e],
     axis: usize,
-) -> T[d0,…,d(axis-1), e0,…,em, d(axis+1),…,dn]
-    // produces the tensor whose element at (…, j0,…,jm, …) is
-    // data[…, idx[j0,…,jm], …], with the index landing on `axis`
+) -> T[e]
+    where e[k] == d[k] for every k != axis
+    // produces the tensor whose element at i is
+    // data[i[0..axis] ++ [idx[i]] ++ i[axis+1..n]]
+
+// Look up whole slices by index. Each entry of `idx` names a position along `axis`,
+// and the slice of `data` sitting there is copied out; `idx`'s own axes take the
+// place of `axis`. A token embedding is this: one row of a table per token id.
+fn emmy::gather_by_axis<T, const n: usize, const m: usize, const d: usize[n], const e: usize[m]>(
+    data: T[d],
+    idx: i32[e],
+    axis: usize,
+) -> T[d[0..axis] ++ e ++ d[axis+1..n]]
+    // produces the tensor whose element at i, writing j for the index tensor's own
+    // coordinates i[axis..axis+m], is
+    // data[i[0..axis] ++ [idx[j]] ++ i[axis+m..n+m-1]]
 
 // A reindexing the closure form cannot hold: no source, several sources, a
 // selection deciding which source feeds which output position, or rank above six.
-fn emmy::index_map<T, const d0: usize, …, const dn: usize>(sources: …) -> T[d0,…,dn]
+fn emmy::index_map<T, const n: usize, const d: usize[n]>(sources: …) -> T[d]
 
 // Decode or encode a narrow float format, element by element. Unlike `cast`, these
 // have a real implementation behind them (`emmy/compiler/ir/elementwise.py`).
-fn emmy::intrinsics::from_f8e4m3<const d0: usize, …, const dn: usize>(x: f8e4m3[d0,…,dn]) -> f32[d0,…,dn]
-fn emmy::intrinsics::to_f8e4m3<const d0: usize, …, const dn: usize>(x: f32[d0,…,dn]) -> f8e4m3[d0,…,dn]
+fn emmy::intrinsics::from_f8e4m3<const n: usize, const d: usize[n]>(x: f8e4m3[d]) -> f32[d]
+fn emmy::intrinsics::to_f8e4m3<const n: usize, const d: usize[n]>(x: f32[d]) -> f8e4m3[d]
 ```
 
 `emmy::const_eval()` and `emmy::input_data()` are not operations. They stand for where a constant's value comes

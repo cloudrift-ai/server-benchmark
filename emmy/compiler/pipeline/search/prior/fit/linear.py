@@ -1,7 +1,7 @@
 """The linear trainer — the offline learning-to-rank fit of the :class:`OfflinePrior` weights.
 
 :class:`LinearTrainer` holds the hyperparameters and :meth:`~LinearTrainer.fit` turns a
-:class:`Group` list into a :class:`LinearFit`. The trainer is immutable and its ``fit`` is pure, so a
+:class:`GoldenGroup` list into a :class:`LinearFit`. The trainer is immutable and its ``fit`` is pure, so a
 fit is a function of ``(groups, hyperparameters)`` alone: the same inputs give a byte-identical artifact, one
 instance serves every cross-validation fold without copying, and an A/B between two fits measures the fit
 inputs rather than run-to-run noise.
@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
@@ -97,7 +97,7 @@ def mean_log_rank(ranks: list[int]) -> float:
 
 
 def fit_weights(
-    groups: list[Group], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True, objective=mean_log_rank
+    groups: list[GoldenGroup], names, sd_ref, *, seed_w, seed_params, rng, samples, l2=DEFAULT_L2, fit_params=True, objective=mean_log_rank
 ):
     """Random-search + coordinate-descent the deployed scoring function over ``groups``, minimizing
     ``objective + l2 * l2_penalty`` (the ranking loss plus the raw-space L2 — see :data:`DEFAULT_L2`
@@ -117,15 +117,15 @@ def fit_weights(
     z-space. The params are NOT z-scored — they are raw quality units, and ``matz @ w_z`` equals the
     raw quality up to a per-pool constant that ranking drops, so the two add consistently. Returns
     ``(best_w, best_params, best_ranks, mu, sd)`` with ``best_w`` in this pool's z-space."""
-    # A PRIVATE copy: the z-scoring below is in place, and ``Group.matrix`` hands back a shared read-only
+    # A PRIVATE copy: the z-scoring below is in place, and ``GoldenGroup.matrix`` hands back a shared read-only
     # projection. Copying here is what it has always done — the difference is that the projection it copies
     # from is now built once for the whole run instead of once per fold.
     mats = [g.matrix(names).copy() for g in groups]
-    pinned = [g.pinned for g in groups]
+    pinned = [g.golden_ids for g in groups]
 
     # Z-score over this fit's candidate pool so weights are comparable across features.
     # Two streaming passes (mean, then squared deviation) and an IN-PLACE scaling, rather than
-    # one concatenated copy plus a fresh list: ``Group.matrix`` already returned a private array,
+    # one concatenated copy plus a fresh list: ``GoldenGroup.matrix`` already returned a private array,
     # and the pools are large enough that holding several copies of the dataset at once decides
     # whether the fit runs at all — after the tile-scheduler rebuild one fp16 golden enumerates
     # ~78k rows and the golden corpus is ~18 GB, so the concatenate + comprehension spelling
@@ -228,7 +228,7 @@ class LinearTrainer:
     objective: Callable[[list[int]], float] = mean_log_rank
 
     @staticmethod
-    def unfittable(train: list[Group], hold: list[Group]) -> str | None:
+    def unfittable(train: list[GoldenGroup], hold: list[GoldenGroup]) -> str | None:
         """Why a cross-validation fold cannot be fit under this model class, or ``None``. Both reasons are about
         the two weight sets: the dynamic stage seeds from the static one, so a slice with no static cases fits
         nothing at all, and a holdout needing the dynamic set cannot be scored by a model that never fit one.
@@ -239,7 +239,7 @@ class LinearTrainer:
             return "dynamic weight set unfittable (0 dyn cases in training)"
         return None
 
-    def fit(self, groups: list[Group]) -> LinearFit:
+    def fit(self, groups: list[GoldenGroup]) -> LinearFit:
         """Fit both weight sets over ``groups``: a static fit over the non-dynamic groups, then the
         dynamic fit over the rest, seeded from the static result in its own z-space (the ``sd_ref``
         chaining) and drawing from the same RNG after it. That RNG is built here from
@@ -306,7 +306,7 @@ class LinearFit:
     static_ranks: list[int]
     dyn_ranks: list[int] | None
 
-    def score_rows(self, group: Group) -> np.ndarray | None:
+    def score_rows(self, group: GoldenGroup) -> np.ndarray | None:
         """The trainer protocol's scoring entry point (:func:`~.cv.case_ranks` calls it), answered by the
         fitted model itself — the column choice and the weight-set routing are the model's, not a copy of
         them kept here."""

@@ -2,9 +2,12 @@
 DB, the online-prior reservoir, and the digest-pinned measurement freeze): one
 :class:`Sample` row type, one :class:`Dataset` query surface, the cheap
 :class:`ShapeKey` structural identity, the freeze writer/loader (``freeze.py``), and
-``group.py``'s :class:`Group` — one candidate pool packed as a matrix plus its labels,
-the comparison set a ranking question is asked over. See ``sample.py`` for the
-featurization-fidelity contract.
+``group.py``'s :class:`Group` — one candidate pool packed as a matrix plus one label per
+row, the comparison set a ranking question is asked over, with :class:`GoldenGroup` the
+kind whose labels MARK the rows goldens verified rather than measuring them. Pools are
+built by plain functions there (``group_measured`` for benched rows, ``pack_features``
+for the packing both kinds share). See ``sample.py`` for the featurization-fidelity
+contract.
 
 Nothing here may import :mod:`~..prior` — the data layer describes candidates and
 their labels; deciding what a score MEANS is the layer above (guarded by

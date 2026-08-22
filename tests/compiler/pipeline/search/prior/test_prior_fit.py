@@ -19,7 +19,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.data.group import Group, feature_matrix
+from emmy.compiler.pipeline.search.data.group import GoldenGroup, feature_matrix
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.metrics import rank_of_golden
 from emmy.compiler.pipeline.search.prior.fit import (
@@ -44,7 +44,7 @@ _INTERACTION_FEATURES = {"D_finalize_kernel", "D_splitk"}
 
 
 def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
-    """A small fixed case set in the fitter's input shape (:class:`Group`), with sparse
+    """A small fixed case set in the fitter's input shape (:class:`GoldenGroup`), with sparse
     rows so the absent-feature path (the matrix packing's fill columns) is live."""
     rng = np.random.default_rng(seed)
     names = [f"D_f{i}" for i in range(n_feats)]
@@ -57,9 +57,9 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
         tier = ["thread", "warp", "reduce", "dyn"][c % 4]
         # EVERY pool carries the routing stamp, as the featurizer writes it (``passes/identity._extents``
         # emits the key unconditionally, 0.0 when no axis is symbolic) — a static pool stamps 0.0, it does
-        # not omit the key. ``Group`` packs it like any other column and the linear trainer narrows it out.
+        # not omit the key. ``GoldenGroup`` packs it like any other column and the linear trainer narrows it out.
         feats = [{**f, "S_ext_n_symbolic_axis": 1.0 if tier == "dyn" else 0.0} for f in feats]
-        cases.append(Group.from_dicts(f"x/case{c}", f"case{c}", tier, "x", f"shape{c}", int(rng.integers(0, n_rows)), feats))
+        cases.append(GoldenGroup.from_dicts(f"x/case{c}", f"case{c}", tier, "x", f"shape{c}", int(rng.integers(0, n_rows)), feats))
     # The feature list the trainer is given is the union of the PACKED columns, exactly as
     # ``commands/fit.py`` builds it — so it includes the routing stamp, and the fit has to narrow it out.
     return cases, sorted({n for c in cases for n in c.feat_names})
@@ -186,7 +186,7 @@ def test_dict_and_matrix_paths_score_identically(dynamic):
     since the shipped weight is 0.0 and a zero term would make the comparison vacuous).
 
     This also pins the routing agreement, which is the part that CAN break: the dict path reads the
-    symbolic-axis stamp off the row it is scoring, the matrix path reads ``Group.dynamic`` off the
+    symbolic-axis stamp off the row it is scoring, the matrix path reads ``GoldenGroup.dynamic`` off the
     pool. Same rows, so they must land on the same weight set."""
     art = json.loads(_DEFAULT_FILE.read_text())
     params = {"atomic_free_weight": 5.0, "atomic_free_split_threshold": 4.0}
@@ -206,7 +206,7 @@ def test_dict_and_matrix_paths_score_identically(dynamic):
         }
         for _ in range(60)
     ]
-    group = Group.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", "case", 0, rows)
+    group = GoldenGroup.from_dicts("x/case", "case", "dyn" if dynamic else "warp", "x", "case", 0, rows)
     assert group.dynamic is dynamic  # routed by the rows' stamp, not the tier label
     fitted = fit.score_rows(group)
     deployed = np.array([prior.quality(row) for row in rows])
@@ -232,8 +232,8 @@ def test_an_unfittable_dynamic_fold_scores_as_none_rather_than_raising():
         atomic_free_split_threshold=4.0,
     )
     rows = [{"D_threads": float(i), "S_ext_n_symbolic_axis": 1.0} for i in range(5)]
-    dyn = Group.from_dicts("x/d", "d", "dyn", "x", "d", 0, rows)
-    static = Group.from_dicts("x/s", "s", "warp", "x", "s", 0, [{"D_threads": float(i)} for i in range(5)])
+    dyn = GoldenGroup.from_dicts("x/d", "d", "dyn", "x", "d", 0, rows)
+    static = GoldenGroup.from_dicts("x/s", "s", "warp", "x", "s", 0, [{"D_threads": float(i)} for i in range(5)])
 
     assert dyn.dynamic and not static.dynamic
     for caller in (static_only, LinearFit(static_only, [], [])):  # the model, and the fit that forwards to it

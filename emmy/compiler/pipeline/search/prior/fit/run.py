@@ -4,7 +4,7 @@ pure function, the run structure shared by every trainer and dataset combination
 :func:`run_fit` owns the *shape* of a fit run and none of its *content*: the trainer arrives as two
 configured objects (the shippable model's and the CV folds' — they differ only in seeding policy,
 which is the caller's to decide and to record in its header), the dataset as pre-built
-:class:`Group` lists, and every non-deterministic input (dates, repo commit, CLI args)
+:class:`GoldenGroup` lists, and every non-deterministic input (dates, repo commit, CLI args)
 pre-rendered inside ``header``. No I/O, no clock, no argparse: the same inputs produce the same
 ``(metrics, fit)`` pair, so the harness is testable on synthetic groups with a stub trainer.
 
@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_folds
 
 
-def run_fit(groups: list[Group], skipped: list[tuple[str, str, str]], *, trainer, fold_trainer, folds, header):
+def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, trainer, fold_trainer, folds, header):
     """One complete fit run → ``(metrics, fit)``. ``trainer.fit(groups)`` produces the shippable
     model over every group; ``fold_trainer`` is the same trainer under the fold-seeding policy and
     fits one model per :func:`~.cv.run_folds` fold. ``folds`` is the fold count (``0`` skips

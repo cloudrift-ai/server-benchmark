@@ -61,11 +61,12 @@ def test_feature_view_globs_and_names():
 
 def test_from_dicts_normalizes_one_or_many_positives():
     """A bare int and a sequence are the same input — most callers pin one row and wrapping it would say
-    nothing. Either way the stored tuple is sorted and duplicate-free, which is what lets the builder grow a
-    group's pins without the trainers having to re-sort or de-duplicate them."""
+    nothing. Either way the marked rows come out sorted and duplicate-free, so the trainers never have to
+    re-sort or de-duplicate them."""
     rows = [{"D_a": float(i)} for i in range(5)]
     assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).labels).tolist() == [2]
     assert np.flatnonzero(Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).labels).tolist() == [1, 3]
+    # ...so a builder may hand over the rows it verified in whatever order and with whatever repeats it found.
 
 
 def test_a_merged_case_reports_its_positive_count():
@@ -200,12 +201,44 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
 
 
 def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
-    """Two recordings of the same config over the same pool are ONE fact. They pin the same row, so the pin
-    set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
+    """Two recordings of the same config over the same pool are ONE fact. They verify the same row, so the
+    label set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
     cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
     assert [(c.key, np.flatnonzero(c.labels).tolist()) for c in cases] == [("gpuA/m.512", [1])]
+
+
+def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch):
+    """The reason the packed pool decides membership and the recorded key only groups the work.
+
+    A program recorded in two sessions carries two different wires — different node ids, same graph — so it
+    reads as two enumerations and is enumerated twice. The pools they produce are identical, and the second
+    stage folds them. Without it the V100 corpus, where the same shapes are recorded many times over, reports
+    306 cases where there are 108 pools, each one counting a single fact on its own."""
+    std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
+    cases, _ = _build(
+        [
+            _StubRecord("m.512", {"TILE": "b"}, std),
+            # Same pool, but recorded as a different program — the recorded key cannot see they are one.
+            _StubRecord("m.512.resession", {"TILE": "c"}, std, program=[{"same-graph": "other-ids"}]),
+        ],
+        monkeypatch,
+    )
+    assert [(c.key, np.flatnonzero(c.labels).tolist()) for c in cases] == [("gpuA/m.512", [1, 2])]
+
+
+def test_a_pool_is_named_after_a_golden_that_is_actually_in_it(monkeypatch):
+    """A record can be grouped onto a pool and then fail to find its own row in it. Naming the case after
+    that record would put a rank in ``metrics.json`` under a name the same run reports as skipped — and the
+    golden whose row IS pinned would appear nowhere."""
+    std = [{"TILE": "a"}, {"TILE": "b"}]
+    cases, skipped = _build(
+        [_StubRecord("m.512.absent", {"TILE": "zz"}, std), _StubRecord("m.512", {"TILE": "b"}, std)],
+        monkeypatch,
+    )
+    assert [(c.key, c.name) for c in cases] == [("gpuA/m.512", "m.512")]
+    assert [s[1] for s in skipped] == ["m.512.absent"]
 
 
 # --- synthetic cases ---------------------------------------------------------------

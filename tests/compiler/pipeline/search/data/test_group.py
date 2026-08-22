@@ -1,4 +1,4 @@
-"""``Dataset.group_measured`` — benched node rows packed into comparison sets.
+"""``group_measured`` — benched node rows packed into comparison sets.
 
 A group here is the set of configs that genuinely competed: one op, one card, one nvcc regime. What makes
 that non-trivial is that three plausible spellings of "one op" are wrong, and two kinds of row carry a
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import LATENCY, PINNED, Group, group_measured
+from emmy.compiler.pipeline.search.data.group import LATENCY, VERIFIED, Group, group_measured
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS
 from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
 from tests.compiler.pipeline.search.helpers import node_row as _row
@@ -111,7 +111,7 @@ def test_the_kind_travels_with_the_group():
     pinned = Group.from_dicts("g/x", "x", "warp", "g", "x", 1, [{"D_a": float(i)} for i in range(3)])
 
     assert (measured.label_kind, measured.labels.tolist()) == (LATENCY, [200.0, 300.0, 400.0])
-    assert (pinned.label_kind, pinned.labels.tolist()) == (PINNED, [0.0, 1.0, 0.0])
+    assert (pinned.label_kind, pinned.labels.tolist()) == (VERIFIED, [0.0, 1.0, 0.0])
 
 
 def test_pins_go_in_as_row_indices_and_mark_those_rows():

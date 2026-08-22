@@ -26,7 +26,7 @@ import logging
 import subprocess
 import time
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -34,7 +34,7 @@ import numpy as np
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, PINNED, Group, feature_view, pack_features, pinned_labels
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, VERIFIED, Group, feature_view, pack_features, verified_labels
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
@@ -124,6 +124,22 @@ def _shape_group(g) -> str:
     ``kind`` and the extents stay: ``flash`` / ``softmax`` / ``rms_norm`` / ``fused`` are different kernels, not
     variants of one shape. The result is a string so it lands in the metrics file as-is."""
     return str(replace(g.shape_key, is_dyn=False, is_warp=False))
+
+
+@dataclass
+class _Pool:
+    """One packed candidate pool and every verified row found in it, before it becomes a :class:`Group`.
+
+    ``namer`` is the first golden the builder verified in this pool — it supplies the group's key, name,
+    card and fold group. Deliberately not "the first record considered": a record can be grouped onto this
+    pool and then fail to match a row in it, and naming a case after a golden the same run reports as
+    skipped would put a rank in ``metrics.json`` under a name nothing pinned."""
+
+    namer: object
+    tier: str
+    packed: tuple[tuple[str, ...], np.ndarray, bool]
+    total: int
+    verified: list[int]
 
 
 def _recorded_pool_key(g) -> tuple:
@@ -233,7 +249,7 @@ def build_golden_groups(
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
     matched = 0
-    pools: dict[tuple, tuple] = {}  # packed-pool identity -> the pool and every pin on it
+    pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every verified row on it
     # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
     # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
     # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
@@ -277,7 +293,7 @@ def build_golden_groups(
         # ``MOVE@element`` keys while the golden YAML records legacy GEMM-letter keys, so comparing
         # key-value tuples directly never matches. A member that misses is dropped on its own; the pool
         # still stands for the members that hit.
-        pins = []
+        verified, namer = [], None
         for m in members:
             want = features.tile_signature(m.knobs)
             gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
@@ -285,10 +301,11 @@ def build_golden_groups(
                 logger.info("  !! %s: golden not in %d candidates — skipping", m.name, len(rows))
                 skipped.append((m.gpu_name, m.name, f"golden not in {len(rows)} candidates"))
             else:
-                pins.append(gidx)
-        if not pins:
+                verified.append(gidx)
+                namer = namer or m  # the pool is named after a golden that is actually IN it
+        if not verified:
             continue
-        matched += len(pins)
+        matched += len(verified)
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
         # ``MMA_tier`` — see its rationale in ``search/data/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
@@ -299,20 +316,32 @@ def build_golden_groups(
         # Second stage: two enumerations can still land on one pool — the same program recorded in different
         # sessions keys apart above but packs identically here. Fold those together, so a pool is one case
         # however many times it was recorded.
-        pool = pools.get(identity := _pool_identity(g, tier, packed))
+        pool = pools.get(identity := _pool_identity(namer, tier, packed))
         if pool is None:
-            pools[identity] = (f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), packed, candidates.total, pins)
+            pools[identity] = _Pool(namer, tier, packed, candidates.total, verified)
         else:
-            pool[7].extend(pins)
+            pool.verified.extend(verified)
 
-    # Every pool now knows every golden that landed in it, so each becomes ONE group whose labels are final
-    # at construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train
-    # accumulator on it) and is spent per POOL in first-appearance order, so goldens that merged never
-    # claim one.
-    for key_str, name, tier, gpu, shape, packed, total, pins in pools.values():
+    # Every pool now knows every golden verified in it, so each becomes ONE group whose labels are final at
+    # construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator
+    # on it) and is spent per POOL in first-appearance order, so goldens that merged never claim one.
+    for pool in pools.values():
+        g = pool.namer
+        key_str = f"{g.gpu_name}/{g.name}"
         key_counts[key_str] = n = key_counts.get(key_str, 0) + 1
-        labels = pinned_labels(pins, len(packed[1]))
-        cases.append(Group.from_packed(key_str if n == 1 else f"{key_str}#{n}", name, tier, gpu, shape, packed, labels, PINNED, total))
+        cases.append(
+            Group.from_packed(
+                key_str if n == 1 else f"{key_str}#{n}",
+                g.name,
+                pool.tier,
+                g.gpu_name,
+                _shape_group(g),
+                pool.packed,
+                verified_labels(pool.verified, len(pool.packed[1])),
+                VERIFIED,
+                pool.total,
+            )
+        )
     logger.info(
         "  %d matched goldens over %d candidate pools (%d joined a pool an earlier golden opened)",
         matched,

@@ -14,7 +14,7 @@ Nothing here imports a model: a group carries the columns and the labels, and ea
 itself which columns it wants (see :meth:`Group.matrix`).
 
 Rows are ndarray-backed, not dict-backed: ``feats`` is one float64 matrix (rows × ``feat_names``), packed
-once by :meth:`Group.from_dicts` from the builder's transient per-row feature dicts. A per-row dict of ~63
+once by :func:`pack_features` from the builder's transient per-row feature dicts. A per-row dict of ~63
 floats costs ~4 KB; the full golden dataset is ~2.5 M rows, and the dict representation (~10 GB) OOM-killed whole
 fit runs — the matrix representation is ~20× smaller.
 
@@ -23,9 +23,9 @@ means by "absent": ``0.0`` for the linear model (reproducing ``feats.get(k, 0.0)
 for a tree, which can branch on not-decided as a state of its own. The dataset stores the more informative of
 the two so neither model constrains the other.
 
-``key`` is ``"<gpu>/<name>"`` of the FIRST golden that opened the pool, disambiguated by the builder when one
-name opens several distinct pools (``#2``, ``#3``, … in dataset order); goldens that join an already-open pool
-are further entries in its pin set rather than a group of their own — the builder resolves that before it
+``key`` is ``"<gpu>/<name>"`` of the first golden the builder VERIFIED in this pool, disambiguated when one
+name opens several distinct pools (``#2``, ``#3``, … in dataset order); the other goldens over that pool are
+further entries in its label set rather than groups of their own — the builder resolves that before it
 constructs anything, so a group is built once, already knowing every verified row it holds. ``tier`` is the
 fit's case tier (``thread`` / ``warp`` / ``dyn`` / ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it
 decides nothing.
@@ -48,7 +48,9 @@ from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_
 
 # What a group's ``labels`` array means. Fixed by the builder that made the group and never mixed: a pool is
 # either a golden's candidate set (which rows someone verified) or a measured set (what each row cost).
-PINNED = "pinned"
+# ``VERIFIED`` rather than "pinned": a PIN is a tuning choice forced by hand (``GLOSSARY.md``), which these
+# rows are not — they are the configs a golden run confirmed.
+VERIFIED = "verified"
 LATENCY = "latency"
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
@@ -119,8 +121,8 @@ def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.nd
     return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
 
 
-def pinned_labels(rows: Sequence[int], n: int) -> np.ndarray:
-    """The :data:`PINNED` label array: ``1.0`` on every verified row of an ``n``-row pool. The one place
+def verified_labels(rows: Sequence[int], n: int) -> np.ndarray:
+    """The :data:`VERIFIED` label array: ``1.0`` on every verified row of an ``n``-row pool. The one place
     that encoding is written, so no caller has to know that a pin is a ``1.0``."""
     labels = np.zeros(n, dtype=float)
     labels[list({int(i) for i in rows})] = 1.0
@@ -183,7 +185,7 @@ class Group:
     # or a measured set, where every row carries its own latency — so this is one array rather than two
     # optional ones, and the kind is fixed by whichever builder made the group.
     #
-    # :data:`PINNED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere — so ``np.flatnonzero(labels)``
+    # :data:`VERIFIED`: ``1.0`` on every verified-optimum row, ``0.0`` elsewhere — so ``np.flatnonzero(labels)``
     # is the row set and ``labels.sum()`` the count. Several goldens can land on one pool (the same shape
     # recorded twice, or under two names), so this is a SET. Deploy ships one config, so any of them ranked
     # first is a win — which is why the fit's per-group term is the best rank over the set, and the reported
@@ -235,20 +237,9 @@ class Group:
         every column is what keeps one model class from deciding for the other. Reading row 0 is exact: the
         stamp comes from the shape, which every candidate in a pool shares.
 
-        The stamp must agree with ``tier``, and disagreeing is a hard error. The two reach here by
-        different routes — the stamp through the featurizer, the tier from the source record's own
-        flag — and they are the same fact, so a mismatch means one of them is wrong and this pool
-        would otherwise train and be scored under the wrong weight set with nothing reporting it.
-        This is what keeps ``tier``, a label that decides nothing, honest."""
-        names, matrix, dynamic = pack_features(feats)
-        if dynamic != (tier == "dyn"):
-            raise ValueError(
-                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
-                f"the source record's flag and its featurized rows disagree about the weight set"
-            )
+        ``tier`` is cross-checked against the routing stamp by :meth:`from_packed`."""
         rows = (pinned,) if isinstance(pinned, int) else pinned
-        packed = (names, matrix, dynamic)
-        return cls.from_packed(key, name, tier, gpu, shape, packed, pinned_labels(rows, len(feats)), PINNED, total)
+        return cls.from_packed(key, name, tier, gpu, shape, pack_features(feats), verified_labels(rows, len(feats)), VERIFIED, total)
 
     @classmethod
     def from_measured(cls, key: str, gpu: str, op_sig: str, latency_us: Sequence[float], feats: list[dict[str, float]]) -> Group:
@@ -258,9 +249,8 @@ class Group:
         identities exist. ``op_sig`` serves as both ``name`` and ``shape`` — a measured pool IS one op, so
         there is no second identity to spell — and ``tier`` is empty, because the golden tiers are a closed
         report vocabulary about how a CASE was built and a sixth value would mean nothing to the two places
-        that read it. For the same reason there is no tier cross-check here: :meth:`from_dicts` can catch a
-        routing disagreement because a golden record carries that fact twice, and a measured row carries it
-        once.
+        that read it. For the same reason :meth:`from_packed` runs its tier cross-check only on the verified kind: a
+        golden record carries that fact twice and a measured row carries it once.
 
         No ``total`` either: a measured pool is not a sample of a larger enumeration, it is exactly the
         configs someone ran, and a rank against anything else would be against candidates never measured."""
@@ -282,8 +272,20 @@ class Group:
         """A group from an already-packed pool (:func:`pack_features`) and its finished labels — the entry
         point for a builder that had to pack before it could know the labels, which is every builder that
         deduplicates pools. The two named constructors above are this one with the label array spelled the
-        way that kind of label is naturally spelled."""
+        way that kind of label is naturally spelled.
+
+        A :data:`VERIFIED` group's ``tier`` must agree with the routing stamp its rows carry, and
+        disagreeing is a hard error. The two reach here by different routes — the stamp through the
+        featurizer, the tier from the source record's own flag — and they are the same fact, so a mismatch
+        means one of them is wrong and this pool would otherwise train and be scored under the wrong weight
+        set with nothing reporting it. That is what keeps ``tier``, a label that decides nothing, honest.
+        A measured group has no second route to check against, and no tier to check."""
         names, matrix, dynamic = packed
+        if label_kind == VERIFIED and dynamic != (tier == "dyn"):
+            raise ValueError(
+                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
+                f"the source record's flag and its featurized rows disagree about the weight set"
+            )
         return cls(key, name, tier, gpu, shape, dynamic, labels, label_kind, names, matrix, len(matrix) if total is None else total)
 
     def matrix(self, names: list[str], *, fill: float = 0.0) -> np.ndarray:

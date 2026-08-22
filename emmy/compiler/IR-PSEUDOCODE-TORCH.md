@@ -1,10 +1,24 @@
 # Reading a graph dump
 
-`emmy compile <model> --ir torch` and `--ir tensor` print the graph as Rust-shaped pseudocode. Nothing parses it
+`emmy compile <model> --ir torch` and `--ir tensor` print the graph as pseudocode with Rust-like syntax. Nothing parses it
 back; it exists so a reader can follow what the compiler holds at that point. The renderer is
 `emmy/compiler/pretty.py`, and `EMMY_DUMP_DIR` writes every stage's graph through the same code.
 
-## The program
+Torch and Tensor IR represent a very special kind of programs that work in a restricted model.
+There is no branching, loops or any other control flow.
+The whole program is a static (not changing at execution time dynamically) sequence of applying operations to values,
+  starting from input values, and finally arriving at the output values.
+Each such operation can be expressed as an assignment of an operation result to a name: `<result_name> = <operation>(<arg1>, ... <argn>)`,
+  where args are names of either program inputs or previous operation results.
+Once a name `<result_name>` is assigned like that, its value cannot be changed.
+Some names are marked as outputs.
+Their values at the end of program execution define the program's result.
+
+The pseudocode, in which emmy dumps torch and tensor IRs, looks like a subset of Rust with extra types and primitives for working with tensors.
+It aims to concisely express the IR code, while also making it easy to read intuitively for someone who is familiar with Rust.
+The following sections introduce by example.
+
+## IR Dump Examples
 
 Three small ones first. A whole-tensor operation, with its own fields after the operands:
 
@@ -24,6 +38,8 @@ pub fn main(
     linear
 }
 ```
+
+
 
 A scalar added to a tensor. The scalar becomes a constant, and reaching the tensor's shape takes an explicit
 node — the closure ignores both indices, which is what a broadcast looks like:

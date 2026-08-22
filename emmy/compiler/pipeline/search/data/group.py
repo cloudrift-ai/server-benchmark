@@ -343,9 +343,18 @@ class GoldenGroup(Group):
         return cls(key, name, tier, gpu, shape, dynamic, packed[0], matrix, len(matrix) if total is None else total, golden_ids=ids)
 
 
+def _extent_key(feats: dict) -> tuple:
+    """The loop extents a row's kernel actually ran over — the ``S_ext_*`` stamps, sorted.
+
+    What makes two measured latencies comparable at all. Every stamped row carries the whole set (the
+    stamp pass emits them unconditionally), so a missing one would be a row from a vocabulary this
+    featurizer version cannot read, which the admission filter has already rejected."""
+    return tuple(sorted((k, v) for k, v in feats.items() if k.startswith("S_ext_")))
+
+
 def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     """Benched :class:`~..db.NodeRow`s as groups labelled with measured µs, keyed
-    ``(gpu, op_sig, H_opt)`` — one group per set of configs that genuinely competed, plus a count of
+    ``(gpu, op_sig, H_opt, extents)`` — one group per set of configs that genuinely competed, plus a count of
     what was dropped and why.
 
     Takes ``NodeRow``s rather than :class:`Sample`s because three of the four decisions below read
@@ -354,11 +363,20 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
-    - **``op_sig``, not the ``S_*`` signature.** Descent stamps its own deltas into the ``S_*``
-      features, so keying on them would split alternative schedules for ONE op into separate groups
-      and destroy the comparison the metric is asking for. ``op_sig`` is the DB's own op identity and
-      survives the freeze round-trip verbatim. It is also the axis ``fold_node_rows(by="op")`` splits
-      on, so grouping and folding coincide by construction rather than by coincidence.
+    - **``op_sig``, not the full ``S_*`` signature.** Descent stamps its own deltas into the ``S_*``
+      features, so keying on the whole signature would split alternative schedules for ONE op apart and
+      destroy the comparison the metric is asking for. Measured over the RTX 5090 freeze it also MERGES
+      what ``op_sig`` rightly keeps apart, collapsing 410 pools to 336. ``op_sig`` is a digest over the
+      **pre-descent offer op's** stamps and survives the freeze round-trip verbatim.
+    - **The EXTENTS, beside ``op_sig``, because the offer site is not the work.** ``op_sig`` names where
+      a decision was offered; one site can be realized as kernels that compute different amounts. Nine
+      pools of that freeze mixed two workloads a median 8192x apart — a 5.9 µs row and a 131 ms row filed
+      as competitors, both honest measurements of different kernels at ~35 TFLOP/s. Latency is only
+      comparable between rows that did the same work, so every ``S_ext_*`` stamp joins the key. It costs
+      almost nothing: it splits 9 pools of 401 and leaves 339 with the two rows regret needs (was 344),
+      after which NO ``S_*`` stamp varies within any pool at all. ``(S_ext_free_prod,
+      S_ext_reduce_prod)`` alone gives the identical partition; the full tuple is spelled because "the
+      extents" is the thing being said, not two fields that happened to suffice.
     - **``H_opt`` from the features, never ``context_key``.** (Present and numeric by then: the
       admission filter has already rejected a row missing its ``H_*`` stamps.) A live DB spells the regime as
       ``digest(Context, cap, flags)`` and a freeze spells the same one ``capX.Y-OZ``, so grouping on
@@ -366,6 +384,12 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
       came from. It looks like the first-class column; that is the trap. The regimes must not pool
       either way — ``-O1`` and ``-O3`` invert often enough that a merged group measures neither.
     - **``gpu``.** Cards never pool.
+
+    This key is a REFINEMENT of ``fold_node_rows(by="op")``'s, which splits on ``op_sig`` alone. The two
+    answer different questions and should not be made to agree: a fold must keep a whole op's tree on one
+    side or the value-correlated parent/child chains leak across the split, while a comparison must not
+    merge rows that computed different things. Refinement is what makes both safe at once — a group never
+    straddles two folds.
 
     Admission is :func:`freeze_reason`, the sanity filter the freeze writer already applies — not a
     second list of rules. It rejects a non-leaf (whose ``value_us`` is a min over its explored subtree,
@@ -396,10 +420,14 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
         elif not r.op_sig or not r.gpu:
             dropped["unkeyed"] += 1
         else:
-            buckets[(r.gpu, r.op_sig, r.features["H_opt"])].append(r)
+            buckets[(r.gpu, r.op_sig, r.features["H_opt"], _extent_key(r.features))].append(r)
 
     groups = []
-    for (gpu, op_sig, h_opt), grp in sorted(buckets.items()):
+    for (gpu, op_sig, h_opt, extents), grp in sorted(buckets.items()):
         feats = [knob_features(r.features) for r in grp]
-        groups.append(MeasuredGroup.from_measured(f"{gpu}/{op_sig}@O{h_opt:g}", gpu, op_sig, h_opt, [r.value_us for r in grp], feats))
+        # The extents ride in the key string too: two realizations of one offer site over different work are
+        # now two groups, and a report keys its per-pool rows on this.
+        free, reduce = dict(extents).get("S_ext_free_prod", 0.0), dict(extents).get("S_ext_reduce_prod", 0.0)
+        key = f"{gpu}/{op_sig}@O{h_opt:g}/{free:g}x{reduce:g}"
+        groups.append(MeasuredGroup.from_measured(key, gpu, op_sig, h_opt, [r.value_us for r in grp], feats))
     return groups, dict(dropped)

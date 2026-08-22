@@ -1379,9 +1379,18 @@ where a score comes from.
 
 **Every cell publishes what it covered.** Cells carry the axes they were keyed on as a dict — measured: `gpu` ×
 `H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
-many the model could not score at all, and a per-metric group count. The metrics have different minimums (regret
-needs two rows, Spearman five, regret@10 eleven), so on the v3 freeze's 401 pools those counts are 344, 211 and 81.
-An aggregate that averaged the excluded pools in would be reporting mostly arithmetic.
+many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
+cell holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
+so on the v3 freeze's 410 pools those counts are 339, 211 and 81. An aggregate that averaged the excluded pools in
+would be reporting mostly arithmetic.
+
+**The extents are part of the measured key, beside `op_sig`.** `op_sig` digests the **pre-descent offer op's**
+stamps — it names where a decision was offered, not what got computed — so one site can be realized as kernels
+doing wildly different amounts of work (a fused op against one kernel of a split pair). Nine pools of the RTX 5090
+freeze mixed two workloads a median 8192x apart, filing a 5.9 µs row and a 131 ms row as competitors when both ran
+at about 35 TFLOP/s. Every `S_ext_*` stamp therefore joins the key. That makes the grouping key a REFINEMENT of
+`fold_node_rows(by="op")`'s, which splits on `op_sig` alone — deliberately, since a fold must keep a whole op's
+tree on one side while a comparison must not merge rows that computed different things.
 
 **`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
 pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it

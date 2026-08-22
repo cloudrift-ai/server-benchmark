@@ -45,10 +45,30 @@ def test_the_key_separates_cards_ops_and_nvcc_regimes():
     assert len(groups) == 4 and all(len(g.feats) == 1 for g in groups)
 
 
+def test_one_offer_site_over_different_work_is_not_one_group():
+    """``op_sig`` names where a decision was OFFERED, not what got computed: it digests the pre-descent offer
+    op's stamps, and one site can be realized as kernels doing wildly different amounts of work — a fused op
+    against one kernel of a split pair. Both rows are honest measurements; comparing their latencies is not.
+
+    Left merged this cost a real number: nine pools of the RTX 5090 freeze mixed two workloads a median 8192x
+    apart, and the report priced a 5.9 µs row against a 131 ms one as a 22 221x miss when both ran at about
+    35 TFLOP/s."""
+    small = _feats(S_ext_free_prod=30720.0, S_ext_reduce_prod=3840.0, REDUCE="coop")
+    large = _feats(S_ext_free_prod=69632.0, S_ext_reduce_prod=14745600.0, REDUCE="coop")
+    # Both latencies are plausible for their OWN extents — the point is the grouping, so neither row may be
+    # one the plausibility gate would have dropped anyway.
+    rows = [_row("small", value_us=2000.0, features=small), _row("large", value_us=131496.0, features=large)]
+
+    groups, dropped = group_measured(rows)
+    assert not dropped
+    assert [g.latency_us.tolist() for g in groups] == [[2000.0], [131496.0]]
+
+
 def test_one_op_scheduled_two_ways_stays_one_group():
-    """The reason the key is ``op_sig`` and not the structural signature: these two rows are alternative
-    SCHEDULES for one op, and a key that split them would leave two groups of one row each — nothing to
-    rank, and the comparison the metric exists for silently gone."""
+    """The other side of the same line: the key is ``op_sig`` plus the EXTENTS, not the whole structural
+    signature. These two rows are alternative SCHEDULES for one op over identical extents — descent moved an
+    ``S_*`` stamp that is not one — and a key that split them would leave two groups of one row each,
+    nothing to rank, and the comparison the metric exists for silently gone."""
     rows = [
         _row("a", value_us=200.0, features=_feats(TILE="f2x2", S_loop_depth=3.0)),
         _row("b", value_us=400.0, features=_feats(TILE="f8x8", S_loop_depth=2.0)),  # descent moved an S_* stamp

@@ -42,16 +42,10 @@ def _nests_reduce(loop_op: LoopOp) -> bool:
     """Whether the body carries a reduce ``Loop`` (transitively) inside another reduce ``Loop``.
 
     The refusal's criterion is REVERSIBILITY, not readability alone: a merge evidence cannot price
-    the split back out of is one the compiler can never undo. Attention is the case that makes the
-    distinction sharp. Its ``Q·Kᵀ`` producer has TWO consumers in the merged cell (the streaming
-    softmax statistic and the weight cone), so splicing it duplicates the producer at each demand
-    site — and no ``PLACE`` cut puts that back: a cut fragment serves ONE consumer (an operand edge
-    is inline, and there is no let table), so cutting both seams mints two score kernels, never the
-    one shared producer the unmerged graph had. The merged cell is READABLE downstream — recognition
-    lifts each spliced producer to an operand edge of the step's fold
-    (``lowering/tile/_fromloop``), it binds as a computed-A cone over a computed score and it runs —
-    but until that fused form is realized at the tensor-core tier it is far slower than the
-    two-kernel graph this refusal preserves, and evidence has no way back."""
+    the split back out of is one the compiler can never undo. Recognition may discharge the
+    refusal when placement proves an exact grouped inverse: two alpha-equivalent computed edges
+    reconstruct one workspace producer and remain beside the fused form as a priced sibling.
+    Every other nested reduce keeps this fail-closed refusal."""
     reduce_names = loop_op.reduce_axis_names
 
     def walk(stmts: Body, inside: bool) -> bool:
@@ -123,6 +117,18 @@ def _total_work(loop_op: LoopOp) -> int:
     return sum(cost for stmt, cost in _walk_leaf_costs(loop_op) if isinstance(stmt, (Assign, Accum))) or 1
 
 
+def _recognized_reuse_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
+    """The exact grouped placement inverse when recognition can prove one.
+
+    The dependency is lazy because fusion stays a Loop-IR pass; it asks the existing tile
+    recognizer only for a boundedness witness, never for a performance decision. The returned
+    child and parent are the same structural split option placement will expose later.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces  # noqa: PLC0415
+
+    return reusable_cut_pieces(loop_op)
+
+
 def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     """Splice an owned one- or multi-consumer region, capped only by compute growth.
 
@@ -135,9 +141,14 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     merged = _build_merged_region(graph, region, sink)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
-    if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region):
+    reuse_pieces = _recognized_reuse_pieces(merged)
+    if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region) and reuse_pieces is None:
         raise RuleSkipped("merge nests a reduce loop inside a reduce loop — an unreadable seam (raw-loop escape only)")
-    if _entangled_multi_stat(merged) and not any(_entangled_multi_stat(graph.nodes[node_id].op) for node_id in region):
+    if (
+        _entangled_multi_stat(merged)
+        and not any(_entangled_multi_stat(graph.nodes[node_id].op) for node_id in region)
+        and reuse_pieces is None
+    ):
         # The single-statistic computed-A shape is readable (the fused norm→linear kind); a
         # multi-statistic compound (the online-softmax pair) stays readable only with its flat
         # same-extent normalize tail or a free sweep of same-extent additive folds (the
@@ -146,6 +157,12 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
         raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
     pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
+    if reuse_pieces is not None:
+        # Raw Loop IR spells the equal producer once at each demand site and may nest one copy
+        # below an output sweep. Recognition proves that the tile form reuses the producer, and
+        # placement supplies the priced materialized sibling. Bound that recognized work, not the
+        # duplicated spelling; unrelated merges keep the ordinary raw-loop count.
+        post_work = min(post_work, sum(_total_work(piece) for piece in reuse_pieces))
     if post_work > _BLOWUP_FACTOR * pre_work:
         raise RuleSkipped(f"work blowup: post={post_work} > {_BLOWUP_FACTOR}× pre={pre_work}")
 

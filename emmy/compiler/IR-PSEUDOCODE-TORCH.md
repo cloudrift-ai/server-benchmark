@@ -17,7 +17,7 @@ possible in Rust:
 
 - No mutation: no `mut` keyword, once a name is bound with `let`, it can't be rebound.
 - No I/O, no side effects. Whole program is `main` function that deterministically maps its arguments to its return value.
-- No control flow, no pattern matchign: `if`, `for`, `while`, `match`.
+- No control flow and no pattern matching: `if`, `for`, `while`, `match`.
 - No traits.
 - First-class typed tensors support. Example: `let x : f32[16,8,64] = ...` is a three-dimensional tensor.
 - Tensor's shape is given by its type. You may not omit the dimensions that go in `[]` of `f32[16,8,64]`.
@@ -31,6 +31,36 @@ programmer's knowledge of Rust, and enable them to intuitively read 90% of the c
 following sections introduce the pseudocode by example.
 
 ## Examples
+
+High-level structure of the IR dump is demonstrated below.
+
+```rust
+struct Dynamic {
+  // dynamic arguments
+}
+
+struct Inputs<dynamic: Dynamic> {
+  // input tensor shapes, may depend on `dynamic`
+}
+
+struct Outputs<dynamic: Dynamic> {
+  // output tensor shapes, may depend on `dynamic`
+}
+
+// the actual computations of tensor IR program
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  // constants list
+  let constant1 : Type = ...;
+  ...
+
+  // assignments defining nodes, each with a tensor operation
+  let result1 : Type = operation(arg1, arg2);
+  ...
+
+  // final collection of the IR program's outputs, each comes from one of the assignment above
+  Outputs { output1, output2, ... }
+}
+```
 
 ### Main function
 
@@ -64,6 +94,9 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
 This is a program with two inputs that applies `F.linear` to them.
 It does not use any dynamic parameters, so the `Dynamic` and `dynamic` can be disregarded here, they're just noise.
 The program's main meaning is in `main`: it maps its `inputs.x0` and `inputs.x1` to `linear` output.
+
+Note that `linear` also takes a named argument `has_bias=False`.
+The `False` value does not come from a previous assignment, declared constant or input, this value is inlined in the `linear` call.
 
 ### Scalars and constants
 
@@ -211,19 +244,12 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
 travels under the node id, the rest under their own buffer names, so every name a later line can refer to is
 bound. Only the later dialects build such nodes; a torch or tensor dump has none.
 
-## Discussion
+## Constants
 
-Then `main`. Its body opens with the graph's constants, in their own block under a comment; each compute node
-becomes one more `let`; and the tail expression builds `Outputs`. An input is reached through its struct,
-`inputs.hidden_states`, while a constant or an earlier result is a plain name.
-
-**Order** is a dependency order, not an execution schedule.
-
-**Trailing `key=value` arguments** are the operation's own fields, not tensor operands:
-`linear(mul_1, p_attn_q_proj_weight, has_bias=False)`, `reshape(x, shape=(1, 512, -1))`. A `-1` inside `shape=`
-is the request the trace captured; the declared type on the left shows the extent it resolved to.
-
-## Where a constant's value comes from
+In the simplest case, a constant's value is given by a literal, e.g. `let add_c1: f32[1] = 1.0;`.  But in some cases
+they may be loaded from disk (like model weights) or be declared externally in some other way; the key is that all these
+values are known before the values of `inputs` tensors are chosen, and such constants don't depend on inputs.  This
+section summarizes a few examples of syntax our pseudocode uses for that.
 
 | Right-hand side | Meaning |
 | --- | --- |
@@ -231,40 +257,25 @@ is the request the trace captured; the declared type on the left shows the exten
 | `load("self_attn.q_proj.weight")` | a tensor read by path, from the checkpoint or from the traced wrapper |
 | `load("a.weight", "b.weight")` | several tensors read and concatenated along axis 0 |
 | `load("x.weight_scale_2").reshape(shape=(1, 1))` | layout operations the loader applies after reading |
-| `emmy::const_eval()` | a tensor the loader computes by evaluating a small graph, rather than reading one |
 | `context(num_tokens)` | a scalar bound at launch from the symbolic-dimension environment |
+| `emmy::const_eval()` | a tensor the loader computes by evaluating a small graph, rather than reading one |
 | `emmy::input_data()` | a tensor the caller supplies at run time |
 
-A path is relative to whatever wrapper the trace ran over. A single layer gives short names
-(`self_attn.q_proj.weight`); a whole model gives long ones (`model.model.layers.0.input_layernorm.weight`), and
-buffers keep their own registered names (`causal_mask`) beside them. So one dump can carry both shapes.
+The last two are the less common ones; feel free to skip them if they don't make sense at first.
 
-The multi-path form appears once passes have run: `035_merge_sibling_linears` fuses the sibling projections, so
-a tensor dump reads `load("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight")`.
-`emmy::const_eval()` needs a constant the loader computes rather than reads — constant folding collapsing a
-chain, or a quantized checkpoint's decode table. `context(...)` needs a decomposition pass and a symbolic
-dimension, so it cannot appear at `--ir torch` or in a static-shape dump. `emmy::input_data()` is the fallback
-when a constant has no value and no address of any kind, which also covers constants a pass synthesized and
-the loader never sees.
+## Operations: PyTorch/NumPy and Emmy
 
-## Operations
+We've seen a few examples of applying operations to tensors inside `main`, like
 
-A bare name means what torch or numpy already means by it. The model-level ones appear only in a torch dump —
-`linear`, `mean`, `softmax`, `reshape`, `slice`, `cat`, `transpose`, `sdpa`, `silu` — while `multiply`, `add`,
-`pow`, `sum`, `divide`, `exp` and the rest of the scalar and reduction names appear at both stages. Five names
-need care.
+```rust
+let linear: f32[4,16] = linear(inputs.x0, inputs.x1, has_bias=False);
+```
 
-A **reduction** prints as its combine's name with an `axis=` argument — `sum(pow_1, axis=-1)`,
-`maximum(x, axis=-1)`. That is the same spelling as the elementwise operation of the same name, so the `axis=`
-argument is the only mark; the reduced axis stays in the result at size 1. A running reduction prints
-`scan_sum(x, axis=-1)`, a name neither library has — nothing in the repo builds one today.
-
-**`transpose`** carries an `axes` field, and its length tells you which reading applies: two entries are the
-pair torch's `transpose` swaps, more are a full permutation, as numpy's reads.
-
-**`slice`** takes three captured scalars as operands. Two duplicate its `dim` and `start` fields; the third is
-the end, which the declared result shape already carries. **`cat`** ends in a captured scalar too, and that one
-is not a duplicate: `CatOp` has no fields, so the constant is the only record of the concatenation axis.
+At this point, you may be wondering where do operation names like `linear` come from, and whether there's an exhaustive
+list of operation names one might see in tensor IR. They come from PyTorch/NumPy operations that are valid in PyTorch
+graph, as well as a few of Emmy's own operations. We mark Emmy's own operations with `emmy::` namespace. Operations that
+don't have a namespace like `linear`, `add` or `mul` are from either PyTorch or NumPy. We can't tell exactly which of the
+two is meant in each case, because the tracing code does not thoroughly record the source.
 
 **`rms_norm`** and **`layer_norm`** are respellings: the class names behind them would otherwise lowercase to
 `rmsnorm` and `layernorm`. Every other operation without an `emmy::` prefix prints under its own name, `sdpa`

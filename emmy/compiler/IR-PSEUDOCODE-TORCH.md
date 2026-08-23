@@ -4,21 +4,35 @@
 back; it exists so a reader can follow what the compiler holds at that point. The renderer is
 `emmy/compiler/pretty.py`, and `EMMY_DUMP_DIR` writes every stage's graph through the same code.
 
-Torch and Tensor IR represent a very special kind of programs that work in a restricted model.
-There is no branching, loops or any other control flow.
-The whole program is a static (not changing at execution time dynamically) sequence of applying operations to values,
-  starting from input values, and finally arriving at the output values.
-Each such operation can be expressed as an assignment of an operation result to a name: `<result_name> = <operation>(<arg1>, ... <argn>)`,
-  where args are names of either program inputs or previous operation results.
-Once a name `<result_name>` is assigned like that, its value cannot be changed.
-Some names are marked as outputs.
-Their values at the end of program execution define the program's result.
+Torch and Tensor IR represent a very special kind of programs that work in a restricted model.  There is no branching,
+loops or any other control flow.  The whole program is a static (not changing at execution time dynamically) sequence of
+applying pre-defined operations to values.  Values in this model are typically tensors, and the operations are common
+pytorch/numpy primitives, plus a few ones Emmy adds for convenience.
 
-The pseudocode, in which emmy dumps torch and tensor IRs, looks like a subset of Rust with extra types and primitives for working with tensors.
-It aims to concisely express the IR code, while also making it easy to read intuitively for someone who is familiar with Rust.
-The following sections introduce by example.
+## Overview
 
-## IR Dump Examples
+The pseudocode in which emmy dumps torch and tensor IRs is a *dependently-typed*, *purely functional*, *array*
+programming language.  Despite using Rust syntax, it removes some of the things Rust can do and adds a few things not
+possible in Rust:
+
+- No mutation: no `mut` keyword, once a name is bound with `let`, it can't be rebound.
+- No I/O, no side effects. Whole program is `main` function that deterministically maps its arguments to its return value.
+- No control flow, no pattern matchign: `if`, `for`, `while`, `match`.
+- No traits.
+- First-class typed tensors support. Example: `let x : f32[16,8,64] = ...` is a three-dimensional tensor.
+- Tensor's shape is given by its type. You may not omit the dimensions that go in `[]` of `f32[16,8,64]`.
+- Types (of a struct or a function) can be polymorphic over values. This is particularly useful to support `--dynamic`
+  parameters. Example: if some *value* `dyn_len: usize` is in scope, you can declare a tensor whose *type-level* shape
+  depends on that value `let x : [16,dyn_len,64]`.
+
+These features are hand-picked from existing functional programming languages (Agda, Idris, Futhark) to concisely
+and unambiguously express programs in tensor IR's programming model.  Using Rust syntax allows us to piggyback on a
+programmer's knowledge of Rust, and enable them to intuitively read 90% of the code and ease the learning curve.  The
+following sections introduce the pseudocode by example.
+
+## Examples
+
+### Main function
 
 Three small ones first. A whole-tensor operation, with its own fields after the operands:
 
@@ -47,7 +61,11 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
 }
 ```
 
+This is a program with two inputs that applies `F.linear` to them.
+It does not use any dynamic parameters, so the `Dynamic` and `dynamic` can be disregarded here, they're just noise.
+The program's main meaning is in `main`: it maps its `inputs.x0` and `inputs.x1` to `linear` output.
 
+### Scalars and constants
 
 A scalar added to a tensor. The scalar becomes a constant, and reaching the tensor's shape takes an explicit
 node — the closure ignores both indices, which is what a broadcast looks like:
@@ -80,85 +98,56 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
 }
 ```
 
-Two operations, and three constants that nothing refers to. Resolving a traced call's inputs materializes every
-scalar argument as a constant, and a handler that folds the scalar into a field instead — `transpose`'s `axes`,
-`softmax`'s `axis` — never wires the constant up. They are real nodes, so they print; the count in the header
-includes them:
+The `add_c1` in this example is a constant, it does not depend on `inputs`, but some later operations use it as an
+argument.  The torch tracing logic has decided that `torch.randn(4,8)` is an input called `inputs.x`, while the plain
+literal `1` is a constant `add_c1`.  This example also features the `emmy::tensor_from_fn` primitive, it is used to fill
+up an array by given a function of its indices.  Let's look at its application more closely.
 
 ```
-emmy compile -c 'F.softmax(torch.randn(2,4,8).transpose(1,2), dim=-1)' --ir torch
+  let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(|_i, _j| add_c1[0]);
+  //                 ^ emmy::tensor_from_fn infers the result size from here, it's not unambiguous,
+  //                 so it knows it has to iterate _i over 0..=3 and _j over 0..=7
+```
+
+This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::tensor_from_fn`
+primitive is polymorphic over the shape of the tensor it produces, so its type signature is something like `fn
+emmy::tensor_from_fn<T, n: usize, m:usize>(...) -> T[n, m]` so it may be called by the same name `emmy::tensor_from_fn`
+to produce tensors of different shapes and dimensions. Since the result's type is always annotated, the shape is never
+unambiguous.
+
+In practice, tensor IR can't express `emmy::tensor_from_fn` calls with arbitrary lambdas, only some specific restricted
+forms.  But it's not a problem for you, since you only read these lambdas and never write them.  For the precise
+definition of what lambdas can occur in `emmy::tensor_from_fn` calls, check the tensor IR definition and the code that
+generates it.
+
+### Dynamic parameters
+
+```
+emmy compile -c 'torch.nn.RMSNorm(4)(torch.randn(2,8,4))' --dynamic 'seq_len@x:1' --ir torch
 ```
 
 ```rust
-// 6 nodes, 1 inputs, 1 outputs
+// 3 nodes, 1 inputs, 1 outputs
 
-struct Dynamic {}
+struct Dynamic {
+    seq_len: usize,
+}
 
 struct Inputs<dynamic: Dynamic> {
-    x: f32[2,4,8],
+    x: f32[2,dynamic.seq_len,4],
 }
 
 struct Outputs<dynamic: Dynamic> {
-    softmax: f32[2,8,4],
+    rms_norm: f32[2,dynamic.seq_len,4],
 }
 
 fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
   // constants: checkpoint tensors, and the literals the trace captured
-  let transpose_c1: f32[1] = 1.0;
-  let transpose_c2: f32[1] = 2.0;
-  let softmax_c1: f32[1] = -1.0;
+  let p_weight: f32[4] = load("weight");
 
-  let transpose: f32[2,8,4] = transpose(inputs.x, axes=(1, 2));
-  let softmax: f32[2,8,4] = softmax(transpose, axis=-1);
+  let rms_norm: f32[2,dynamic.seq_len,4] = rms_norm(inputs.x, p_weight, eps=1e-06);
 
-  Outputs { softmax }
-}
-```
-
-Those leftovers do not survive the pipeline. One Qwen3-0.6B layer carries 33 such constants at `--ir torch`
-and 4 at `--ir tensor`, and the four that remain are the norm epsilons, which really are operands. A `slice`
-keeps its captured scalars as operands too, redundantly with its own fields.
-
-A model layer has the same shape, with more of it. Below is one layer of a Llama-architecture model, cut down
-to its landmarks:
-
-```
-emmy compile TinyLlama/TinyLlama-1.1B-Chat-v1.0 --layer 0 --ir torch
-```
-
-```rust
-
-// 106 nodes, 4 inputs, 1 outputs
-
-struct Dynamic {}
-
-struct Inputs<dynamic: Dynamic> {
-    hidden_states: f16[1,512,2048],
-    position_embeddings_0: f16[1,512,64],
-    position_embeddings_1: f16[1,512,64],
-    attention_mask: f32,
-}
-
-struct Outputs<dynamic: Dynamic> {
-    add_5: f16[1,512,2048],
-}
-
-fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
-  // constants: checkpoint tensors, and the literals the trace captured
-  let p_attn_q_proj_weight: f16[2048,2048] = load("self_attn.q_proj.weight");
-  // … 38 constants in all
-
-  let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
-  let to: f32[1,512,2048] = emmy::cast(inputs.hidden_states);
-  // … the norm, then the q / k / v projections
-  let scaled_dot_product_attention: f16[1,32,512,64]
-      = sdpa(add_1, add_2, transpose_2, is_causal=True, sliding_window=None, scale=0.125);
-  let linear_3: f16[1,512,2048] = linear(reshape, p_attn_o_proj_weight, has_bias=False);
-  let add_3: f16[1,512,2048] = add(inputs.hidden_states, linear_3);
-  // … the post-attention norm and the feed-forward block
-  let add_5: f16[1,512,2048] = add(add_3, linear_6);
-
-  Outputs { add_5 }
+  Outputs { rms_norm }
 }
 ```
 
@@ -167,13 +156,66 @@ Three types come first. `Dynamic` carries the symbolic extents a `--dynamic` tra
 `x: f32[2,dynamic.seq_len,4]` — and that parameter is what binds the name an extent refers to. Every dump
 prints all three, empty ones included, so one shape fits every graph.
 
-Then `main`. Its body opens with the graph's constants, in their own block under a comment; each compute node
-becomes one more `let`; and the tail expression builds `Outputs`. An input is reached through its struct,
-`inputs.hidden_states`, while a constant or an earlier result is a plain name.
-
 **Types** carry the shape: `f16[1,512,4096]`. A rank-0 tensor is just its dtype (`f32`). Dtype names are the
 repo's own, including the narrow float formats (`f8e4m3`). Under `--dynamic` an extent can be a name or an
 expression rather than a number — `f32[2,seq_len,4]`, `f32[1,(2 * seq_len),4]`.
+
+### Detructuring
+
+No traced model produces a node with several outputs — `aten.chunk` becomes one `slice` per piece, and
+`aten.split` and `aten.max.dim` are refused. So this listing starts from a graph written straight to an IR
+file, which `emmy compile` takes as readily as a model id:
+
+```
+python - > /tmp/split.json <<'PY'
+import json, sys
+from emmy.compiler.graph import Graph
+from emmy.compiler.tensor import Tensor
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+g = Graph()
+g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 8), "f32"), node_id="x")
+g.inputs = ["x"]
+g.add_node(op=ElementwiseOp(op="negative"), inputs=["x"], node_id="split",
+           outputs=[Tensor("lo", (4, 8), "f32"), Tensor("hi", (4, 8), "f32")])
+g.outputs = ["split", "hi"]
+json.dump(g.to_dict(), sys.stdout)
+PY
+
+emmy compile /tmp/split.json --ir torch
+```
+
+```rust
+// 2 nodes, 1 inputs, 2 outputs
+
+struct Dynamic {}
+
+struct Inputs<dynamic: Dynamic> {
+    x: f32[4,8],
+}
+
+struct Outputs<dynamic: Dynamic> {
+    split: f32[4,8],
+    hi: f32[4,8],
+}
+
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  let (split, hi): (f32[4,8], f32[4,8]) = negative(inputs.x);
+
+  Outputs { split, hi }
+}
+```
+
+**A node that writes several buffers destructures.** `let (nid, buf1): (f32[4,8], f32[4,8]) = op(x);` — slot 0
+travels under the node id, the rest under their own buffer names, so every name a later line can refer to is
+bound. Only the later dialects build such nodes; a torch or tensor dump has none.
+
+## Discussion
+
+Then `main`. Its body opens with the graph's constants, in their own block under a comment; each compute node
+becomes one more `let`; and the tail expression builds `Outputs`. An input is reached through its struct,
+`inputs.hidden_states`, while a constant or an earlier result is a plain name.
 
 **Order** is a dependency order, not an execution schedule.
 
@@ -181,32 +223,9 @@ expression rather than a number — `f32[2,seq_len,4]`, `f32[1,(2 * seq_len),4]`
 `linear(mul_1, p_attn_q_proj_weight, has_bias=False)`, `reshape(x, shape=(1, 512, -1))`. A `-1` inside `shape=`
 is the request the trace captured; the declared type on the left shows the extent it resolved to.
 
-**Constants named `<node>_c<N>`** are scalars the trace captured, named after the traced call they came from
-and their position in that call's resolved operand list: `add_c1` is the epsilon inside the node called `add`.
+## Wut
 
-**A node that writes several buffers destructures.** `let (nid, buf1): (f32[4,8], f32[4,8]) = op(x);` — slot 0
-travels under the node id, the rest under their own buffer names, so every name a later line can refer to is
-bound. Only the later dialects build such nodes; a torch or tensor dump has none.
-
-**Binding names are node ids.** Every node carries two labels: the id the graph stores it under and refers to
-it by, and its output tensor's name. They are usually the same string, because a new node takes its tensor name
-as its id when that id is free. When it is taken, the id falls back to `n0`, `n1`, … and the tensor keeps its
-name — `broadcast_to` names its result after its source, so one source broadcast to two different shapes yields
-one name twice. Bindings print the id, so no two can collide, and a differing tensor name follows in a comment:
-
-```rust
-let n0: f16[1,4,512,64] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);  // aka tensor name `unsqueeze_bc`
-let unsqueeze_bc: f16[1,32,512,64] = emmy::tensor_from_fn(|i, _j, k, l| unsqueeze[i, 0, k, l]);
-```
-
-**Memory, loops, threads, kernels, fusion and hardware choices are absent** because these levels cannot express
-them, not because the printer hides them. They arrive with the later dialects, which have their own printed
-forms.
-
-**Four fields are hidden.** Every operation carries `source` (its predecessor in a rewrite chain), `knobs` (the
-tuning choices passes stamp on it), and `inputs` / `outputs`, a derived view of the tensors around it that the
-matcher fills in. None of them says what the node computes, and `Graph.to_dict` skips them too when it
-serializes a graph. At the torch stage they are empty anyway, since no pass has run yet.
+Wut:
 
 When `EMMY_DUMP_DIR` dumps a later stage, whose nodes hold whole statement trees, an operation prints its own
 body instead:
@@ -225,33 +244,9 @@ body instead:
   };
 ```
 
+Wut:
+
 `acc0 <- add(acc0, v0)` is that dialect's accumulate, not an assignment this notation defines.
-
-## Two stages, one notation
-
-`--ir torch` and `--ir tensor` print through the same renderer, and every reading rule below applies to both.
-What changes is the vocabulary of operations, because decomposition runs between them.
-
-A torch dump is the trace as recorded, so it holds model-level operations — `linear`, `sdpa`, `mean`,
-`softmax`, `reshape`, `transpose`, `slice`, `cat`, `unsqueeze` — each carrying a whole idea in one node
-(`emmy/compiler/ir/frontend/ir.py`). A tensor dump has none of them. Decomposition rewrites every one into the
-generic set in `emmy/compiler/ir/tensor/ir.py`: elementwise operations, reductions, scans, the two gathers,
-scatter, index maps, casts.
-
-The same Qwen3-0.6B layer at both stages:
-
-```
---ir torch    136 nodes    linear x7, mean x4, transpose x4, slice x4, reshape x4, sdpa, softmax
---ir tensor   153 nodes    none of those; sum x11, divide x5, exp x2, emmy::tensor_from_fn x51
-```
-
-A `linear` becomes a broadcast, an elementwise multiply and a `sum` over the contracted axis. A `mean` becomes
-that `sum` times a reciprocal. An `sdpa` becomes masked scores, the three-pass softmax spelled out, then the
-second contraction. The layout operations become index maps carrying real arithmetic, which is why the builder
-count more than doubles: what sat inside a `slice` node's fields at the torch stage is
-`linear_4__cat__linear_5[i, j, (k + 3072)]` at the tensor stage.
-
-One node becoming several is why the count grows, even though the pipeline sweeps dead nodes on the way.
 
 ## Where a constant's value comes from
 
@@ -424,38 +419,3 @@ Valid: every coordinate is arithmetic over the closure's parameters, literals, a
 symbolic dimension names, which appear free in the body because the launch binds them. A coordinate is never a
 value read from another tensor; that is what `emmy::gather` and `emmy::gather_by_axis` are for. Invalid: a
 parameter count that disagrees with the result's rank, which would mean the printer has a bug.
-
-## Gotchas
-
-These are oddities of the compiler that the new spelling makes visible rather than hiding.
-
-**A conversion has no operation of its own.** It is an identity node whose output tensor *declares* the new
-dtype, and the backend converts when it materializes that type. `emmy::cast` is the printer naming a node it
-recognized by comparing the declared types.
-
-**`CastOp` exists and nothing builds it.** `emmy/compiler/ir/tensor/ir.py` defines a cast operation carrying an
-explicit dtype. `torch_wire.py` can rebuild one from a stored graph and the constant-folding pass knows it, but
-no production code creates one, so every real conversion arrives as the identity node above. `copy` and
-`bitcast` are the two elementwise names whose implementation is the identity; the narrow-float decoders do
-compute.
-
-**A binding can be a plain rebinding.** An identity node whose declared dtype already matches its input prints
-as its argument alone — `005_split_cast_from_indexmap.py` leaves one behind whenever it splits a conversion out
-of an index map, so a `--ir tensor` dump carries several:
-
-```rust
-let to: f32[1,512,1024] = to_cast;
-```
-
-**`emmy::gather` is not `torch.gather`.** The formula is torch's, and on the inputs emmy accepts the two agree
-element for element. But torch requires only `index.size(d) <= input.size(d)` on every axis other than the
-gathered one, while emmy demands equality there. A narrower index is a legal `torch.gather` that prints as the
-other operation: `torch.gather` on data `[4,8]` with an index `[4,3]` at axis 0 prints
-`let gather: f32[4,3] = emmy::gather_by_axis(x0, x1, axis=0);`. That line is the one place a dump contradicts
-itself — the declared type is torch's answer, while `emmy::gather_by_axis` as defined above would give
-`[4,3,8]`, and that is also what emmy computes. Four ATen operators collapse onto one node and only the axis
-survives, so operand shapes are the only evidence of which was meant.
-
-**Some captured constants go unused.** The layer above captures 29 scalars and refers to 18 of them. The 11
-left over come from `transpose` (8), `unsqueeze` (2) and `sdpa` (1) — the handlers that read a scalar argument
-off the trace and store it in a field, rather than keeping the constant the resolver had already made.

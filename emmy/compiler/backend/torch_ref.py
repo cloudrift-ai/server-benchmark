@@ -113,6 +113,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "pow": lambda a: a[0] ** a[1],
         "maximum": lambda a: torch.maximum(a[0], a[1]),
         "minimum": lambda a: torch.minimum(a[0], a[1]),
+        "where": lambda a: torch.where(a[0], a[1], a[2]),
         "negative": lambda a: -a[0],
         "abs": lambda a: torch.abs(a[0]),
         "reciprocal": lambda a: torch.reciprocal(a[0]),

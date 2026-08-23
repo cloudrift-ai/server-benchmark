@@ -34,6 +34,7 @@ from emmy.compiler.backend.cuda.dtype import cupy_dtype
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
+from emmy.compiler.dtype import encode_bf16
 from emmy.compiler.graph import Graph
 
 if TYPE_CHECKING:
@@ -166,6 +167,14 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _numpy_storage(src, dtype) -> np.ndarray:
+    """Return a contiguous host array in one buffer's physical storage dtype."""
+    arr = np.asarray(src)
+    if getattr(dtype, "name", dtype) == "bf16":
+        return np.ascontiguousarray(arr) if arr.dtype == np.uint16 else encode_bf16(arr)
+    return np.ascontiguousarray(arr, dtype=dtype.np)
+
+
 def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
     """Build one device array for ``buf`` at ``shape`` — the single fill
     policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
@@ -177,15 +186,20 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
 
     cp_dtype = cupy_dtype(buf.dtype)
     np_dtype = buf.dtype.np
+    is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     if src is not None:
         if isinstance(src, cp.ndarray):
+            if is_bf16 and src.dtype != np.dtype(np.uint16):
+                values = src.astype(cp.float32, copy=False).view(cp.uint32)
+                values = values + cp.uint32(0x7FFF) + ((values >> cp.uint32(16)) & cp.uint32(1))
+                src = (values >> cp.uint32(16)).astype(cp.uint16)
             if src.dtype != np.dtype(np_dtype):
                 src = src.astype(np_dtype)
             return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
-        return cp.asarray(np.ascontiguousarray(src, dtype=np_dtype).reshape(shape))
+        return cp.asarray(_numpy_storage(src, buf.dtype).reshape(shape))
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])
-        if getattr(buf.dtype, "name", buf.dtype) == "bf16":
+        if is_bf16:
             # bf16 buffers ride as uint16 BITS (``BF16.np``) — casting the float would zero it;
             # encode the value to bf16 bits (round-to-nearest-even on the dropped mantissa half).
             bits = int(np.float32(v).view(np.uint32))
@@ -201,7 +215,8 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
         # → ``nan``). Compute in fp32 and cast the final values — always in
         # ``[-0.5, 0.5]``, so fp16-safe.
         idx = np.arange(n, dtype=np.int64)
-        vals = (0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)).astype(np_dtype)
+        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return cp.asarray(vals.reshape(shape))
     return cp.zeros(shape, dtype=cp_dtype)
 

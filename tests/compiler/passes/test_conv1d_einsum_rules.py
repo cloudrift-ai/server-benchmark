@@ -65,6 +65,36 @@ def test_depthwise_conv1d_matches_eager(run_graph, conv_module) -> None:
     _assert_matches_eager(run_graph, conv_module(groups=8, padding=3), (x, w))
 
 
+def test_causal_conv1d_with_zero_width_chunk_pad_matches_eager(run_graph) -> None:
+    """The Qwen3.8 causal Conv1d target retains its empty chunk-alignment pad."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class CausalConv(nn.Module):
+        def forward(self, x, w):
+            return F.pad(F.conv1d(x, w, padding=3, groups=8), (0, 0))
+
+    torch.manual_seed(0)
+    x, w = torch.randn(2, 8, 16), torch.randn(8, 1, 4)
+    _assert_matches_eager(run_graph, CausalConv(), (x, w))
+
+
+def test_causal_conv1d_rejects_nonzero_generic_pad() -> None:
+    """A coordinate-changing pad fails before the attribute-free elementwise fallback."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class CausalConv(nn.Module):
+        def forward(self, x, w):
+            return F.pad(F.conv1d(x, w, padding=3, groups=8), (1, 0))
+
+    x, w = torch.randn(1, 8, 16), torch.randn(8, 1, 4)
+    with pytest.raises(NotImplementedError, match="only explicit zero-width padding"):
+        _decompose(CausalConv(), (x, w))
+
+
 def test_dense_conv1d_im2col_matches_eager(run_graph, conv_module) -> None:
     """The im2col form, with the stride and dilation that make the window map non-trivial."""
     import torch

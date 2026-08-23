@@ -189,7 +189,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
-| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
+| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…); unary `pad` is the frontend's exact zero-width identity. |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |

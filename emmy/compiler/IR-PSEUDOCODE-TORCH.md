@@ -277,22 +277,24 @@ graph, as well as a few of Emmy's own operations. We mark Emmy's own operations 
 don't have a namespace like `linear`, `add` or `mul` are from either PyTorch or NumPy. We can't tell exactly which of the
 two is meant in each case, because the tracing code does not thoroughly record the source.
 
-**`rms_norm`** and **`layer_norm`** are respellings: the class names behind them would otherwise lowercase to
-`rmsnorm` and `layernorm`. Every other operation without an `emmy::` prefix prints under its own name, `sdpa`
-included — emmy's short spelling of scaled dot product attention.
-
-An `emmy::` name is emmy's own:
+Below, we overview the `emmy::` operations.
 
 | Name | Meaning |
 | --- | --- |
-| `emmy::tensor_from_fn(\|i, j\| body)` | build a tensor from a function of its indices, here rank two |
-| `emmy::cast(x)` | a dtype change (see the gotchas below — no node computes it) |
+| `emmy::tensor_from_fn(\|i, j\| body)` | build a tensor from a function of its indices (rank 2 in this example for simplicity, in principle this supports any rank) |
+| `emmy::cast(x)` | a dtype change, the IR uses it to make the implicit casts in graph IR explicit |
 | `emmy::bitcast(x)` | reinterpret same-width elements as another dtype |
 | `emmy::index_map(a, b)` | a reindexing `emmy::tensor_from_fn` cannot hold |
 | `emmy::gather(data, idx, axis=n)` | pick one element per output position |
 | `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
-A second namespace, `emmy::scalar::`, holds functions on a single number, applied to every element. They are
+The `emmy::gather` and `emmy::gather_by_axis` are internally represented as one operation `"gather"` in graph IR.
+Depending on the shapes of inputs and outputs, the `"gather"` in graph IR does one of two unrelated things.  We
+make the two cases easy to distinguish by differentiating them at IR dump time, and calling them `emmy::gather` and
+`emmy::gather_by_axis`. The `emmy::gather` is very similar to PyTorch `gather`, but has some slight differences, so we
+keep it distinct.
+
+A second namespace, `emmy::scalar::`, holds functions on a single number, applied to scalars. They are
 the entries of one table — `_NAME_TO_FN` in `emmy/compiler/ir/elementwise.py` — minus the ones torch or numpy
 already names, which print bare.
 
@@ -303,7 +305,9 @@ already names, which print bare.
 | `emmy::scalar::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
 | `emmy::scalar::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
 
-### What the `emmy::` helpers mean
+The following section presents `emmy::` helpers in more detail.
+
+### The `emmy::` helpers
 
 Written as definitions in the same pseudocode, with three conventions.
 
@@ -341,7 +345,9 @@ fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
 // Pick one element per output position. `idx` has the result's shape, and each of
 // its entries says which position along `axis` that one output element reads; the
 // other coordinates come from the output position itself. Close to torch's
-// `gather`, but not the same — see the gotchas.
+// `gather`, but not the same: torch allows `idx` to be smaller than `data` on the
+// axes it does not gather, while this requires them equal. A narrower index is a
+// legal `torch.gather` that prints — and computes — as `emmy::gather_by_axis`.
 fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]>(
     data: T[d],
     idx: i64[e],

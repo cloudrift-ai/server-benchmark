@@ -488,7 +488,7 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     base = _Term(cell, tile.place.on_grid(), ctx)
     pro = fused_view(tile)
     if pro is not None:
-        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
+        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, *pro[1]), stores=pro[2])
         return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
     node = head(tile.op)
     if node is None or not is_contraction(node):

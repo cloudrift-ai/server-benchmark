@@ -44,7 +44,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     # the reference tree when it binds; its seams are the ones a ``PLACE`` key spells.
     pro = fused_view(map_tile)
     route_tree, route_free, route_stores = (
-        (pro[0], (*map_tile.place.free, pro[1]), pro[2]) if pro is not None else (map_tile.op, map_tile.place.free, map_tile.stores)
+        (pro[0], (*map_tile.place.free, *pro[1]), pro[2]) if pro is not None else (map_tile.op, map_tile.place.free, map_tile.stores)
     )
     verdict, seam = route_cut(ctx, dict(loop.knobs or {}), route_tree, route_stores, route_free)
     if verdict == "cut":

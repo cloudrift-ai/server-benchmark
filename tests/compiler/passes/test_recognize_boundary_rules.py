@@ -883,7 +883,7 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     assert pro is not None, "the chained score column binds through the fused view"
     node = pro[0].operands[0]
     assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
-    seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, pro[1]))]
+    seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, *pro[1]))]
     assert "PLACE@b" in seams, seams
 
 
@@ -967,7 +967,7 @@ def test_fused_view_tail_prefix_is_alpha_renamed_from_the_statistic_prologue():
     tile = recognized_tile(LoopOp(body=_m1_norm_gate_up_body()))
     pro = fused_view(TileOp(op=tile.op, place=Placement(free=tuple(tile.place.free)), stores=tuple(tile.stores)))
     assert pro is not None, "the one-row norm→gate/up must bind the fused (computed-A) reading"
-    tree, n_ax, stores = pro
+    tree, added_axes, stores = pro
     assert any(s.name.endswith("__p") for s in tree.body if isinstance(s, Load)), [s for s in tree.body]
     # The parent piece of any cut is this flattening; it must be a valid single-scope program.
-    LoopOp(body=Body(tuple(_nest(effect_tail(tree.lower(), stores), [*tile.place.free, n_ax]))))
+    LoopOp(body=Body(tuple(_nest(effect_tail(tree.lower(), stores), [*tile.place.free, *added_axes]))))

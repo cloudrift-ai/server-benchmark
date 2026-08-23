@@ -223,7 +223,8 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
 
     bound = fused_view(tile)
     assert bound is not None, "the sweep must bind as a computed-A contraction over the twisted statistic"
-    node, n_axis, _stores = bound
+    node, added_axes, _stores = bound
+    (n_axis,) = added_axes
     con = node
     assert is_contraction(con) and con.axis.extent == Dim(128), "one contraction over the whole reduce axis"
     assert n_axis.extent == Dim(32), "the output column axis joins the grid"
@@ -244,10 +245,11 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     bound = fused_view(tile)
     assert bound is not None
-    node, n_axis, stores = bound
+    node, added_axes, stores = bound
+    (n_axis,) = added_axes
 
     stmts = tuple(effect_tail(node.lower(), stores))
-    for axis in reversed((*tile.place.free, n_axis)):
+    for axis in reversed((*tile.place.free, *added_axes)):
         stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
     relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)))
     again = fused_view(relifted)

@@ -515,11 +515,12 @@ failing several passes later:
   It is offered as a fork SIBLING of the
   cooperative reduce form (the warp mma rows ride the mandatory `sync` compute-fill;
   dtype / geometry legality stays schedule-side). This retired the pin-only
-  `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided,
-  `free = ()`) binds too — a synthesized unit free axis keeps the column grid; without it the fused kernel
-  schedules at grid 1, ~300× off the memory floor. SSA renames track the stored algebra through the `Fold`
-  rewrite handler (`rename_combine` — a verbatim combine left the cooperative combine reading a state name the
-  renamed body no longer defined).
+  `_prologue_warp_option` rescue. The **degenerate M=1** composition (per-token decode: the unit row axis elided)
+  binds too — when the output row is the literal-zero coordinate, a synthesized unit free axis precedes the column
+  grid even if batch or head axes remain contextual; without it the fused kernel schedules at grid 1, ~300× off the
+  memory floor. A non-unit or structurally missing row declines this reading. SSA renames track the stored algebra
+  through the `Fold` rewrite handler (`rename_combine` — a verbatim combine left the cooperative combine reading a
+  state name the renamed body no longer defined).
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the fold
   node's `Reduction` view + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same

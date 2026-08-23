@@ -1075,6 +1075,42 @@ def test_bind_inputs_preserves_int_dtype():
     np.testing.assert_array_equal(bound["position_ids"], np.arange(8, dtype=np.int32)[None, :])
 
 
+def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
+    import numpy as np
+
+    from emmy.commands.run import _bind_inputs, _comparison_outputs
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (2,), dt.BF16), node_id="x")
+    g.add_node(
+        op=ConstantOp(name="weight", source_path="weight"),
+        inputs=[],
+        output=Tensor("weight", (2,), dt.BF16),
+        node_id="weight",
+    )
+    g.inputs = ["x"]
+    g.outputs = ["x"]
+
+    class _Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([3.0, -4.0], dtype=torch.bfloat16))
+
+    x = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+    bound = _bind_inputs(g, _Module(), (x,), {})
+
+    assert bound["x"].dtype == np.uint16
+    assert bound["weight"].dtype == np.uint16
+    np.testing.assert_array_equal(bound["x"], x.view(torch.uint16).numpy())
+    np.testing.assert_array_equal(
+        _comparison_outputs({"x": bound["x"]}, g)["x"],
+        np.array([1.0, -2.0], dtype=np.float32),
+    )
+
+
 def test_bind_inputs_arity_mismatch_raises():
     """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
     also runs inside the bench worker child, where an exit(1) reached the parent as an

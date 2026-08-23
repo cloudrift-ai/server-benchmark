@@ -713,6 +713,25 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+def _comparison_outputs(outputs: dict, graph) -> dict:
+    """Decode physical carriers before command-layer correctness checks."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dtype import decode_bf16  # noqa: PLC0415
+
+    if not hasattr(graph, "buffer"):
+        return outputs
+    decoded = outputs
+    for name, value in outputs.items():
+        arr = np.asarray(value)
+        dtype = graph.buffer(name).dtype
+        if dtype.name == "bf16" and arr.dtype == np.uint16:
+            if decoded is outputs:
+                decoded = dict(outputs)
+            decoded[name] = decode_bf16(arr)
+    return decoded
+
+
 def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, atol: float = 1e-3) -> dict:
     """Return a direct Emmy-vs-eager tolerance verdict with reproducible error statistics.
 
@@ -925,6 +944,7 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
             logger.warning("[golden] %s: bench of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, g_compiled, None, [f"bench_fail: {exc}"], "bench_fail"))
             continue
+        run_outputs = _comparison_outputs(run_outputs, g_compiled) if run_outputs is not None else None
         correctness = None
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
@@ -1874,11 +1894,12 @@ async def bench_lowered_vs_torch(
             input_data[nid] = arr.flatten().tolist()
 
     result, _ = backend.run(lowered, input_data=input_data)
+    result_outputs = _comparison_outputs(result.outputs, lowered)
     if frontend is None and ref_out is not None:
-        ref_out.append((input_data, result.outputs))
+        ref_out.append((input_data, result_outputs))
     if ref_us_out is not None:
         ref_us_out.append(result.time_ms * 1000)
-    for nid, arr in result.outputs.items():
+    for nid, arr in result_outputs.items():
         finite = np.isfinite(arr).all()
         logger.info("Output %s: shape=%s finite=%s mean=%.4f", nid, arr.shape, bool(finite), float(arr.mean()))
 
@@ -1890,12 +1911,12 @@ async def bench_lowered_vs_torch(
             with torch.no_grad():
                 eager_out = torch_fn(*torch_inputs)
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result.outputs, eager_out)
+                correctness = _strict_correctness_proof(result_outputs, eager_out)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
             else:
-                accuracy_error = _check_accuracy(result.outputs, eager_out)
-            reference = (input_data, _eager_outputs_by_name(result.outputs, eager_out))
+                accuracy_error = _check_accuracy(result_outputs, eager_out)
+            reference = (input_data, _eager_outputs_by_name(result_outputs, eager_out))
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
@@ -2337,14 +2358,25 @@ def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None
     input_data: dict[str, np.ndarray] = {}
     torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
     for nid, tensor in zip(input_ids, flat_inputs, strict=True):
-        np_dtype = compiled.nodes[nid].output.dtype.np
+        dtype = compiled.nodes[nid].output.dtype
+        np_dtype = dtype.np
         tensor = tensor.detach().cpu()
         # An fp8 activation/weight INPUT binds the raw bit pattern on its uint8 carrier —
         # numpy has no fp8 scalar type, and a value cast would decode the bits (the same
         # rule the constant side and the serving expert feed already follow).
         if tensor.dtype in torch_f8:
             tensor = tensor.view(torch.uint8)
-        input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
+        if dtype.name == "bf16":
+            from emmy.compiler.dtype import encode_bf16  # noqa: PLC0415
+
+            if tensor.dtype == torch.bfloat16:
+                input_data[nid] = tensor.contiguous().view(torch.uint16).numpy()
+            else:
+                input_data[nid] = encode_bf16(tensor.numpy())
+        else:
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.float()
+            input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
 
     # ``remove_duplicate=False`` so tied weights (e.g. a model whose lm_head
     # shares the embedding matrix) are surfaced under *every* name, including
@@ -2352,9 +2384,19 @@ def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None
     # picked may be the one torch dedups away and the constant won't bind.
     sources: dict[str, np.ndarray] = {}
     for path, tensor in module.named_parameters(remove_duplicate=False):
-        sources[path] = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
     for path, tensor in module.named_buffers(remove_duplicate=False):
-        sources[path] = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
 
     input_data.update(bind_constants(compiled, sources))
 

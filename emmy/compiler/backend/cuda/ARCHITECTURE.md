@@ -76,10 +76,12 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
    constant overrides come from `input_data`; scalar `ConstantOp`s
    materialize as single-element arrays; scratch buffers zero-init.
    Inputs without supplied data get a deterministic pseudo-random fill
-   (useful for standalone compile-and-benchmark scripts).
+   (useful for standalone compile-and-benchmark scripts). BF16 buffers use NumPy's `uint16` carrier as raw bits:
+   numeric inputs are round-to-nearest-even encoded before upload, while an already-`uint16` source is preserved.
 2. Launch each kernel in topological order; `zero_outputs` fills run
    before the launch.
-3. Copy `graph.outputs` buffers back to numpy.
+3. Copy `graph.outputs` buffers back to numpy. BF16 outputs remain raw `uint16` bits at this backend boundary;
+   command-layer correctness checks decode them.
 
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its
 own permanently-live buffer — that holds all 28 layers' `[heads, S, S]` attention scratch resident at once (~29 GB for

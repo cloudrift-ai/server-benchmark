@@ -126,6 +126,9 @@ autotuning cache doesn't bust on cosmetic edits.
 - **One `LoopOp` = one kernel.** Fusion produces `LoopOp` nodes;
   lowering turns each into `KernelOp` (AST) then `CudaOp` (rendered
   source).
+- **BF16 uses raw `uint16` bits at NumPy boundaries.** `dtype.encode_bf16` and `decode_bf16` are the shared
+  round-to-nearest-even conversion. Numeric values must never be value-cast to the carrier: live PyTorch tensors,
+  standalone random inputs, CUDA uploads, and command-layer comparisons preserve or decode the physical bits.
 - **`LoopOp.forward()` executes.** `ir/loop/runner.py` renders the body
   to C++ and JIT-compiles it via cppyy / Cling, letting the default
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on

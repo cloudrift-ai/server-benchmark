@@ -17,6 +17,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
+    Conv1dOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -66,6 +67,7 @@ _OP_SPECS: dict[str, tuple[type[Op], tuple[str, ...]]] = {
     "torch.slice": (SliceOp, ("shape", "dim", "start")),
     "torch.cat": (CatOp, ()),
     "torch.unsqueeze": (UnsqueezeOp, ("dim",)),
+    "torch.conv1d": (Conv1dOp, ("stride", "padding", "dilation", "groups")),
     "torch.linear": (LinearOp, ("has_bias",)),
     "torch.matmul": (MatmulOp, ("has_bias",)),
     "torch.sdpa": (SdpaOp, ("is_causal", "sliding_window", "scale")),

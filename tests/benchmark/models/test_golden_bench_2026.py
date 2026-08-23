@@ -368,15 +368,16 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert emmy_runner_path.stat().st_mode & 0o111
     emmy_runner = emmy_runner_path.read_text()
     assert "operators.sh" in emmy_runner
-    assert '"$emmy" run --golden "$golden" --bench --strict' in emmy_runner
+    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
+    assert 'run --golden "$golden" --bench --strict' not in emmy_runner
+    assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
     assert "emmy tune" not in emmy_runner
-    assert "--bench-backends eager,tcompile,emmy --warmup 1 --iters 15" in emmy_runner
     assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
     assert "setup-status.tsv" in emmy_runner
     assert 'test "$missing_goldens" -eq 0' in emmy_runner
     assert 'test "$successful_setups" -gt 0' in emmy_runner
     assert "run_pytorch.py" in emmy_runner
-    assert 'status="pytorch-only:emmy-failed:$emmy_status"' in emmy_runner
+    assert 'reference="pytorch-only:emmy-failed:$reference_status"' in emmy_runner
 
     pytorch_runner = (Path(directory) / "run_pytorch.py").read_text()
     assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner

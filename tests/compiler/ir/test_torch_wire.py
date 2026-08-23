@@ -13,6 +13,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
+    Conv1dOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -117,6 +118,17 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
 def test_operation_round_trip(op):
     restored = op_from_wire(json.loads(json.dumps(op_to_wire(op))))
     assert restored == op
+
+
+def test_conv1d_operation_wire_schema_round_trip():
+    op = Conv1dOp(stride=2, padding=3, dilation=4, groups=5)
+    wire = op_to_wire(op)
+
+    assert wire == {
+        "op": "torch.conv1d",
+        "attrs": {"stride": 2, "padding": 3, "dilation": 4, "groups": 5},
+    }
+    assert op_from_wire(json.loads(json.dumps(wire))) == op
 
 
 def _program() -> Graph:

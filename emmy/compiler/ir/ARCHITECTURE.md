@@ -493,8 +493,10 @@ default `Backend.run` topo-walk like any pre-fusion graph.
 
 ### `loop/builder.py` — fluent construction
 
-`LoopBuilder` helper used by decomposition/fusion tests to construct
-LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
+`LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
+nest. Fresh SSA names retain the lowest available deterministic suffix while a per-hint monotonic cursor ensures each
+occupied suffix is tested at most once; the used-name set remains authoritative when another hint claims a future
+suffix.
 
 ## `tile/`
 

@@ -487,6 +487,10 @@ Each splice memoizes `Expr.free_vars()` by expression identity while placing dep
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
 global cache would require; the memo is discarded with the splicer.
 
+`Sigma` computes canonical expression text once for each initial substitution. Derived substitutions created by
+`extend` and `restrict` retain the applicable canonical entries from their parent, so dependency placement neither
+reformats deep coordinate trees nor retains duplicate canonical strings.
+
 ### `loop/runner.py` — C++ JIT executor
 
 `execute_loop_op_cpp(loop, input_arrays, out_shape) → ndarray` renders the

@@ -421,20 +421,3 @@ the node.
 ```rust
 fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: [tensor]) -> T[d]
 ```
-
-#### `emmy::scalar::*`
-
-Functions on one number, applied to every element. Unlike `cast`, these have a real implementation behind them,
-in `emmy/compiler/ir/elementwise.py`.
-
-```rust
-fn emmy::scalar::from_f8e4m3<const rank: usize, const d: usize[rank]>(x: f8e4m3[d]) -> f32[d]
-fn emmy::scalar::to_f8e4m3<const rank: usize, const d: usize[rank]>(x: f32[d]) -> f8e4m3[d]
-```
-
-#### `emmy::const_eval` and `emmy::input_data`
-
-Not operations. They stand for where a constant's value comes from, and appear only on the right of a binding
-in the constants block. `const_eval` means the loader computes the value by running a small graph — a chain of
-layout operations over other constants that folding collapsed into one. `input_data` means the constant has no
-value and no address at all, so whoever runs the graph must supply it by name.

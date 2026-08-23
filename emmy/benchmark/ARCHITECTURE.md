@@ -6,8 +6,9 @@ judging or interpreting experiment data.
 ## Experiment record
 
 An actual `emmy bench` invocation creates `<recipe_dir>/<YYYY-MM-DD_HH-MM-SS>/`. Dry runs never create, delete, or
-modify a run directory. Every expanded row receives one collision-safe `*.experiment.yaml`; there is no JSON, TXT,
-task manifest, instance manifest, or inline aggregate result path.
+modify a run directory. Every expanded row receives one collision-safe `*.experiment.yaml`; each declared result file
+uses the same readable variant plus stable row ID before its task-relative name, so abbreviated variants cannot
+overwrite each other. There is no JSON, TXT, task manifest, instance manifest, or inline aggregate result path.
 
 `ExperimentRecord` is a typed dataclass schema. It is initialized before provisioning, serialized directly to YAML,
 and atomically rewritten at each lifecycle transition. A handled failure therefore leaves a terminal row rather than

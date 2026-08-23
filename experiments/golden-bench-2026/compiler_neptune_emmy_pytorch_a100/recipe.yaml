@@ -15,6 +15,12 @@
 #   neptune  the pinned artifact's own tune + Nsight profile for one operator (10 operators)
 #   emmy     bench eager / torch.compile / Emmy, with Emmy replaying a pre-tuned golden (5 operators)
 #
+# The emmy lane runs two arms per setup: the golden replay times the committed tuned schedules, and
+# a `emmy run -c` reference arm supplies eager, torch.compile, and the strict Emmy-vs-eager
+# correctness proof. They are separate because `emmy trace --code` stores a single-op program's
+# post-fusion targets as Loop IR — every kernel of an SDPA snippet shares one provenance selector —
+# and a Loop IR target carries no torch twin to compare against.
+#
 # Tuning happens outside this recipe, through the tune-kernels skill: trace each setup from
 # operators.sh (`./operators.sh OPERATOR SEQUENCE_LENGTH` prints the exact module source this
 # experiment benches), tune the working golden on an A100, and commit the validated result under

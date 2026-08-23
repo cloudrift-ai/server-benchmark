@@ -87,9 +87,9 @@ The benchmark library is an experiment-agnostic runner: it retains complete clie
 generic system information, and partial raw results after failure. It treats execution and result-collection
 failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
 backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
-may opt into the single `command.strict` integrity contract for a clean Git worktree, required declared results, and
-Git/GPU/NVCC/cuBLAS provenance. The complete boundary lives in
-`emmy/benchmark/ARCHITECTURE.md`.
+may opt into the single `command.strict` integrity contract for clean declared stage paths, required declared results,
+and Git/GPU/NVCC/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
+environment or reused remote source tree. The complete boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` because nothing is generated.

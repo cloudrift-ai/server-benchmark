@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from emmy.provisioning.staging import (
+    StagedSourceProvenance,
     build_stage_tar,
     enumerate_staged_files,
     stage_to_remote,
@@ -94,9 +95,11 @@ def test_staged_paths_dirty_reports_untracked_and_deleted_files(repo):
 
 
 def test_stage_to_remote_clean_gate_runs_before_dry_run_transfer(repo):
-    with pytest.raises(RuntimeError, match="requires a clean source tree"):
+    with pytest.raises(RuntimeError, match="requires clean declared paths"):
         asyncio.run(stage_to_remote(repo, ["scripts"], "host", "key", 22, "/remote", dry_run=True, require_clean=True))
 
     (repo / "scripts" / "untracked.py").unlink()
+    (repo / "other.txt").write_text("unrelated local edit\n")
     result = asyncio.run(stage_to_remote(repo, ["scripts"], "host", "key", 22, "/remote", dry_run=True, require_clean=True))
-    assert result is None
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert result == StagedSourceProvenance(git_revision=revision, git_dirty=False)

@@ -333,6 +333,28 @@ fn emmy::tensor_from_fn<T, const rank: usize, const d: usize[rank]>(f: |usize[ra
     // i[k] < d[k]
 ```
 
+Inside the closure, a tensor is read with brackets. An axis the body never uses takes Rust's `_` prefix, which
+is how a broadcast looks:
+
+```rust
+let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
+```
+
+One number per column, repeated over batch and tokens. Coordinates can also be arithmetic over the parameters,
+which is how a slice or a dropped axis reads:
+
+```rust
+let linear_5: f16[1,512,3072] = emmy::tensor_from_fn(|i, j, k| linear_4__cat__linear_5[i, j, (k + 3072)]);
+let linear_3: f16[1,512,1024] = emmy::tensor_from_fn(|i, j, k| linear_3_reduce[i, j, 0, k]);
+```
+
+The first reads the upper half of a concatenated tensor, the second drops a size-1 axis.
+
+Valid: every coordinate is arithmetic over the closure's parameters, literals, and — under `--dynamic` — the
+symbolic dimension names, which appear free in the body because the launch binds them. A coordinate is never a
+value read from another tensor; that is what `emmy::gather` and `emmy::gather_by_axis` are for. Invalid: a
+parameter count that disagrees with the result's rank, which would mean the printer has a bug.
+
 #### `emmy::cast`
 
 A dtype change. No node computes it: the declared result type is the whole operation, and the backend converts
@@ -416,27 +438,3 @@ Not operations. They stand for where a constant's value comes from, and appear o
 in the constants block. `const_eval` means the loader computes the value by running a small graph — a chain of
 layout operations over other constants that folding collapsed into one. `input_data` means the constant has no
 value and no address at all, so whoever runs the graph must supply it by name.
-
-### Reading `emmy::tensor_from_fn`
-
-The closure takes one parameter per axis of the **result**, and the type gives their ranges. Inside, a tensor
-is read with brackets. An axis the body never uses takes Rust's `_` prefix, which is how a broadcast looks:
-
-```rust
-let p_input_layernorm_weight_bc: f16[1,512,2048] = emmy::tensor_from_fn(|_i, _j, k| p_input_layernorm_weight[k]);
-```
-
-One number per column, repeated over batch and tokens. Coordinates can also be arithmetic over the parameters,
-which is how a slice or a dropped axis reads:
-
-```rust
-let linear_5: f16[1,512,3072] = emmy::tensor_from_fn(|i, j, k| linear_4__cat__linear_5[i, j, (k + 3072)]);
-let linear_3: f16[1,512,1024] = emmy::tensor_from_fn(|i, j, k| linear_3_reduce[i, j, 0, k]);
-```
-
-The first reads the upper half of a concatenated tensor, the second drops a size-1 axis.
-
-Valid: every coordinate is arithmetic over the closure's parameters, literals, and — under `--dynamic` — the
-symbolic dimension names, which appear free in the body because the launch binds them. A coordinate is never a
-value read from another tensor; that is what `emmy::gather` and `emmy::gather_by_axis` are for. Invalid: a
-parameter count that disagrees with the result's rank, which would mean the printer has a bug.

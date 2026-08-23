@@ -570,3 +570,57 @@ def test_literal_producer_write_index():
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
     assert "negative" in _elementwise_fns(merged)
+
+
+def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(monkeypatch):
+    """A long producer chain reuses one large coordinate target without re-walking its tree."""
+    from emmy.compiler.ir.expr import BinaryExpr
+
+    producer_axis = Axis("p", 4096)
+    producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
+    previous = "x"
+    for i in range(128):
+        name = f"v{i}"
+        producer_stmts.append(Assign(name=name, op="negative", args=(previous,)))
+        previous = name
+    producer_stmts.append(Write(output="P", index=(Var("p"),), value=previous))
+    producer = LoopOp(body=(Loop(axis=producer_axis, body=tuple(producer_stmts)),))
+
+    i_axis, j_axis = Axis("i", 8), Axis("j", 8)
+    target = Var("i")
+    for _ in range(128):
+        target = target * 2 + Var("j")
+    target = BinaryExpr("^", target, Literal(1, "int"))
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=i_axis,
+                body=(
+                    Loop(
+                        axis=j_axis,
+                        body=(
+                            Load(name="pv", input="P", index=(target,)),
+                            Write(output="OUT", index=(Var("i"), Var("j")), value="pv"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    root_walks = 0
+    original = BinaryExpr.free_vars
+
+    def counted_free_vars(expr):
+        nonlocal root_walks
+        if expr.op == "^":
+            root_walks += 1
+        return original(expr)
+
+    monkeypatch.setattr(BinaryExpr, "free_vars", counted_free_vars)
+    merged = splice_loops(loops={"producer": producer, "consumer": consumer}, splice_edges={("consumer", "P"): ("producer", "P")})
+
+    assert merged is not None
+    # Loop construction and normalization also inspect the coordinate expression, but the count
+    # must not grow with the 128 producer dependencies (without the per-splice memo it exceeds 128).
+    assert root_walks < 32

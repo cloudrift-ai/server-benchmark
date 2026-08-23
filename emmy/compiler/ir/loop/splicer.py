@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import Expr, Literal, Var
@@ -264,6 +265,10 @@ class _Splicer(LoopBuilder):
         # to its own enclosing — the only bindings that affect its rewrite.
         # Same key → share a single emission.
         self._binding: dict[_BindKey, str] = {}
+        # Sigma expressions stay live for one splice. Cache by object identity so repeated
+        # dependency placement does not recursively walk the same large coordinate tree, while
+        # avoiding structural hashing (which would perform another recursive tree walk).
+        self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
 
     def run(self) -> LoopOp:
         self._seed()
@@ -293,7 +298,11 @@ class _Splicer(LoopBuilder):
         if name not in meta.defs:
             raise _NotSupported(f"_ensure_dep: {name!r} is not defined in loop {origin!r}")
 
-        required_axes = tuple(mapped for axis in meta.scopes[name].enclosing for mapped in _remap_axis_names(axis, sigma, ref_scope))
+        required_axes = tuple(
+            mapped
+            for axis in meta.scopes[name].enclosing
+            for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expr_free_vars)
+        )
         emit_scope = _scope_for_axes(ref_scope, required_axes)
 
         # σ restricted to axes transitively used in Expr subtrees reachable
@@ -309,6 +318,16 @@ class _Splicer(LoopBuilder):
         self._binding[key] = bound
         self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))
         return bound
+
+    def _expr_free_vars(self, expr: Expr) -> frozenset[str]:
+        """Memoize one expression's variables for this splice by object identity."""
+        key = id(expr)
+        cached = self._free_vars_by_expr_id.get(key)
+        if cached is not None and cached[0] is expr:
+            return cached[1]
+        variables = expr.free_vars()
+        self._free_vars_by_expr_id[key] = (expr, variables)
+        return variables
 
     # -- Resolution dispatch -------------------------------------------------
 
@@ -416,7 +435,13 @@ def _scope_for_axes(ref_scope: Scope, required: tuple[str, ...]) -> Scope:
     return Scope(enclosing=ref_scope.enclosing[:k])
 
 
-def _remap_axis_names(axis: Axis, sigma: Sigma, ref_scope: Scope) -> tuple[str, ...]:
+def _remap_axis_names(
+    axis: Axis,
+    sigma: Sigma,
+    ref_scope: Scope,
+    *,
+    free_vars: Callable[[Expr], frozenset[str]] | None = None,
+) -> tuple[str, ...]:
     """Pick the merged-kernel axes that ``axis``'s σ target depends on.
 
     Every occurrence of the producer axis is substituted with the complete target expression by
@@ -432,7 +457,7 @@ def _remap_axis_names(axis: Axis, sigma: Sigma, ref_scope: Scope) -> tuple[str, 
     target = sigma.get(axis.name)
     if target is None:
         return (axis.name,)
-    variables = target.free_vars()
+    variables = free_vars(target) if free_vars is not None else target.free_vars()
     scope_axes = tuple(a.name for a in ref_scope.enclosing)
     if any(name not in scope_axes for name in variables):
         # A non-axis variable is an SSA gather index. Keep the producer at the reader's current

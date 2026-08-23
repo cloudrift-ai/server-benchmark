@@ -257,7 +257,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
   expert programs; indirect operands compose (bits + scale slices both table-resolved).
-  **Quantized-checkpoint serving load (gpt-oss fp8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
+  **Quantized-checkpoint serving load (FP8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
   dense trunk shard-streamed in as real values, expert tensors kept fp8 as a per-layer store of program-input-named
   tensors (bits on the uint8 carrier + f32 scales + `dtype` biases, gate/up de-interleaved). `from_model` then
@@ -267,7 +267,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   examples as its last entries. Every per-expert input — weights, biases, scales — is a per-launch slice of the
   store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
-  card, the rest is vLLM's KV budget.
+  card, the rest is vLLM's KV budget. Gpt-oss checkpoints already store E-leading expert tensors; the DeepSeek /
+  Laguna lineage stores one module per expert, so the split loader stacks each layer into the same program inputs,
+  concatenating gate/up weights and block scales along their output axis while leaving ignored dense layers unscaled.
   **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
   codes and padded channel-vector tensors. Gate and up remain separate program inputs.
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the

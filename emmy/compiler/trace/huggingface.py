@@ -1410,7 +1410,8 @@ def load_quantized_split(
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
-    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
+    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss
+    and the DeepSeek / Laguna per-expert-module lineage):
     never materializes the whole dequantized dict (a 20B checkpoint dequantizes to ~42 GB of
     host values — the whole-dict ``load_dequantized_state_dict`` OOMs a 60 GB box). Instead:
 
@@ -1419,13 +1420,15 @@ def load_quantized_split(
     - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
       streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
       casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
-      3-D expert params are skipped — they stay meta on the twin.
+      expert params are skipped — they stay meta on the twin.
     - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
       INPUT names: fp8 weights as RAW BITS on the uint8 carrier plus their f32 scale
       tensors (the runner spells the dequant in-graph via ``spell_quantized_inputs`` and
       uploads 1-byte weights — the whole point of the fp8 checkpoint), biases (and any
-      unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
-      de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
+      unquantized expert weights) as ``dtype`` value tensors. Per-expert checkpoint modules
+      stack into the same E-leading inputs, concatenating gate and up along the output axis.
+      An interleaved gate/up layout de-interleaves here — bits, scale and bias alike
+      (:func:`deinterleave_gate_up`).
 
     EXL3 (``fmt == "exl3"``) follows the same split with the trellis format's own shapes, while
     every routed expert keeps its PACKED CODES. Experts arrive as per-expert modules, so each
@@ -1469,6 +1472,7 @@ def load_quantized_split(
         _exl3_quant_config,
         _fp8_quant_config,
         _is_skipped,
+        _skip_patterns,
         dequantize,
         dequantize_awq4,
         scale_is_reciprocal,
@@ -1484,7 +1488,7 @@ def load_quantized_split(
 
     qc = _fp8_quant_config(model_dir) or {}
     awq = _awq_quant_config(model_dir)
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    patterns = _skip_patterns(qc)
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
     by_shard: dict[str, list[str]] = {}

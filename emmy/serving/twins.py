@@ -177,10 +177,11 @@ def capture_twin_graphs(
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the same names
     ``scripts/capture_gen_twins.py`` writes. ``extra_widths`` adds release-specific decode or
-    prefill buckets. On an EXL3 checkpoint each
-    twin holding coded weights is replaced by its spelled forms, one per rate profile
-    (``…@b4``). ``static_only`` is the deliberate exception: it accepts only the proven
-    decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
+    prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
+    spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
+    config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
+    profile includes unconverted experts. ``static_only`` is the deliberate exception: it accepts
+    only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 

@@ -168,7 +168,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
   reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
   E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
-  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
+  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. DeepSeek-lineage FP8
+  checkpoints use the same per-expert module layout for ordinary 2-D weights and block scales;
+  `_stack_expert_modules` preserves FP8 bits on the uint8 carrier, stacks scales as float32, concatenates gate and up
+  along the output axis, and leaves down weights in checkpoint orientation. Ignored dense layers take the same path
+  without scales. The store also carries
   `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
   `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
   whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the

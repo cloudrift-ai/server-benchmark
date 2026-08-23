@@ -624,3 +624,103 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
     # Loop construction and normalization also inspect the coordinate expression, but the count
     # must not grow with the 128 producer dependencies (without the per-splice memo it exceeds 128).
     assert root_walks < 32
+
+
+# ---------------------------------------------------------------------------
+# Construction work bound
+# ---------------------------------------------------------------------------
+
+
+def test_construction_work_bound_preserves_body_at_the_exact_limit():
+    """The bound changes only rejection; an admitted splice stays byte-identical."""
+    axis = Axis("i", 4)
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=axis,
+                body=(
+                    Load(name="x", input="X", index=(Var("i"),)),
+                    Assign(name="y", op="exp", args=("x",)),
+                    Write(output="P", index=(Var("i"),), value="y"),
+                ),
+            ),
+        )
+    )
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=axis,
+                body=(
+                    Load(name="p", input="P", index=(Var("i"),)),
+                    Assign(name="z", op="negative", args=("p",)),
+                    Write(output="O", index=(Var("i"),), value="z"),
+                ),
+            ),
+        )
+    )
+    loops = {"producer": producer, "consumer": consumer}
+    edges = {("consumer", "P"): ("producer", "P")}
+
+    unbounded = splice_loops(loops, edges)
+    at_limit = splice_loops(loops, edges, max_work=8)
+
+    assert unbounded is not None and at_limit is not None
+    assert at_limit.body == unbounded.body
+    assert splice_loops(loops, edges, max_work=7) is None
+
+
+def test_construction_work_bound_stops_repeated_affine_recurrence(monkeypatch):
+    """A minimized recurrence/mask shape terminates before its coordinate paths expand.
+
+    Each update reads the preceding value at two affine coordinates. Composing 32 updates is the
+    same repeated-coordinate structure as the 169-node onboarding region, but the ordinary 8×
+    input-work ceiling must stop construction without a wall-clock assertion.
+    """
+    from emmy.compiler.ir.loop import splicer as splicer_module
+
+    depth = 32
+    axis = Axis("i", 4)
+    loops: dict[str, LoopOp] = {
+        "n0": LoopOp(
+            body=(
+                Loop(
+                    axis=axis,
+                    body=(
+                        Load(name="x", input="X", index=(Var("i"),)),
+                        Assign(name="y", op="negative", args=("x",)),
+                        Write(output="n0", index=(Var("i"),), value="y"),
+                    ),
+                ),
+            )
+        )
+    }
+    edges: dict[tuple[str, str], tuple[str, str]] = {}
+    for i in range(1, depth):
+        previous, current = f"n{i - 1}", f"n{i}"
+        loops[current] = LoopOp(
+            body=(
+                Loop(
+                    axis=axis,
+                    body=(
+                        Load(name="left", input=previous, index=(Var("i"),)),
+                        Load(name="right", input=previous, index=(Var("i") + Literal(1, "int"),)),
+                        Assign(name="y", op="add", args=("left", "right")),
+                        Write(output=current, index=(Var("i"),), value="y"),
+                    ),
+                ),
+            )
+        )
+        edges[(current, previous)] = (previous, previous)
+
+    resolutions = 0
+    original = splicer_module._Splicer._resolve
+
+    def counted(self, demand):
+        nonlocal resolutions
+        resolutions += 1
+        return original(self, demand)
+
+    monkeypatch.setattr(splicer_module._Splicer, "_resolve", counted)
+    input_work = depth * axis.extent.as_static()
+    assert splice_loops(loops, edges, max_work=8 * input_work) is None
+    assert resolutions < 1000

@@ -310,7 +310,12 @@ sweep of flat same-extent additive folds — the value folds of a fused softmax�
 contraction over the pair; other shapes fall to the raw-loop
 escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
 boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
-nest that no schedule can run and recognition cannot certify.
+nest that no schedule can run and recognition cannot certify. Ordinary merges enforce that same cap during splicer
+construction, stopping once their monotonic partial arithmetic work already exceeds the final 8× limit. The only
+uncapped construction shapes are structural candidates for the existing grouped-placement exception: one additive
+contraction at exactly two coordinate demands along otherwise linear paths, or a linear extension of an already
+recognized grouped inverse. The post-build recognizer and final work check remain authoritative; the preflight never
+admits a new exception.
 
 **Merge ORDER is a decision, and `loop/prefusion` makes it.** A merge is directional — it makes the SINK the
 region's output, so the sink's width must then be written. Splice a compute producer into a still-open

@@ -413,7 +413,7 @@ def reusable_cut_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
         return None
     if pro is None:
         return None
-    tree, free, stores = pro[0], (*tile.place.free, pro[1]), pro[2]
+    tree, free, stores = pro[0], (*tile.place.free, *pro[1]), pro[2]
     groups = [cut for cut in cuttable_seams(tree, stores, free) if len(cut.members) == 2]
     if len(groups) != 1:
         return None

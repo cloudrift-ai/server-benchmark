@@ -18,8 +18,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.ir.axis import AxisRole
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.dim import Dim
+from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Lambda, component_ops
 from emmy.compiler.ir.pure.fold import (
     Channel,
@@ -406,7 +407,23 @@ def _unchain(col: Fold) -> tuple[Fold, Fold | None]:
     return bare, edge
 
 
-def fused_view(tile) -> tuple[Fold, object, tuple] | None:
+def _unit_output_row(writes: tuple[Write, ...], n_name: str) -> Axis | None:
+    """The established synthetic row for a matrix output whose M=1 loop was elided.
+
+    Loop IR spells that exact case as a literal-zero penultimate output coordinate followed by
+    the column sweep. Every boundary write must prove the same shape; a non-unit or missing row
+    coordinate declines rather than reclassifying a contextual batch / head axis as M.
+    """
+    if not writes:
+        return None
+    for write in writes:
+        index = write.index
+        if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
+            return None
+    return Axis(name="_um", extent=Dim(1))
+
+
+def fused_view(tile) -> tuple[Fold, tuple[Axis, ...], tuple] | None:
     """B3 — the MONOID-PRODUCER composition, read off the lifted tree: a root projection whose one
     operand is a per-row statistic fold (PLANAR Σx² — RMSNorm; TWISTED ``(m, l)`` — softmax·V) and
     whose body is the statistic's scalar epilogue + ONE raw column contraction loop (restored by
@@ -415,12 +432,13 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     on the ``a`` edge with the statistic as its SOURCE (``make_cone`` — the K seam on the node),
     one :class:`Channel` per ⊗-fold, the column axis joining the grid.
 
-    Returns the same ``(Fold, column Axis, stores)`` the old recognize-time binder returned — or
-    ``None`` (not this shape). The returned contraction keeps a wrapping projection only when its
-    body has real work; an empty identity projection carries no information. A VIEW, not a rewrite:
-    ``classify`` stores the canonical projection tree; this derivation runs on demand at the
-    schedule (``_views``) and the golden decode, because which of the two readings a fork row
-    realizes is a decision about the SCHEDULE.
+    Returns ``(Fold, added grid Axes, stores)`` — or ``None`` (not this shape). The added axes are
+    normally just the column axis; a provably unit output row that Loop IR elided adds the existing
+    synthetic ``_um`` row before it. The returned contraction keeps a wrapping projection only
+    when its body has real work; an empty identity projection carries no information. A VIEW, not
+    a rewrite: ``classify`` stores the canonical projection tree; this derivation runs on demand
+    at the schedule (``_views``) and the golden decode, because which of the two readings a fork
+    row realizes is a decision about the SCHEDULE.
 
     The statistic's OWN composed score binds too (the old ``bound_producer``): a single fold edge
     on the statistic re-binds through :func:`bind_bilinear` — tried against each free axis as the
@@ -452,16 +470,20 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
         # A chained column over TWO statistics (normalized Q against normalized K): the bilinear
         # binder reads it with the sweep as the column axis and each side's statistic on its cone.
         folds = [s for s in body if isinstance(s, Fold)]
-        if len(folds) == 1 and folds[0].axis is not None and free:
+        if len(folds) == 1 and folds[0].axis is not None:
             n_ax = stores[0].sweep
-            r = bind_bilinear(folds[0], free[-1].name, n_ax.name, frozenset(a.name for a in free) | {n_ax.name})
+            unit_m = _unit_output_row((stores[0].write,), n_ax.name)
+            view_free = (*free, unit_m) if unit_m is not None else free
+            axes = frozenset(a.name for a in view_free) | {n_ax.name}
+            r = bind_bilinear(folds[0], view_free[-1].name, n_ax.name, axes, unit_m=unit_m is not None) if view_free else None
+            added = (unit_m, n_ax) if unit_m is not None else (n_ax,)
             if r is not None:
                 con, epi = r
                 at = body.index(folds[0])
                 tail = [*body[:at], *epi, *body[at + 1 :]]
                 from emmy.compiler.ir.tile.ir import Store  # noqa: PLC0415
 
-                return Fold.projection(body=Body(tuple(tail)), operands=(con,)), n_ax, (Store(write=stores[0].write),)
+                return Fold.projection(body=Body(tuple(tail)), operands=(con,)), added, (Store(write=stores[0].write),)
     if chain is None:
         if len(node.operands) != 1:
             return None
@@ -502,10 +524,13 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
         return None
     if not all(isinstance(s, (Load, Assign)) for s in stat_epi) or not all(isinstance(s, Assign) for s in tail):
         return None
+    unit_m = _unit_output_row(tuple(writes), n_ax.name)
+    view_free = (*free, unit_m) if unit_m is not None else free
+    added = (unit_m, n_ax) if unit_m is not None else (n_ax,)
     if stat.operands:
         if len(stat.operands) != 1 or not isinstance(stat.operands[0], Fold) or stat.operands[0].axis is None:
             return None
-        score = _bound_producer(stat.operands[0], free, stat.axis.name)
+        score = _bound_producer(stat.operands[0], view_free, stat.axis.name)
         if score is None:
             return None  # a composed score the binder cannot read — the base rows stand
         stat = replace(stat, operands=(score,))
@@ -522,7 +547,7 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     for e in fcol.operands:
         if not (isinstance(e, Fold) and e.axis is not None):
             return None
-        b = _bound_producer(e, free, k_name)
+        b = _bound_producer(e, view_free, k_name)
         if b is None:
             return None
         edges.append(b)
@@ -534,7 +559,12 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
     stat_defs = set(_operand_result_names(stat)) | {nm for s in stat_epi for nm in s.defines()}
     edge_names = frozenset(nm for e in edges for nm in _operand_result_names(e))
     bound = _bind_stat_channels(
-        fcol, n_ax.name, stat_defs, frozenset(a.name for a in free) | {n_ax.name}, edge_names, m_name=free[-1].name if free else None
+        fcol,
+        n_ax.name,
+        stat_defs,
+        frozenset(a.name for a in view_free) | {n_ax.name},
+        edge_names,
+        m_name=view_free[-1].name if view_free else None,
     )
     if bound is None:
         return None
@@ -590,7 +620,7 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
 
     projection = Body((*prefix, *tail))
     root = Fold.projection(body=projection, operands=(con,)) if projection else con
-    return root, n_ax, tuple(Store(write=w) for w in writes)
+    return root, added, tuple(Store(write=w) for w in writes)
 
 
 def _cone_value_key(name: str, defs: dict) -> tuple:
@@ -623,7 +653,7 @@ def _bound_producer(e: Fold, free: tuple, n_name: str) -> Fold | None:
     for ax in free:
         if ax.name == n_name:
             continue
-        b = bind_bilinear(e, ax.name, n_name, axes, producer=True)
+        b = bind_bilinear(e, ax.name, n_name, axes, producer=True, unit_m=ax.name == "_um" and ax.extent == Dim(1))
         if b is not None and not b[1] and isinstance(b[0].a, Load) and isinstance(b[0].b, Load):
             return b[0]  # an edge carries no projection epilogue — a hoisted producer declines
     return None
@@ -809,7 +839,14 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset, b
     return stmts
 
 
-def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset(), producer: bool = False) -> tuple[Fold, tuple] | None:
+def bind_bilinear(
+    f: Fold,
+    m_name: str,
+    n_name: str,
+    axes: frozenset = frozenset(),
+    producer: bool = False,
+    unit_m: bool = False,
+) -> tuple[Fold, tuple] | None:
     """Rebind a lifted fold as the bilinear contraction — the ONE contraction reading, off the λ
     spelling and stated on the ALGEBRAIC TRAITS, never op names: the carrier must be a product of
     ONE commutative-monoid ⊕ (associative + commutative + identity — the reassociation license
@@ -818,6 +855,8 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
     registered-semiring table; ``(multiply, add)`` is the matmul). The ⊗ args classify by their
     loads' grid-axis indexing — B is the ``(n, k)``-indexed side and never reads ``m``, A the
     mirror (role-exclusive: a load carrying both axes is neither, and the fold stays PLANAR).
+    ``unit_m`` admits an A load with no M coordinate only for the synthetic unit row proven by
+    :func:`_unit_output_row`; it must still read K and remain N-free.
     Role purity is per index EXPR (:func:`_role_pure`): another free axis may ride a separate
     dim (a batch offset), never the same expr as the role axis — the DIRECT slab loaders
     template an operand address over the bare role Var and cannot spell a composite, so it
@@ -868,8 +907,10 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
 
     def role_load(name: str, on: str, off: str) -> Load | None:
         ld = loads.get(name)
-        if ld is None or on not in _idx_vars(ld) or off in _idx_vars(ld):
+        if ld is None or off in _idx_vars(ld):
             return None
+        if on not in _idx_vars(ld):
+            return ld if unit_m and on == m_name and k_name in _idx_vars(ld) else None
         return ld if producer or _role_pure(ld, on, axes) else None
 
     # The per-channel ⊗ reads: each result's two-arg multiply, its directly-named B load (or

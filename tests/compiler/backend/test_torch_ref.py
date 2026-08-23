@@ -9,7 +9,7 @@ from emmy.compiler.backend import torch_ref
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 
@@ -191,6 +191,29 @@ def test_indexmap_cat_with_select():
     )
     g = _imap_graph([(4, 2), (4, 2)], (4, 4), (s0, s1))
     _assert_matches_numpy(g, {"in0": _rng().standard_normal((4, 2)), "in1": _rng().standard_normal((4, 2))})
+
+
+def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
+    # Insert a two-cell recurrence update into columns 1:3 of a larger carried state.
+    column = placeholder(1)
+    in_patch = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    patch_column = TernaryExpr(in_patch, column - Literal(1, "int"), Literal(0, "int"))
+    sources = (
+        IndexSource(input_idx=0, coord_map=(placeholder(0), patch_column), select=in_patch),
+        IndexSource(input_idx=1, coord_map=(placeholder(0), column)),
+    )
+    g = _imap_graph([(2, 2), (2, 4)], (2, 4), sources)
+    patch = np.array([[10, 11], [20, 21]], dtype=np.float32)
+    carried = np.arange(8, dtype=np.float32).reshape(2, 4)
+
+    _assert_matches_numpy(g, {"in0": patch, "in1": carried})
+
+
+@pytest.mark.parametrize(("condition", "expected"), [(1, 7), (0, 9)])
+def test_index_expr_ternary_preserves_scalar_condition(condition, expected):
+    expr = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
+
+    assert torch_ref._idx_expr(expr, {}) == expected
 
 
 def test_symbolic_shapes_resolve_from_input_tensors():

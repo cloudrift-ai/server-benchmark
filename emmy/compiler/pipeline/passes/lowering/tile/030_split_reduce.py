@@ -152,6 +152,13 @@ def _frag(match: Match, root: Node) -> Graph:
     return frag
 
 
+def _piece_inputs(root: Node, op: Fold, *first: str) -> list[str]:
+    """Graph edges for a minted piece: fragment-created buffers first, followed by external
+    inputs the piece actually reads. Every rendered CUDA argument must remain a registered edge."""
+    reads = {load.input for load in op.body.loads}
+    return [*first, *(inp for inp in root.inputs if inp in reads)]
+
+
 def _one(frag: Graph, root: Node, piece: LoopOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
@@ -308,7 +315,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag
 
@@ -460,6 +467,6 @@ def rewrite(match: Match, root: Node) -> Graph:
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

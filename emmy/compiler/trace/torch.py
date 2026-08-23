@@ -1508,6 +1508,44 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         node_map[name] = nid
         return
 
+    # ``triu`` / ``tril`` keep one triangular region of the last two dimensions and
+    # fill the other with zero. They are coordinate maps, not scalar elementwise
+    # functions: the diagonal selects output coordinates and is not a tensor operand.
+    if op_name in ("triu", "tril"):
+        if not input_ids:
+            raise ValueError(f"aten.{op_name} requires a resolved tensor input")
+        if len(shape) < 2:
+            raise ValueError(f"aten.{op_name} requires a tensor with at least two dimensions, got shape {shape}")
+        diagonal = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("diagonal", 0)
+        if not isinstance(diagonal, int) or isinstance(diagonal, bool):
+            raise NotImplementedError(f"aten.{op_name} requires a static integer diagonal, got {diagonal!r}")
+
+        row = placeholder(len(shape) - 2)
+        column = placeholder(len(shape) - 1)
+        boundary = row if diagonal == 0 else BinaryExpr("+", row, Literal(diagonal, "int"))
+        keep = BinaryExpr(">=", column, boundary) if op_name == "triu" else BinaryExpr("<=", column, boundary)
+        identity = tuple(placeholder(axis) for axis in range(len(shape)))
+        zero_name = f"{name}_zero"
+        zero_id = g.add_node(
+            op=ConstantOp(name=zero_name, value=False if dtype == "bool" else 0.0),
+            inputs=[],
+            output=Tensor(zero_name, (1,), dtype),
+            node_id=zero_name,
+        )
+        node_map[name] = g.add_node(
+            op=IndexMapOp(
+                out_shape=shape,
+                sources=(
+                    IndexSource(input_idx=0, coord_map=identity, select=keep),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[input_ids[0], zero_id],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        return
+
     # --- Elementwise ops ---
     # Torch's aten-level short names (``sub`` / ``mul`` / ``div`` / ``neg``)
     # get translated to numpy-style long names here so the rest of the

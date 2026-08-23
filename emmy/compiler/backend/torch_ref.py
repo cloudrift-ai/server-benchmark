@@ -270,11 +270,20 @@ def _idx_expr(e, env: dict):
     routes ``&&``/``||`` through ``np.logical_and``, which can't take a CUDA
     tensor). Falls back to ``Expr.eval`` for leaf node types that don't appear
     in coord maps."""
+    import torch  # noqa: PLC0415
+
     cls = type(e).__name__
     if cls == "Var":
         return env[e.name]
     if cls == "Literal":
         return e.value
+    if cls == "TernaryExpr":
+        cond = _idx_expr(e.cond, env)
+        if_true = _idx_expr(e.if_true, env)
+        if_false = _idx_expr(e.if_false, env)
+        if not torch.is_tensor(cond):
+            return if_true if cond else if_false
+        return torch.where(cond, if_true, if_false)
     if cls == "BinaryExpr":
         lo, ro = _idx_expr(e.left, env), _idx_expr(e.right, env)
         op = e.op

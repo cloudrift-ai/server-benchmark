@@ -690,6 +690,33 @@ def test_trace_masked_fill_lowers_to_ternary_where_and_matches_eager():
     np.testing.assert_array_equal(got, MaskedFill()(x, mask).numpy())
 
 
+def test_trace_triangular_filters_lower_to_index_maps_and_match_eager():
+    """Function and tensor triangular APIs select the last two axes and zero the rest."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class TriangularFilters(nn.Module):
+        def forward(self, x):
+            return torch.triu(x, diagonal=1), x.tril(diagonal=-1)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(TriangularFilters(), (x,))
+    triangular_maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2]
+    assert len(triangular_maps) == 2
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    with torch.no_grad():
+        expected = TriangularFilters()(x)
+    for got, want in zip(result.outputs.values(), expected, strict=True):
+        np.testing.assert_array_equal(got, want.numpy())
+
+
 def test_trace_transpose():
     """aten.transpose traces to TransposeOp."""
     import torch

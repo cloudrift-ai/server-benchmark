@@ -28,7 +28,10 @@ the allocation's FX name versions sequential slice writes and later aliases buil
 leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
 or a view created before the write still fails closed; those forms need general alias versioning rather than this local
 functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
-instead of becoming NaN through arithmetic selection.
+instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over
+the last two axes: the selected triangular region reads the input and the complement reads a scalar zero. The
+diagonal must be a static integer; tensor-valued or symbolic diagonals fail closed instead of becoming broadcast
+elementwise operands.
 
 A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
 `fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step

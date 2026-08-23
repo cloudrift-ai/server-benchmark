@@ -17,13 +17,13 @@ from emmy.planner.variant import Variant
 logger = logging.getLogger(__name__)
 
 
-def _local_result_name(variant: str, rel: str) -> str:
+def _local_result_name(file_stem: str, rel: str) -> str:
     """Local filename for a pulled result file, from its task_dir-relative path.
 
     Two patterns pulling same-named files from different subdirs (std/*, fm/*)
     must not collide, so subdir separators join the name with underscores.
     """
-    return f"{variant}_{rel.replace('/', '_')}"
+    return f"{file_stem}_{rel.replace('/', '_')}"
 
 
 def _leaf_name(key: str) -> str:
@@ -162,7 +162,7 @@ async def run_command_workload(
             rel_paths = [pattern]
 
         for rel in rel_paths:
-            local_path = task.run_dir / _local_result_name(task.variant, rel)
+            local_path = task.run_dir / _local_result_name(task.file_stem, rel)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
             if rc_scp != 0:

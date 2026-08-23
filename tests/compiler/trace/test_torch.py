@@ -611,6 +611,91 @@ def test_trace_rejects_noninteger_arange():
         trace_module(FloatRange(), (torch.randn(4),))
 
 
+@pytest.mark.parametrize(("shape", "dtype"), [((4, 4), "float32"), ((3, 5), "float16")])
+def test_trace_static_eye_uses_index_map_and_matches_eager(shape, dtype):
+    """Eye is a diagonal coordinate map with typed scalar sources, not an elementwise function."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Eye(nn.Module):
+        def forward(self, x):
+            if x.shape[0] == x.shape[1]:
+                return x + torch.eye(x.shape[0], dtype=x.dtype, device=x.device)
+            return x + torch.eye(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
+
+    x = torch.zeros(shape, dtype=getattr(torch, dtype))
+    graph = trace_module(Eye(), (x,))
+    eye_maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2]
+    assert len(eye_maps) == 1
+    assert not any(isinstance(node.op, ElementwiseOp) and node.op.fn == "eye" for node in graph.nodes.values())
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    expected = Eye()(x)
+    assert got.dtype == expected.numpy().dtype
+    np.testing.assert_array_equal(got, expected.numpy())
+
+
+def test_trace_eye_rejects_symbolic_dimensions():
+    """Dynamic eye extents cannot be serialized as static IndexMap output dimensions."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class DynamicEye(nn.Module):
+        def forward(self, x):
+            return torch.eye(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
+
+    rows = torch.export.Dim("rows", min=2, max=8)
+    columns = torch.export.Dim("columns", min=2, max=8)
+    with pytest.raises(NotImplementedError, match="static integer dimensions"):
+        trace_module(
+            DynamicEye(),
+            (torch.randn(3, 5),),
+            dynamic_shapes={"x": {0: rows, 1: columns}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("target_name", "kwargs", "message"),
+    [
+        ("default", {"layout": "sparse"}, "strided layout"),
+        ("default", {"pin_memory": True}, "pinned-memory"),
+        ("default", {"requires_grad": True}, "unsupported keyword arguments"),
+        ("out", {}, "unsupported aten.eye overload"),
+    ],
+)
+def test_trace_eye_rejects_unrepresented_constructor_semantics(target_name, kwargs, message):
+    """Eye options without stable tensor-IR fields fail before any invalid node is added."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.trace.torch import _handle_call_function
+
+    if kwargs.get("layout") == "sparse":
+        kwargs = {"layout": torch.sparse_coo}
+    fx_node = SimpleNamespace(
+        target=getattr(torch.ops.aten.eye, target_name),
+        args=(3,),
+        kwargs=kwargs,
+        meta={"val": torch.empty((3, 3))},
+        name="eye",
+    )
+    graph = Graph()
+    with pytest.raises(NotImplementedError, match=message):
+        _handle_call_function(graph, fx_node, {})
+    assert not graph.nodes
+
+
 def test_trace_reassembles_ling_mtp_roll_select_fill_observed_through_base():
     """Ling's exact MTP token shift versions the rolled base through its selected view."""
     import numpy as np

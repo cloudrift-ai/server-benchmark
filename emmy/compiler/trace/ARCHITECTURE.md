@@ -42,6 +42,11 @@ fail closed.
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
 
+Static rank-two `eye` lowers to a two-source `IndexMapOp`: output coordinates select a typed scalar one on the
+diagonal and a typed scalar zero everywhere else. Square and rectangular dimensions must be static integers and match
+the exported tensor metadata. Dynamic dimensions, non-strided layouts, pinned memory, and unsupported overloads or
+constructor options fail closed rather than being stored as an elementwise operation without coordinate semantics.
+
 An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad")` identity so a working golden
 retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
 closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.

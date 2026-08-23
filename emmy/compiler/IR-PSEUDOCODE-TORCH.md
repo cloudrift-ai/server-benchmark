@@ -309,7 +309,7 @@ The following section presents `emmy::` helpers in more detail.
 
 ### The `emmy::` helpers
 
-Written as definitions in the same pseudocode, with three conventions.
+Each one below is written as a definition in the same pseudocode, under three conventions.
 
 `T` and `U` are element types. A shape is one const parameter holding all the axis sizes —
 `const d: usize[rank]` — so a definition can index it (`d[axis]`), slice it (`d[0..axis]`) and join pieces
@@ -321,33 +321,47 @@ coordinates before the axis, and `i[0..axis] ++ [v] ++ i[axis+1..rank]` is `i` w
 replaced by `v`. An index *tensor* holds `i64`, the dtype a traced index carries; splicing one of its values
 into an index vector converts it.
 
+#### `emmy::tensor_from_fn`
+
+Builds a tensor from a function of its indices. The closure takes one index vector; a printed line names its
+components instead, `|i, j, k|` for rank three, which is why rank six is the limit — the printer has six index
+names.
+
 ```rust
-// Build a tensor from a function of its indices. The closure takes one index
-// vector; a printed line names its components instead, `|i, j, k|` for rank three,
-// which is why rank six is the limit — the printer has six index names.
 fn emmy::tensor_from_fn<T, const rank: usize, const d: usize[rank]>(f: |usize[rank]| -> T) -> T[d]
     // produces the tensor whose element at i is f(i), for every index i with
     // i[k] < d[k]
+```
 
-// A dtype change. No node computes it: the declared result type is the whole
-// operation, and the backend converts when it materializes that type. The values
-// can still change, since a narrowing conversion rounds.
+#### `emmy::cast`
+
+A dtype change. No node computes it: the declared result type is the whole operation, and the backend converts
+when it materializes that type. The values can still change, since a narrowing conversion rounds.
+
+```rust
 fn emmy::cast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
+```
 
-// Reinterpret each element's bits as another type of the same width.
+#### `emmy::bitcast`
+
+Reinterprets each element's bits as another type of the same width.
+
+```rust
 fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
     where size_of::<U>() == size_of::<T>()
+```
 
-// One graph node covers the next two, and the operand shapes decide which: the
-// per-element reading applies when `idx` matches `data` in rank and in every axis
-// but `axis`, and the slice lookup applies otherwise.
+#### `emmy::gather`
 
-// Pick one element per output position. `idx` has the result's shape, and each of
-// its entries says which position along `axis` that one output element reads; the
-// other coordinates come from the output position itself. Close to torch's
-// `gather`, but not the same: torch allows `idx` to be smaller than `data` on the
-// axes it does not gather, while this requires them equal. A narrower index is a
-// legal `torch.gather` that prints — and computes — as `emmy::gather_by_axis`.
+Picks one element per output position. `idx` has the result's shape, and each of its entries says which
+position along `axis` that one output element reads; the other coordinates come from the output position
+itself.
+
+Close to torch's `gather`, but not the same: torch allows `idx` to be smaller than `data` on the axes it does
+not gather, while this requires them equal. A narrower index is a legal `torch.gather` that prints — and
+computes — as `emmy::gather_by_axis`.
+
+```rust
 fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]>(
     data: T[d],
     idx: i64[e],
@@ -356,10 +370,15 @@ fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]
     where e[k] == d[k] for every k != axis
     // produces the tensor whose element at i is
     // data[i[0..axis] ++ [idx[i]] ++ i[axis+1..rank]]
+```
 
-// Look up whole slices by index. Each entry of `idx` names a position along `axis`,
-// and the slice of `data` sitting there is copied out; `idx`'s own axes take the
-// place of `axis`. A token embedding is this: one row of a table per token id.
+#### `emmy::gather_by_axis`
+
+Looks up whole slices by index. Each entry of `idx` names a position along `axis`, and the slice of `data`
+sitting there is copied out; `idx`'s own axes take the place of `axis`. A token embedding is this: one row of a
+table per token id.
+
+```rust
 fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize[rank], const e: usize[irank]>(
     data: T[d],
     idx: i64[e],
@@ -368,25 +387,35 @@ fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize
     // produces the tensor whose element at i, writing j for the index tensor's own
     // coordinates i[axis..axis+irank], is
     // data[i[0..axis] ++ [idx[j]] ++ i[axis+irank..rank+irank-1]]
+```
 
-// A reindexing the builder above cannot hold: no source, several sources, a
-// selection deciding which source feeds which output position, or rank above six.
-// A printed call lists the operand tensors; the coordinate map that pairs each one
-// with the output index, and the condition under which it supplies a position, stay
-// inside the node.
+#### `emmy::index_map`
+
+A reindexing `emmy::tensor_from_fn` cannot hold: no source, several sources, a selection deciding which source
+feeds which output position, or rank above six. A printed call lists the operand tensors; the coordinate map
+that pairs each one with the output index, and the condition under which it supplies a position, stay inside
+the node.
+
+```rust
 fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: [tensor]) -> T[d]
+```
 
-// Decode or encode a narrow float format, element by element. Unlike `cast`, these
-// have a real implementation behind them (`emmy/compiler/ir/elementwise.py`).
+#### `emmy::scalar::*`
+
+Functions on one number, applied to every element. Unlike `cast`, these have a real implementation behind them,
+in `emmy/compiler/ir/elementwise.py`.
+
+```rust
 fn emmy::scalar::from_f8e4m3<const rank: usize, const d: usize[rank]>(x: f8e4m3[d]) -> f32[d]
 fn emmy::scalar::to_f8e4m3<const rank: usize, const d: usize[rank]>(x: f32[d]) -> f8e4m3[d]
 ```
 
-`emmy::const_eval()` and `emmy::input_data()` are not operations. They stand for where a constant's value comes
-from and appear only on the right of a module-level binding. `const_eval` means the loader computes the value
-by running a small graph — a chain of layout operations over other constants that folding collapsed into one.
-`input_data` means the constant has no value and no address at all, so whoever runs the graph must supply it by
-name.
+#### `emmy::const_eval` and `emmy::input_data`
+
+Not operations. They stand for where a constant's value comes from, and appear only on the right of a binding
+in the constants block. `const_eval` means the loader computes the value by running a small graph — a chain of
+layout operations over other constants that folding collapsed into one. `input_data` means the constant has no
+value and no address at all, so whoever runs the graph must supply it by name.
 
 ### Reading `emmy::tensor_from_fn`
 

@@ -483,6 +483,10 @@ node must rename its body `Write.output` to match (`fusion/_helpers.py::rename_w
 Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops`
 — `compile -vv` shows which pattern a rejected edge hit.
 
+Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
+live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
+global cache would require; the memo is discarded with the splicer.
+
 ### `loop/runner.py` — C++ JIT executor
 
 `execute_loop_op_cpp(loop, input_arrays, out_shape) → ndarray` renders the

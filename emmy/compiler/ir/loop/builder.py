@@ -26,17 +26,20 @@ class LoopBuilder:
     def __init__(self, used_names: set[str]) -> None:
         self._body: Body = ()
         self._used: set[str] = set(used_names)
+        self._next_suffix: dict[str, int] = {}
 
     def fresh(self, hint: str) -> str:
         """Return an unused name derived from ``hint`` and reserve it."""
         if hint not in self._used:
             self._used.add(hint)
+            self._next_suffix[hint] = 1
             return hint
-        i = 1
+        i = self._next_suffix.get(hint, 1)
         while f"{hint}_s{i}" in self._used:
             i += 1
         name = f"{hint}_s{i}"
         self._used.add(name)
+        self._next_suffix[hint] = i + 1
         return name
 
     def insert(self, stmt: Stmt, enclosure: Scope) -> None:

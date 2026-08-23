@@ -142,6 +142,8 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
     reuse_pieces = _recognized_reuse_pieces(merged)
+    if reuse_pieces is None and any(_recognized_reuse_pieces(graph.nodes[node_id].op) is not None for node_id in region):
+        raise RuleSkipped("merge destroys a recognized grouped placement inverse")
     if _nests_reduce(merged) and not any(_nests_reduce(graph.nodes[node_id].op) for node_id in region) and reuse_pieces is None:
         raise RuleSkipped("merge nests a reduce loop inside a reduce loop — an unreadable seam (raw-loop escape only)")
     if (

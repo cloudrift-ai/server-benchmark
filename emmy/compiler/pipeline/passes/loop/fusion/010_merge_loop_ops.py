@@ -23,7 +23,8 @@ one streaming loop) — other shapes fall to the raw-loop escape downstream (no 
 recognition may prove two alpha-equivalent computed edges reconstruct one producer through a
 grouped placement cut; the fused cell and that materialized form remain priced siblings. The same
 witness makes the work bound count the child once plus its parent instead of the raw duplicated
-spelling. Otherwise ``_total_work`` sums the enclosing free×reduce iteration count of every
+spelling. A later merge may preserve that witness, but never consume it and leave no placement
+inverse for evidence to price. Otherwise ``_total_work`` sums the enclosing free×reduce iteration count of every
 compute leaf, and a merge that grows it by more than ``_BLOWUP_FACTOR`` is refused. That bound is
 what keeps the downstream problem finite, not a
 performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest

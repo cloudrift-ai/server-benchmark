@@ -737,7 +737,9 @@ so same-shaped computations over different values never alias; a class with more
 The one producer writes a common workspace, while each replacement `Load` retains its member's contextual index axes.
 This grouped inverse is also fusion's boundedness witness: a nested-reduce or multi-statistic merge it recognizes is
 counted as child-once + parent rather than by the duplicated raw-loop spelling, and placement keeps that materialized
-form beside the fused form for evidence to price. A piece is a RAW loop body: the tree's λ-local SSA names flatten
+form beside the fused form for evidence to price. A later merge must preserve that witness; destroying it would make
+the already-admissible materialized sibling disappear and leave evidence unable to recover the prior kernel boundary.
+A piece is a RAW loop body: the tree's λ-local SSA names flatten
 into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused
 reading's store-side prefix, which re-evaluates the tail's stat-free cone stmts beside the statistic prologue — is

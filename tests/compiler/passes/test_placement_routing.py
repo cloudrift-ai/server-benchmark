@@ -203,7 +203,7 @@ def test_grouped_cut_rejects_more_than_two_equivalent_uses() -> None:
     assert not [cut for cut in cuts if len(cut.members) > 1]
 
 
-def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides() -> None:
+def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides(monkeypatch) -> None:
     """The fused cell and its two-kernel inverse are structural siblings.
 
     The inverse materializes one score producer. Its two contextual uses retain distinct
@@ -213,13 +213,28 @@ def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides() -> None:
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.loop.fusion import _merge
 
+    grouped_over_limit: list[tuple[int, int]] = []
+    original = _merge._build_merged_region
+
+    def tracked(graph, region, sink, *, max_work=None):
+        merged = original(graph, region, sink, max_work=max_work)
+        if merged is not None and max_work is None and _merge._recognized_reuse_pieces(merged) is not None:
+            pre_work = sum(_merge._total_work(graph.nodes[node_id].op) for node_id in region)
+            raw_work = _merge._total_work(merged)
+            if raw_work > 8 * pre_work:
+                grouped_over_limit.append((pre_work, raw_work))
+        return merged
+
+    monkeypatch.setattr(_merge, "_build_merged_region", tracked)
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
     )["graph"]
     fused = Pipeline.build(LOOP_PASSES).run(graph)
     loop_nodes = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loop_nodes) == 1, "recognized reuse must admit the whole fused Loop-IR cell"
+    assert grouped_over_limit, "the grouped score inverse must bypass the ordinary raw-work limit"
 
     captured: list = []
 

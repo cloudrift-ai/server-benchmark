@@ -129,6 +129,53 @@ def _recognized_reuse_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
     return reusable_cut_pieces(loop_op)
 
 
+def _may_need_grouped_reuse(graph: Graph, region: set[str], sink: Node) -> bool:
+    """Whether construction may expose or preserve a grouped placement inverse.
+
+    A new grouped placement shares one additive contraction at exactly two distinct coordinate
+    demands. Everything between that producer and the sink is linear: only the producer fans out,
+    only the sink joins, and every intermediate has one coordinate demand. A merge that extends
+    one already-recognized inverse is eligible only along a single linear path. The post-build
+    recognizer remains the authoritative witness in both cases.
+    """
+    parents = {node_id: set() for node_id in region}
+    users = {node_id: set() for node_id in region}
+    demands: dict[str, list[tuple]] = {node_id: [] for node_id in region}
+    for consumer_id in region:
+        for load in graph.nodes[consumer_id].op.body.loads:
+            if load.input in region:
+                parents[consumer_id].add(load.input)
+                users[load.input].add(consumer_id)
+                if not any(load.index == existing for existing in demands[load.input]):
+                    demands[load.input].append(load.index)
+
+    sources = [node_id for node_id in region if not parents[node_id]]
+    if len(sources) != 1:
+        return False
+    source = sources[0]
+
+    linear = all(
+        (not parents[node_id] and len(users[node_id]) == 1 and len(demands[node_id]) == 1)
+        if node_id == source
+        else (len(parents[node_id]) == 1 and not users[node_id])
+        if node_id == sink.id
+        else (len(parents[node_id]) == 1 and len(users[node_id]) == 1 and len(demands[node_id]) == 1)
+        for node_id in region
+    )
+    if linear and any(_recognized_reuse_pieces(graph.nodes[node_id].op) is not None for node_id in region):
+        return True
+
+    accums = [stmt for stmt in graph.nodes[source].op.body.iter() if isinstance(stmt, Accum)]
+    if len(accums) != 1 or accums[0].op.reduce_canon != "add" or _nests_reduce(graph.nodes[source].op):
+        return False
+    if len(demands[source]) != 2:
+        return False
+    for node_id in region - {source, sink.id}:
+        if len(parents[node_id]) != 1 or len(users[node_id]) != 1 or len(demands[node_id]) != 1:
+            return False
+    return not users[sink.id]
+
+
 def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     """Splice an owned one- or multi-consumer region, capped only by compute growth.
 
@@ -138,7 +185,9 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
     if any("__cut_" in node_id for node_id in region - {sink.id}):
         raise RuleSkipped("region crosses a decided placement cut")
 
-    merged = _build_merged_region(graph, region, sink)
+    pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
+    construction_limit = None if _may_need_grouped_reuse(graph, region, sink) else _BLOWUP_FACTOR * pre_work
+    merged = _build_merged_region(graph, region, sink, max_work=construction_limit)
     if merged is None:
         raise RuleSkipped("N-way Loop splicer rejected the region")
     reuse_pieces = _recognized_reuse_pieces(merged)
@@ -157,7 +206,6 @@ def merge_region(match: Match, region: set[str], sink: Node) -> Graph:
         # expectation channels the pairing joins). A merge that entangles the pair with any
         # other tail produces a cell recognition keeps as the raw-loop escape.
         raise RuleSkipped("merge entangles a multi-statistic compound — an unreadable seam")
-    pre_work = sum(_total_work(graph.nodes[node_id].op) for node_id in region)
     post_work = _total_work(merged)
     if reuse_pieces is not None:
         # Raw Loop IR spells the equal producer once at each demand site and may nest one copy

@@ -218,10 +218,13 @@ def test_spell_2d_block_interleaved_reshape_pair(tmp_path):
     assert any(isinstance(lop, ReshapeOp) for lop in scale_node.op.load_ops)
 
 
-def test_spell_inverse_scale_divides(tmp_path):
+def test_spell_scale_inv_multiplies(tmp_path):
+    """DeepSeek's ``weight_scale_inv`` names the dequant MULTIPLIER (the inverse of the
+    quantization scale), not a reciprocal to divide by — ``q * s``, as its own ``weight_dequant``
+    and vLLM's block-fp8 path compute it."""
     g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1), inverse=True)
     names = [n.op.op.name for n in _ops_by_type(g, ElementwiseOp)]
-    assert "divide" in names and "multiply" not in names
+    assert "multiply" in names and "divide" not in names
 
 
 def test_spell_e5m2_selects_its_cast(tmp_path):
@@ -475,7 +478,9 @@ def _torch_ref(bits, scale_np, *, fmt="f8e4m3", inverse=False):
         s = s.reshape(())
     else:
         s = np.repeat(np.repeat(s, vals.shape[0] // s.shape[0], axis=0), vals.shape[1] // s.shape[1], axis=1)
-    return vals / s if inverse else vals * s
+    # ``inverse`` selects the ``weight_scale_inv`` key; the stored value is the multiplier either way.
+    del inverse
+    return vals * s
 
 
 def _run_spelled(graph: Graph, model_dir: str) -> np.ndarray:

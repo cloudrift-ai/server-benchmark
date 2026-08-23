@@ -784,25 +784,30 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     A cross-CTA split is offered here only in COMPOSITE with the transposed band — every split
     candidate in the catalog is one, so the loop below states the catalog's shape rather than
     adding a rule."""
-    pin = term.pin("REDUCE", node)
-    if pin is not None:
-        return [_consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
-    extent = _hint_extent(node.axis)
-    cands = [ReducePlan()]
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
+
+    def band_legal(p: ReducePlan, *, pinned: bool) -> bool:
+        # The transposed band's own requirements: the geometry (shared with the contraction tier)
+        # plus this tier's epilogue condition. A pin meets the same test, as a refusal.
+        if not p.coop_transposed:
+            return True
+        return legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=pinned) and legal.enforce(epilogue, pinned=pinned)
+
+    pin = term.pin("REDUCE", node)
+    if pin is not None:
+        plan = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        band_legal(plan, pinned=True)
+        return [plan]
+    extent = _hint_extent(node.axis)
+    cands = [ReducePlan()]
     for p in coop_reduce_moves():
         if p.needs_split and not _splittable_axis(term, node):
             continue  # the axis is already a slice — its cross-CTA partition was consumed
-        if p.coop_transposed:
-            # The band's own requirements: the geometry (shared with the contraction tier) plus
-            # this tier's epilogue condition.
-            if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
-                continue
-            if not legal.enforce(epilogue, pinned=False):
-                continue
+        if not band_legal(p, pinned=False):
+            continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
     return cands
@@ -824,10 +829,17 @@ def _fill_realized(parent: _Node | None, site: Site) -> bool:
     prologue stripes a cone's statistic ONE ROW PER WARP, the warp's 32 lanes striding the fold and
     closing it on the shuffle butterfly (``lowering/kernel/_stage.sync_stat_fill``) — a single
     hardwired partition, so any value here would stamp a knob no kernel realizes."""
-    if parent is None or not is_contraction(parent.site.node) or isinstance(parent.site.node.a, Load):
+    if parent is None or not is_contraction(parent.site.node):
         return False
     depth = len(parent.site.segments)
-    return len(site.segments) > depth and site.segments[depth] == "a"
+    if len(site.segments) <= depth:
+        return False
+    role = site.segments[depth]
+    if role == "a":
+        return not isinstance(parent.site.node.a, Load)
+    # A computed B CONE (a zero-axis projection) is evaluated by the same fill per slab cell, its
+    # statistic with it; an inline B fold WITH an axis is a real nested schedule site.
+    return role == "b" and all(isinstance(ch.b, Fold) and ch.b.axis is None for ch in parent.site.node.channels if isinstance(ch.b, Fold))
 
 
 def _band_of(plan: ReducePlan) -> Workers | None:
@@ -968,6 +980,9 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     pin = term.pin("REDUCE", node)
     if pin is not None:
         pinned = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        ext = node.axis.extent
+        # A pin meets the transposed band's geometry as a refusal, not an emitter crash.
+        legal.enforce(legal.coop_band_geometry(pinned, ext.as_static() if ext.is_static else None, _inner_free(term.place)), pinned=True)
         if pinned.needs_split:
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:

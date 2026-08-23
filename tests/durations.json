@@ -212,6 +212,7 @@
  "tests/compiler/passes/test_online_softmax_channels.py::test_fill_decline_names_the_gate_it_actually_hit": 8.5,
  "tests/compiler/passes/test_online_softmax_channels.py::test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring": 9.1,
  "tests/compiler/passes/test_online_softmax_channels.py::test_twisted_statistic_contraction_realizes_the_warp_tier": 1.93,
+ "tests/compiler/passes/test_placement_routing.py::test_contraction_operand_seam_takes_the_output_dtype": 14.78,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade": 5.05,
  "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[flash_pair]": 1.26,
  "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[fused_norm_linear]": 1.65,

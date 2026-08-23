@@ -368,6 +368,28 @@ def demoted_chain(op):
     return Fold.projection(operands=tuple(operands), body=Body(tuple(body)))
 
 
+def _split_chain(edge: Fold, a_cone: list, b_cone: list):
+    """Partition a chain edge between the two cones that read it: each side takes the backward
+    cone (within the edge body) of the edge results it reads, plus the ONE statistic fold those
+    stmts read. ``None`` when a side needs two statistics or the sides share one."""
+    from emmy.compiler.ir.pure.fold import deep_reads as _dr  # noqa: PLC0415
+
+    results = set(edge.lift.results)
+    by_state = {n: e for e in edge.operands if isinstance(e, Fold) for n in (e.combine.results if e.combine is not None else ())}
+    out = []
+    taken: set[int] = set()
+    for cone in (a_cone, b_cone):
+        needs = _dr(cone) & results
+        members = list(Body(tuple(edge.body)).backward_cone(sorted(needs)).members) if needs else []
+        stats = {id(by_state[n]): by_state[n] for s in (*members,) for n in s.deps() if n in by_state}
+        stats.update({id(by_state[n]): by_state[n] for n in needs if n in by_state})
+        if len(stats) > 1 or any(i in taken for i in stats):
+            return None
+        taken |= set(stats)
+        out.append((next(iter(stats.values()), None), members))
+    return out[0], out[1]
+
+
 def _unchain(col: Fold) -> tuple[Fold, Fold | None]:
     """``col`` with its one zero-axis projection edge detached — the column fold as it read before
     root formation closed it (its λ reading the edge's results as free names) — and that edge."""
@@ -426,6 +448,20 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
                 at = body.index(folds[0])
                 chain = (chain[0], [*body[:at], *chain[1]], chain[2])
                 body = body[at + 1 :]
+    if chain is None and not node.operands and len(stores) == 1 and stores[0].sweep is not None:
+        # A chained column over TWO statistics (normalized Q against normalized K): the bilinear
+        # binder reads it with the sweep as the column axis and each side's statistic on its cone.
+        folds = [s for s in body if isinstance(s, Fold)]
+        if len(folds) == 1 and folds[0].axis is not None and free:
+            n_ax = stores[0].sweep
+            r = bind_bilinear(folds[0], free[-1].name, n_ax.name, frozenset(a.name for a in free) | {n_ax.name})
+            if r is not None:
+                con, epi = r
+                at = body.index(folds[0])
+                tail = [*body[:at], *epi, *body[at + 1 :]]
+                from emmy.compiler.ir.tile.ir import Store  # noqa: PLC0415
+
+                return Fold.projection(body=Body(tuple(tail)), operands=(con,)), n_ax, (Store(write=stores[0].write),)
     if chain is None:
         if len(node.operands) != 1:
             return None
@@ -530,6 +566,13 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
             if id(st) not in seen:
                 seen.add(id(st))
                 prefix.append(st)
+    # The prefix RE-EVALUATES cone stmts on the store side, so it is a second spelling of their
+    # names: α-renamed (``__p``), as the chain formation spells a shared member, so a piece that
+    # flattens both sides into one scope (a PLACE cut's parent) never defines a name twice.
+    rename = {nm: f"{nm}__p" for st in prefix for nm in st.defines()}
+    ren = lambda n: rename.get(n, n)  # noqa: E731
+    prefix = [st.rewrite(ren) for st in prefix]
+    tail = [st.rewrite(ren) for st in tail]
     # A combine tail projects the channels to ONE value, so it stores once; with no tail every
     # fold's accumulator is stored raw, each exactly once (the split partial's slot-per-channel).
     stored = sorted(tuple(w.values) for w in writes)
@@ -796,18 +839,22 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
     if f.axis is None or f.combine is None:
         return None
     stat = sweep = None
+    edge = None
     bound_values: frozenset = frozenset()
     if f.operands:
-        # The CHAIN form: root formation closed this fold over a statistic's projected epilogue
-        # through one projection edge. Bind the bare fold and hang the statistic + epilogue on
-        # the computed-A cone as its source (``make_cone(stat=…)``) — the one reading the
-        # demoted-loop form reached only through ``fused_view``.
-        chain = _chained_column(f)
-        if chain is None:
+        # The CHAIN form: root formation closed this fold over the values it reads through one
+        # projection edge (a statistic's projected epilogue, or two of them — one per side).
+        # Bind the bare fold and hang each side's statistic + epilogue on that side's cone as
+        # its source (``make_cone(stat=…)``) — the reading the demoted-loop form reached only
+        # through ``fused_view``.
+        chain = _chained_column(f)  # one statistic: its cone source; two: split per side below
+        bare, edge = _unchain(f)
+        if edge is None or any(isinstance(e, Fold) and e.axis is None for e in bare.operands):
             return None  # a fold composing other producers — another stage's shape
-        stat, sweep, _ = chain
-        f, edge = _unchain(f)
-        bound_values = frozenset(edge.lift.results)  # the edge's results — row-invariant values the cone may read
+        f = bare
+        bound_values = frozenset(edge.lift.results)  # the edge's results — row-invariant values the cones may read
+        if chain is not None:
+            stat, sweep, _ = chain
     ops = component_ops(f.combine)
     if ops is None or len(set(ops)) != 1:
         return None  # the carrier is not a product of ONE ⊕ monoid
@@ -914,8 +961,38 @@ def bind_bilinear(f: Fold, m_name: str, n_name: str, axes: frozenset = frozenset
             return None
         consumed.update(id(s) for s in cone)
         b_edges = [Fold.projection(body=Body(tuple(cone)))]
+    elif edge is not None and len(reads) == 1:
+        # Both sides computed over a chained edge — attention's normalized Q and normalized K,
+        # each side's cone reading its own statistic's projected scale. Each cone hangs its
+        # statistic + epilogue as its source; the fill evaluates a computed B per slab cell,
+        # and the ``b`` seam is the cut that materializes the normalized keys.
+        h = hoisted()
+        if h is not None:
+            return h
+        lift = reads[0][0]
+        other = next(a for a in lift.args if a != a_arg)
+        # Which ⊗ argument is the row side is a property of the cones' indices, not of the
+        # argument order: try the lift's order, then the swap.
+        rest = [s for s in body if id(s) not in consumed]
+        a_cone = b_cone = None
+        for a_try, b_try in ((a_arg, other), (other, a_arg)):
+            a_cone = _cone(rest, a_try, n_name, k_name, axes, bound_values)
+            b_cone = _cone(rest, b_try, m_name, k_name, axes, bound_values)
+            if a_cone is not None and b_cone is not None:
+                break
+        if a_cone is None or b_cone is None:
+            return None
+        split = _split_chain(edge, a_cone, b_cone)
+        if split is None:
+            return None
+        (a_stat, a_epi), (b_stat, b_epi) = split
+        consumed.update(id(s) for s in a_cone)
+        consumed.update(id(s) for s in b_cone)
+        a_edge = make_cone(a_cone, k_name, stat=a_stat, sweep=tuple(a_epi))
+        b_edges = [make_cone(b_cone, k_name, stat=b_stat, sweep=tuple(b_epi))]
     else:
-        # Both sides computed — the W8A8 double-decode pair binds through the mul-hoist alone.
+        # Both sides computed with no chain — the W8A8 double-decode pair binds through the
+        # mul-hoist alone.
         return hoisted()
     if any(id(s) not in consumed for s in body):
         return None  # an unaccounted λ stmt — a shape this binding does not understand

@@ -36,6 +36,7 @@ from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
@@ -150,6 +151,21 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> t
     return None, None
 
 
+def _is_contraction_operand(root, child) -> bool:
+    """Whether ``child`` is the ``a`` edge or a channel's ``b`` edge of some contraction in the tree."""
+    from emmy.compiler.ir.pure.fold import is_contraction  # noqa: PLC0415
+
+    def walk(node) -> bool:
+        if not isinstance(node, Fold):
+            return False
+        if is_contraction(node) and (node.a is child or any(ch.b is child for ch in node.channels)):
+            return True
+        members = (*node.operands, *(m for m in node.body if isinstance(m, Fold))) if node.axis is None else node.operands
+        return any(walk(e) for e in members if isinstance(e, Fold))
+
+    return walk(root)
+
+
 def _child_axes(child, free: tuple, ancestors: tuple) -> list[Axis]:
     """The seam value's index space — the enclosing iteration axes the child's lowered body
     reads (its own bound axes excluded), in enclosing order: the parent placement's free axes,
@@ -247,8 +263,15 @@ def _ws_dtype(child, inputs: dict):
     # stored through an ``int*`` workspace: every decoded weight rounded to an integer, a
     # whole-model ``max_diff`` of 0.27 against a 0.005 gate. Only an explicit declared dtype (the
     # branch above) may make a seam integer.
-    for st in lowered:
-        for ld in Body((st,)).loads:
+    # The seam holds what the fused form's operand slab would have stored: the TENSOR the cone
+    # reads (an indexed load), not a scalar constant it also reads — a normalize cone's eps /
+    # count constants are f32 scalars beside f16 activations, and typing the seam off them
+    # makes an f32 B operand no warp atom can copy into its slab.
+    loads = [ld for st in lowered for ld in Body((st,)).loads]
+    for indexed in (True, False):
+        for ld in loads:
+            if bool(any(e.free_vars() for e in ld.index or ())) != indexed:
+                continue
             t = (inputs or {}).get(ld.input)
             if t is not None and np.issubdtype(t.dtype.np, np.floating):
                 return t.dtype
@@ -295,20 +318,30 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     axes = _child_axes(child, (*free, *sweeps), anc)
     ws_index = tuple(Var(a.name) for a in axes)
     ws_dtype = _ws_dtype(child, getattr(root.op, "inputs", None) or {})
+    if _is_contraction_operand(tile_op, child) and out.dtype.nbytes == 2:
+        # A seam standing in for a CONTRACTION OPERAND holds what the fused form's operand slab
+        # stored: the fill rounds a computed operand to the atom's 16-bit element on the slab
+        # store, so the materialized operand takes the contraction's 16-bit output dtype — the
+        # same numerics, and a B slab the warp atoms can copy (only ``a`` has a converting fill).
+        ws_dtype = out.dtype
     spelled = spell(tile_op, "PLACE", child, all_sites=sites(tile_op))
     logger.info("placement: cutting %s (%s → %s + residue) on %s", spelled, root.id, ws, out.name)
 
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
     child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
-    child_op = LoopOp(body=Body(tuple(child_body)))
+    child_op = LoopOp(body=rename_ssa_sequential(Body(tuple(child_body))))
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
     parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
-    parent_op = LoopOp(body=Body(tuple(parent_body)))
+    # A piece is a RAW loop body: the tree's λ-local SSA names (each lift names its own loads
+    # ``in0``…) flatten into one scope, where a name two λs share collides. Canonical sequential
+    # names make the flattened body a valid single-scope program; the re-recognition lifts and
+    # renames the piece again, so nothing downstream reads these names.
+    parent_op = LoopOp(body=rename_ssa_sequential(Body(tuple(parent_body))))
 
     frag = Graph()
     for inp in root.inputs:

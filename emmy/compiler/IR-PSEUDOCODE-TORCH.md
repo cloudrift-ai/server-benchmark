@@ -223,31 +223,6 @@ becomes one more `let`; and the tail expression builds `Outputs`. An input is re
 `linear(mul_1, p_attn_q_proj_weight, has_bias=False)`, `reshape(x, shape=(1, 512, -1))`. A `-1` inside `shape=`
 is the request the trace captured; the declared type on the left shows the extent it resolved to.
 
-## Wut
-
-Wut:
-
-When `EMMY_DUMP_DIR` dumps a later stage, whose nodes hold whole statement trees, an operation prints its own
-body instead:
-
-```rust
-  let linear: f32[4,16]
-      = loop(inputs.x1, inputs.x0) {
-        for a0 in 0..4
-            for a1 in 0..16
-                for a2 in 0..64
-                    in0 = load x1[a1, a2]
-                    in1 = load x0[a0, a2]
-                    v0 = multiply(in0, in1)
-                    acc0 <- add(acc0, v0)
-                linear[a0, a1] = acc0
-  };
-```
-
-Wut:
-
-`acc0 <- add(acc0, v0)` is that dialect's accumulate, not an assignment this notation defines.
-
 ## Where a constant's value comes from
 
 | Right-hand side | Meaning |

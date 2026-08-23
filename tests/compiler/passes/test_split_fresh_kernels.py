@@ -25,6 +25,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
@@ -62,6 +63,21 @@ def test_the_split_returns_two_kernels(monkeypatch) -> None:
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o", "o__partial"}
     monkeypatch.setenv("EMMY_REDUCE", "g2a")
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o"}
+
+
+def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
+    """A deferred finalize keeps every external buffer its projection reads. The CUDA op's
+    argument order cannot name a buffer absent from the graph node's inputs."""
+    graph = _matmul()
+    graph.add_node(InputOp(), [], Tensor("bias", (Dim(128),), dtype=F16), node_id="bias")
+    graph.add_node(ElementwiseOp("add"), ["o", "bias"], Tensor("biased", (Dim(128), Dim(128)), dtype=F16), node_id="biased")
+    graph.inputs, graph.outputs = ["a", "b", "bias"], ["biased"]
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+
+    out, _ = _resolve(CUDA_PASSES, graph)
+    finalize = out.nodes["biased"]
+    assert finalize.inputs == ["biased__partial", "bias"]
+    assert finalize.op.arg_order == ("biased__partial", "bias", "biased")
 
 
 def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:

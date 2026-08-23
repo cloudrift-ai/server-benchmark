@@ -305,27 +305,87 @@ already names, which print bare.
 | `emmy::scalar::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
 | `emmy::scalar::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
 
-The following section presents `emmy::` helpers in more detail.
+The following section presents `emmy::` helper operations in more detail.
+We do not discuss the PyTorch- and NumPy-based operations in detail, consult those repsective projects for that.
 
 ### The `emmy::` helpers
 
-Each one below is written as a definition in the same pseudocode, under three conventions.
+In this section, we will have a deeper look at the `emmy::*` tensor opreations.
+Before we start, let's recap our notation for tensor types and shapes we use in torch IR.
 
-`T` and `U` are element types. A shape is one const parameter holding all the axis sizes —
-`const d: usize[rank]` — so a definition can index it (`d[axis]`), slice it (`d[0..axis]`) and join pieces
-with `++`.
+A tensor is an $$n$$-dimensional array.
+When $$n=1$$, it's just a vector indexed by a single value; when $$n=2$$ it's a 2D matrix.
+In our IR, a tensor value's type must specify its size across every dimension.
 
-An index into a rank-`r` tensor is itself a vector of `r` numbers, so `x[i]` with `i: usize[r]` is one element,
-and `x[i0, i1]` is the same thing written out. Slicing and joining work on an index too: `i[0..axis]` is the
-coordinates before the axis, and `i[0..axis] ++ [v] ++ i[axis+1..rank]` is `i` with the coordinate at `axis`
-replaced by `v`. An index *tensor* holds `i64`, the dtype a traced index carries; splicing one of its values
-into an index vector converts it.
+```rust
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+  // examples of declaring 1D and 2D tensors
+  let tensor_1d: f32[16] = ...
+  let tensor_2d: f32[8, 32] = ...;
+}
+```
+
+Most of the time, tensor's size across each dimensions is just a constant literal like 16, 8 or 32 above.
+Sometimes, a tensor's size across some of the dimensions can be give by a `dynamic` variable or some expression of `dynamic` variables.
+
+```rust
+fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
+	let var_len_tensor: f32[dynamic.dyn_len] = ...;
+}
+```
+
+The number of tensor's dimensions though is always fixed and known inside `main`.  You can never have a tensor value
+whose number of dimensions varies with tensor IR program inputs.  But the `emmy::*` operations we present here are
+re-usable across many different programs, and we'd like them to work with tensors of any size and dimensionality.  So in
+order to show their types correctly and concisely, we empower notation with tensors of variable dimensionality.  This
+extension of our Rust pseudocode is only needed to present the `emmy::` helper operations in this section, it's not used
+in actual IR dumps.  In the following, we define this pseudocode extension and present the `emmy::` tensor helpers using
+it.
+
+A 1-dimensional tensor is just a vector. Its shape is given by a single number: vector's length.  A 2-dimensional tensor
+is a 2D matrix, its shape is a pair of numbers that specify the matrix height and width.  Likewise, the shape of an
+$$n$$-dimensional tensor is a tuple of $$n$$ integers, specifying its size across each of $$n$$ axes.  Let `n` be some
+integer. Then:
+
+1. `shape: usize[n]` is a 1D vector of `n` integers.
+2. `t: f32[shape]` denodes an `n`-dimensional tensor of `f32` whose size across axis `i` is `shape[i]`.
+3. `i: usize[n]` is another 1D vector on `n` integers such that `i[k] < shape[k]` for all `k`.
+4. `t[i]: f32` is a scalar in `t` addressed by `i`. Note that `i` that serves as an index into the tensor has the same
+   type `usize[n]` as the tensor shape.
+
+We use standard notation for slicing vectors/tensors and concatenating them. For example, `t[[i[0]+1] + i[1..]]` is the
+element just one position "up" from `t[i]` in `t` across axis 0.
+
+The following sections present `emmy::` tensor operation helpers. Their type signatures use this tensor notation
+heavily, this helps precisely pin down the types and shapes of tensors they consume and produce. We don't show their
+implementation as code, but intead define it in prose.
+
+#### `emmy::cast`
+
+A dtype change. The graph IR does not have an explicit node for cast operation: casts there are implicit, and assumed
+to happen whenever an tensor of one type is assigned to a tensor of a different type. In tensor IR pseudocode dumps, we
+print them explicitly since such conversions actually change the data.
+
+```rust
+fn emmy::cast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
+```
+
+Note that the dtype changes from `T` to `U`, while the shape `d` stays the same.
+
+#### `emmy::bitcast`
+
+Reinterprets each element's bits as another type of the same width.
+
+```rust
+fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
+    where size_of::<U>() == size_of::<T>()
+```
 
 #### `emmy::tensor_from_fn`
 
-Builds a tensor from a function of its indices. The closure takes one index vector; a printed line names its
-components instead, `|i, j, k|` for rank three, which is why rank six is the limit — the printer has six index
-names.
+Builds a tensor from a lambda function that maps tensor indices to values. The lambda takes one index vector; a printed
+line names its components instead, `|i, j, k|` for rank three, which is why rank six is the limit — the printer has
+six index names.
 
 ```rust
 fn emmy::tensor_from_fn<T, const rank: usize, const d: usize[rank]>(f: |usize[rank]| -> T) -> T[d]
@@ -354,24 +414,6 @@ Valid: every coordinate is arithmetic over the closure's parameters, literals, a
 symbolic dimension names, which appear free in the body because the launch binds them. A coordinate is never a
 value read from another tensor; that is what `emmy::gather` and `emmy::gather_by_axis` are for. Invalid: a
 parameter count that disagrees with the result's rank, which would mean the printer has a bug.
-
-#### `emmy::cast`
-
-A dtype change. No node computes it: the declared result type is the whole operation, and the backend converts
-when it materializes that type. The values can still change, since a narrowing conversion rounds.
-
-```rust
-fn emmy::cast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
-```
-
-#### `emmy::bitcast`
-
-Reinterprets each element's bits as another type of the same width.
-
-```rust
-fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
-    where size_of::<U>() == size_of::<T>()
-```
 
 #### `emmy::gather`
 

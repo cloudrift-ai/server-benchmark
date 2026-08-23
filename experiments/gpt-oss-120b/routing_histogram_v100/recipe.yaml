@@ -1,0 +1,143 @@
+# Routed input-slice histogram for the native-MXFP4 gpt-oss-120b checkpoint. The fixed datasets separate general
+# chat, grade-school math, and Python synthesis while keeping request count and output cap equal. A request at each
+# workload boundary causes Emmy's cumulative device counter to be logged before the new workload starts; RESULTS.md
+# derives each window by subtracting those snapshots. The image is the task-local qualification build and is pinned
+# by content digest because registry publication is a separate approval-gated operation.
+command:
+  timeout: 7200
+  result_files:
+    - image.json
+    - request_summary.json
+    - responses.jsonl
+    - server.log
+    - workloads.json
+  run: |
+    set -euo pipefail
+    image=sha256:3db6adc6528fce02cb0bc24afd59353f90677b0fd753461de9d8390f65e1da9d
+    compilation_config='{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
+    container=emmy-gptoss-routing-$$RANDOM
+    cleanup() {
+      sudo docker logs "$$container" > $task_dir/server.log 2>&1 || true
+      sudo docker rm -f "$$container" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    sudo docker image inspect "$$image" > $task_dir/image.json
+    sudo docker run -d --name "$$container" --gpus all --ipc host --network host \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
+      -e EMMY_GEN_DECODE_BUCKET=16 \
+      -e EMMY_GEN_PREFILL_BUCKET=0 \
+      -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      -e VLLM_SM70_FLASH_ATTN_V100=1 \
+      -e VLLM_FLASH_V100_ALLOW_TRITON_FALLBACK=1 \
+      "$$image" openai/gpt-oss-120b \
+      --revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a \
+      --runner generate \
+      --dtype float16 \
+      --hf-overrides '{"architectures":["EmmyGenModel"],"quantization_config":null}' \
+      --compilation-config "$$compilation_config" \
+      --pipeline-parallel-size 4 \
+      --distributed-executor-backend mp \
+      --gpu-memory-utilization 0.90 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 512 \
+      --max-num-seqs 1 \
+      --attention-backend FLASH_ATTN_V100 \
+      --disable-custom-all-reduce \
+      --no-enable-prefix-caching \
+      --tool-call-parser openai \
+      --enable-auto-tool-choice
+
+    for _ in $$(seq 1 540); do
+      if curl -sf http://127.0.0.1:8000/health >/dev/null; then
+        break
+      fi
+      sudo docker inspect -f '{{.State.Running}}' "$$container" | grep -qx true || {
+        sudo docker logs "$$container"
+        exit 1
+      }
+      sleep 10
+    done
+    curl -sf http://127.0.0.1:8000/health >/dev/null
+
+    TASK_DIR=$task_dir /usr/bin/python3 - <<'PYEOF'
+    import json
+    import os
+    import time
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path
+
+    out = Path(os.environ["TASK_DIR"])
+    sources = {
+        "chat": ("HuggingFaceH4/ultrachat_200k", "default", "train_sft", "prompt"),
+        "math": ("openai/gsm8k", "main", "test", "question"),
+        "code": ("openai/openai_humaneval", "openai_humaneval", "test", "prompt"),
+    }
+    workloads = {}
+    for label, (dataset, config, split, field) in sources.items():
+        query = urllib.parse.urlencode(
+            {"dataset": dataset, "config": config, "split": split, "offset": 0, "length": 16}
+        )
+        with urllib.request.urlopen("https://datasets-server.huggingface.co/rows?" + query, timeout=120) as response:
+            rows = json.load(response)["rows"]
+        prompts = [row["row"][field] for row in rows]
+        if label == "math":
+            prompts = ["Solve this problem and give the final answer.\n\n" + prompt for prompt in prompts]
+        elif label == "code":
+            prompts = ["Complete this Python function. Return code only.\n\n" + prompt for prompt in prompts]
+        workloads[label] = prompts
+    (out / "workloads.json").write_text(json.dumps(workloads, indent=2) + "\n")
+
+    def request(label, index, prompt):
+        body = json.dumps(
+            {
+                "model": "openai/gpt-oss-120b",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 32,
+                "temperature": 0.0,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        started = time.monotonic()
+        with urllib.request.urlopen(req, timeout=900) as response:
+            result = json.load(response)
+        return {
+            "workload": label,
+            "index": index,
+            "elapsed_s": time.monotonic() - started,
+            "response": result,
+        }
+
+    records = []
+    # The probe's selections are present in every later snapshot and therefore cancel from each workload delta.
+    records.append(request("baseline_probe", 0, "Reply with one word: ready."))
+    for label in ("chat", "math", "code"):
+        for index, prompt in enumerate(workloads[label]):
+            records.append(request(label, index, prompt))
+    # This final forward logs the cumulative counter after the complete code window.
+    records.append(request("final_probe", 0, "Reply with one word: done."))
+    with (out / "responses.jsonl").open("w") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    summary = {
+        "schema_version": 1,
+        "requests": len(records),
+        "workloads": {label: len(prompts) for label, prompts in workloads.items()},
+        "max_output_tokens": 32,
+        "temperature": 0.0,
+        "failed": 0,
+    }
+    (out / "request_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    PYEOF
+
+    sudo docker logs "$$container" > $task_dir/server.log 2>&1
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 4

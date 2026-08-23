@@ -577,3 +577,38 @@ def test_fp8_expert_twins_spell_bits_and_block_scales_and_keep_the_unconverted_p
     # Every layer converted: no plain twin. A config without fp8 spells nothing.
     assert list(_spell_fp8_expert_twins("e", graph, profile, {1, 2})) == ["e@f8e4m3"]
     assert fp8_weight_profile(type("Cfg", (), {"quantization_config": {"quant_method": "exl3"}})()) is None
+
+
+def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from emmy.compiler.loader.quant import mxfp4_weight_profile
+    from emmy.serving.gen_runner import trace_split
+    from emmy.serving.twins import _spell_mxfp4_expert_twins
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down, b_gate_up, b_down):
+            gate, up = (x @ w_gate_up + b_gate_up).chunk(2, dim=-1)
+            return gate * up @ w_down + b_down
+
+    hidden, inter = 64, 32
+    graph = trace_split(
+        Expert(),
+        tuple(
+            torch.zeros(*shape, dtype=torch.float16)
+            for shape in ((1, hidden), (hidden, 2 * inter), (inter, hidden), (2 * inter,), (hidden,))
+        ),
+        None,
+    )
+    config = type("Cfg", (), {"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}})()
+    profile = mxfp4_weight_profile(config)
+    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1})
+    assert set(twins) == {"expert1@mxfp4"}
+    spelled = twins["expert1@mxfp4"]
+    spelled.validate()
+    assert spelled.inputs == ["x", "w_gate_up", "w_down", "b_gate_up", "b_down", "w_gate_up_scale", "w_down_scale"]
+    assert tuple(d.as_static() for d in spelled.nodes["w_gate_up"].output.shape) == (64, 2, 16)
+    assert tuple(d.as_static() for d in spelled.nodes["w_down"].output.shape) == (64, 1, 16)
+    assert tuple(d.as_static() for d in spelled.nodes["w_gate_up_scale"].output.shape) == (64, 2)
+    assert profile == ["lm_head"]

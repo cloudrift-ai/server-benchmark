@@ -84,15 +84,14 @@ F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 
 # Integer types — they appear on ``input_ids`` placeholders from HF whole-model
-# traces and inside generic static construction algebra. The compiler doesn't
-# generate kernels that compute on the signed forms (LM-head gather + embedding
-# lookup is index math) and does not lower the unsigned ones at all; the generic
-# constant folder removes their current uses before Loop IR.
+# traces and inside generic static construction algebra. U8 also carries one-byte
+# storage into generic reconstruction algebra.
 # I16 also appears as a raw carrier in generic checkpoint reconstruction algebra.
 # Static uses fold before Loop IR, like I32/I64.
 I16 = DataType("i16", np.dtype(np.int16), 2)
 I32 = DataType("i32", np.dtype(np.int32), 4)
 I64 = DataType("i64", np.dtype(np.int64), 8)
+U8 = DataType("u8", np.dtype(np.uint8), 1)
 U16 = DataType("u16", np.dtype(np.uint16), 2)
 U32 = DataType("u32", np.dtype(np.uint32), 4)
 U64 = DataType("u64", np.dtype(np.uint64), 8)
@@ -123,7 +122,7 @@ def decode_bf16(bits) -> np.ndarray:
     return np.ascontiguousarray(expanded.view(np.float32))
 
 
-_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F16x2, I16, I32, I64, U16, U32, U64, BOOL)}
+_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F16x2, I16, I32, I64, U8, U16, U32, U64, BOOL)}
 
 # Aliases let callers feed PyTorch/numpy-style names without re-canonicalizing
 # at every callsite. The canonical name (``F32.name == "f32"``) is what lands
@@ -142,6 +141,7 @@ _ALIASES: dict[str, str] = {
     "int32": "i32",
     "int64": "i64",
     "long": "i64",
+    "uint8": "u8",
     "uint16": "u16",
     "uint32": "u32",
     "uint64": "u64",

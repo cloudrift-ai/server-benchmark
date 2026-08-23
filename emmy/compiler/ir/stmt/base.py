@@ -145,7 +145,7 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -184,7 +184,7 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
         # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
         # wins a tie, while a strictly wider signed type can represent the narrower unsigned
         # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
-        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        widths = {"u8": 8, "i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
         signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
         unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
         if unsigned_width >= signed_width:

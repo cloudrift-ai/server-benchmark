@@ -617,6 +617,34 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     torch.testing.assert_close(result, torch.tensor([[73000.0]], dtype=torch.float32), rtol=0, atol=0)
 
 
+def test_routing_histogram_counts_persistent_input_slice_selections():
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._routing_histogram_counts = torch.zeros(2, 4, dtype=torch.int64)
+    runner._routing_histogram_interval = 0
+    runner._routing_histogram_calls = 0
+    runner._moe = [
+        {"local_layer": 0, "layer": 10, "num_experts": 4, "top_k": 2},
+        {"local_layer": 1, "layer": 11, "num_experts": 3, "top_k": 2},
+    ]
+
+    runner._record_routing(runner._moe[0], torch.tensor([[1, 3], [1, 2]]))
+    runner._record_routing(runner._moe[1], torch.tensor([[0, 2]]))
+
+    assert runner.routing_histogram() == {
+        "event": "emmy_routing_histogram",
+        "layers": [
+            {"layer": 10, "num_experts": 4, "top_k": 2, "total_selections": 4, "selections": [0, 2, 1, 1]},
+            {"layer": 11, "num_experts": 3, "top_k": 2, "total_selections": 2, "selections": [1, 0, 1]},
+        ],
+    }
+    runner.routing_histogram(reset=True)
+    assert runner._routing_histogram_counts.count_nonzero() == 0
+
+
 def test_moe_block_parts_rejects_dense_mlp():
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
@@ -679,6 +707,8 @@ def test_expert_slot_maps_both_expert_layouts():
     from emmy.compiler.trace.huggingface import _expert_slot
 
     assert _expert_slot("model.layers.3.mlp.experts.gate_up_proj") == (3, "w_gate_up", None)
+    assert _expert_slot("model.layers.3.mlp.experts.gate_up_proj_blocks") == (3, "w_gate_up", None)
+    assert _expert_slot("model.layers.3.mlp.experts.down_proj_scales") == (3, "w_down_scale", None)
     assert _expert_slot("model.layers.3.mlp.experts.7.gate_proj.trellis") == (3, "w_gate", 7)
     assert _expert_slot("model.layers.3.mlp.experts.7.up_proj.suh") == (3, "w_up_suh", 7)
     assert _expert_slot("model.layers.3.mlp.experts.7.down_proj.svh") == (3, "w_down_svh", 7)

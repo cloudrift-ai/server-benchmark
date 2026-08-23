@@ -63,6 +63,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
@@ -414,6 +415,16 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_routing_histogram_interval(default: int = 0) -> int:
+    """``EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL`` — emit a cumulative routed-buffer
+    selection histogram every N uncaptured generative-model forwards (default 0 = off).
+
+    Selection counters stay on the GPU and their updates are CUDA-graph-safe, so captured
+    decode replays remain visible. Snapshotting synchronizes the counters to the host and is
+    therefore attempted only from an uncaptured forward. See `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_ROUTING_HISTOGRAM_INTERVAL, default)
 
 
 def gen_m1_tier(default: int = 1) -> int:

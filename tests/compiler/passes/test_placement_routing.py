@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
@@ -243,3 +245,13 @@ def test_contraction_operand_seam_takes_the_output_dtype(monkeypatch) -> None:
     ws = [n for n in out.nodes.values() if "__cut_" in n.id and isinstance(n.op, (LoopOp, TileOp))]
     assert ws, [n.id for n in out.nodes.values()]
     assert any(n.output.dtype == F16 for n in ws), [(n.id, str(n.output.dtype)) for n in ws]
+
+
+def test_pinned_transposed_coop_band_refuses_without_a_free_axis_to_sweep(monkeypatch) -> None:
+    """A REDUCE pin meets the transposed band's legality as a refusal, never a crash: at one row
+    the rms statistic has no innermost free axis for the band's 32 lanes to sweep (unpinned,
+    the catalog simply omits the band)."""
+    monkeypatch.setenv("EMMY_WORK", "t256")
+    monkeypatch.setenv("EMMY_REDUCE", "coop-t")
+    with pytest.raises(ValueError, match="innermost free axis"):
+        _compile(_rms_graph(S=1), None, monkeypatch)

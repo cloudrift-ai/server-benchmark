@@ -608,8 +608,8 @@ def test_norm_linear_symbolic_m_offers_warp_rows():
     assert any(_is_warp_row(r) for r in rows)
 
 
-def _mlp_gate_up_graph() -> Graph:
-    S, H, inter = 32, 1024, 3072
+def _mlp_gate_up_graph(S: int = 32) -> Graph:
+    H, inter = 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
     g.add_node(InputOp(), [], Tensor("wn", (Dim(H),), dtype=F16), node_id="wn")
@@ -872,3 +872,89 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
     seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, pro[1]))]
     assert "PLACE@b" in seams, seams
+
+
+def _m1_norm_gate_up_body() -> Body:
+    """One row of norm → gate/up → SiLU·up as loop fusion leaves it: the row statistic, its
+    epilogue, the SiLU's fill constant (``one``) loaded ahead of the column sweep, and the
+    combine tail reading it after the two-channel contraction."""
+    lit0 = Literal(0, "int")
+    stat = Loop(
+        axis=Axis("k0", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xs",), input="x", index=(lit0, lit0, Var("k0"))),
+                Assign(name="xf", op="copy", args=("xs",), dtype=F32),
+                Assign(name="sq", op="multiply", args=("xf", "xf")),
+                Accum(name="ss", value="sq", op="add", axes=("k0",)),
+            )
+        ),
+    )
+    col = Loop(
+        axis=Axis("k", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xc",), input="x", index=(lit0, lit0, Var("k"))),
+                Load(names=("wn",), input="w", index=(Var("k"),)),
+                Assign(name="xcf", op="copy", args=("xc",), dtype=F32),
+                Assign(name="wnf", op="copy", args=("wn",), dtype=F32),
+                Assign(name="sc", op="multiply", args=("rs", "xcf")),
+                Assign(name="nm", op="multiply", args=("sc", "wnf")),
+                Assign(name="nh", op="copy", args=("nm",), dtype=F16),
+                Load(names=("g",), input="wg", index=(Var("k"), Var("n"))),
+                Assign(name="pg", op="multiply", args=("g", "nh")),
+                Accum(name="ag", value="pg", op="add", axes=("k",)),
+                Load(names=("u",), input="wu", index=(Var("k"), Var("n"))),
+                Assign(name="pu", op="multiply", args=("nh", "u")),
+                Accum(name="au", value="pu", op="add", axes=("k",)),
+            )
+        ),
+    )
+    sweep = Loop(
+        axis=Axis("n", Dim(128)),
+        body=Body(
+            (
+                col,
+                Assign(name="ng", op="negative", args=("ag",)),
+                Assign(name="eg", op="exp", args=("ng",)),
+                Assign(name="dn", op="add", args=("one", "eg")),
+                Assign(name="sg", op="reciprocal", args=("dn",)),
+                Assign(name="si", op="multiply", args=("ag", "sg")),
+                Assign(name="o", op="multiply", args=("au", "si")),
+                Write(output="out", index=(lit0, lit0, Var("n")), value="o"),
+            )
+        ),
+    )
+    return Body(
+        (
+            stat,
+            Load(names=("cnt",), input="count", index=(lit0,)),
+            Assign(name="mean", op="divide", args=("ss", "cnt")),
+            Load(names=("eps",), input="eps", index=(lit0,)),
+            Assign(name="ve", op="add", args=("eps", "mean")),
+            Assign(name="rs", op="rsqrt", args=("ve",)),
+            Load(names=("one",), input="silu_one", index=(lit0,)),
+            sweep,
+        )
+    )
+
+
+def test_fused_view_tail_prefix_is_alpha_renamed_from_the_statistic_prologue():
+    """At one row the fused gate/up reading prepends the tail's stat-free cone stmts (the
+    SiLU's fill constant) so the store side re-evaluates them — a SECOND spelling of names the
+    statistic prologue also defines. A PLACE cut flattens both into one raw loop body (the
+    parent piece), so the copies must carry their own names or the piece defines a name twice
+    and the cut is refused (Qwen3.8 ``PLACE@a0=cut`` on norm→gate/up M=1)."""
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.ir.tile.ir import effect_tail
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _nest
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_m1_norm_gate_up_body()))
+    pro = fused_view(TileOp(op=tile.op, place=Placement(free=tuple(tile.place.free)), stores=tuple(tile.stores)))
+    assert pro is not None, "the one-row norm→gate/up must bind the fused (computed-A) reading"
+    tree, n_ax, stores = pro
+    assert any(s.name.endswith("__p") for s in tree.body if isinstance(s, Load)), [s for s in tree.body]
+    # The parent piece of any cut is this flattening; it must be a valid single-scope program.
+    LoopOp(body=Body(tuple(_nest(effect_tail(tree.lower(), stores), [*tile.place.free, n_ax]))))

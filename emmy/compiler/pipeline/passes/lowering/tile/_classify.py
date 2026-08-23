@@ -566,6 +566,13 @@ def fused_view(tile) -> tuple[Fold, object, tuple] | None:
             if id(st) not in seen:
                 seen.add(id(st))
                 prefix.append(st)
+    # The prefix RE-EVALUATES cone stmts on the store side, so it is a second spelling of their
+    # names: α-renamed (``__p``), as the chain formation spells a shared member, so a piece that
+    # flattens both sides into one scope (a PLACE cut's parent) never defines a name twice.
+    rename = {nm: f"{nm}__p" for st in prefix for nm in st.defines()}
+    ren = lambda n: rename.get(n, n)  # noqa: E731
+    prefix = [st.rewrite(ren) for st in prefix]
+    tail = [st.rewrite(ren) for st in tail]
     # A combine tail projects the channels to ONE value, so it stores once; with no tail every
     # fold's accumulator is stored raw, each exactly once (the split partial's slot-per-channel).
     stored = sorted(tuple(w.values) for w in writes)

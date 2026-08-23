@@ -730,7 +730,11 @@ Cut legality is structural: single-component CLOSED children only (`_captured_va
 role; the multi-result prologue of a cone that passes its statistic through stays uncut by the component gate), and
 the pure-copy degenerate
 (cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
-non-terminating case) is refused. Loop fusion stops at `__cut_` workspace producers — a decided placement is not
+non-terminating case) is refused. A piece is a RAW loop body: the tree's λ-local SSA names flatten into one scope,
+so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused
+reading's store-side prefix, which re-evaluates the tail's stat-free cone stmts beside the statistic prologue — is
+α-renamed (`__p`) where it is derived, as the chain formation renames a shared member. Loop fusion stops at
+`__cut_` workspace producers — a decided placement is not
 fusion's to undo (tune-mode slicing re-enters fusion with the pieces as ordinary pairs). The old `020_cut_edge` /
 `025_sink_row_reduce` / `032_fuse_finalize` realizers stay retired; their non-default placements return only as
 routing entries re-seeded by fresh `--ab` evidence (phase 5 — the 020-era `cut_cone_*` schedule entries stamp the

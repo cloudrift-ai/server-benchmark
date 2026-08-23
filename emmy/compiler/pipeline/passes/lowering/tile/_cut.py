@@ -36,6 +36,7 @@ from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import axis_names
 from emmy.compiler.ir.tile.path import Site, family_sites, resolve, sites, spell
@@ -329,14 +330,18 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
     child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
     child_body = _nest(child_stmts, axes)
-    child_op = LoopOp(body=Body(tuple(child_body)))
+    child_op = LoopOp(body=rename_ssa_sequential(Body(tuple(child_body))))
 
     # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
     load = Load(name=child_name, input=ws, index=ws_index)
     parent_tree = _replace_edge(tile_op, child, load)
     parent_cell = effect_tail(parent_tree.lower(), stores)
     parent_body = _nest(list(parent_cell), list(free))
-    parent_op = LoopOp(body=Body(tuple(parent_body)))
+    # A piece is a RAW loop body: the tree's λ-local SSA names (each lift names its own loads
+    # ``in0``…) flatten into one scope, where a name two λs share collides. Canonical sequential
+    # names make the flattened body a valid single-scope program; the re-recognition lifts and
+    # renames the piece again, so nothing downstream reads these names.
+    parent_op = LoopOp(body=rename_ssa_sequential(Body(tuple(parent_body))))
 
     frag = Graph()
     for inp in root.inputs:

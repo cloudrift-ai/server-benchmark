@@ -18,6 +18,7 @@ from dataclasses import fields as dc_fields
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import _NAME_TO_FN
 from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Var
+from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp, GatherOp, IndexMapOp, ReduceOp, ScanOp
 
 _DIM_NAMES = ("i", "j", "k", "l", "m", "n")
@@ -30,6 +31,8 @@ _SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs"})
 _WRAP = 118
 # Class names whose lowercased form is not the torch spelling.
 _OP_SPELLING = {"RmsNormOp": "rms_norm", "LayerNormOp": "layer_norm"}
+# Reduce combines whose library name differs from the elementwise one.
+_REDUCE_SPELLING = {"maximum": "amax", "minimum": "amin"}
 
 
 def fmt_type(shape: tuple, dtype, syms: dict[str, Var] | None = None) -> str:
@@ -90,8 +93,14 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         prefix = "emmy::intrinsics::" if op.name in _NAME_TO_FN and op.name not in _BORROWED_ELEMENTWISE else ""
         return f"{prefix}{op.name}({', '.join(args)})"
     if isinstance(op, (ReduceOp, ScanOp)):
-        name = op.name if isinstance(op, ReduceOp) else f"scan_{op.name}"
+        # A reduction over `maximum` is what both libraries call `amax`, which
+        # keeps the name off the elementwise `maximum(a, b)`.
+        name = _REDUCE_SPELLING.get(op.name, op.name)
+        name = name if isinstance(op, ReduceOp) else f"scan_{name}"
         return f"{name}({', '.join(args)}, axis={op.axis})"
+    if isinstance(op, TransposeOp) and len(op.axes) != 2:
+        # Two axes are torch's `transpose`; a full permutation is its `permute`.
+        return f"permute({args[0]}, axes={op.axes})"
     if isinstance(op, CastOp):
         return f"emmy::cast({args[0]})"
     if isinstance(op, BitcastOp):

@@ -397,6 +397,37 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
     assert all(isinstance(node.op, (InputOp, ConstantOp, LoopOp)) for node in lowered.nodes.values())
 
 
+def test_trace_reassembles_qwen_chunk_recurrence_on_computed_local_base():
+    """Sequential select/slice writes version Qwen's computed attention matrix and local output."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class ChunkRecurrence(nn.Module):
+        def forward(self, x):
+            attn = -(x @ x.transpose(-1, -2))
+            for i in range(1, 4):
+                row = attn[..., i, :i].clone()
+                sub = attn[..., :i, :i].clone()
+                attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+            output = torch.zeros_like(attn)
+            output[..., 0, :].copy_(attn[..., 0, :])
+            return attn, output
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 4, 4)
+    graph = trace_module(ChunkRecurrence(), (x,))
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    with torch.no_grad():
+        expected = ChunkRecurrence()(x)
+    for got, want in zip(result.outputs.values(), expected, strict=True):
+        np.testing.assert_allclose(got, want.numpy(), rtol=1e-5, atol=1e-5)
+
+
 def test_trace_treats_empty_static_local_slice_copy_as_noop():
     """An empty local write preserves its base without loading a zero-sized source."""
     import numpy as np

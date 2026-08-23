@@ -257,24 +257,6 @@ def _observable_alias_read_after_write(node) -> tuple[Any, Any] | None:
     return None
 
 
-def _static_local_slice_destination(node) -> tuple[Any, tuple[int, ...], tuple[int, ...]] | None:
-    """Describe a unit-step slice destination rooted at a local tensor constructor.
-
-    Returns ``(root, offsets, extents)`` in root coordinates. This deliberately accepts
-    only the allocation + static ``aten.slice`` form whose functional update is exactly
-    representable by a two-source ``IndexMapOp``. Other aliases stay fail-closed.
-    """
-    destination = _static_affine_view_destination(node)
-    if destination is None:
-        return None
-    root, offsets, extents, view_axes = destination
-    if any(axis is None for axis in view_axes):
-        return None
-    if root.op != "call_function" or _op_name(root.target) not in ("new_zeros", "new_full"):
-        return None
-    return root, offsets, extents
-
-
 def _static_affine_view_destination(
     node,
 ) -> tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int | None, ...]] | None:
@@ -358,16 +340,20 @@ def _static_fx_shape(node) -> tuple[int, ...] | None:
     return tuple(shape)
 
 
-def _reassemblable_local_slice_copy(node) -> tuple[Any, tuple[int, ...], tuple[int, ...]] | None:
-    """Return a local slice-update description when every alias can be versioned safely."""
+def _reassemblable_local_affine_copy(
+    node,
+) -> tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int | None, ...]] | None:
+    """Return a local affine-view update when every alias can be versioned safely."""
     # A used ``copy_`` return is itself an alias. Supporting both it and an updated base would
     # require versioning that returned view across later writes, outside this narrow local form.
     if node.users:
         return None
-    destination = _static_local_slice_destination(node)
+    destination = _static_affine_view_destination(node)
     if destination is None:
         return None
-    root, _, _ = destination
+    root, _, _, _ = destination
+    if root.op != "call_function":
+        return None
     if not _local_alias_version_is_rebindable(node, root):
         return None
     return destination
@@ -1411,14 +1397,14 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         )
         return
 
-    # ``copy_(dest, src)`` returns destination-shaped source values. A static slice of a local
-    # constructor can also update its base functionally: one IndexMap source supplies the written
+    # ``copy_(dest, src)`` returns destination-shaped source values. A static slice/select of a
+    # local value can also update its base functionally: one IndexMap source supplies the written
     # region and the previous base supplies the rest. Broader alias mutation remains fail-closed.
     if op_name == "copy_":
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
         observable = _observable_alias_read_after_write(fx_node)
-        reassembly = _reassemblable_local_slice_copy(fx_node) if observable is not None else None
+        reassembly = _reassemblable_local_affine_copy(fx_node) if observable is not None else None
         if observable is not None and reassembly is None:
             later, source = observable
             raise NotImplementedError(
@@ -1442,7 +1428,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         node_map[name] = copied_id
 
         if reassembly is not None:
-            root, offsets, extents = reassembly
+            root, offsets, extents, view_axes = reassembly
             previous_base = node_map.get(root.name)
             if not isinstance(previous_base, str):
                 raise ValueError(f"aten.copy_ local destination root {root.name!r} did not resolve to a tensor")
@@ -1453,20 +1439,29 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
                 return
             base = g.nodes[previous_base].output
             base_shape = tuple(base.shape)
-            if len(base_shape) != len(offsets) or tuple(shape) != tuple(extents):
+            view_shape = [0] * sum(axis is not None for axis in view_axes)
+            for root_axis, view_axis in enumerate(view_axes):
+                if view_axis is not None:
+                    view_shape[view_axis] = extents[root_axis]
+            if len(base_shape) != len(offsets) or tuple(shape) != tuple(view_shape):
                 raise ValueError(
-                    f"aten.copy_ local slice shape mismatch: base={base_shape}, destination={tuple(extents)}, copy={tuple(shape)}"
+                    f"aten.copy_ local view shape mismatch: base={base_shape}, destination={tuple(view_shape)}, copy={tuple(shape)}"
                 )
 
             select = Literal(1, "int")
-            source_coords = []
             for axis, (offset, extent) in enumerate(zip(offsets, extents, strict=True)):
                 coord = placeholder(axis)
                 in_axis = BinaryExpr(">=", coord, Literal(offset, "int"))
                 in_axis = BinaryExpr("&&", in_axis, coord.lt(Literal(offset + extent, "int")))
                 select = BinaryExpr("&&", select, in_axis)
+            source_coords: list[Any] = [Literal(0, "int")] * len(view_shape)
+            for root_axis, view_axis in enumerate(view_axes):
+                if view_axis is None:
+                    continue
+                coord = placeholder(root_axis)
+                offset = offsets[root_axis]
                 source_coord = coord - Literal(offset, "int") if offset else coord
-                source_coords.append(TernaryExpr(select, source_coord, Literal(0, "int")))
+                source_coords[view_axis] = TernaryExpr(select, source_coord, Literal(0, "int"))
 
             identity = tuple(placeholder(axis) for axis in range(len(base_shape)))
             update_name = f"{name}_base"

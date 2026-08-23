@@ -21,13 +21,13 @@ stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
 constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice chain
-rooted at a local `new_zeros` / `new_full` allocation additionally reassembles the updated base as a two-source
-`IndexMapOp`: the copied value supplies the written region and the previous base supplies the remainder. Rebinding
-the allocation's FX name versions sequential slice writes and later aliases built from that name; an empty slice write
-leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
-or a view created before the write still fails closed; those forms need general alias versioning rather than this local
-functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice/select
+chain rooted at a locally computed tensor additionally reassembles the updated base as a two-source `IndexMapOp`: the
+copied value supplies the written region and the previous base supplies the remainder. Rebinding the root's FX name
+versions sequential overlapping writes and later aliases built from that name; an empty write leaves that version
+unchanged. A write through an input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
+before the write still fails closed; those forms need general alias versioning rather than this local functional
+update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
 instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over
 the last two axes: the selected triangular region reads the input and the complement reads a scalar zero. The
 diagonal must be a static integer; tensor-valued or symbolic diagonals fail closed instead of becoming broadcast

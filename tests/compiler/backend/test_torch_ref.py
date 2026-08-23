@@ -56,6 +56,30 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+def test_where_preserves_bool_condition_dtype_and_broadcasts():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("condition", (2, 1), "bool"), node_id="condition")
+    g.add_node(InputOp(), [], Tensor("left", (2, 3)), node_id="left")
+    g.add_node(InputOp(), [], Tensor("right", (1, 3)), node_id="right")
+    g.add_node(ElementwiseOp(op="where"), ["condition", "left", "right"], Tensor("out", (2, 3)), node_id="out")
+    g.inputs, g.outputs = ["condition", "left", "right"], ["out"]
+    arrays = {
+        "condition": np.array([[True], [False]]),
+        "left": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "right": np.array([[10, 20, 30]], dtype=np.float32),
+    }
+    expected = NumpyBackend().run(g, input_data=arrays)[0].outputs["out"]
+    tensors = {name: torch.from_numpy(array) for name, array in arrays.items()}
+    fn, inputs = torch_ref.build_callable(g, tensors)
+
+    actual = fn(*inputs)
+
+    assert torch_ref.is_runnable(g)
+    assert actual.dtype == torch.float32
+    assert actual.shape == (2, 3)
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+
 def test_declared_dtype_cast_is_enforced():
     """The trace folds HF's explicit casts (e.g. the fp32 RMSNorm body casting
     back to fp16) into each node's declared output dtype; ``build_callable``

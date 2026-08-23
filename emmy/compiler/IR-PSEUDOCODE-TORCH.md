@@ -292,16 +292,16 @@ An `emmy::` name is emmy's own:
 | `emmy::gather(data, idx, axis=n)` | pick one element per output position |
 | `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
-A second namespace, `emmy::intrinsics::`, holds the scalar functions emmy defines itself, the ones with no
-torch or numpy function behind them. `emmy/compiler/ir/elementwise.py` holds that table, and everything in it
-that torch or numpy does not already name prints under the prefix:
+A second namespace, `emmy::scalar::`, holds functions on a single number, applied to every element. They are
+the entries of one table — `_NAME_TO_FN` in `emmy/compiler/ir/elementwise.py` — minus the ones torch or numpy
+already names, which print bare.
 
 | Name | Meaning |
 | --- | --- |
-| `emmy::intrinsics::from_f8e4m3(x)`, `from_f8e5m2`, `to_f8e4m3`, `to_f8e5m2` | decode or encode a narrow float format |
-| `emmy::intrinsics::bitcast(x)` | the same reinterpretation as `emmy::bitcast`, reached through the intrinsic table |
-| `emmy::intrinsics::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
-| `emmy::intrinsics::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
+| `emmy::scalar::from_f8e4m3(x)`, `from_f8e5m2`, `to_f8e4m3`, `to_f8e5m2` | decode or encode a narrow float format |
+| `emmy::scalar::bitcast(x)` | the same reinterpretation as `emmy::bitcast`, reached through that table |
+| `emmy::scalar::gelu_tanh(x)` | gelu's tanh approximation, torch's `approximate="tanh"` |
+| `emmy::scalar::exp_fast(x)` | `exp` with the fast-math CUDA spelling, from a kernel-stage pass |
 
 ### What the `emmy::` helpers mean
 
@@ -372,8 +372,8 @@ fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: [tensor
 
 // Decode or encode a narrow float format, element by element. Unlike `cast`, these
 // have a real implementation behind them (`emmy/compiler/ir/elementwise.py`).
-fn emmy::intrinsics::from_f8e4m3<const rank: usize, const d: usize[rank]>(x: f8e4m3[d]) -> f32[d]
-fn emmy::intrinsics::to_f8e4m3<const rank: usize, const d: usize[rank]>(x: f32[d]) -> f8e4m3[d]
+fn emmy::scalar::from_f8e4m3<const rank: usize, const d: usize[rank]>(x: f8e4m3[d]) -> f32[d]
+fn emmy::scalar::to_f8e4m3<const rank: usize, const d: usize[rank]>(x: f32[d]) -> f8e4m3[d]
 ```
 
 `emmy::const_eval()` and `emmy::input_data()` are not operations. They stand for where a constant's value comes

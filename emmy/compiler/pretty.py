@@ -23,8 +23,8 @@ from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp, GatherO
 
 _DIM_NAMES = ("i", "j", "k", "l", "m", "n")
 # Elementwise names torch or numpy already means. Everything else in
-# ``elementwise.py``'s table is one of emmy's own intrinsics and prints under
-# ``emmy::intrinsics::``, so a new entry there needs no edit here.
+# ``elementwise.py``'s table is one of emmy's own scalar functions, printed under
+# ``emmy::scalar::``, so a new entry there needs no edit here.
 _BORROWED_ELEMENTWISE = frozenset({"copy", "where", "arange", "rsqrt", "relu", "sigmoid", "silu", "softplus", "erf", "gelu"})
 # Attribution metadata every op carries; never part of what an op computes.
 _SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs"})
@@ -90,7 +90,7 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         # so a copy either changes the declared dtype — a conversion — or nothing.
         return args[0] if same_dtype else f"emmy::cast({args[0]})"
     if isinstance(op, ElementwiseOp):
-        prefix = "emmy::intrinsics::" if op.name in _NAME_TO_FN and op.name not in _BORROWED_ELEMENTWISE else ""
+        prefix = "emmy::scalar::" if op.name in _NAME_TO_FN and op.name not in _BORROWED_ELEMENTWISE else ""
         return f"{prefix}{op.name}({', '.join(args)})"
     if isinstance(op, (ReduceOp, ScanOp)):
         # A reduction over `maximum` is what both libraries call `amax`, which

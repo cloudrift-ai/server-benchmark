@@ -1180,6 +1180,68 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     name = fx_node.name
     shape = _get_shape(fx_node, sym_rename)
     dtype = _get_dtype(fx_node)
+
+    # ``eye`` constructs values from output coordinates; its dimensions are not tensor
+    # operands. Preserve that coordinate meaning directly and reject forms whose constructor
+    # semantics cannot be represented by the static tensor dialect.
+    if op_name == "eye":
+        import torch
+
+        overload = str(fx_node.target)
+        if overload not in ("aten.eye.default", "aten.eye.m"):
+            raise NotImplementedError(f"unsupported aten.eye overload {overload}")
+        if len(fx_node.args) not in (1, 2):
+            raise NotImplementedError(f"aten.eye requires one or two static integer dimensions, got {len(fx_node.args)}")
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in fx_node.args):
+            raise NotImplementedError("aten.eye requires static integer dimensions")
+        rows = fx_node.args[0]
+        columns = fx_node.args[1] if len(fx_node.args) == 2 else rows
+        expected_shape = (rows, columns)
+        if _static_fx_shape(fx_node) != expected_shape:
+            raise ValueError(f"aten.eye output shape mismatch: expected {expected_shape}, got {_static_fx_shape(fx_node)}")
+
+        kwargs = fx_node.kwargs or {}
+        unexpected = set(kwargs) - {"dtype", "layout", "device", "pin_memory"}
+        if unexpected:
+            raise NotImplementedError(f"aten.eye unsupported keyword arguments: {sorted(unexpected)}")
+        if kwargs.get("layout") not in (None, torch.strided):
+            raise NotImplementedError(f"aten.eye requires strided layout, got {kwargs['layout']}")
+        if kwargs.get("pin_memory") not in (None, False):
+            raise NotImplementedError("aten.eye does not support pinned-memory construction")
+        resolve_dtype(dtype)
+
+        one_name = f"{name}_one"
+        one_id = g.add_node(
+            op=ConstantOp(name=one_name, value=True if dtype == "bool" else 1.0),
+            inputs=[],
+            output=Tensor(one_name, (1,), dtype),
+            node_id=one_name,
+        )
+        zero_name = f"{name}_zero"
+        zero_id = g.add_node(
+            op=ConstantOp(name=zero_name, value=False if dtype == "bool" else 0.0),
+            inputs=[],
+            output=Tensor(zero_name, (1,), dtype),
+            node_id=zero_name,
+        )
+        node_map[name] = g.add_node(
+            op=IndexMapOp(
+                out_shape=shape,
+                sources=(
+                    IndexSource(
+                        input_idx=0,
+                        coord_map=(Literal(0, "int"),),
+                        select=BinaryExpr("==", placeholder(0), placeholder(1)),
+                    ),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[one_id, zero_id],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        return
+
     input_ids = _resolve_inputs(fx_node, node_map, g)
 
     if op_name is None:

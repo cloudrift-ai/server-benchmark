@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "Dominant 2.4T MoE breakout across all independent discovery sources."
+  rationale: "Dominant 2.4T MoE with strong family momentum and very high downloads."
   heat: 95
   task: generate
 matrices:

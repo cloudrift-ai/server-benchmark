@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "Zero evidence across sources. Minimal presence."
-  heat: 10
+  rationale: "Zero evidence across HF trends, Reddit, and serving signals."
+  heat: 5
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

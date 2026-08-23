@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: google/gemma-3-27b-it
-  rationale: "Steady OR presence but eclipsed by Qwen3.8 and gemma-4 family."
+  rationale: "Steady but eclipsed by newer successors Qwen3.8 and gemma-4."
   heat: 45
   task: generate
 matrices:

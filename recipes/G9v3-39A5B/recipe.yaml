@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: ai9stars/G9v3-39A5B
-  rationale: "Novel MoE architecture provides fresh hardware coverage without hype."
+  rationale: "Novel MoE architecture shows moderate traction with niche interest."
   heat: 45
   task: generate
 matrices:

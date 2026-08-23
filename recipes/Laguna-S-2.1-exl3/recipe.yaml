@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "Niche exl3 format with zero adoption signals."
+  rationale: "Niche exl3 format with minimal community signals and low visibility."
   heat: 10
   task: generate
 matrices:

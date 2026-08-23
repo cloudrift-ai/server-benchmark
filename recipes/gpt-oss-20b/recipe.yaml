@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "7.6M downloads signal strong current attention."
+  rationale: "7.6M downloads signal strong current attention and serving value."
   heat: 80
   task: generate
 matrices:

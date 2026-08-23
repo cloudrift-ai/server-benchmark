@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
-  rationale: "Dominant Qwen3.8 wave with high OR heat and Reddit engagement."
+  rationale: "Dominant Qwen3.8 wave with strong community adoption and high OpenRouter heat."
   heat: 95
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
   task: generate

@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Niche compiler model with zero current community activity."
+  rationale: "Specialized compiler model with minimal adoption and low commercial relevance."
   heat: 5
   task: generate
 matrices:

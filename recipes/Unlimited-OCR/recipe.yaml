@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: baidu/Unlimited-OCR
-  rationale: Novel 3B vision-language OCR with massive downloads and API utility.
+  rationale: "3B vision-language OCR with massive downloads and strong practical utility."
   heat: 65
   task: generate
 matrices:

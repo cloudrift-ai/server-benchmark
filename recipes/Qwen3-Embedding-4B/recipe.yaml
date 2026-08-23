@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Overshadowed by 0.6B and 8B variants. Low-moderate current attention."
-  heat: 38
+  rationale: "Overshadowed by smaller and larger embedding variants; weak evidence."
+  heat: 35
   task: embed
 
 engine:

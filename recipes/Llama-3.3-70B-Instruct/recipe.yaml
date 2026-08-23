@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-3.3-70B-Instruct
-  rationale: "Huge HF momentum and serving value warrant breakout heat."
-  heat: 92
+  rationale: "Massive HuggingFace download momentum and sustained active serving."
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

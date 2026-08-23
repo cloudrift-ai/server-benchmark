@@ -7,8 +7,8 @@ tags:
 
 model:
   huggingface: "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
-  rationale: "Preserves chat contract on V100; Llama 3.1 aged."
-  heat: 20
+  rationale: "AWQ 8B for V100; Llama 3.1 aging in favor of newer iterations."
+  heat: 30
   revision: db1f81ad4b8c7e39777509fac66c652eb0a52f91
   task: generate
 

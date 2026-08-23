@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Overshadowed by GLM-5.2. Lack of evidence indicates low interest."
+  rationale: "Overshadowed by GLM-5.2 which dominates trending metrics; low mindshare."
   heat: 30
 engine:
   llm:

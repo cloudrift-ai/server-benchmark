@@ -250,20 +250,23 @@ def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> 
     assert record.shape_key.reduce_max == 64
 
 
-def test_trace_inventory_lists_each_sdpa_split_kernel_as_a_target(tmp_path) -> None:
-    """SDPA lowers through the generic split (Q·K^T | the fused softmax·V region — the
-    online-softmax pairing's expectation channel keeps the probability matrix unmaterialized), so
-    the inventory carries one loop-IR target per split kernel — cut pieces have no frontend cone
-    of their own, so no ``origins`` mapping, and the kernel name keeps the sdpa provenance."""
+def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> None:
+    """Recognized score reuse admits the whole SDPA frontend target.
+
+    Placement separately exposes fused and shared-score materialization siblings; the source
+    inventory remains one frontend program so either structural form can be tuned in context.
+    """
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,16), torch.randn(1,2,8,16), torch.randn(1,2,8,16), is_causal=True)"
     )["graph"]
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     records = load_golden_records(load_golden_file(path))
-    assert len(records) == 2
-    assert [record.loop_index for record in records] == [0, 1]
-    assert all(record.name.startswith("k_sdpa_reduce") for record in records)
+    assert len(records) == 1
+    (record,) = records
+    assert record.loop_index is None
+    assert record.origins == ("scaled_dot_product_attention",)
+    assert record.name.startswith("k_sdpa")
 
 
 def test_trace_serializes_target_without_a_torch_reference_mapping(tmp_path) -> None:

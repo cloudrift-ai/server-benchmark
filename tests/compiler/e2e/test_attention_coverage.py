@@ -3,18 +3,18 @@ r"""Attention coverage — flash (the twisted ``(m, l, O)`` MONOID on the stream
 Attention is the hybrid algebra: a SEMIRING contraction (QK^T, P@V) wrapped in a MONOID streaming
 softmax reduce. This file pins every tier of it:
 
-- **generic-path SDPA** — non-causal / causal / GQA / additive-mask SDPA lowers through the
-  readable-seam split (Q·K^T | softmax pieces | P·V, plus cut glue) and matches torch, static AND
-  dynamic (symbolic ``seq_len``); KV tiling; the default-path guards. The kernel count belongs to
-  the fusion pass; these tests assert numerics over the whole kernel set.
+- **generic-path SDPA** — non-causal / causal / GQA / additive-mask SDPA matches torch, static AND
+  dynamic (symbolic ``seq_len``), through either structural placement sibling: one fused cell or
+  one materialized score producer feeding the softmax·V residue. The kernel count belongs to the
+  fusion and placement passes; these tests assert numerics over the whole kernel set.
 - **fused tensor-core flash** — the flash pattern compiler (its private recognition, the ``_twist``
   fragment emitter, the streaming-pair schedule tiers) was deleted with the perf gates; its
   generic-path successor has LANDED as the TWISTED computed-A arm of the one recognizer
   (``bind_prologue_contraction`` accepting the ``(m, d)`` exp-family statistic source), so the
   ``softmax·V`` half of SDPA is one contraction over the KV axis and takes the warp/mma tier, the
   staged transports and split-K wherever the target's atoms admit a compute-filled ``a`` edge
-  (sm_80+; Volta's atoms are materialized-edges-only). The score contraction still lands in its own
-  kernel. RECOGNITION of the single-kernel form is complete: a reduce whose step composes its own
+  (sm_80+; Volta's atoms are materialized-edges-only). RECOGNITION of the single-kernel form is
+  complete: a reduce whose step composes its own
   producer reads with that producer on an operand edge (``lowering/tile/_fromloop`` — the COMPOSED
   STEP), the online-softmax pair matches on the two passes' score cones by content, and the sweep
   binds as one computed-A contraction whose cone reads a COMPUTED score
@@ -31,7 +31,7 @@ softmax reduce. This file pins every tier of it:
   operands STAGE like any other (``_atom.score_key_operand`` / ``score_query_operand``): keys per
   chunk, queries once, both drained by the ordinary ``ldmatrix``, so the score crosses L1 once per
   CTA instead of once per warp. Measured on a
-  5090 at f16, ``(1, 8, S, D)``, against the two-kernel graph the fusion refusal preserves and torch:
+  5090 at f16, ``(1, 8, S, D)``, against the two-kernel shared-score placement sibling and torch:
 
   | shape        | torch | two-kernel | fused | (gmem-direct score) |
   | ------------ | ----- | ---------- | ----- | ------------------- |
@@ -45,11 +45,10 @@ softmax reduce. This file pins every tier of it:
   | S=2048 D=64  |  60.6 |      140.8 | 97.0  |               148.3 |
   | S=2048 D=128 | 117   |      162   | 190.8 |               273   |
 
-  So on that card the fused arm beat the graph the refusal preserves at every ``D ≤ 64`` and beat
-  torch at every ``D`` at ``S = 512``, and lost at ``D = 128`` — which is why loop fusion continues
-  to refuse the merge (``loop/fusion/_merge._nests_reduce`` — the refusal is REVERSIBILITY: no
-  ``PLACE`` cut puts a two-consumer producer back together). Those rows PREDATE the slab-swizzle
-  fix below and have not been re-measured; the A100 rows have.
+  So on that card the fused arm beat the materialized sibling at every ``D ≤ 64`` and beat torch at
+  every ``D`` at ``S = 512``, and lost at ``D = 128``. Both forms now remain structural siblings,
+  so measured evidence chooses instead of fusion hard-coding that result. Those rows PREDATE the
+  slab-swizzle fix below and have not been re-measured; the A100 rows have.
 
   All four of the fused kernel's slabs SWIZZLE. Three of them did not: the score's own staged
   operands and the weight tile the ``ldmatrix`` drain reads were left plain row-major, and at
@@ -81,10 +80,10 @@ softmax reduce. This file pins every tier of it:
   about it: unpinned it lands on ``f1x8`` at every shape, which happens to be the best schedule at
   ``S = 256`` (9.0) and is 231 us at ``S = 512``.
 
-  Structurally the merged tree IS reversible here — with the merge allowed, ``EMMY_PLACE=cut``
-  lowers back to two kernels and both arms pass ``run --bench --strict`` — but the recovered split
-  is not the good one (909 us at ``S = 256`` against the default's 45), so pricing fused against cut
-  needs the cut arm's own schedule evidence before the refusal can be lifted.
+  A bare ``EMMY_PLACE=cut`` selects the shallowest normalize seam and is not the shared-score
+  inverse (909 us at ``S = 256`` against the old default's 45). The exact score path selects the
+  grouped two-use seam: one producer workspace feeds both contextual uses, and each piece receives
+  its own schedule evidence.
 
   The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
   of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
@@ -240,27 +239,12 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
 @requires_cuda
 @pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
 def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
-    """SDPA lowers to ONE kernel and matches torch when the merge is allowed.
+    """SDPA lowers to ONE kernel and matches torch through the ordinary fusion path.
 
-    Loop fusion refuses to nest the score reduce inside the softmax reduce, and that refusal is a
-    REVERSIBILITY judgement, not a capability one (``loop/fusion/_merge._nests_reduce``: the
-    ``Q·Kᵀ`` producer has two consumers in the merged cell, so splicing duplicates it and no
-    ``PLACE`` cut puts it back). Lifting the refusal here pins the capability behind it — the
-    COMPOSED-STEP reading (``lowering/tile/_fromloop``), the pairing on composed score cones, the
-    computed-A bind over a COMPUTED score, and split-K's σ-reindex of the cone's producer edge —
-    so the recognition path cannot rot while the fill that makes the fused form worth deploying is
-    built. Perf is deliberately not asserted here — it is this module's docstring's table, and the
-    realization it depends on is pinned structurally by the assertions below and by
-    ``test_fused_sdpa_sweeps_the_score_once``.
-
-    The configs stay at ``D = 16`` because the other refusal — ``_total_work``'s blowup bound — is
-    real here: in LOOP IR the merged score sits inside the output-column sweep, so its cost counts
-    ``D`` times even though the realized fill computes it once per ``(m, kv)`` slab cell and shares
-    it across the column tile. At ``D = 128`` the bound refuses the merge outright."""
-    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
-
-    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
-    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
+    Recognition proves the exact two-use score inverse, so nested-reduce readability and work
+    account for the producer once while placement retains the materialized sibling. This test has
+    no fusion override: it protects that end-to-end contract together with the COMPOSED-STEP
+    reading and computed-A realization asserted below."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")  # authoritative: keep the merged tree whole, so the count is not greedy's
     torch.manual_seed(0)
     B, H, S, D = cfg
@@ -316,10 +300,6 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     ``REDUCE`` is pinned off because the single pass needs the sweep and the contraction to cover
     the same keys; a split-K partition does not, and there the two-pass pair stands
     (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
-    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
-
-    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
-    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)
@@ -353,10 +333,6 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 
     Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
-    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
-
-    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
-    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
     torch.manual_seed(0)
@@ -387,10 +363,6 @@ def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
 
     The decline is a correctness gate, not a preference: sweeping only the partition's keys would
     normalize each partial by its own denominator and the atomic sum of those is not softmax."""
-    from emmy.compiler.pipeline.passes.loop.fusion import _merge  # noqa: PLC0415
-
-    monkeypatch.setattr(_merge, "_nests_reduce", lambda _op: False)
-    monkeypatch.setattr(_merge, "_entangled_multi_stat", lambda _op: False)
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2a")  # two cross-CTA partitions of the KV axis, atomic-summed
     torch.manual_seed(0)

@@ -3,7 +3,11 @@
 ``PLACE@<child-path> = cut`` on an in-tree parent↔child seam splits the kernel: the child
 subtree becomes its own graph node (a plain un-mapped ``LoopOp``, re-entering recognition as a
 fresh tree), the seam value materializes to a workspace buffer, and the parent consumes a plain
-``Load`` where the child was. Resolution is RECURSIVE: a pin decides the cut BEFORE any schedule
+``Load`` where the child was. Exactly two computed edges whose runnable normalized Loop bodies
+are alpha-equivalent collapse to ONE placement option: one child workspace producer replaces
+both uses, with each parent Load keeping that use's contextual index axes. Different buffers or
+operations remain distinct, and a class with more than two uses stays ungrouped. Resolution is
+RECURSIVE: a pin decides the cut BEFORE any schedule
 fork is built; every resulting piece then re-recognizes on the pass-scan restart — a piece may
 itself be cut by a deeper pin key. NO pin = fuse = the recognized form, spelled as absence. Pins
 are the codec's exploration mechanism (``--ab`` and tune trajectories); a pass consults no
@@ -22,6 +26,7 @@ construction); an open seam cannot be spelled because ``PLACE`` sites are tree c
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -47,6 +52,27 @@ logger = logging.getLogger(__name__)
 
 #: The one value that routes a rewrite; ``fuse`` (or absence) is the recognized form.
 _CUT = "cut"
+
+
+@dataclass(frozen=True)
+class CutSite:
+    """One materialization boundary, possibly shared by two equivalent tree uses.
+
+    A singleton is the ordinary parent-child seam. A pair says both uses lower to the
+    same alpha-equivalent producer, so one workspace producer may replace both edges.
+    More than two uses are deliberately not represented: the grouped form is a narrow,
+    fail-closed inverse for the two-use producer duplication created by fusion.
+    """
+
+    members: tuple[Site, ...]
+
+    @property
+    def node(self):
+        return self.members[0].node
+
+    @property
+    def depth(self) -> int:
+        return min(s.depth for s in self.members)
 
 
 def _place_pins() -> dict[str, str]:
@@ -115,14 +141,68 @@ def _cuttable(root, site: Site, stores: tuple, free: tuple) -> bool:
     return True
 
 
-def cuttable_seams(root, stores: tuple = (), free: tuple = ()) -> list[Site]:
-    """Every legal ``PLACE`` seam on this tree, shallowest first — the placement fork's option
-    list and the pin resolver's candidate set, one derivation."""
+def _piece_op(root, stores: tuple, free: tuple, member: Site, ws: str) -> tuple[LoopOp, list[Axis]]:
+    """Build the standalone producer a seam would materialize, plus its index axes."""
+    child = member.node
+    sweeps = tuple(st.sweep for st in stores if st.sweep is not None)
+    axes = _child_axes(child, (*free, *sweeps), _ancestor_axes(root, child))
+    index = tuple(Var(a.name) for a in axes)
+    stmts = [*child.lower(), Write(output=ws, index=index, value=operand_name(child))]
+    body = _nest(stmts, axes)
+    return LoopOp(body=rename_ssa_sequential(Body(tuple(body)))), axes
+
+
+def _grouped_sites(root, stores: tuple, free: tuple, legal: list[Site]) -> list[CutSite]:
+    """Collapse an exact pair of alpha-equivalent computed edges to one cut option.
+
+    Equality is checked on runnable normalized Loop IR, not ``structural_key``: external
+    buffer names and exact elementwise operations remain significant while bound SSA and
+    axis names are canonical. Thus two same-shaped contractions over different tensors do
+    not alias. A class with more than two uses stays as singleton cuts (fail closed).
+    """
+    from emmy.compiler.ir.pure.fold import is_contraction  # noqa: PLC0415
+
+    by_body: dict[Body, list[Site]] = {}
+    for site in legal:
+        child = site.node
+        if not (isinstance(child, Fold) and child.axis is not None and is_contraction(child)):
+            continue
+        try:
+            piece, _ = _piece_op(root, stores, free, site, "__group_probe")
+        except (AssertionError, ValueError):
+            continue
+        by_body.setdefault(piece.body, []).append(site)
+
+    paired: dict[Site, CutSite] = {}
+    for members in by_body.values():
+        if len(members) != 2:
+            continue
+        group = CutSite(tuple(sorted(members, key=lambda s: s.depth)))
+        for member in members:
+            paired[member] = group
+
+    out: list[CutSite] = []
+    emitted: set[CutSite] = set()
+    for site in sorted(legal, key=lambda s: s.depth):
+        cut = paired.get(site, CutSite((site,)))
+        if cut not in emitted:
+            emitted.add(cut)
+            out.append(cut)
+    return out
+
+
+def cuttable_seams(root, stores: tuple = (), free: tuple = ()) -> list[CutSite]:
+    """Every legal ``PLACE`` cut on this tree, shallowest first.
+
+    Two alpha-equivalent computed edges are exposed as one option that reconstructs one
+    workspace producer. Every other legal seam remains an ordinary singleton option.
+    """
     all_sites = sites(root)
-    return sorted((s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)), key=lambda s: s.depth)
+    legal = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
+    return _grouped_sites(root, stores, free, legal)
 
 
-def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, Site | None]:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
+def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, CutSite | None]:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
     """The ``PLACE`` pin resolution for a freshly-recognized kernel: ``("cut", seam)`` when a pin
     cuts, ``("fuse", None)`` when a pin names this tree and keeps it fused (authoritative — no
     placement fork is offered), ``(None, None)`` when no pin decides (the placement FORK owns the
@@ -133,7 +213,7 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> t
     if not pins:
         return None, None
     all_sites = sites(root)
-    seams = [s for s in family_sites("PLACE", all_sites) if _cuttable(root, s, stores, free)]
+    seams = cuttable_seams(root, stores, free)
     if not seams:
         return None, None  # a bare fold / flat cell has no in-tree seam (or none is legal)
     for key, value in pins.items():
@@ -145,9 +225,10 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> t
             site = resolve(root, key, all_sites=all_sites)
         except ValueError:
             continue  # the pin names no seam on THIS tree (a whole-model pin targets one kernel)
-        if site is None or site not in seams:
+        cut = next((s for s in seams if site in s.members), None)
+        if site is None or cut is None:
             continue
-        return (_CUT, site) if value == _CUT else ("fuse", None)
+        return (_CUT, cut) if value == _CUT else ("fuse", None)
     return None, None
 
 
@@ -298,7 +379,49 @@ def _replace_edge(node, child, load: Load):
     return out
 
 
-def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Site) -> Graph:
+def _cut_ops(root, stores: tuple, free: tuple, cut: CutSite, ws: str) -> tuple[LoopOp, LoopOp, list[Axis]]:
+    """Build one producer and the residue whose member-local Loads all read it."""
+    child_op, axes = _piece_op(root, stores, free, cut.members[0], ws)
+    parent_tree = root
+    sweeps = tuple(st.sweep for st in stores if st.sweep is not None)
+    for member in cut.members:
+        child = member.node
+        member_axes = _child_axes(child, (*free, *sweeps), _ancestor_axes(root, child))
+        load = Load(name=operand_name(child), input=ws, index=tuple(Var(a.name) for a in member_axes))
+        parent_tree = _replace_edge(parent_tree, child, load)
+    parent_cell = effect_tail(parent_tree.lower(), stores)
+    # Flattening term-local names into one raw Loop body can collide; canonical sequential
+    # names make the piece valid before re-recognition names its own lambdas again.
+    parent_op = LoopOp(body=rename_ssa_sequential(Body(tuple(_nest(list(parent_cell), list(free))))))
+    return child_op, parent_op, axes
+
+
+def reusable_cut_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
+    """Return the two Loop-IR pieces for one unambiguous grouped computed-edge cut.
+
+    Fusion uses this as its boundedness witness: the recognized form has a concrete
+    materialization sibling whose producer runs once, so duplicated raw-loop work is not the
+    work the recognized tile must perform. No group, or more than one possible group, declines.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
+
+    try:
+        tile = recognized_tile(loop_op, name=loop_op.name)
+        pro = fused_view(tile)
+    except (AssertionError, ValueError):
+        return None
+    if pro is None:
+        return None
+    tree, free, stores = pro[0], (*tile.place.free, pro[1]), pro[2]
+    groups = [cut for cut in cuttable_seams(tree, stores, free) if len(cut.members) == 2]
+    if len(groups) != 1:
+        return None
+    child_op, parent_op, _ = _cut_ops(tree, stores, free, groups[0], "__reuse_ws")
+    return child_op, parent_op
+
+
+def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: CutSite) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
     the same tree with the seam edge replaced by a plain workspace ``Load``. Both pieces are
@@ -313,10 +436,7 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     ws = f"{out.name}__cut_{child_name}"
     if ws in match.graph.nodes:
         raise RuleSkipped(f"seam already cut — {ws} exists")
-    anc = _ancestor_axes(tile_op, child)
-    sweeps = tuple(st.sweep for st in stores if st.sweep is not None)
-    axes = _child_axes(child, (*free, *sweeps), anc)
-    ws_index = tuple(Var(a.name) for a in axes)
+    child_op, parent_op, axes = _cut_ops(tile_op, stores, free, site, ws)
     ws_dtype = _ws_dtype(child, getattr(root.op, "inputs", None) or {})
     if _is_contraction_operand(tile_op, child) and out.dtype.nbytes == 2:
         # A seam standing in for a CONTRACTION OPERAND holds what the fused form's operand slab
@@ -326,22 +446,6 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
         ws_dtype = out.dtype
     spelled = spell(tile_op, "PLACE", child, all_sites=sites(tile_op))
     logger.info("placement: cutting %s (%s → %s + residue) on %s", spelled, root.id, ws, out.name)
-
-    # --- the CHILD piece: the seam subtree, its value stored to the workspace ------------------
-    child_stmts = [*child.lower(), Write(output=ws, index=ws_index, value=child_name)]
-    child_body = _nest(child_stmts, axes)
-    child_op = LoopOp(body=rename_ssa_sequential(Body(tuple(child_body))))
-
-    # --- the PARENT piece: the tree with the seam edge → a workspace Load ----------------------
-    load = Load(name=child_name, input=ws, index=ws_index)
-    parent_tree = _replace_edge(tile_op, child, load)
-    parent_cell = effect_tail(parent_tree.lower(), stores)
-    parent_body = _nest(list(parent_cell), list(free))
-    # A piece is a RAW loop body: the tree's λ-local SSA names (each lift names its own loads
-    # ``in0``…) flatten into one scope, where a name two λs share collides. Canonical sequential
-    # names make the flattened body a valid single-scope program; the re-recognition lifts and
-    # renames the piece again, so nothing downstream reads these names.
-    parent_op = LoopOp(body=rename_ssa_sequential(Body(tuple(parent_body))))
 
     frag = Graph()
     for inp in root.inputs:
@@ -378,4 +482,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Si
     return frag
 
 
-__all__ = ["cuttable_seams", "realize_cut", "route_cut"]
+__all__ = ["CutSite", "cuttable_seams", "realize_cut", "reusable_cut_pieces", "route_cut"]

@@ -730,7 +730,14 @@ Cut legality is structural: single-component CLOSED children only (`_captured_va
 role; the multi-result prologue of a cone that passes its statistic through stays uncut by the component gate), and
 the pure-copy degenerate
 (cutting an empty-body root projection's only operand, whose parent would merely copy the workspace out — the
-non-terminating case) is refused. A piece is a RAW loop body: the tree's λ-local SSA names flatten into one scope,
+non-terminating case) is refused. Exactly two computed contraction edges may share one cut when their runnable
+normalized child Loop bodies are equal. That alpha-equivalence preserves external buffer names and exact operations,
+so same-shaped computations over different values never alias; a class with more than two uses stays ungrouped.
+The one producer writes a common workspace, while each replacement `Load` retains its member's contextual index axes.
+This grouped inverse is also fusion's boundedness witness: a nested-reduce or multi-statistic merge it recognizes is
+counted as child-once + parent rather than by the duplicated raw-loop spelling, and placement keeps that materialized
+form beside the fused form for evidence to price. A piece is a RAW loop body: the tree's λ-local SSA names flatten
+into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused
 reading's store-side prefix, which re-evaluates the tail's stat-free cone stmts beside the statistic prologue — is
 α-renamed (`__p`) where it is derived, as the chain formation renames a shared member. Loop fusion stops at

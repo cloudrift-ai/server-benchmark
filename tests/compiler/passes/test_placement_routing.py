@@ -303,6 +303,32 @@ def test_synthetic_decode_row_requires_a_literal_unit_coordinate(index) -> None:
     assert _unit_output_row((write,), "n") is None
 
 
+def test_followup_fusion_preserves_the_sdpa_grouped_inverse() -> None:
+    """A producer merge cannot consume an attention target's recovered placement sibling."""
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
+
+    graph = trace_inline_code(
+        "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
+    )["graph"]
+    graph = Pipeline.build(LOOP_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    attention = graph.nodes["scaled_dot_product_attention"]
+    assert isinstance(attention.op, LoopOp) and reusable_cut_pieces(attention.op) is not None
+
+    source = graph.nodes["x0"].output
+    graph.rename_node("x0", "q_src")
+    graph.add_node(ElementwiseOp("negative"), ["q_src"], replace(source, name="x0"), node_id="x0")
+    graph.replace_input(attention.id, "q_src", "x0")
+
+    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph, ctx=Context.from_target((8, 0)))
+    loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 2, "the producer must stay outside the reusable attention cell"
+    attention = fused.nodes["scaled_dot_product_attention"]
+    assert reusable_cut_pieces(attention.op) is not None
+
+
 # --- the realizer: pin-driven cuts, fuse-default, recursion ---------------------------------------
 
 

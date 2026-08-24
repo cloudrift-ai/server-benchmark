@@ -1,3 +1,58 @@
+# Cycle 3: retune on main @ 3aa618af — tunable kernels now beat eager; fusion's cold deploys got worse
+
+## Scope and protocol
+
+Third pass, after 70 further commits (#629 computed-A recognition, #633 Volta A-reuse, #628/#636 structural
+winner replay, FA follow-ups). RTX 4090 (128 vCPU, CUDA 12.8, driver 590) and RTX 5090 (192 vCPU, CUDA 12.8)
+hosts; V100 not provided this cycle (its cycle-2 goldens stand). 0.6B + 0.6B-FP8 only — both hosts had 32 GB
+disks, excluding the 32B checkpoint by fit. Same trace -> tune (budget 12) -> 3x `-O3` verify flow, with one
+deliberate protocol change: **`EMMY_BENCH_RUN_TIMEOUT_S=15`** for tune and verify (the tune lane hardcodes a 2 s
+bench watchdog at `emmy/commands/tune.py:188`; 15 s lets slow-but-real candidates rank). Runs were driven by the
+same uncommitted benchmark-from-goldens flow as cycle 2; in-tree `recipe.yaml` unchanged.
+
+## Headline, stated carefully
+
+**Both directions moved.** The measured majority of kernels improved dramatically — on the 4090 the tunable
+kernels now sum to 553 µs (s512) / 148 µs (s1) and **beat eager 1.4x / 2.7x**, the first eager win of any
+cycle; cycle 2's 116 ms knobless decode misdeploy is gone. But the new fusion (kernel count changed 18 -> 21;
+every cycle-2 SDPA/computed-A kernel identity is gone) produces cold deploys so slow they exceed even the 15 s
+bench cap. Measured with 10-iter runs (single repeat, marked as such in the golden):
+
+| kernel (4090) | emmy µs | eager µs | ratio |
+| --- | ---: | ---: | ---: |
+| `k_linear_mean_reduce_d623c5...s512` (computed-A) | 422477 | 220 | ~1900x |
+| `k_sdpa_linear_reduce_5b0de4...s512` | 233695 | 41 | ~5700x |
+| `k_linear_sdpa_reduce_fc07d0...s512` | 233954 | 54 | ~4300x |
+| `k_linear_mean_reduce_c1b0ae...s1` | 136830 | 110 | ~1250x |
+
+All deploy with empty schedule knobs on trivial grids (the 422 ms kernel runs on a **2-block grid**). True s512
+layer total on the 4090 is therefore ~891 ms vs eager ~1.5 ms — **worse than cycle 2's 34.5 ms**, because the
+fused forms got heavier while staying schedule-less. A naive old-vs-new sum over *measured* rows reads as a 62x
+improvement; that is coverage illusion, and this file reports it only to warn against it.
+
+## Findings
+
+1. **Greedy-maximal fusion emits cold-catastrophic fused forms and the deploy path has no defense.** The new
+   SDPA/computed-A kernels are knobless at deploy (search reaches no schedule; candidates exceed any sane bench
+   budget). Raising the watchdog 2 s -> 15 s helped everything measurable, but these need ~100+ s per bench —
+   the earlier observation stands that raising it further just moves cost into re-lowering.
+2. **Golden drift is now structural and fast**: the #580 goldens no longer replay on this main ("provenance
+   target no longer resolves after lowering"; only 4/18 resolved), and the kernel identities changed again
+   within this cycle. Any golden corpus needs re-tracing per compiler epoch.
+3. **The 2 s tune watchdog is still hardcoded** (`tune.py:188`) with only the env override; cycle-3 tunes ran at
+   15 s and that protocol note travels with these numbers.
+4. 5090 mirror: same shape (15/21 and 26/38 measured; FP8 traces needed `HF_HUB_DISABLE_XET=1` after xet
+   download failures). Its unmeasured rows are the same over-budget fused kernels, not measured separately.
+5. Host notes: both cycle-3 hosts were clean (no driver/toolchain traps); Vast containers reap tmux/setsid on
+   SSH resets — **supervisor** is the reliable launcher there.
+
+## Files
+
+Goldens refreshed for rtx4090/rtx5090 (0.6B, 0.6B-FP8; the six over-budget 4090 rows carry single-repeat
+10-iter measurements, all other rows are median-of-3). Archives: `results_rtx4090x1.tar.gz`,
+`results_rtx5090x1.tar.gz` (raw traces, tune logs with 15 s-watchdog search feedback, verify JSONs, slow-kernel
+logs). V100 files untouched from cycle 2.
+
 # Golden-bench kernel corpus: retuned golden datasets after the first fix wave (main @ 001d4f44)
 
 ## What this refresh is

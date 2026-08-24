@@ -108,8 +108,9 @@ own process, is reported as a failure, and the remaining rows continue.
 ## Recording rules worth knowing
 
 - **A recorded cut and a tile choice cannot go in the same entry.** A cut is decided before schedules are chosen, so
-  one entry records either the placement pin or a schedule row, never both. Here is a real cut entry, recorded for
-  the same shape as the fused one above:
+  one entry records either the placement pin or a schedule row, never both. Here is a cut entry recorded for the
+  same shape as the fused example above (the standalone inventory it comes from predates the current serving-twin
+  gemma-4 file, which carries no cut routings):
 
   ```yaml
   - name: gemma4_12b.norm_q_proj.m32.cut
@@ -163,7 +164,7 @@ Read a real file — they are plain YAML, and the comments in them are the recor
 
 ```bash
 find recipes -path '*/golden/*.yaml' -print
-grep -n -A9 "name: gemma4_12b.norm" recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml | head -30
+grep -n -A9 "name: post-sym.k_linear_mean_reduce" recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml | head -30
 ```
 
 Then run the file-scoped validation on the GPU named by the serving config. It needs model configuration and

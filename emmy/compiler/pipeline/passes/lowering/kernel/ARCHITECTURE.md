@@ -227,6 +227,10 @@ per-fragment row/column placeholders. The destination index remains only an addr
 index to a tile-local slab, but it must not rebase a causal or other coordinate predicate. Later cell replication
 substitutes the predicate's real coordinate variables and the store fills only its element offsets. Inferring the
 predicate origin from `RegStore.dst_index` would make every nonzero chunk compare slab-local coordinates instead.
+The epilogue also retains every captured `Assign.dtype`: fragment-local pointwise operations use the same promotion,
+native-operation, and final-conversion rules as the scalar Loop tail. In particular, an f32 accumulator crossing a
+declared f16 tensor boundary narrows before a later activation consumes it; register fusion cannot erase that store/load
+semantic boundary.
 
 The chained fill takes one of two forms, and the first is preferred wherever it reads:
 

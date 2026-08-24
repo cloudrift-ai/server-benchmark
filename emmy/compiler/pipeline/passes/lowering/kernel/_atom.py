@@ -185,10 +185,12 @@ def _warp_epilogue(
     The projection is the post-reduce ``tail`` stmts: the leaf ``Load``s + pointwise ``Assign``s +
     an optional causal ``Select``. Each leaf ``Load`` becomes an :class:`EpilogueLoad` at the
     cell-base coordinate (σ-applied; the render adds the per-element row/col motion on the
-    ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args)`` op; a coord-predicated
+    ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args, dtype)`` op; a coord-predicated
     ``Select`` (causal mask) captures its σ-applied cell bases plus ``__M__`` / ``__N__``
     placeholders; the store substitutes only the element's row/col offsets. This keeps semantic
-    source coordinates independent of a later store to a tile-local shared-memory slab."""
+    source coordinates independent of a later store to a tile-local shared-memory slab. Keeping
+    the optional dtype makes the register epilogue obey the scalar Loop tail's promotion and
+    conversion rules."""
     loads, ops, selects = [], [], []
     write = None
     ph = {
@@ -206,7 +208,7 @@ def _warp_epilogue(
                 )
             )
         elif isinstance(s, Assign):
-            ops.append((s.name, s.op.name, tuple(s.args)))
+            ops.append((s.name, s.op.name, tuple(s.args), s.dtype))
         elif isinstance(s, Select):
             selects.append((s.name, tuple((br.select.substitute(ph), br.value) for br in s.branches)))
         elif isinstance(s, Write):
@@ -221,7 +223,7 @@ def _warp_epilogue(
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
     bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
-    for name, _op, args in ops:
+    for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
             raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")

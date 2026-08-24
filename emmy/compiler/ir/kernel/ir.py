@@ -1842,16 +1842,16 @@ class RegEpilogue:
     Captured by ``kernel/005_lower_atom_tile`` from the backward slice between
     the accumulator and the Write (the scalar Load / Assign stmts are stripped
     — the accumulator has no scalar SSA name on the fragment path). The render
-    evaluates the chain per fragment element in f32 with ``acc`` substituted
-    by the element and each leaf loaded at the element's own (row, col); the
-    chain ops reuse the scalar renderer's ``op_to_expr`` translation, so any
-    elementwise op with a CUDA spelling works. ``ops`` are ``(name, op_name,
-    args)`` in topological (body) order; ``result`` is the SSA name the Write
+    evaluates the chain per fragment element with ``acc`` substituted by the
+    element and each leaf loaded at the element's own (row, col). Chain ops
+    reuse :class:`Assign` rendering, including its optional dtype, promotion,
+    native-op, and conversion rules. ``ops`` are ``(name, op_name, args,
+    dtype)`` in topological (body) order; ``result`` is the SSA name the Write
     stored."""
 
     acc: str
     loads: tuple[EpilogueLoad, ...]
-    ops: tuple[tuple[str, str, tuple[str, ...]], ...]
+    ops: tuple[tuple[str, str, tuple[str, ...], DataType | None], ...]
     result: str
     # Coord-predicated Selects (the causal attention mask), rendered before the
     # ``ops`` chain as per-element ternaries. Each is ``(name, branches)`` where
@@ -1954,7 +1954,7 @@ class RegStore(Stmt):
         idx = ", ".join(e.pretty() for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
-            chain = ", ".join(op for _, op, _ in self.epilogue.ops)
+            chain = ", ".join(op for _, op, _, _ in self.epilogue.ops)
             bufs = ", ".join(ld.buffer for ld in self.epilogue.loads)
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
@@ -2017,17 +2017,15 @@ class RegStore(Stmt):
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
         ``2_t+{0,1}``) declares its leaf loads (converted to f32; offsets per
-        the dim roles at each buffer's own stride) and the chain ops (via
-        ``op_to_expr`` — the same translation the scalar ``Assign`` render
-        uses), all scoped inside the store's ``{ }`` block. Leaf loads are
+        the dim roles at each buffer's own stride) and the chain ops (via the
+        scalar ``Assign`` renderer), all scoped inside the store's ``{ }``
+        block. Leaf loads are
         scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
         if self.epilogue is None:
             return [[] for _ in coords], [f"{self.frag}[{i}]" for i in range(len(coords))]
-        from emmy.compiler.ir.expr import Var  # noqa: PLC0415
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
 
         epi = self.epilogue
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
@@ -2036,11 +2034,14 @@ class RegStore(Stmt):
         for i, (row, col, row_off, col_off) in enumerate(coords):
             lines: list[str] = []
             env = {epi.acc: f"{self.frag}[{i}]", **{a: f"{fr}[{i}]" for a, fr in epi.extra_accs}}
+            for value in env.values():
+                ctx.ssa_dtypes[value] = "f32"
             for ld in epi.loads:
                 temp = f"{ld.name}_e{i}"
                 if ld.buffer in ctx.literal_constants:
                     lines.append(f"const float {temp} = {float(ctx.literal_constants[ld.buffer])!r}f;")
                     env[ld.name] = temp
+                    ctx.ssa_dtypes[temp] = "f32"
                     continue
                 flat = render_index(ld.buffer, ld.index, ctx)
                 parts = [flat]
@@ -2054,6 +2055,7 @@ class RegStore(Stmt):
                 dt = ctx.buffer_dtypes.get(ld.buffer, "f32")
                 lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{ld.buffer}[{addr}]')};")
                 env[ld.name] = temp
+                ctx.ssa_dtypes[temp] = "f32"
             # Coord-predicated Selects (the causal mask): a per-element ternary.
             # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
             # the captured predicate already carries its semantic cell base.
@@ -2065,10 +2067,17 @@ class RegStore(Stmt):
                     expr = f"(({rc}) ? {env[value]} : {expr})"
                 lines.append(f"const float {sel_name}_e{i} = {expr};")
                 env[sel_name] = f"{sel_name}_e{i}"
-            for name, op_name, args in epi.ops:
-                expr = op_to_expr(op_name, [Var(env[a]) for a in args])
-                lines.append(f"const float {name}_e{i} = {expr.render(ctx)};")
-                env[name] = f"{name}_e{i}"
+                ctx.ssa_dtypes[env[sel_name]] = "f32"
+            for name, op_name, args, dtype in epi.ops:
+                rendered_name = f"{name}_e{i}"
+                rendered = Assign(
+                    name=rendered_name,
+                    op=op_name,
+                    args=tuple(env[arg] for arg in args),
+                    dtype=dtype,
+                ).render(replace(ctx, indent=0))[0]
+                lines.append(f"const {rendered}")
+                env[name] = rendered_name
             per_elem.append(lines)
             vals.append(env[epi.result])
         return per_elem, vals

@@ -73,7 +73,9 @@ raises an illegal memory access capturing a WIDE mixed batch on gemma-4-12B (512
 offset-overflow artifact), pinned by a `CUDA_LAUNCH_BLOCKING=1` boot — and FLEX_ATTENTION fails its
 sliding-window block-mask build outright (`used_pages.masked_fill_`: 256 vs 258 pages). So wide-head models get
 their rungs capped at `config.WIDE_HEAD_MIXED_RUNG_CAP` (2112) and run chunk capture on the 2048-chunk-quantum
-lane, wider steps eager; the 4096-chunk lane stays eager until a fixed vLLM lands.
+lane, wider steps eager; the 4096-chunk lane stays eager until a fixed vLLM lands. (SUPERSEDED by the
+2026-08-15 root cause below — the attribution to head width was wrong, the cap is gone, and the 4096 lane
+runs.)
 
 Measured cells (capture ON / capture OFF / stock):
 
@@ -120,12 +122,13 @@ leads TPOT — the same not-shape-comparable admission asymmetry as the 2048-lan
 hashes are byte-identical across ON / OFF / stock.
 
 **Caveat — the clamp was 5090-validated on the fcbc-era tree (`bench/fcbc-clamp` = `bench/chunk-capture-fcbc880f`
-+ the clamp commit), NOT on this branch:** trees containing main PRs #498–#503 (this branch's base) hang on the
-FIRST inference step on the 5090 (100% util / ~122 W spin-kernel signature, capture ON and OFF alike, eager
-prefill included) while stock vLLM and the fcbc-era tree serve fine — a pre-existing serving regression between
-fcbc880f and #503, unrelated to the clamp (which only touches dummy-run seq lens). Remaining follow-ups: bisect
-that regression on a 5090, re-bench against a stock arm at a comparable admission shape, and upstream the vLLM
-report.
++ the clamp commit), NOT on a current-main base:** trees on newer bases appeared to hang on their first serving
+step on the 5090 (100% util / ~123 W, capture ON and OFF alike, eager prefill included) while stock vLLM and
+the fcbc-era tree served fine. That was bisected separately to #482's mlp_down fork erasure — a bounded 4-5
+order-of-magnitude cold-pick slowdown (~40 s/token, so any client timeout reads as a hang), not a deadlock and
+unrelated to this clamp, which only touches dummy-run seq lens. It clears with the gemma-4-it golden re-record
+on current main. Remaining follow-ups: re-validate serving on a current-main base once that re-record lands,
+re-bench against a stock arm at a comparable admission shape, and upstream the vLLM report.
 
 ## Target architecture
 

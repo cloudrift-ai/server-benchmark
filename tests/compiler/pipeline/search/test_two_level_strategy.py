@@ -93,11 +93,13 @@ def _fuse(graph: Graph) -> Graph:
     return Pipeline.build(LOOP_PASSES).run(graph, db=SearchDB())
 
 
-def test_searched_winner_requires_one_post_fusion_and_one_cuda_kernel() -> None:
+def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row() -> None:
     one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
     assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE": "f2x2"}, 5.0)
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
+    split = OpResult(**{**multi_cuda.__dict__, "searched_knobs": {"REDUCE": "g8k"}, "searched_structural": True})
+    assert InnerReward(total_us=4.0, ok=True, per_op=[split]).searched_winner() == ({"REDUCE": "g8k"}, 5.0)
     assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
 
 

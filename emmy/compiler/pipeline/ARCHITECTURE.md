@@ -79,7 +79,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
-| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -538,7 +538,10 @@ Three definitions the list leans on:
 - **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
-  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
+  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided. At
+  a placement fork, `PLACE` is the exception: each candidate's complete `PLACE` subset must exactly equal the measured
+  row's subset, including the fused candidate's empty subset. A cut measurement therefore vouches only for that cut,
+  while the same prefix rule continues to apply to every non-`PLACE` knob.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so
@@ -590,11 +593,13 @@ the fused form plus one cut fragment per legal seam, so `tune` discovers cuts an
 prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
 whichever prior is loaded. That costing exists because a `Graph` leaf carries no knob row the ordinary ranking
 could score, not to defend the fused side: when some leaf cannot be priced the pricing decides nothing and every
-leaf, cuts included, goes on to the ordinary ranking. Exactly two computed seams whose runnable normalized Loop
-bodies are alpha-equivalent collapse to one cut fragment: one workspace producer replaces both contextual uses.
-Different external buffers or operations, and equivalence classes larger than two, remain independent seams. A
-chosen cut's
-parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut records and replays as the exact pin. A
+leaf, cuts included, goes on to the ordinary ranking. A measured whole-route row is direct evidence for the complete
+fused or cut candidate, so the reservoir and DB tiers consult it before estimating a route from its child kernels;
+only a placement fork without exact aggregate evidence reaches that structural cost estimate. Exactly two computed
+seams whose runnable normalized Loop bodies are alpha-equivalent collapse to one cut fragment: one workspace producer
+replaces both contextual uses. Different external buffers or operations, and equivalence classes larger than two,
+remain independent seams. A chosen cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut
+records and replays as the exact pin. A
 **routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
 schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
 unpinned compile.
@@ -933,9 +938,18 @@ for a forkless anchor) is compiled with scoped authoritative pins and measured t
 the normal isolated benchmark and DB persistence path before MCTS continues in the same input pin regime. A
 realized-vs-requested check marks an
 unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
-rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
-the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
-only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
+rows feed the shared prior immediately, so the following MCTS can use their evidence. The measured pipeline captures
+the exact finalized single Loop's stamped structural identity, even when the working file starts from stable Torch IR.
+At the kernel-set-changing splice it also captures the consumed parent carrying the complete scheduler feature row and
+exact structural route. The proposal's measured whole-slice latency persists under that route-specific parent cache
+key and context. This captured perf row is deploy evidence: the measured DB index can select the route again after a
+cold reload while the unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain
+their independent terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and
+training; they do not drive deploy selection. The direct row is written only when the authoritative pins pass
+realized-pin validation, search retains the exact structural route, one consumed parent realizes it, and the terminal
+measurement succeeds. Ranking feedback is flushed to the working file as soon as proposal measurement finishes,
+before MCTS. A multi-CudaOp result records realized knobs only when their union is conflict-free, or when search
+retained that exact structural replay row; otherwise the ranking is explicitly ambiguous.
 
 Each of those per-target persists rewrites the whole file, so its cost is the size of the inventory rather than of
 the entry that changed, and a whole-model sweep pays it once per target. They are written **incrementally**: the
@@ -950,8 +964,11 @@ already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals cons
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
-provides both its knob row and cost. A later greedy deploy replay can select different golden/DB evidence and is never
-paired with that search reward. These `-O1` ranking numbers never populate
+provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its first
+exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule row for
+a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their heterogeneous
+schedules into one row or falls back to a slower monolithic sibling. A later greedy deploy replay can select different
+golden/DB evidence and is never paired with that search reward. These `-O1` ranking numbers never populate
 `emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either

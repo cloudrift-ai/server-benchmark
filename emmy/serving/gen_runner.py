@@ -33,12 +33,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
+_GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
 
 
 def _generation_precision_contract(model_type, expert_store):
     """Pack-key component for architecture precision rewrites that run only on cold trace."""
     if model_type == "laguna" and (expert_store or {}).get("fmt") == "exl3":
         return _LAGUNA_EXL3_PRECISION_CONTRACT
+    if model_type == "gpt_oss" and (expert_store or {}).get("fmt") == "mxfp4":
+        return _GPT_OSS_MXFP4_PRECISION_CONTRACT
     return None
 
 

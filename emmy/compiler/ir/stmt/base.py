@@ -748,6 +748,12 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             )
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            if s.dtype is not None:
+                # The defining Assign is omitted below, so its normal render path cannot
+                # register the SSA dtype. Preserve it for the consumer: otherwise an inlined
+                # integer shift feeding a bitwise mask is mistaken for f32 and rendered with
+                # logical ``&&``/``||`` instead of integer ``&``/``|``.
+                ctx.ssa_dtypes[s.name] = s.dtype.name
             bases[s.name] = names
             inlined.add(s.name)
         if inlined:

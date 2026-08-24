@@ -26,6 +26,21 @@ def _tiny_olmoe_config(transformers):
     )
 
 
+def _tiny_gpt_oss_config(transformers):
+    return transformers.GptOssConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+    )
+
+
 def _tiny_laguna_config(transformers):
     return transformers.LagunaConfig(
         vocab_size=64,
@@ -554,7 +569,7 @@ def test_exl3_routed_scale_leaves_other_architectures_untouched():
     assert model.marker is marker
 
 
-def test_laguna_exl3_precision_contract_invalidates_old_pack_key(tmp_path, monkeypatch):
+def test_precision_contracts_invalidate_old_pack_key(tmp_path, monkeypatch):
     from emmy.compiler.backend import pack
     from emmy.serving.gen_runner import _generation_precision_contract
 
@@ -563,8 +578,39 @@ def test_laguna_exl3_precision_contract_invalidates_old_pack_key(tmp_path, monke
     contract = _generation_precision_contract("laguna", {"fmt": "exl3"})
     assert contract == "laguna-exl3-precision-v4"
     assert pack.pack_path(tmp_path, old_key) != pack.pack_path(tmp_path, {**old_key, "precision_contract": contract})
+    gpt_oss_contract = _generation_precision_contract("gpt_oss", {"fmt": "mxfp4"})
+    assert gpt_oss_contract == "gpt-oss-mxfp4-fp32-residual-v1"
+    assert pack.pack_path(tmp_path, old_key) != pack.pack_path(tmp_path, {**old_key, "precision_contract": gpt_oss_contract})
     assert _generation_precision_contract("laguna", {"fmt": "fp8"}) is None
+    assert _generation_precision_contract("gpt_oss", {"fmt": "fp8"}) is None
     assert _generation_precision_contract("glm4_moe", {"fmt": "exl3"}) is None
+
+
+def test_gpt_oss_float32_residual_contract_prevents_late_layer_add_overflow():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+    from emmy.serving.gen_runner import _combine_moe_output
+
+    block = GptOssDecoderLayer(_tiny_gpt_oss_config(transformers), layer_idx=0).half().eval()
+    block.self_attn.o_proj.weight.data.zero_()
+    block.self_attn.o_proj.bias.data.zero_()
+    pre, post, _expert = build_moe_split_wrapper(block, float32_residual=True)
+
+    residual = torch.full((2, 64), 65_000.0, dtype=torch.float32)
+    attn_out = torch.zeros((2, 64), dtype=torch.float16)
+    with torch.no_grad():
+        q, k, v = pre(residual)
+        h, xn = post(attn_out, residual)
+        routed = torch.full_like(xn, 1_000.0)
+        got = _combine_moe_output(h, routed)
+
+    assert {q.dtype, k.dtype, v.dtype, xn.dtype} == {torch.float16}
+    assert h.dtype == got.dtype == torch.float32
+    assert torch.isfinite(got).all()
+    assert not torch.isfinite(h.half() + routed).all()
 
 
 def test_combine_casts_fp32_router_scores():

@@ -232,7 +232,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   stay fp16. Checkpoint-provenanced attention, dense, routed, and shared down outputs return fp32; routed and fixed-slot
   combines accumulate fp32, and the final norm returns fp16 for the head. The marked post program returns the fp32
   base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
-  without a narrowing cast. Ordinary routers and non-Laguna checkpoints retain their existing hot paths.
+  without a narrowing cast. gpt-oss MXFP4 uses the narrower form of the same residual contract: embedding and the
+  inter-layer residual stay fp32, pre/post norms cast their projection and router activations back to fp16, expert
+  partials and their weighted combine stay fp16, and the routed result is added to the fp32 base before the final norm
+  returns fp16 for the output head. This prevents late-layer residual adds from overflowing on fp16-only GPUs without
+  widening attention or expert kernels. Other checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
@@ -391,7 +395,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   are filtered before shard files open, so a rank never reads or materializes another stage's coded weights. Execution
   plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
-  Laguna EXL3 contract therefore preserves its fp32 residual stream across ranks while q/k/v and attention stay fp16.
+  Laguna EXL3 and gpt-oss MXFP4 contracts therefore preserve their fp32 residual streams across ranks while q/k/v and
+  attention stay fp16.
   The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
   `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the coded compiler program
   row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline

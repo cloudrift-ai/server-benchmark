@@ -48,7 +48,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
             input_names.append(src_id)
             name = f"in{i}"
             body.append(Load(name=name, input=src_id, index=idx))
-            select_expr = src.select.substitute(mapping) if src.select is not None else Literal(1, "int")
+            select_expr = src.select.substitute(mapping) if src.select is not None else Literal(True, "bool")
             branches.append(SelectBranch(value=name, select=select_expr))
         body.append(Select(name="v", branches=tuple(branches)))
         body.append(Write(output=out_buf, index=write_index, value="v"))

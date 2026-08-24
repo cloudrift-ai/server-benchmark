@@ -421,6 +421,7 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
 
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tensor.ir import IndexMapOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
@@ -447,6 +448,11 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
         node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2 and node.id.endswith("_base")
     ]
     assert len(updates) == 4
+    for update in updates:
+        select = update.op.sources[0].select
+        while isinstance(select, BinaryExpr) and select.op == "&&":
+            select = select.left
+        assert select == Literal(True, "bool")
 
     backend = NumpyBackend()
     result, _ = backend.run(

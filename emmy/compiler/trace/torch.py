@@ -1469,7 +1469,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         if any(extent == 0 for extent in extents):
             return
 
-        select = Literal(1, "int")
+        select = Literal(True, "bool")
         for axis, (offset, extent) in enumerate(zip(offsets, extents, strict=True)):
             coord = placeholder(axis)
             in_axis = BinaryExpr(">=", coord, Literal(offset, "int"))
@@ -1551,7 +1551,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
                     f"aten.copy_ local view shape mismatch: base={base_shape}, destination={tuple(view_shape)}, copy={tuple(shape)}"
                 )
 
-            select = Literal(1, "int")
+            select = Literal(True, "bool")
             for axis, (offset, extent) in enumerate(zip(offsets, extents, strict=True)):
                 coord = placeholder(axis)
                 in_axis = BinaryExpr(">=", coord, Literal(offset, "int"))

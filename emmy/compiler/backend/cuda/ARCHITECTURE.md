@@ -80,7 +80,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
    numeric inputs are round-to-nearest-even encoded before upload, while an already-`uint16` source is preserved.
 2. Launch each kernel in topological order; `zero_outputs` fills run
    before the launch.
-3. Copy `graph.outputs` buffers back to numpy. BF16 outputs remain raw `uint16` bits at this backend boundary;
+3. Copy `graph.outputs` buffers back to numpy in their declared order, independently of buffer allocation order. BF16
+   outputs remain raw `uint16` bits at this backend boundary;
    command-layer correctness checks decode them.
 
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its

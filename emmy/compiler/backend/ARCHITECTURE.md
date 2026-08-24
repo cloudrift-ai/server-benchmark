@@ -123,6 +123,8 @@ grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the co
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
+The declared output list is also the runtime return order; allocation planning may reorder buffers, but cannot reorder
+observable program results.
 
 `plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
 It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while

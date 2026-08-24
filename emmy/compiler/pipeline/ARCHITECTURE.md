@@ -860,7 +860,8 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
   It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
-  inputs and persisted Loop programs stay byte-identical across fresh Python processes.
+  inputs and persisted Loop programs stay byte-identical across fresh Python processes. Every retained `InputOp` is
+  registered as a slice input even when a minting fragment did not list the boundary in its own `Graph.inputs`.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
 - **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the

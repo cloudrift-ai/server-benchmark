@@ -18,13 +18,17 @@ import zlib
 import pytest
 
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
+from emmy.compiler.backend.cuda._planner import compute_live_intervals
+from emmy.compiler.backend.plan import plan_from_graph
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _KernelInventory
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
@@ -120,6 +124,24 @@ def test_identical_kernels_dedup_with_multiplicity() -> None:
     assert len(reward.per_op) == 1, "structurally identical kernels share one inner search"
     assert reward.per_op[0].multiplicity == 2
     assert reward.total_us == pytest.approx(2 * reward.per_op[0].best_us)
+
+
+def test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime_plan() -> None:
+    fused = _fuse(_graph(("x", 64, 128, 48)))
+    fused.inputs.remove("xb")
+    root = next(node.id for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+
+    sliced = single_node_graph(fused, root)
+    lowered = Pipeline.build(CUDA_PASSES).run(sliced, ctx=Context.from_target((8, 0)))
+    plan = plan_from_graph(lowered)
+
+    assert set(sliced.inputs) == {"xa", "xb"}
+    roles = {buffer.name: buffer.role for buffer in plan.buffers}
+    assert roles == {"xa": "input", "xb": "input", "xc": "output"}
+    scratch = [buffer.name for buffer in plan.buffers if buffer.role == "scratch"]
+    # Exercise the allocator's exact liveness seam: an undeclared InputOp would
+    # be scratch here and fail because no CUDA launch produces it.
+    assert compute_live_intervals(scratch, plan.launches) == {}
 
 
 def test_run_drives_outer_scores_separably_and_assembles() -> None:

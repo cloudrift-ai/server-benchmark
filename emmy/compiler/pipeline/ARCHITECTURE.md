@@ -1218,6 +1218,9 @@ cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no t
 backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
 backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
 lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
+Tune terminals request one nominal warmup; the CUDA benchmark's existing clock-ramp floor extends that warmup until
+it covers 10 ms of GPU time. A slow candidate therefore spends one iteration warming instead of exhausting the
+run-stage budget on discarded repeats. Pinned and deployable comparisons retain their caller-selected warmup count.
 
 ## Part 7: Golden records and the A/B integrity gates
 

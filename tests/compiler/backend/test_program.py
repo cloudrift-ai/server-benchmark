@@ -1,5 +1,8 @@
 """Tests for cupy dispatch of a lowered ``Graph[CudaOp]``."""
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -230,6 +233,44 @@ def test_benchmark_program_returns_timing():
     assert result.num_launches == 1
     assert result.per_launch is not None
     assert len(result.per_launch) == 1
+
+
+def _fake_benchmark_program(monkeypatch, iter_ms: float):
+    import emmy.compiler.backend.cuda.program as program_mod
+    import emmy.compiler.backend.gpu_lock as lock_mod
+
+    class _FakeProgram:
+        def __init__(self) -> None:
+            self.compiled = SimpleNamespace(launches=[SimpleNamespace(kernel_name="k")])
+            self.calls = 0
+
+        def iter_once(self, *, batch_sizes=None, pre_iter=None):
+            self.calls += 1
+            return [iter_ms]
+
+    fake = _FakeProgram()
+    monkeypatch.setattr(program_mod.CompiledProgram, "build", classmethod(lambda _cls, *_args, **_kwargs: fake))
+    monkeypatch.setattr(lock_mod, "gpu_lock", nullcontext)
+    return fake
+
+
+def test_benchmark_program_explicit_warmup_count_is_unchanged(monkeypatch):
+    fake = _fake_benchmark_program(monkeypatch, iter_ms=5.0)
+
+    result = benchmark_program(Graph(), warmup=5, num_iters=1, run_timeout_s=2.0, capture_graphs=False)
+
+    assert fake.calls == 6
+    assert result.time_ms == 5.0
+    assert result.per_launch[0].samples == (5.0,)
+
+
+def test_benchmark_program_run_budget_still_fails_on_first_slow_iteration(monkeypatch):
+    fake = _fake_benchmark_program(monkeypatch, iter_ms=2100.0)
+
+    with pytest.raises(RuntimeError, match="benchmark run stage exceeded 2.0s of GPU time"):
+        benchmark_program(Graph(), warmup=1, num_iters="auto", run_timeout_s=2.0, capture_graphs=False)
+
+    assert fake.calls == 1
 
 
 @requires_cuda

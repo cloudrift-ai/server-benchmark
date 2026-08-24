@@ -69,7 +69,8 @@ class _CountingBackend:
             per.append(LaunchTime(idx=i, kernel_name=getattr(n.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,)))
         return BenchmarkResult(time_ms=sum(p.time_ms for p in per), num_launches=len(per), per_launch=per)
 
-    async def benchmark_async(self, graph, num_iters="auto") -> BenchmarkResult:
+    async def benchmark_async(self, graph, num_iters="auto", warmup=5) -> BenchmarkResult:
+        del warmup
         return self.benchmark(graph, num_iters=num_iters)
 
 

@@ -424,6 +424,29 @@ def test_benchmark_pinned_isolated_async_ships_inputs_once_and_retries_on_miss()
     assert bench == "B" and outputs == {"o": 1}
 
 
+async def test_cuda_backend_pinned_bench_keeps_default_warmup(monkeypatch) -> None:
+    import emmy.compiler.backend.cuda.program as program_mod
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    seen = {}
+
+    async def _fake_pinned(compiled, **kwargs):
+        seen.update(compiled=compiled, **kwargs)
+        return "bench", None
+
+    monkeypatch.setattr(program_mod, "benchmark_pinned_isolated_async", _fake_pinned)
+    backend = CudaBackend()
+    worker = object()
+    monkeypatch.setattr(backend, "_async_worker", lambda: worker)
+
+    result = await backend.bench_pinned_async("G")
+
+    assert result == ("bench", None)
+    assert seen["worker"] is worker
+    assert seen["warmup"] == 5
+    assert seen["num_iters"] == 20
+
+
 def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     """A ``trace_args`` job with ``accuracy``: the child binds the rebuilt module's real
     inputs, runs the emmy program on them, and compares vs eager. A numeric failure ships

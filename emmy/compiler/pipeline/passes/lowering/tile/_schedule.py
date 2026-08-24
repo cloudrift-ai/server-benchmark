@@ -108,7 +108,7 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view
+from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view, unit_contraction_view
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -472,6 +472,9 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     - the MONOID-producer composition (``_classify.fused_view``) — the stored map form plus
       the derived fused contraction. The contraction's tree is the REFERENCE namespace: bare
       ``REDUCE`` must mean its K fold, so the map view spells its statistic at ``REDUCE@<axis>``;
+    - the direct unit-row contraction (``_classify.unit_contraction_view``) — the stored one-axis
+      term reclassified with its proven synthetic M axis, exposing the ordinary contraction
+      schedule without changing the canonical tree;
     - the COLLAPSE (:meth:`Fold.demoted`) — a stored computed-A contraction plus the derived
       per-cell splice, which carries the cone on the reduce tiers.
 
@@ -490,6 +493,13 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     if pro is not None:
         fused = _view(tile, pro[0], ctx, free=(*tile.place.free, *pro[1]), stores=pro[2])
         return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+    unit = unit_contraction_view(tile)
+    if unit is not None:
+        contraction = _view(tile, unit[0], ctx, free=unit[1])
+        unit_node = head(unit[0])
+        if unit_node is not None and _has_computed_operand(unit_node):
+            return [_Term(cell, tile.place.on_grid(), ctx, ref=contraction.sched), contraction], 1
+        return [contraction], 0
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base], 0

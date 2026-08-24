@@ -120,6 +120,45 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
     assert scheduled >= {"o", "o__partial"}, f"each piece must be offered its own schedule fork, saw {scheduled}"
 
 
+def test_a_split_m1_partial_offers_scalar_and_volta_mma_rows() -> None:
+    """The split-group coordinate is not the missing M row.
+
+    The partial's workspace boundary carries ``(partition, 0, N)`` and its operand address
+    composes that partition with the sliced K coordinate. That realized split receipt restores a
+    synthetic unit M after the partition while preserving the scalar sibling rows.
+    """
+    ctx = Context.from_target((7, 0), gpu_name="NVIDIA Tesla V100 SXM3 32GB")
+    partial_rows: list[dict] = []
+    derived_free: tuple[str, ...] | None = None
+
+    def decide(fp):
+        nonlocal derived_free
+        from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
+        leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
+        rows = [leaf for leaf in leaves if hasattr(leaf, "knobs")]
+        materialized = rows[0].expand()[0] if rows else None
+        if isinstance(materialized, TileOp) and any(store.write.output.endswith("__partial") for store in materialized.stores):
+            partial_rows.extend(dict(row.knobs) for row in rows)
+            view = unit_contraction_view(materialized)
+            assert view is not None
+            derived_free = tuple(axis.name for axis in view[1])
+            return rows[0]
+        split = next((row for row in rows if row.knobs.get("REDUCE") == "g2k"), None)
+        return split or (rows[0] if rows else leaves[0])
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_matmul(m=1, k=64, n=16), decide)
+
+    assert derived_free is not None and derived_free[1] == "_um" and len(derived_free) == 3
+    assert any(str(row.get("WORK", "")).startswith("t") for row in partial_rows), "the scalar sibling was lost"
+    assert any(str(row.get("WORK", "")).startswith("w") and "mma_m8n8k4_f16_f32" in str(row.get("TILE", "")) for row in partial_rows), (
+        "the sliced m1 partial offered no Volta MMA row"
+    )
+
+
 def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
     """A piece featurizes as ITSELF. Without this the partial joined the pre-split kernel's
     evidence — the same signature for a kernel doing half the reduction. Nothing in the rule stamps

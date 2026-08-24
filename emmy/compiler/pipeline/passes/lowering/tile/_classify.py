@@ -29,6 +29,7 @@ from emmy.compiler.ir.pure.fold import (
     _operand_result_names,
     deep_defines,
     deep_reads,
+    is_contraction,
     refs_axis,
     stmt_axis_names,
 )
@@ -421,6 +422,63 @@ def _unit_output_row(writes: tuple[Write, ...], n_name: str) -> Axis | None:
         if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
             return None
     return Axis(name="_um", extent=Dim(1))
+
+
+def unit_contraction_view(tile) -> tuple[Fold, tuple[Axis, ...]] | None:
+    """The bilinear view of an ``m1 x K x N`` term whose row loop was elided.
+
+    The canonical term keeps the visible output axes. Ordinarily N must be its only free axis.
+    A split partial may also carry leading cross-CTA partition coordinates; those are admitted
+    only when each coordinate is present in the workspace boundary and composes with the sliced
+    reduction coordinate in an operand address. That receipt cannot mistake an ordinary batch or
+    head coordinate for M. When every boundary write also proves the established literal-zero
+    unit row, reclassify a derived view with that row restored. The view must expose an actual
+    contraction at the root or through its projection; otherwise decline so a pointwise or
+    incompletely bound fold cannot acquire an MMA schedule.
+    """
+    if not tile.place.free:
+        return None
+    *prefix, n_axis = tile.place.free
+    writes = tuple(store.write for store in tile.stores if store.sweep is None)
+    unit_m = _unit_output_row(writes, n_axis.name)
+    if unit_m is None or (prefix and not _partitioned_output_prefix(tile, tuple(prefix), writes)):
+        return None
+    free = (*prefix, unit_m, n_axis)
+    node = classify(tile.op, free)
+    if not _contains_contraction(node):
+        return None
+    return node, free
+
+
+def _partitioned_output_prefix(tile, prefix: tuple[Axis, ...], writes: tuple[Write, ...]) -> bool:
+    """Whether every leading free axis is a realized reduction partition, not output context.
+
+    ``030_split_reduce`` leaves two independent receipts on a partial: the sliced reduce loop has
+    a partition ``Window``, and its operand address combines that loop coordinate with the new
+    leading grid coordinate. The workspace boundary carries that coordinate before the restored
+    literal-zero row. Require all three facts for every prefix axis; a batch/head axis that merely
+    indexes a separate tensor dimension therefore declines.
+    """
+    body = Body(tuple(tile.op.lower()))
+    sliced = {loop.axis.name for loop in body.loops if loop.is_reduce and loop.axis.window is not None and loop.axis.window.partition}
+    if not sliced:
+        return False
+    prefix_names = {axis.name for axis in prefix}
+    if any(not prefix_names <= {name for expr in write.index[:-2] for name in expr.free_vars()} for write in writes):
+        return False
+    return all(
+        any(
+            axis.name in variables and bool(variables & sliced)
+            for load in body.loads
+            for variables in (expr.free_vars() for expr in load.index)
+        )
+        for axis in prefix
+    )
+
+
+def _contains_contraction(node) -> bool:
+    """Whether ``node`` or one of its operand edges has the bilinear reading."""
+    return is_contraction(node) or (isinstance(node, Fold) and any(_contains_contraction(operand) for operand in node.operands))
 
 
 def fused_view(tile) -> tuple[Fold, tuple[Axis, ...], tuple] | None:

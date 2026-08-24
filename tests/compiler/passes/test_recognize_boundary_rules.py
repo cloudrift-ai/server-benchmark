@@ -224,6 +224,61 @@ def _m1_linear_graph() -> Graph:
     return g
 
 
+def _m1_contraction_tile(*, row: int | Var = 0, context: str | None = None) -> TileOp:
+    """A direct unit-row contraction, optionally nested under an ordinary output axis."""
+    n, k = Axis("n", Dim(16)), Axis("k", Dim(16))
+    row_index = Literal(row) if isinstance(row, int) else row
+    load_prefix = (Var(context),) if context is not None else ()
+    store_prefix = (Var(context),) if context is not None else ()
+    cell = Body(
+        (
+            Loop(
+                axis=n,
+                body=Body(
+                    (
+                        Loop(
+                            axis=k,
+                            body=Body(
+                                (
+                                    Load(name="a", input="x", index=(*load_prefix, Literal(0), Var("k"))),
+                                    Load(name="b", input="w", index=(Var("n"), Var("k"))),
+                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a", "b")),
+                                    Accum(name="acc", value="p", op=ElementwiseImpl("add"), axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Write(output="o", index=(*store_prefix, row_index, Var("n")), value="acc"),
+                    )
+                ),
+            ),
+        )
+    )
+    body = cell if context is None else Body((Loop(axis=Axis(context, Dim(8)), body=cell),))
+    node, free, stores = _lift_tree(body)
+    from emmy.compiler.ir.tile import Placement
+
+    return TileOp(op=node, place=Placement(free=tuple(free)), stores=stores)
+
+
+def test_unit_contraction_view_restores_only_the_literal_zero_output_row():
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    view = unit_contraction_view(_m1_contraction_tile())
+    assert view is not None and [axis.name for axis in view[1]] == ["_um", "n"]
+    assert unit_contraction_view(_m1_contraction_tile(row=1)) is None
+    assert unit_contraction_view(_m1_contraction_tile(row=Var("m"))) is None
+
+
+@pytest.mark.parametrize("context", ["batch", "head"])
+def test_unit_contraction_view_does_not_reclassify_output_context(context):
+    """A second output axis is not M unless a realized split receipt proves otherwise."""
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    tile = _m1_contraction_tile(context=context)
+    assert [axis.name for axis in tile.place.free] == [context, "n"]
+    assert unit_contraction_view(tile) is None
+
+
 def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict], TileOp]:
     """Run the tile passes, capturing every fork leaf's knob row; ``pick`` selects the applied
     leaf (default: option-0, the emission-order head). Returns ``(rows, the one TileOp)``."""
@@ -278,6 +333,15 @@ def test_wide_m1_flinear_offers_the_warp_k_fold_and_a_pin_realizes_it(monkeypatc
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
     assert [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"] == ["coop"]
     assert tile.knobs.get("WORK") == "t32"
+
+
+def test_direct_m1_contraction_offers_scalar_and_volta_mma_rows():
+    """Restoring the unit M axis adds the Volta tier without losing scalar schedules."""
+    ctx = Context.from_target((7, 0), gpu_name="NVIDIA Tesla V100 SXM3 32GB")
+    rows, _ = _resolve(_m1_linear_graph(), ctx=ctx)
+
+    assert any(str(row.get("WORK", "")).startswith("t") for row in rows)
+    assert any(str(row.get("WORK", "")).startswith("w") and "mma_m8n8k4_f16_f32" in str(row.get("TILE", "")) for row in rows)
 
 
 def test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows():

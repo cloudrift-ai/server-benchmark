@@ -473,21 +473,23 @@ fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(
     //   where s is the first source with s.select(i)
 ```
 
-`emmy::tensor_from_fn` is the printed form when there is one source and no condition; this is what prints
-otherwise. A `cat` is the everyday case — two sources filling different parts of the result:
+A `cat` is the everyday case:
 
 ```
 emmy compile -c 'torch.cat([torch.randn(2,3), torch.randn(2,5)], dim=1)' --ir tensor
 ```
 
 ```rust
-let cat: f32[2,8] = emmy::index_map(inputs.x0, inputs.x1);
+let cat: f32[2,8]
+    = emmy::index_map([
+    IndexSource { operand: inputs.x0, coord: |i, j| [i, ((j < 3) ? j : 0)], select: |_i, j| (j < 3) },
+    IndexSource { operand: inputs.x1, coord: |i, j| [i, ((j < 3) ? 0 : (j - 3))] },
+  ]);
 ```
 
-Here the first source reads `x0[i, j]` where `j < 3` and the second reads `x1[i, j - 3]` where `j >= 3`. The
-printed call carries neither: it lists the operands, and each source's `coord` and `select` stay inside the
-node. Reading a line like this one, you know which tensors feed the result and not which parts come from
-which.
+The first source supplies the columns below 3 and reads `x0` there; the second has no condition, so it takes
+what is left. Both coordinate maps are guarded, so each one stays inside its operand even at the positions the
+other source supplies.
 
 A source carries its operand's rank and shape as its own fields because the operands need not agree on either
 — `f32[2,3]` and `f32[2,5]` above, and a mask built from two `f16[1]` scalars. They do agree on the element

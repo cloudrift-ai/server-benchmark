@@ -111,7 +111,7 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         if len(op.sources) == 1 and op.sources[0].select is None and len(op.out_shape) <= len(_DIM_NAMES):
             names = _binders(op)
             return f"emmy::tensor_from_fn(|{', '.join(names)}| {_index_expr(op, names, args, syms)})"
-        return f"emmy::index_map({', '.join(args)})"
+        return _fmt_index_sources(op, args, syms)
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same
         # test the evaluator applies. Both names are emmy's: ``gather`` picks one
@@ -138,6 +138,29 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         nested = "\n".join(f"    {line}" for line in body.splitlines())
         return f"{name}({', '.join(args)}) {{\n{nested}\n  }}"
     return f"{name}({', '.join([*args, *_fields(op)])})"
+
+
+def _fmt_index_sources(op: IndexMapOp, args: list[str], syms: dict[str, Var]) -> str:
+    """The general reindexing form: one ``IndexSource`` per operand, each carrying the
+    coordinate map and the condition that decides which output positions it supplies."""
+    names = list(_DIM_NAMES[: len(op.out_shape)])
+    rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n) for d, n in enumerate(names)} | syms
+
+    def closure(expr_list: tuple, body: str) -> str:
+        used: set[str] = set()
+        for e in expr_list:
+            used |= e.free_vars()
+        params = ", ".join(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}" for d, n in enumerate(names))
+        return f"|{params}| {body}"
+
+    lines = []
+    for src in op.sources:
+        coords = ", ".join(e.substitute(rename).pretty() for e in src.coord_map)
+        fields = [f"operand: {args[src.input_idx]}", f"coord: {closure(src.coord_map, f'[{coords}]')}"]
+        if src.select is not None:
+            fields.append(f"select: {closure((src.select,), src.select.substitute(rename).pretty())}")
+        lines.append(f"      IndexSource {{ {', '.join(fields)} }},")
+    return "emmy::index_map([\n" + "\n".join(lines) + "\n    ])"
 
 
 def fmt_constant(node, syms: dict[str, Var]) -> str:

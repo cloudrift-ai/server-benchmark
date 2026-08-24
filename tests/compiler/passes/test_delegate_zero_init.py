@@ -16,16 +16,14 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
 
 def _compile_chain(n: int):
-    """``(x @ w1) @ w2`` fp16 with the matmul seam cut and ``REDUCE=g4a`` pinned on each
+    """``(x @ w1) @ w2`` f32 with the matmul seam cut and ``REDUCE=g4a`` pinned on each
     piece — two atomic kernels whose outputs are ``32×n`` (the delegation-cap lever:
-    512 → 32 KB per accumulator; 3840 → 240 KB,
+    512 → 64 KB per accumulator; 3840 → 480 KB,
     past it)."""
     mp = pytest.MonkeyPatch()
     # Per-knob vars, NOT EMMY_KNOBS: the aggregate splat runs at knob-module IMPORT time, long
     # before this fixture — and calling apply_knobs_env here would write env keys monkeypatch
     # never cleans up.
-    mp.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k4")
-    mp.setenv("EMMY_WORK", "w1x8")
     mp.setenv("EMMY_REDUCE", "g4a")
     # Gate-free loop fusion composes the two matmuls. This test is about CUDA zero-init
     # delegation between kernels, so route the recognized contraction seam back to two pieces.
@@ -34,12 +32,7 @@ def _compile_chain(n: int):
     try:
         from emmy.commands.trace import graph_from_code
 
-        code = (
-            "x = torch.randn(32,3840,dtype=torch.float16)\n"
-            f"w1 = torch.randn(3840,{n},dtype=torch.float16)\n"
-            f"w2 = torch.randn({n},{n},dtype=torch.float16)\n"
-            "(x @ w1) @ w2"
-        )
+        code = f"x = torch.randn(32,3840)\nw1 = torch.randn(3840,{n})\nw2 = torch.randn({n},{n})\n(x @ w1) @ w2"
         graph, _slug, _bundle = graph_from_code(code)
         ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
         return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
@@ -84,7 +77,7 @@ def test_first_atomic_keeps_its_memset(chained_atomic):
 
 
 def test_oversized_accumulator_is_delegated_too():
-    """A 240 KB accumulator (32×3840 fp16) delegates like any other static accumulator: whether
+    """A 480 KB accumulator (32×3840 f32) delegates like any other static accumulator: whether
     delegation's saved MEMSET node beats CTA-0's serial zeroing is a size- and card-dependent
     measurement, so it is tuned evidence's decision, never a compile-time size threshold."""
     ops = _cuda_ops(_compile_chain(3840))

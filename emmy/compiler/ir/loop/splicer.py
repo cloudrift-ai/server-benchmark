@@ -18,7 +18,10 @@ Resolution dispatches on stmt kind:
 - **Load on a splice edge** — emit a copy alias at the demand scope;
   σ is solved by pairing target's ``Write.index`` against the reader's
   σ-substituted index, and the target's ``Write.value`` is queued under
-  the solved σ. The target's expression chain reconstructs piecemeal.
+  the solved σ. A narrowing reduction at a declared frontend output keeps its
+  tensor dtype when the consumer has a distinct origin; a decomposition-private
+  output may reconstruct within the frontend operation. The target's expression
+  chain reconstructs piecemeal.
 - **Accum** — freshen its reduce axis, place
   ``Loop(fresh_reduce_axis, Accum(...))`` at
   ``_scope_for_axes(ref_scope, required_c_axes)``, queue the Accum's
@@ -54,8 +57,10 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
@@ -137,6 +142,9 @@ def splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp |
 def splice_loops(
     loops: dict[str, LoopOp],
     splice_edges: dict[tuple[str, str], tuple[str, str]],
+    *,
+    splice_dtypes: dict[tuple[str, str], DataType] | None = None,
+    max_work: int | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -146,13 +154,19 @@ def splice_loops(
     ``(target_tag, target_output_buf)`` meaning "this loop's Load whose
     ``source`` is ``source_buf`` reads ``target_tag``'s Write whose
     ``output`` is ``target_output_buf`` and should be inlined."
+    ``splice_dtypes`` optionally gives an edge's required dtype conversion.
+    The emitted copy alias retains that dtype so reconstructing a reduction
+    cannot bypass its tensor boundary.
 
     Non-splice Loads keep their original ``source`` buf names — buf
     identity is global, no remap needed. The sink — the loop whose Writes
     seed the traversal — is derived from ``splice_edges``: it's the
     unique tag in ``loops`` that never appears as a splice target.
     Returns ``None`` if the sink is ambiguous (cycle or multiple sinks)
-    or if any splice edge hits an unsupported pattern.
+    or if any splice edge hits an unsupported pattern. ``max_work`` bounds
+    the arithmetic work accumulated while constructing the body; fusion uses
+    it to reject a merge as soon as its existing work-growth limit cannot be
+    met.
     """
     target_tags = {tag for tag, _out in splice_edges.values()}
     candidates = [tag for tag in loops if tag not in target_tags]
@@ -163,7 +177,9 @@ def splice_loops(
         return _Splicer(
             loops={tag: op.analyze() for tag, op in loops.items()},
             splice_edges=splice_edges,
+            splice_dtypes=splice_dtypes or {},
             root=root,
+            max_work=max_work,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -174,7 +190,7 @@ def splice_loops(
         return None
 
 
-def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph, *, max_work: int | None = None) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -196,6 +212,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
 
     loop_nodes = {n.id: n for n in graph.nodes.values() if isinstance(n.op, LoopOp)}
     splice_edges: dict[tuple[str, str], tuple[str, str]] = {}
+    splice_dtypes: dict[tuple[str, str], DataType] = {}
     external_order: list[str] = []
     seen_external: set[str] = set()
 
@@ -209,6 +226,22 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
             # same producer.
             if inp in loop_nodes:
                 splice_edges[(node.id, inp)] = (inp, inp)  # producer's Write.output is its node id
+                producer = graph.buffer(inp)
+                producer_meta = loop_nodes[inp].op.analyze()
+                producer_write = next((write for write, _ in producer_meta.writes if write.output == inp), None)
+                producer_value = producer_meta.defs.get(producer_write.value) if producer_write is not None else None
+                producer_origin = _ultimate_source(loop_nodes[inp].op)
+                same_origin = producer_origin is _ultimate_source(node.op)
+                origin_outputs = getattr(producer_origin, "outputs", {})
+                private_output = producer_origin is not loop_nodes[inp].op and bool(origin_outputs) and inp not in origin_outputs
+                if (
+                    not same_origin
+                    and not private_output
+                    and isinstance(producer_value, Accum)
+                    and producer is not None
+                    and producer.dtype != (producer_value.dtype or F32)
+                ):
+                    splice_dtypes[(node.id, inp)] = producer.dtype
             elif inp not in seen_external:
                 seen_external.add(inp)
                 external_order.append(inp)
@@ -216,10 +249,20 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     merged = splice_loops(
         loops={nid: n.op for nid, n in loop_nodes.items()},
         splice_edges=splice_edges,
+        splice_dtypes=splice_dtypes,
+        max_work=max_work,
     )
     if merged is None:
         return None
     return merged, external_order
+
+
+def _ultimate_source(op):
+    """The frontend-origin object at the end of an op rewrite chain."""
+    root = op
+    for source in op.source_chain():
+        root = source
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +292,9 @@ class _Splicer(LoopBuilder):
         *,
         loops: dict[str, LoopMeta],
         splice_edges: dict[tuple[str, str], tuple[str, str]],
+        splice_dtypes: dict[tuple[str, str], DataType],
         root: str,
+        max_work: int | None,
     ) -> None:
         used: set[str] = set()
         for meta in loops.values():
@@ -257,13 +302,39 @@ class _Splicer(LoopBuilder):
         super().__init__(used_names=used)
         self.loops = loops
         self.splice_edges = splice_edges
+        self.splice_dtypes = splice_dtypes
         self.root = root
+        self._max_work = max_work
+        self._partial_work = 0
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
         # emit scope it lands at in the merged body, and the σ restricted
         # to its own enclosing — the only bindings that affect its rewrite.
         # Same key → share a single emission.
         self._binding: dict[_BindKey, str] = {}
+        # Sigma expressions stay live for one splice. Cache by object identity so repeated
+        # dependency placement does not recursively walk the same large coordinate tree, while
+        # avoiding structural hashing (which would perform another recursive tree walk).
+        self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
+
+    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
+        """Insert one statement while maintaining fusion's work lower bound.
+
+        Source LoopOps are normalized before splicing, so their arithmetic leaves already sit at
+        the shallowest valid scope. Coordinate substitution may only remove axes, which
+        ``_scope_for_axes`` does before insertion. Identity copies are omitted because
+        ``LoopOp`` normalization removes them from the final body. Every other inserted Assign
+        or Accum therefore contributes permanently to the final ``_total_work`` metric.
+        """
+        extent = 1
+        for axis in enclosure.enclosing:
+            extent *= axis.extent.as_static() if axis.extent.is_static else 128
+        is_copy = isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype is None
+        added = extent if isinstance(stmt, (Assign, Accum)) and not is_copy else 0
+        if self._max_work is not None and self._partial_work + added > self._max_work:
+            raise _NotSupported(f"partial work exceeds construction limit: {self._partial_work + added} > {self._max_work}")
+        self._partial_work += added
+        super().insert(stmt, enclosure)
 
     def run(self) -> LoopOp:
         self._seed()
@@ -277,8 +348,18 @@ class _Splicer(LoopBuilder):
 
     # -- Seed: every root Write, with its value queued ----------------------
 
+    @staticmethod
+    def _write_observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
+        """Whether ``write`` observes an accumulator before its reduce loop completes."""
+        defining = meta.defs.get(write.value)
+        reduce_axis = meta.reduce_axes.get(write.value)
+        return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
+
     def _seed(self) -> None:
-        for w, scope in self.loops[self.root].writes:
+        root = self.loops[self.root]
+        for w, scope in root.writes:
+            if self._write_observes_running_accumulator(root, w, scope):
+                raise _NotSupported(f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced")
             v_bound = self._ensure_dep(w.value, self.root, Sigma(), scope)
             self.insert(Write(output=w.output, index=w.index, value=v_bound), scope)
 
@@ -293,7 +374,11 @@ class _Splicer(LoopBuilder):
         if name not in meta.defs:
             raise _NotSupported(f"_ensure_dep: {name!r} is not defined in loop {origin!r}")
 
-        required_axes = tuple(mapped for axis in meta.scopes[name].enclosing for mapped in _remap_axis_names(axis, sigma, ref_scope))
+        required_axes = tuple(
+            mapped
+            for axis in meta.scopes[name].enclosing
+            for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expr_free_vars)
+        )
         emit_scope = _scope_for_axes(ref_scope, required_axes)
 
         # σ restricted to axes transitively used in Expr subtrees reachable
@@ -309,6 +394,16 @@ class _Splicer(LoopBuilder):
         self._binding[key] = bound
         self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))
         return bound
+
+    def _expr_free_vars(self, expr: Expr) -> frozenset[str]:
+        """Memoize one expression's variables for this splice by object identity."""
+        key = id(expr)
+        cached = self._free_vars_by_expr_id.get(key)
+        if cached is not None and cached[0] is expr:
+            return cached[1]
+        variables = expr.free_vars()
+        self._free_vars_by_expr_id[key] = (expr, variables)
+        return variables
 
     # -- Resolution dispatch -------------------------------------------------
 
@@ -357,11 +452,16 @@ class _Splicer(LoopBuilder):
         subsequent iterations. ``target_output_buf`` selects which ``Write``
         of the target is the splice source when the target has multiple outputs."""
         target = self.loops[target_tag]
-        target_write = next((w for w, _ in target.writes if w.output == target_output_buf), None)
-        if target_write is None:
+        found = next(((w, scope) for w, scope in target.writes if w.output == target_output_buf), None)
+        if found is None:
             raise _NotSupported(
                 f"splice edge into {target_tag!r}: no Write with output={target_output_buf!r} "
                 f"(target writes {[w.output for w, _ in target.writes]}) — usually a buf-name != node-id mismatch on the producer"
+            )
+        target_write, target_scope = found
+        if self._write_observes_running_accumulator(target, target_write, target_scope):
+            raise _NotSupported(
+                f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced"
             )
         source_meta = self.loops[d.origin]
         index_rename = {
@@ -372,7 +472,8 @@ class _Splicer(LoopBuilder):
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
         v_bound = self._ensure_dep(target_write.value, target_tag, sigma, d.demand_scope)
-        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
+        dtype = self.splice_dtypes.get((d.origin, stmt.input))
+        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,), dtype=dtype), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Emit ``Loop(fresh_reduce_axis, [Accum(bound, value_bound, op)])`` at
@@ -416,7 +517,13 @@ def _scope_for_axes(ref_scope: Scope, required: tuple[str, ...]) -> Scope:
     return Scope(enclosing=ref_scope.enclosing[:k])
 
 
-def _remap_axis_names(axis: Axis, sigma: Sigma, ref_scope: Scope) -> tuple[str, ...]:
+def _remap_axis_names(
+    axis: Axis,
+    sigma: Sigma,
+    ref_scope: Scope,
+    *,
+    free_vars: Callable[[Expr], frozenset[str]] | None = None,
+) -> tuple[str, ...]:
     """Pick the merged-kernel axes that ``axis``'s σ target depends on.
 
     Every occurrence of the producer axis is substituted with the complete target expression by
@@ -432,7 +539,7 @@ def _remap_axis_names(axis: Axis, sigma: Sigma, ref_scope: Scope) -> tuple[str, 
     target = sigma.get(axis.name)
     if target is None:
         return (axis.name,)
-    variables = target.free_vars()
+    variables = free_vars(target) if free_vars is not None else target.free_vars()
     scope_axes = tuple(a.name for a in ref_scope.enclosing)
     if any(name not in scope_axes for name in variables):
         # A non-axis variable is an SSA gather index. Keep the producer at the reader's current

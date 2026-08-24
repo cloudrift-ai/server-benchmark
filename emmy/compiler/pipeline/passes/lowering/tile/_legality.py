@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.pure.fold import Fold, operand_name
@@ -41,7 +42,12 @@ from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
-from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
+from emmy.compiler.pipeline.search.space import (
+    MAX_BLOCK_THREADS,
+    MAX_REGISTERS_PER_CTA,
+    MAX_REGISTERS_PER_THREAD,
+    WARP_LANES,
+)
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
 # at 4 so it stays within the 5-dim limit.
@@ -67,6 +73,21 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     if pinned:
         raise ValueError(reason)
     return False
+
+
+def direct_atomic_output(outputs) -> str | None:
+    """Whether direct cross-CTA partials avoid another low-precision rounding step.
+
+    F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
+    carrier state and rounds once at the output boundary.
+    """
+    lowp = sorted({str(t.dtype) for t in outputs.values() if t.dtype in (F16, BF16)})
+    if not lowp:
+        return None
+    return (
+        f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
+        "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
+    )
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #
@@ -220,6 +241,66 @@ def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
         f"warp TILE K-step {step} (atom_k={plan.atom.atom_k}*bk={plan.bk}) does not divide the static "
         f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
         f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
+    )
+
+
+def _fragment_registers(atom, role: str) -> int:
+    """The exact per-lane register count of one emitted mma fragment."""
+    explicit = atom.fragment_nregs(role)
+    if explicit is not None:
+        return explicit
+    m, n, k = atom.ptx_shape
+    dtype = atom.operand_dtype(role)
+    if role == "a":
+        return m * k * dtype.nbytes // 128
+    if role == "b":
+        return n * k * dtype.nbytes // 128
+    return m * n // (64 if dtype.nbytes == 2 else 32)
+
+
+def paired_fragment_registers(node: Fold, tile: TilePlan, stage: Stage | None) -> tuple[int, int] | None:
+    """Return ``(required, available)`` peak live registers/lane for a paired score + value contraction.
+
+    A chained computed-A fill keeps the enclosing output fragments live while it builds one score
+    block through the same mma atom. Count the exact ``RegFragment`` families emitted by
+    ``_MmaOps.state`` for both contractions. This is a lower bound: scalar carrier state and
+    address temporaries are intentionally absent, so the check rejects only rows whose fragments
+    alone cannot fit the CTA register file.
+    """
+    score_node = chain_edge(node.a, node.axis.name)
+    if not (tile.is_warp and stage is not None and score_node is not None):
+        return None
+    atom = tile.atom
+    if stage.bk_elems % atom.atom_n:
+        return None  # the fragment score block does not realize this geometry
+    a_regs = _fragment_registers(atom, "a")
+    b_regs = _fragment_registers(atom, "b")
+    c_regs = _fragment_registers(atom, "c")
+    # The f16-accumulate atom keeps an additional f32 shadow C family.
+    if atom.operand_dtype("c").nbytes == 2:
+        c_regs += atom.atom_m * atom.atom_n // 32
+    depth = max(1, stage.reg_depth)
+    channels = len(node.channels)
+    outer_c = channels * tile.reg_m * tile.reg_n * c_regs
+    outer = tile.reg_m * depth * a_regs + channels * (tile.reg_n * depth * b_regs + tile.reg_m * tile.reg_n * c_regs)
+    score_n = stage.bk_elems // atom.atom_n
+    score_channels = len(score_node.channels)
+    score = tile.reg_m * a_regs + score_channels * (score_n * b_regs + tile.reg_m * score_n * c_regs)
+    available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // tile.block_threads)
+    # Outer A/B are first loaded in the drain after the score block. Only the initialized outer C
+    # fragments span both regions; the two A/B families may reuse registers.
+    return max(outer, outer_c + score), available
+
+
+def paired_fragment_register_budget(node: Fold, tile: TilePlan, stage: Stage | None) -> str | None:
+    """Whether coexisting score/output mma fragments fit the CTA register-file envelope."""
+    counts = paired_fragment_registers(node, tile, stage)
+    if counts is None or counts[0] <= counts[1]:
+        return None
+    required, available = counts
+    return (
+        f"paired contractions require at least {required} live fragment registers/thread, over the "
+        f"{available}-register envelope at {tile.block_threads} threads/CTA"
     )
 
 

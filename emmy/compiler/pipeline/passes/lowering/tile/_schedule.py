@@ -108,7 +108,7 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view
+from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view, unit_contraction_view
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -434,11 +434,11 @@ class _Term:
         atoms = _warp_atoms(self, node)
         warp = [p for p in warp_tile_moves(atoms) if _tile_ok(self, node, p)] if atoms else []
         self.warp_eligible = self.warp_eligible or bool(warp)
-        # A COMPUTED ``a`` edge is warp-ONLY: the fill that evaluates a producer cone is the mma
-        # tier's compute fill, and a per-cell / scalar expansion would re-run the cone on every K
-        # step. The reduce tiers stay reachable — through the COLLAPSE view, whose spliced fold
-        # computes the whole body per cell (:func:`_views`).
-        scalar = scalar_tile_moves() if not _has_computed_operand(node) else []
+        # A synchronous-fill node is warp-ONLY: computed edges need evaluation, while a product
+        # node has several B/C channels that the gmem-direct and scalar emitters cannot carry.
+        # Reduce tiers remain reachable through the COLLAPSE view, whose demoted spelling is the
+        # original planar fold (:func:`_views`).
+        scalar = scalar_tile_moves() if not _requires_sync_fill(node) else []
         grouped: dict[str, list[TilePlan]] = {}
         for plan in scalar + warp:
             w = plan_workers(plan)
@@ -472,6 +472,9 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     - the MONOID-producer composition (``_classify.fused_view``) — the stored map form plus
       the derived fused contraction. The contraction's tree is the REFERENCE namespace: bare
       ``REDUCE`` must mean its K fold, so the map view spells its statistic at ``REDUCE@<axis>``;
+    - the direct unit-row contraction (``_classify.unit_contraction_view``) — the stored one-axis
+      term reclassified with its proven synthetic M axis, exposing the ordinary contraction
+      schedule without changing the canonical tree;
     - the COLLAPSE (:meth:`Fold.demoted`) — a stored computed-A contraction plus the derived
       per-cell splice, which carries the cone on the reduce tiers.
 
@@ -488,12 +491,19 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     base = _Term(cell, tile.place.on_grid(), ctx)
     pro = fused_view(tile)
     if pro is not None:
-        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
+        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, *pro[1]), stores=pro[2])
         return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+    unit = unit_contraction_view(tile)
+    if unit is not None:
+        contraction = _view(tile, unit[0], ctx, free=unit[1])
+        unit_node = head(unit[0])
+        if unit_node is not None and _requires_sync_fill(unit_node):
+            return [_Term(cell, tile.place.on_grid(), ctx, ref=contraction.sched), contraction], 1
+        return [contraction], 0
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base], 0
-    if _has_computed_operand(node):
+    if _requires_sync_fill(node):
         return [base, _view(tile, _rewrap(tile.op, node.demoted()), ctx, ref=base.sched)], 0
     return [base], 0
 
@@ -518,6 +528,17 @@ def _has_computed_operand(node) -> bool:
     return eligible(node.a) or any(eligible(ch.b) for ch in node.channels)
 
 
+def _requires_sync_fill(node) -> bool:
+    """Whether a warp contraction must use the synchronous shared-memory fill.
+
+    A computed edge must be evaluated into a slab. A product contraction with more than one B/C
+    channel must copy one shared A slab plus every compatible B slab before one A fragment feeds
+    all MMA accumulator channels; the gmem-direct, async-copy, and scalar emitters are deliberately
+    single-channel. Both forms keep their original planar spelling as the scalar fallback view.
+    """
+    return _has_computed_operand(node) or len(node.channels) > 1
+
+
 def _converting_a(node, atom, inputs) -> bool:
     """Whether the ``a`` edge is a MATERIALIZED load whose dtype the atom cannot bind directly —
     the CONVERTING smem compute fill's case (Gemma's erased ``.float()`` cast ahead of an f16
@@ -535,16 +556,16 @@ def _converting_a(node, atom, inputs) -> bool:
 
 def _needs_fill(term: _Term, node, plan: TilePlan) -> bool:
     """Whether this warp candidate's operands take the mandatory smem compute fill — a computed
-    edge, or a materialized ``a`` the fill must convert. The ONE predicate every fill dispatch
-    reads (tile legality, stage enumeration, the resolver, the split-K partial), so the four
-    cannot drift."""
-    return _has_computed_operand(node) or (plan.is_warp and _converting_a(node, plan.atom, term.tile.inputs))
+    edge, a multi-channel product, or a materialized ``a`` the fill must convert. The ONE predicate
+    every fill dispatch reads (tile legality, stage enumeration, the resolver, the split-K
+    partial), so the four cannot drift."""
+    return _requires_sync_fill(node) or (plan.is_warp and _converting_a(node, plan.atom, term.tile.inputs))
 
 
 def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     """Whether a warp tile candidate is realizable on ``node`` — the K-step divisibility every warp
-    row needs, plus the exact-cover geometry a COMPUTED ``a`` edge's compute fill adds. Both are
-    ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
+    row needs, plus the exact-cover geometry the smem compute fill adds. Both are ``_legality``
+    predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=False):
         return False
     shapes = {**term.tile.inputs, **term.tile.outputs}
@@ -557,7 +578,7 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
         return False
     if not legal.enforce(legal.warp_k_step(node, plan), pinned=False):
         return False
-    if not _has_computed_operand(node) and not conv:
+    if not _requires_sync_fill(node) and not conv:
         return True
     placed = plan.placed_on(term.place)
     if placed.axes is None:
@@ -784,25 +805,34 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     A cross-CTA split is offered here only in COMPOSITE with the transposed band — every split
     candidate in the catalog is one, so the loop below states the catalog's shape rather than
     adding a rule."""
-    pin = term.pin("REDUCE", node)
-    if pin is not None:
-        return [_consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
-    extent = _hint_extent(node.axis)
-    cands = [ReducePlan()]
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
+
+    def band_legal(p: ReducePlan, *, pinned: bool) -> bool:
+        # The transposed band's own requirements: the geometry (shared with the contraction tier)
+        # plus this tier's epilogue condition. A pin meets the same test, as a refusal.
+        if not p.coop_transposed:
+            return True
+        return legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=pinned) and legal.enforce(epilogue, pinned=pinned)
+
+    pin = term.pin("REDUCE", node)
+    if pin is not None:
+        plan = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        band_legal(plan, pinned=True)
+        if plan.needs_split and plan.finalize == "atomic":
+            legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
+        return [plan]
+    extent = _hint_extent(node.axis)
+    cands = [ReducePlan()]
     for p in coop_reduce_moves():
         if p.needs_split and not _splittable_axis(term, node):
             continue  # the axis is already a slice — its cross-CTA partition was consumed
-        if p.coop_transposed:
-            # The band's own requirements: the geometry (shared with the contraction tier) plus
-            # this tier's epilogue condition.
-            if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
-                continue
-            if not legal.enforce(epilogue, pinned=False):
-                continue
+        if not band_legal(p, pinned=False):
+            continue
+        if p.finalize == "atomic" and not legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False):
+            continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
     return cands
@@ -824,10 +854,17 @@ def _fill_realized(parent: _Node | None, site: Site) -> bool:
     prologue stripes a cone's statistic ONE ROW PER WARP, the warp's 32 lanes striding the fold and
     closing it on the shuffle butterfly (``lowering/kernel/_stage.sync_stat_fill``) — a single
     hardwired partition, so any value here would stamp a knob no kernel realizes."""
-    if parent is None or not is_contraction(parent.site.node) or isinstance(parent.site.node.a, Load):
+    if parent is None or not is_contraction(parent.site.node):
         return False
     depth = len(parent.site.segments)
-    return len(site.segments) > depth and site.segments[depth] == "a"
+    if len(site.segments) <= depth:
+        return False
+    role = site.segments[depth]
+    if role == "a":
+        return not isinstance(parent.site.node.a, Load)
+    # A computed B CONE (a zero-axis projection) is evaluated by the same fill per slab cell, its
+    # statistic with it; an inline B fold WITH an axis is a real nested schedule site.
+    return role == "b" and all(isinstance(ch.b, Fold) and ch.b.axis is None for ch in parent.site.node.channels if isinstance(ch.b, Fold))
 
 
 def _band_of(plan: ReducePlan) -> Workers | None:
@@ -842,11 +879,12 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: list[str] | None = None) -> Stage | None:
     """The ONE transport-resolver dispatch — which operand edges and tier select.
 
-    Any COMPUTED contraction operand takes the smem compute fill, which is MANDATORY (no byte
-    transport can evaluate a cone), so ``want=None`` still resolves and only the DEPTH is ever
-    free. Fully MATERIALIZED operands take the mma resolver on a warp tile and the scalar one
-    otherwise, with ``want=None`` the gmem-direct baseline; TMA declines below sm_90 rather than
-    failing to compile. ``tile`` is the PLACED slice.
+    Any COMPUTED contraction operand and every multi-channel product take the smem compute fill,
+    which is MANDATORY (no byte transport can evaluate a cone or carry several B/C channels), so
+    ``want=None`` still resolves and only the DEPTH is ever free. A single-channel, fully
+    MATERIALIZED contraction takes the mma resolver on a warp tile and the scalar one otherwise,
+    with ``want=None`` the gmem-direct baseline; TMA declines below sm_90 rather than failing to
+    compile. ``tile`` is the PLACED slice.
 
     Enumeration, the split-K composition and re-materialization all reach the resolvers through
     here, so a row's resolved spelling is reproducible BY CONSTRUCTION rather than by three copies
@@ -855,10 +893,11 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: l
     if want is not None and legal.stage_target(want, term.ctx) is not None:
         return None
     if _needs_fill(term, node, tile):
-        # A computed (or converting materialized) edge takes only the ``smem`` compute fill — a
-        # want naming an asynchronous byte transport declines rather than silently resolving to
-        # the fill. The fill IS asynchronous on its B slabs; that ring is its own depth 2, so the
-        # decline names that spelling instead of leaving the caller hunting a smem budget.
+        # A computed edge, a multi-channel product, or a converting materialized edge takes only
+        # the ``smem`` compute fill — a want naming an asynchronous byte transport declines rather
+        # than silently resolving to the fill. The fill IS asynchronous on its B slabs; that ring
+        # is its own depth 2, so the decline names that spelling instead of leaving the caller
+        # hunting a smem budget.
         if want is not None and want.transport != "smem":
             legal.decline(
                 why,
@@ -895,10 +934,11 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
 
 
 def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
-    """The RESOLVED compute-fill stages a COMPUTED operand offers — its depths, and nothing else:
-    the fill is MANDATORY (there is no gmem-direct ``None`` sibling and no byte transport can
-    evaluate a cone), so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer
-    prefetch ring ``d2`` are fork siblings — the ring is measured per shape (see
+    """The RESOLVED compute-fill stages a computed operand or multi-channel product offers — its
+    depths, and nothing else: the fill is MANDATORY (there is no gmem-direct ``None`` sibling and
+    no byte transport can evaluate a cone or carry several B/C channels), so a ``STAGE`` pin can
+    only choose the depth. ``d1`` and the asynchronous-peer prefetch ring ``d2`` are fork siblings
+    — the ring is measured per shape (see
     :func:`_legality.resolve_fill_stage`) — and a ``d2`` that clamps back to ``d1`` under the smem
     budget spells identically, so it dedupes to one row."""
     pin = term.pin("STAGE", node)
@@ -968,7 +1008,12 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     pin = term.pin("REDUCE", node)
     if pin is not None:
         pinned = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        ext = node.axis.extent
+        # A pin meets the transposed band's geometry as a refusal, not an emitter crash.
+        legal.enforce(legal.coop_band_geometry(pinned, ext.as_static() if ext.is_static else None, _inner_free(term.place)), pinned=True)
         if pinned.needs_split:
+            if pinned.finalize == "atomic":
+                legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -996,10 +1041,14 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+        atomic_ok = (
+            len(node.channels) == 1
+            and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+            and legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False)
+        )
         for sp in splitk_moves():
             if sp.finalize == "atomic" and not atomic_ok:
-                continue  # a non-distributive projection would raise at 030_split_reduce
+                continue  # the carrier, projection, or destination cannot realize a direct atomic finalize
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(sp)
     return out
@@ -1039,7 +1088,7 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
                 shapes = {**term.tile.inputs, **term.tile.outputs}
                 legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=True)
-                if _has_computed_operand(node) or conv:
+                if _requires_sync_fill(node) or conv:
                     legal.enforce(legal.computed_operand_cover(node, plan.placed_on(term.place), converting_a=conv), pinned=True)
                     legal.enforce(
                         legal.computed_operand_copy_dtype(node, plan.placed_on(term.place), term.tile.inputs, converting_a=conv),
@@ -1050,7 +1099,7 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
                 # scheduler-only fixtures that carry no Tensor metadata.
                 elif not legal.enforce(legal.warp_operand_dtype(node, plan, _a_dtype(node, term.tile.inputs)), pinned=False):
                     return []
-            elif _has_computed_operand(node):
+            elif _requires_sync_fill(node):
                 return []  # a scalar pin belongs to the per-cell view, not the compute-filled edge
             else:
                 # The CTA thread budget, raised HERE rather than left to materialization: a pinned
@@ -1065,10 +1114,12 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     out = []
     for plan in plans:
         for red in _contraction_reduces(term, node, plan):
+            pinned = pin is not None
             stages = tuple(
                 stage
                 for stage in _stage_values(term, node, plan)
                 if not (work is not None and work.producer) or legal.enforce(legal.producer_transport(stage), pinned=False)
+                if red.needs_split or legal.enforce(legal.paired_fragment_register_budget(node, plan, stage), pinned=pinned)
             )
             if stages:
                 out.append(Block({"TILE": plan, "REDUCE": red}, stages))

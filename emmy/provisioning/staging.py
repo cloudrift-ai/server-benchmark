@@ -11,11 +11,20 @@ import asyncio
 import io
 import logging
 import tarfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from emmy.provisioning.ssh_transport import ssh_base_args
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StagedSourceProvenance:
+    """Git provenance for the exact local paths sent to a remote host."""
+
+    git_revision: str
+    git_dirty: bool
 
 
 async def enumerate_staged_files(repo_root: Path, stage_paths: list[str]) -> list[str]:
@@ -89,7 +98,7 @@ async def stage_to_remote(
     remote_dir: str,
     dry_run: bool = False,
     require_clean: bool = False,
-) -> None:
+) -> StagedSourceProvenance | None:
     """Stream a tar of staged files into `remote_dir` on the remote VM.
 
     No-op when `stage_paths` is empty.
@@ -101,12 +110,17 @@ async def stage_to_remote(
     if not files:
         logger.warning(f"stage_to_remote: no files matched {stage_paths}")
         return None
-    if require_clean and (dirty := await staged_paths_dirty(repo_root, stage_paths)):
-        raise RuntimeError(f"command staging requires a clean source tree: {dirty}")
+    dirty = await staged_paths_dirty(repo_root, stage_paths)
+    if require_clean and dirty:
+        raise RuntimeError(f"command staging requires clean declared paths: {dirty}")
+    provenance = StagedSourceProvenance(
+        git_revision=await _git_output(repo_root, "rev-parse", "HEAD"),
+        git_dirty=bool(dirty),
+    )
 
     if dry_run:
         logger.info(f"[dry-run] stage {len(files)} files to {server}:{remote_dir}")
-        return None
+        return provenance
 
     tar_bytes = build_stage_tar(repo_root, files)
 
@@ -129,3 +143,4 @@ async def stage_to_remote(
     if proc.returncode != 0:
         raise RuntimeError(f"stage_to_remote failed (rc={proc.returncode}): {stderr.decode().strip()}")
     logger.info(f"Staged {len(files)} files to {server}:{remote_dir}")
+    return provenance

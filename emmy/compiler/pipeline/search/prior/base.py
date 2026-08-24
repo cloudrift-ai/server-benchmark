@@ -302,13 +302,15 @@ class Prior(ABC):
             self._ev_fp = fp
         return self._ev_index
 
-    def evidence_pick(self, rows: list[dict]) -> tuple[int, float] | None:
+    def evidence_pick(self, rows: list[dict], *, exact_families: frozenset[str] = frozenset()) -> tuple[int, float] | None:
         """Measured-evidence argmin over candidate knob rows: the candidate whose
         knob prefix is consistent with the **fastest -O3 reservoir row** of the
         same op (``S_*`` signature). A candidate is consistent with a measured row
         when every tunable knob the candidate specifies matches the row (knobs the
         candidate hasn't decided yet are free, so a partial fork prefix inherits
-        the best measured outcome among its completions).
+        the best measured outcome among its completions). Families named by
+        ``exact_families`` instead require exact subset equality; placement forks
+        use that to distinguish a fused leaf from each cut fragment.
 
         Returns ``(index, measured_µs)`` or ``None`` when no candidate has
         evidence. This is what keeps the greedy deploy from preferring an
@@ -331,7 +333,7 @@ class Prior(ABC):
                 for row_tun, us in measured:
                     # A row counts as evidence when it matches every knob the candidate
                     # has decided; undecided knobs are free (``evidence_row_vouches``).
-                    if not evidence_row_vouches(cand_tun, row_tun):
+                    if not evidence_row_vouches(cand_tun, row_tun, exact_families=exact_families):
                         continue
                     # Tie on µs (one measured row matching several candidates) breaks by
                     # the candidates' canonical content, never their enumeration order.

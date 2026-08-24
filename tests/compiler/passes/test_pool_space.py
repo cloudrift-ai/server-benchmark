@@ -15,7 +15,8 @@ the space's own traversal is gated by behaviour that predates it. Two properties
 
 The fixtures span every shape the walk dispatches on: the scalar and warp contraction tiers (the
 warp one over both raster orders), a pure reduce, a fused norm→linear (a computed operand cone
-with its own nested statistic site) and the streaming flash pair (two primaries, two pools).
+with its own nested statistic site) and the fused streaming flash cell (one primary, one pool;
+the grouped placement inverse remains a separately priced structural sibling).
 
 **If a digest fails after a deliberate catalog or legality change**, re-record it — the digest
 pins the traversal, not the catalog. Print the new triple from a scratch run and update
@@ -56,8 +57,7 @@ def _matmul_graph(m: int, n: int, k: int, dtype: str) -> Graph:
 
 
 def _sdpa_graph(b: int = 1, h: int = 2, s: int = 64, d: int = 32) -> Graph:
-    """The streaming pair: the hoisted score edge and the derived P@V, two primaries and so two
-    pools, the second carrying the chain's own ``REDUCE@<axis>`` statistic site."""
+    """The fused streaming cell: one primary and one pool over its computed score edge."""
     g = Graph()
     for name in ("q", "k", "v"):
         g.add_node(InputOp(), [], Tensor(name, (Dim(b), Dim(h), Dim(s), Dim(d)), dtype="f16"), node_id=name)
@@ -88,13 +88,12 @@ FIXTURES = {
 #: enumeration order. Recorded against the pre-space recursion — see the module docstring.
 EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
     "scalar_matmul": [(("TILE", "STAGE", "REDUCE"), 17988, "b30d5d0f9070cd89d130ff8fad132a84")],
-    "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 122308, "38eb4fdc94a7be1bb8cc889f3dd01462")],
+    "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
     "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
     "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
-    "flash_pair": [
-        (("TILE", "STAGE", "REDUCE"), 23726, "1a95fa4c2e0823132dfd854c3d46ded0"),
-        (("TILE", "STAGE", "REDUCE@a2", "REDUCE"), 4061, "f73d264419f9deda8253bdd0a805dd17"),
-    ],
+    # Over-budget paired score + value rows are intentionally absent; other fixture pools do not
+    # carry concurrently-live contraction fragments and remain byte-identical.
+    "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3457, "b3ecfbf96e98237f7e1fe8ee258d6dec")],
 }
 
 

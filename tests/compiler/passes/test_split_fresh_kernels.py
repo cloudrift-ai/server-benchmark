@@ -21,10 +21,11 @@ import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
@@ -34,12 +35,20 @@ from emmy.compiler.pipeline.pipeline import Run
 _CTX = Context.from_target((12, 0))
 
 
-def _matmul(m: int = 128, k: int = 512, n: int = 128) -> Graph:
+def _matmul(m: int = 128, k: int = 512, n: int = 128, *, out_dtype=F16) -> Graph:
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=F16), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (Dim(k), Dim(n)), dtype=F16), node_id="b")
-    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=F16), node_id="o")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=out_dtype), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
+    return g
+
+
+def _sum(*, dtype=F16) -> Graph:
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (Dim(4), Dim(512)), dtype=dtype), node_id="x")
+    g.add_node(ReduceOp(axis=1), ["x"], Tensor("s", (Dim(4), Dim(1)), dtype=dtype), node_id="s")
+    g.inputs, g.outputs = ["x"], ["s"]
     return g
 
 
@@ -61,7 +70,31 @@ def test_the_split_returns_two_kernels(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o", "o__partial"}
     monkeypatch.setenv("EMMY_REDUCE", "g2a")
-    assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o"}
+    assert set(_kernels(_resolve(CUDA_PASSES, _matmul(out_dtype=F32))[0])) == {"o"}
+
+
+@pytest.mark.parametrize("dtype", [F16, BF16])
+def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) -> None:
+    """F16/BF16 outputs would round every CTA partial; contraction and plain reduce fail closed."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    for graph in (_matmul(out_dtype=dtype), _sum(dtype=dtype)):
+        with pytest.raises(ValueError, match="direct atomic REDUCE.*output storage"):
+            _resolve(TILE_PASSES, graph)
+
+
+def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
+    """A deferred finalize keeps every external buffer its projection reads. The CUDA op's
+    argument order cannot name a buffer absent from the graph node's inputs."""
+    graph = _matmul()
+    graph.add_node(InputOp(), [], Tensor("bias", (Dim(128),), dtype=F16), node_id="bias")
+    graph.add_node(ElementwiseOp("add"), ["o", "bias"], Tensor("biased", (Dim(128), Dim(128)), dtype=F16), node_id="biased")
+    graph.inputs, graph.outputs = ["a", "b", "bias"], ["biased"]
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+
+    out, _ = _resolve(CUDA_PASSES, graph)
+    finalize = out.nodes["biased"]
+    assert finalize.inputs == ["biased__partial", "bias"]
+    assert finalize.op.arg_order == ("biased__partial", "bias", "biased")
 
 
 def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
@@ -102,6 +135,45 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
         assert set(SCHEDULE_FAMILIES) <= {family_of(k) for k in row}, row
     scheduled = {d.node_id for d in trace if "schedule" in d.rule_name}
     assert scheduled >= {"o", "o__partial"}, f"each piece must be offered its own schedule fork, saw {scheduled}"
+
+
+def test_a_split_m1_partial_offers_scalar_and_volta_mma_rows() -> None:
+    """The split-group coordinate is not the missing M row.
+
+    The partial's workspace boundary carries ``(partition, 0, N)`` and its operand address
+    composes that partition with the sliced K coordinate. That realized split receipt restores a
+    synthetic unit M after the partition while preserving the scalar sibling rows.
+    """
+    ctx = Context.from_target((7, 0), gpu_name="NVIDIA Tesla V100 SXM3 32GB")
+    partial_rows: list[dict] = []
+    derived_free: tuple[str, ...] | None = None
+
+    def decide(fp):
+        nonlocal derived_free
+        from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+        from emmy.compiler.pipeline.pipeline import _is_structural_option
+
+        leaves = flatten_leaves(fp.options)
+        if any(_is_structural_option(leaf) for leaf in leaves):
+            return next(leaf for leaf in leaves if not _is_structural_option(leaf))
+        rows = [leaf for leaf in leaves if hasattr(leaf, "knobs")]
+        materialized = rows[0].expand()[0] if rows else None
+        if isinstance(materialized, TileOp) and any(store.write.output.endswith("__partial") for store in materialized.stores):
+            partial_rows.extend(dict(row.knobs) for row in rows)
+            view = unit_contraction_view(materialized)
+            assert view is not None
+            derived_free = tuple(axis.name for axis in view[1])
+            return rows[0]
+        split = next((row for row in rows if row.knobs.get("REDUCE") == "g2k"), None)
+        return split or (rows[0] if rows else leaves[0])
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_matmul(m=1, k=64, n=16), decide)
+
+    assert derived_free is not None and derived_free[1] == "_um" and len(derived_free) == 3
+    assert any(str(row.get("WORK", "")).startswith("t") for row in partial_rows), "the scalar sibling was lost"
+    assert any(str(row.get("WORK", "")).startswith("w") and "mma_m8n8k4_f16_f32" in str(row.get("TILE", "")) for row in partial_rows), (
+        "the sliced m1 partial offered no Volta MMA row"
+    )
 
 
 def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
@@ -150,7 +222,8 @@ def test_the_split_is_consumed_by_the_kernel_that_realizes_it(monkeypatch, pin) 
     records the partition already happened. Without that reading the partial re-splits its own
     slice on every sweep: K=512 → 256 → … → 1, ending in a raise."""
     monkeypatch.setenv("EMMY_REDUCE", pin)
-    kernels = _kernels(_resolve(CUDA_PASSES)[0])
+    graph = _matmul(out_dtype=F32) if pin.endswith("a") else _matmul()
+    kernels = _kernels(_resolve(CUDA_PASSES, graph)[0])
     assert len(kernels) <= 2, f"{pin}: the split must not cascade — {sorted(kernels)}"
     assert not [v for row in kernels.values() for k, v in row.items() if family_of(k) == "REDUCE" and str(v).startswith("g")]
 

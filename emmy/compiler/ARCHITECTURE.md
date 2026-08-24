@@ -2,6 +2,8 @@
 
 Three layers over a shared `Graph` container.
 
+Reading a `--ir torch` / `--ir tensor` dump: [IR-PSEUDOCODE-TORCH.md](IR-PSEUDOCODE-TORCH.md).
+
 ```
 PyTorch module
    │  trace/              ── PyTorch → Graph IR capture
@@ -110,6 +112,10 @@ autotuning cache doesn't bust on cosmetic edits.
   size (default `DEFAULT_SEQ_HINT=512`, set automatically so reconstruction can't lose it; an explicit
   `Dim(name, hint=...)` overrides). The hint is pure metadata (excluded from `==`/`hash`/structural keys),
   read only by the tuner / partition planner to size tiles for a dynamic axis.
+  Graph JSON op fields use the same stable dimension wire mapping as Torch IR, so static, symbolic, and composite
+  `Dim` values round-trip instead of depending on the scalar-only `Dim.value` compatibility property.
+  Program specialization also binds the named string extents admitted by the `ReshapeOp.shape` and `SliceOp.shape`
+  frontend contracts; unrelated string-valued operation fields are never interpreted as dimensions.
 - **A symbolic free axis is tiled for its hint and emitted as a *masked* tile.** A symbolic M/N axis is treated as
   size `hint`, always-overhang: the block axis becomes a composite ceil-div over the symbolic extent
   (`(seq_len + bf - 1)//bf`), and a boundary `Cond(decoded_coord < seq_len)` wraps the body, so one cached kernel runs
@@ -126,6 +132,9 @@ autotuning cache doesn't bust on cosmetic edits.
 - **One `LoopOp` = one kernel.** Fusion produces `LoopOp` nodes;
   lowering turns each into `KernelOp` (AST) then `CudaOp` (rendered
   source).
+- **BF16 uses raw `uint16` bits at NumPy boundaries.** `dtype.encode_bf16` and `decode_bf16` are the shared
+  round-to-nearest-even conversion. Numeric values must never be value-cast to the carrier: live PyTorch tensors,
+  standalone random inputs, CUDA uploads, and command-layer comparisons preserve or decode the physical bits.
 - **`LoopOp.forward()` executes.** `ir/loop/runner.py` renders the body
   to C++ and JIT-compiles it via cppyy / Cling, letting the default
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
@@ -143,7 +152,10 @@ memory, the dtype decode is absorbed at the fragment load, and a compatible scal
 generic constant folder deliberately excludes storage-decode cones because materializing them would expand the
 buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<key>_scale_inv` rule — it subsumes the
 `.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
-`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`).
+`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`). DeepSeek-lineage `weight_scale_inv` names the inverse of
+the quantization scale, which is the stored dequant multiplier: both suffixes therefore reconstruct the weight by
+multiplication. Only a checkpoint contract that explicitly declares a reciprocal dequant multiplier may select the
+division path; the key suffix alone never does.
 
 When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
 wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.

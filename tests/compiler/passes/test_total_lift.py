@@ -74,6 +74,49 @@ def test_epilogue_stays_in_the_projection_body():
     assert {getattr(s, "input", None) for s in node.body if isinstance(s, Load)} == {"b"}
 
 
+def test_shared_row_value_stays_attached_to_a_computed_contraction_operand():
+    """A row value used by both a reduction cone and its output epilogue is duplicated by root
+    closure. The contraction binder must keep the duplicated edge as the computed A cone's
+    source; otherwise the cone reads its renamed value without a defining Load."""
+    m, n, k = Axis("m", Dim(8)), Axis("n", Dim(16)), Axis("k", Dim(32))
+    reduction = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="xk", input="x", index=(Var("m"), Var("k"))),
+                Assign(name="center", op=ElementwiseImpl("subtract"), args=("shared", "xk")),
+                Load(name="weight", input="weight", index=(Var("n"), Var("k"))),
+                Assign(name="product", op=ElementwiseImpl("multiply"), args=("center", "weight")),
+                Accum(name="acc", value="product", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    column = Loop(
+        axis=n,
+        body=Body(
+            (
+                reduction,
+                Assign(name="outv", op=ElementwiseImpl("add"), args=("acc", "shared")),
+                Write(output="out", index=(Var("m"), Var("n")), value="outv"),
+            )
+        ),
+    )
+    tile = _tile(Body((Loop(axis=m, body=Body((Load(name="shared", input="row", index=(Var("m"),)), column))),)))
+    node = tile.op.operands[0]
+    assert isinstance(node, Fold) and node.role is AxisRole.CONTRACTION and isinstance(node.a, Fold)
+
+    cone_body = Body(node.a.lower())
+    row_loads = [s for s in cone_body.iter() if isinstance(s, Load) and s.input == "row"]
+    assert len(row_loads) == 1, "the detached edge defines its renamed value once inside the computed A cone"
+    defined: set[str] = set()
+    unbound: set[str] = set()
+    axes = {a.name for a in tile.place.free} | {node.axis.name}
+    for stmt in cone_body.iter():
+        unbound.update(set(stmt.deps()) - defined - axes)
+        defined.update(stmt.defines())
+    assert not unbound, f"the computed A cone must be closed, found free SSA reads: {sorted(unbound)}"
+
+
 def test_two_pass_softmax_lifts_both_folds_with_cross_operand_read():
     """The second pass's λ reads the first pass's carried state as a free name — the shape the
     online-softmax pairing will classify."""

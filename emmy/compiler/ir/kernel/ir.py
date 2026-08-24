@@ -57,7 +57,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
     render_body,
 )
-from emmy.compiler.ir.stmt.base import render_merge_program
+from emmy.compiler.ir.stmt.base import render_merge_program, select_to_ternary
 from emmy.compiler.ir.stmt.ir import BodyOp
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -1139,6 +1139,57 @@ FRAG_COL = "__fcol"
 
 
 @dataclass(frozen=True)
+class FragmentSelect(Stmt):
+    """Coordinate-predicated uniform values lifted over an mma C-fragment.
+
+    This is the fragment-tier sibling of scalar :class:`Select`: every branch value is a scalar
+    uniform across the fragment, while each predicate may read the fragment element's absolute
+    row / column through :data:`FRAG_ROW` / :data:`FRAG_COL`. The render substitutes the tile base
+    plus the fragment layout's per-element offset, then reuses :func:`select_to_ternary` so branch
+    ordering and scalar casts stay identical to ``Select``.
+
+    Fragment-valued branches are deliberately not represented here. The lifting boundary accepts
+    only uniform branch values and declines any other shape rather than silently broadcasting it.
+    """
+
+    out: str
+    branches: tuple[SelectBranch, ...]
+    col_base: Expr
+    row_base: Expr | None = None
+    layout: FragLayout = M16N8
+
+    def __post_init__(self) -> None:
+        if not self.branches:
+            raise ValueError("FragmentSelect.branches must be non-empty")
+
+    def deps(self) -> tuple[str, ...]:
+        return tuple(branch.value for branch in self.branches)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.out,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())
+        return (*tuple(branch.select for branch in self.branches), *bases)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentSelect({self.out} <- {len(self.branches)} uniform branches)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        lay = self.layout
+        lines = [f"{pad}float {self.out}[{lay.n_elems}];", *_lane_preamble(ctx, pad, lay.lane_decl)]
+        for i in range(lay.n_elems):
+            sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
+            if self.row_base is not None:
+                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
+            branches = tuple(SelectBranch(value=branch.value, select=branch.select.substitute(sub)) for branch in self.branches)
+            expr = select_to_ternary(Select(name=self.out, branches=branches))
+            lines.append(f"{pad}{self.out}[{i}] = {expr.render(ctx)};")
+        return lines
+
+
+@dataclass(frozen=True)
 class FragmentMask(Stmt):
     """Generic per-element **coordinate-predicated fill** over an mma C-fragment — the ONE fragment
     mask node (it subsumes the former ``FragmentCausalMask`` / ``FragmentBoundaryMask``). Writes
@@ -1791,22 +1842,23 @@ class RegEpilogue:
     Captured by ``kernel/005_lower_atom_tile`` from the backward slice between
     the accumulator and the Write (the scalar Load / Assign stmts are stripped
     — the accumulator has no scalar SSA name on the fragment path). The render
-    evaluates the chain per fragment element in f32 with ``acc`` substituted
-    by the element and each leaf loaded at the element's own (row, col); the
-    chain ops reuse the scalar renderer's ``op_to_expr`` translation, so any
-    elementwise op with a CUDA spelling works. ``ops`` are ``(name, op_name,
-    args)`` in topological (body) order; ``result`` is the SSA name the Write
+    evaluates the chain per fragment element with ``acc`` substituted by the
+    element and each leaf loaded at the element's own (row, col). Chain ops
+    reuse :class:`Assign` rendering, including its optional dtype, promotion,
+    native-op, and conversion rules. ``ops`` are ``(name, op_name, args,
+    dtype)`` in topological (body) order; ``result`` is the SSA name the Write
     stored."""
 
     acc: str
     loads: tuple[EpilogueLoad, ...]
-    ops: tuple[tuple[str, str, tuple[str, ...]], ...]
+    ops: tuple[tuple[str, str, tuple[str, ...], DataType | None], ...]
     result: str
     # Coord-predicated Selects (the causal attention mask), rendered before the
     # ``ops`` chain as per-element ternaries. Each is ``(name, branches)`` where
     # ``branches`` is ``((cond_expr | None, value_name), ...)`` — the predicate
-    # carries ``__M__`` / ``__N__`` placeholder Vars the store substitutes with
-    # the fragment element's own (row, col); the last branch is the else.
+    # carries its σ-applied cell bases plus ``__M__`` / ``__N__`` placeholder
+    # Vars the store substitutes with the fragment element's row/col offsets;
+    # the last branch is the else.
     selects: tuple[tuple[str, tuple[tuple[Expr | None, str], ...]], ...] = ()
     # Additional ``(acc_name, frag_name)`` accumulator bindings — a multi-fold contraction's
     # extra C fragments (the fused gate/up edge): each name substitutes to its fragment's
@@ -1902,7 +1954,7 @@ class RegStore(Stmt):
         idx = ", ".join(e.pretty() for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
-            chain = ", ".join(op for _, op, _ in self.epilogue.ops)
+            chain = ", ".join(op for _, op, _, _ in self.epilogue.ops)
             bufs = ", ".join(ld.buffer for ld in self.epilogue.loads)
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
@@ -1965,38 +2017,31 @@ class RegStore(Stmt):
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
         ``2_t+{0,1}``) declares its leaf loads (converted to f32; offsets per
-        the dim roles at each buffer's own stride) and the chain ops (via
-        ``op_to_expr`` — the same translation the scalar ``Assign`` render
-        uses), all scoped inside the store's ``{ }`` block. Leaf loads are
+        the dim roles at each buffer's own stride) and the chain ops (via the
+        scalar ``Assign`` renderer), all scoped inside the store's ``{ }``
+        block. Leaf loads are
         scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
         if self.epilogue is None:
             return [[] for _ in coords], [f"{self.frag}[{i}]" for i in range(len(coords))]
-        from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
 
         epi = self.epilogue
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
-        # Coord-predicated Selects (causal mask) need the cell-base M / N coords
-        # (the last two var-bearing output dims) — the element adds its own
-        # (row, col) to get the absolute coordinate the predicate compares.
-        sel_m_base = sel_n_base = None
-        if epi.selects:
-            dvd = [e for e in self.dst_index if e.free_vars()]
-            sel_m_base = dvd[-2] if len(dvd) >= 2 else None
-            sel_n_base = dvd[-1] if dvd else None
         per_elem: list[list[str]] = []
         vals: list[str] = []
         for i, (row, col, row_off, col_off) in enumerate(coords):
             lines: list[str] = []
             env = {epi.acc: f"{self.frag}[{i}]", **{a: f"{fr}[{i}]" for a, fr in epi.extra_accs}}
+            for value in env.values():
+                ctx.ssa_dtypes[value] = "f32"
             for ld in epi.loads:
                 temp = f"{ld.name}_e{i}"
                 if ld.buffer in ctx.literal_constants:
                     lines.append(f"const float {temp} = {float(ctx.literal_constants[ld.buffer])!r}f;")
                     env[ld.name] = temp
+                    ctx.ssa_dtypes[temp] = "f32"
                     continue
                 flat = render_index(ld.buffer, ld.index, ctx)
                 parts = [flat]
@@ -2010,12 +2055,11 @@ class RegStore(Stmt):
                 dt = ctx.buffer_dtypes.get(ld.buffer, "f32")
                 lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{ld.buffer}[{addr}]')};")
                 env[ld.name] = temp
+                ctx.ssa_dtypes[temp] = "f32"
             # Coord-predicated Selects (the causal mask): a per-element ternary.
-            # ``__M__`` / ``__N__`` substitute to this element's absolute (row,
-            # col); branches fold right with the last branch as the else.
-            m_abs = BinaryExpr("+", sel_m_base, row_off) if sel_m_base is not None else row_off
-            n_abs = BinaryExpr("+", sel_n_base, col_off) if sel_n_base is not None else col_off
-            coord = {"__M__": m_abs, "__N__": n_abs}
+            # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
+            # the captured predicate already carries its semantic cell base.
+            coord = {"__M__": row_off, "__N__": col_off}
             for sel_name, branches in epi.selects:
                 expr = env[branches[-1][1]]
                 for cond, value in reversed(branches[:-1]):
@@ -2023,10 +2067,17 @@ class RegStore(Stmt):
                     expr = f"(({rc}) ? {env[value]} : {expr})"
                 lines.append(f"const float {sel_name}_e{i} = {expr};")
                 env[sel_name] = f"{sel_name}_e{i}"
-            for name, op_name, args in epi.ops:
-                expr = op_to_expr(op_name, [Var(env[a]) for a in args])
-                lines.append(f"const float {name}_e{i} = {expr.render(ctx)};")
-                env[name] = f"{name}_e{i}"
+                ctx.ssa_dtypes[env[sel_name]] = "f32"
+            for name, op_name, args, dtype in epi.ops:
+                rendered_name = f"{name}_e{i}"
+                rendered = Assign(
+                    name=rendered_name,
+                    op=op_name,
+                    args=tuple(env[arg] for arg in args),
+                    dtype=dtype,
+                ).render(replace(ctx, indent=0))[0]
+                lines.append(f"const {rendered}")
+                env[name] = rendered_name
             per_elem.append(lines)
             vals.append(env[epi.result])
         return per_elem, vals
@@ -2631,10 +2682,15 @@ def _(s: RegStore, rename, sigma, axis_fn):
             ),
             ops=epilogue.ops,
             result=epilogue.result,
-            # Select predicates carry ``__M__`` / ``__N__`` placeholders (not
-            # real partition vars), so they're cell-invariant — pass through; the
-            # per-cell M/N offset reaches them via ``dst_index`` at render.
-            selects=epilogue.selects,
+            # Captured predicates carry semantic cell-base expressions plus
+            # placeholders, so replicate the real coordinate vars like load indices.
+            selects=tuple(
+                (
+                    name,
+                    tuple((None if cond is None else sigma.apply(cond), value) for cond, value in branches),
+                )
+                for name, branches in epilogue.selects
+            ),
             # The extra channel accumulators rename with the store's own fragment (they are
             # per-cell C-fragment names too) — dropping them here left the multi-channel combine
             # (the gemma GeGLU ``acc2``) unbound at render.
@@ -2709,5 +2765,16 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
+        layout=s.layout,
+    )
+
+
+@_rewrite.register
+def _(s: FragmentSelect, rename, sigma, axis_fn):
+    return FragmentSelect(
+        out=rename(s.out),
+        branches=tuple(SelectBranch(value=rename(branch.value), select=sigma.apply(branch.select)) for branch in s.branches),
+        col_base=sigma.apply(s.col_base),
+        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         layout=s.layout,
     )

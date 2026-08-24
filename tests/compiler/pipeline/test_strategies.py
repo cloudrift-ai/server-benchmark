@@ -91,6 +91,27 @@ def test_decomposition_mints_fresh_pieces_and_fusion_aggregates() -> None:
     assert covered == totals["o"], "the kernels together cover every piece of the origin"
 
 
+def test_one_origin_rewrites_keep_the_frontend_source_object() -> None:
+    """Decomposition and lifting fragments retain one ultimate object for private-edge checks."""
+    graph = _matmul()
+    origin = graph.nodes["o"].op
+    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lifting"], graph)
+    loops = [node.op for node in out.nodes.values() if isinstance(node.op, LoopOp)]
+    assert loops
+    assert all(list(op.source_chain())[-1] is origin for op in loops)
+
+
+def test_mixed_origin_rewrite_keeps_the_result_frontend_source_object() -> None:
+    """A fused result retains its consumer origin while its input keeps a distinct origin."""
+    graph = _norm_linear()
+    origin = graph.nodes["y"].op
+    input_origins = {name: graph.nodes[name].op for name in graph.inputs}
+    out, _ = _resolve(LOOP_PASSES, graph)
+    result = out.nodes["y"].op
+    assert list(result.source_chain())[-1] is origin
+    assert all(list(out.nodes[name].op.source_chain())[-1] is input_origin for name, input_origin in input_origins.items())
+
+
 def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
     """PipelineStrategy-scoped concern: strip ProvenanceStrategy from the pipeline and NO node carries
     provenance — the graph and engine hold none of it. (Identity is kept so kernels still stamp.)"""

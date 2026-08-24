@@ -165,6 +165,8 @@ def _serialize_field(v):
     Special cases:
 
     - ``ir.elementwise.ElementwiseImpl`` → its ``name`` string.
+    - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
+      composite expressions round-trip through op fields.
     - ``ir.stmt.Body`` → the underlying ``stmts`` tuple. Body is an
       in-memory wrapper; on disk we keep the tuple-of-stmts form so
       ``_deserialize_field``'s list-of-Stmt-reprs path keeps working
@@ -198,7 +200,9 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        return v.value
+        from emmy.compiler.torch_wire import dim_to_wire
+
+        return {"__dim__": dim_to_wire(v)}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -225,6 +229,11 @@ def _deserialize_field(k, v):
     the IR's ``__all__`` exports — same classes the Stmt reprs reference."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
+    if isinstance(v, dict) and set(v) == {"__dim__"}:
+        from emmy.compiler.torch_wire import dim_from_wire
+
+        return dim_from_wire(v["__dim__"])
+
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
@@ -249,6 +258,8 @@ def _deserialize_field(k, v):
         fields = {fk: _deserialize_field(fk, fv) for fk, fv in v.get("fields", {}).items()}
         return op_cls(**fields) if fields else op_cls()
     if isinstance(v, list) and v and all(isinstance(e, dict) and "__op__" in e for e in v):
+        return tuple(_deserialize_field(k, e) for e in v)
+    if isinstance(v, list) and v and any(isinstance(e, dict) and "__dim__" in e for e in v):
         return tuple(_deserialize_field(k, e) for e in v)
     if isinstance(v, list):
         # Constructor-repr string *elements* rehydrate under the same known-class guard —
@@ -827,12 +838,13 @@ class Graph:
         return self._users.get(buf, set())
 
     def validate(self) -> None:
-        """Check the graph's structural invariants; raise ``ValueError`` on the
-        first violation. Covers: non-empty ``node.outputs``; SSA per buffer
+        """Check the graph's structural and per-op invariants; raise ``ValueError``
+        on the first violation. Covers: non-empty ``node.outputs``; SSA per buffer
         (``_producers`` maps every buffer to exactly its producing node/slot,
         no orphan or missing entries); ``_users`` consistency with every
         ``node.inputs`` edge; ``graph.inputs`` / ``graph.outputs`` naming known
-        buffers. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
+        buffers; a ``copy`` reading its output's shape; an index map whose sources
+        agree on element type. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
         pass boundaries — never in production compile paths."""
         expected_producers: dict[str, tuple[str, int]] = {}
         for nid, node in self.nodes.items():
@@ -862,6 +874,31 @@ class Graph:
             for buf in refs:
                 if buf not in expected_producers:
                     raise ValueError(f"graph.{label} names unknown buffer {buf!r}")
+        # noqa: PLC0415 below — a module-level import of the dialect would cycle.
+        from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp  # noqa: PLC0415
+
+        # An index map moves values, it does not convert them, so several sources
+        # feeding one result must agree on the element type. A source that differed
+        # would be a conversion, which is what a dtype-changing copy is for.
+        for nid, node in self.nodes.items():
+            if not isinstance(node.op, IndexMapOp) or len(node.inputs) < 2:
+                continue
+            dtypes = {str(t.dtype) for inp in node.inputs if (t := self.buffer(inp)) is not None}
+            if len(dtypes) > 1:
+                raise ValueError(f"index map {nid!r} reads sources of differing dtypes: {sorted(dtypes)}")
+
+        # ``copy`` is the identity, so its declared output dtype is the whole
+        # operation and its shape must be its input's. ``ElementwiseOp.infer_output_shape``
+        # states the rule for every elementwise op, but no compile path calls it on one,
+        # and a shape-changing copy would reach the loop stage as a silent broadcast.
+        for nid, node in self.nodes.items():
+            if not (isinstance(node.op, ElementwiseOp) and node.op.name == "copy"):
+                continue
+            out_shape = tuple(node.output.shape)
+            for inp in node.inputs:
+                t = self.buffer(inp)
+                if t is not None and tuple(t.shape) != out_shape:
+                    raise ValueError(f"copy node {nid!r} reads {inp!r} with shape {tuple(t.shape)} but declares {out_shape}")
 
     # ------------------------------------------------------------------
     # Boundary / symbolic-dim queries
@@ -1162,48 +1199,10 @@ class Graph:
         return g
 
     def pretty_print(self) -> str:
-        """Render the graph as readable text (topological order + sections)."""
-        from emmy.compiler.ir.base import ConstantOp, InputOp
+        """Render the graph as Rust-like pseudocode (see :mod:`emmy.compiler.pretty`)."""
+        from emmy.compiler.pretty import render_graph
 
-        order = self.topological_order()
-        lines: list[str] = [
-            f"# Graph: {len(self.nodes)} nodes, {len(self.inputs)} inputs, {len(self.outputs)} outputs",
-            "",
-        ]
-
-        if self.inputs:
-            lines.append("inputs:")
-            for nid in self.inputs:
-                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
-            lines.append("")
-
-        const_ids = [nid for nid in order if isinstance(self.nodes[nid].op, ConstantOp)]
-        if const_ids:
-            lines.append("constants:")
-            for nid in const_ids:
-                n = self.nodes[nid]
-                val = getattr(n.op, "value", None)
-                suffix = f" = {val}" if val is not None else ""
-                lines.append(f"  {_fmt_tensor(n.output)}{suffix}")
-            lines.append("")
-
-        compute_ids = [nid for nid in order if not isinstance(self.nodes[nid].op, (InputOp, ConstantOp))]
-        if compute_ids:
-            name_w = max(len(self.nodes[nid].output.name) for nid in compute_ids)
-            op_w = max(len(_fmt_op(self.nodes[nid], self)) for nid in compute_ids)
-            for nid in compute_ids:
-                n = self.nodes[nid]
-                op_str = _fmt_op(n, self)
-                shape_str = _fmt_shape(n.output.shape)
-                lines.append(f"{n.output.name:<{name_w}}  =  {op_str:<{op_w}}  -> {shape_str} {n.output.dtype}")
-            lines.append("")
-
-        if self.outputs:
-            lines.append("outputs:")
-            for nid in self.outputs:
-                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
-
-        return "\n".join(lines)
+        return render_graph(self)
 
     def to_dict(self) -> dict:
         """Serialize graph to a JSON-compatible dict."""
@@ -1299,19 +1298,9 @@ def _rename_buf_in_op(op, old: str, new: str):
 
 
 # ---------------------------------------------------------------------------
-# Pretty-print helpers (used by Graph.pretty_print)
+# Node-rendering helpers (used by pipeline/search/candidate.py; the graph
+# dump itself lives in compiler/pretty.py)
 # ---------------------------------------------------------------------------
-
-
-def _fmt_shape(shape: tuple) -> str:
-    inside = ", ".join(str(d) for d in shape)
-    if len(shape) == 1:
-        inside += ","
-    return f"({inside})"
-
-
-def _fmt_tensor(t: Tensor) -> str:
-    return f"{t.name}: {_fmt_shape(t.shape)} {t.dtype}"
 
 
 _DIM_NAMES = ("i", "j", "k", "l", "m", "n")

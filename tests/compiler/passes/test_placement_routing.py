@@ -13,14 +13,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -118,7 +121,7 @@ def test_place_sites_are_the_non_root_nodes() -> None:
     tile = recognized_tile(node.op, name=node.op.name)
     pro = fused_view(tile)
     assert pro is not None, "the norm→linear tile must derive its fused computed-A view"
-    c_map, _n_ax, _stores = pro
+    c_map, _added_axes, _stores = pro
     all_sites = sites(c_map)
     seams = family_sites("PLACE", all_sites)
     assert seams and all(s.depth > 1 for s in seams)
@@ -128,6 +131,217 @@ def test_place_sites_are_the_non_root_nodes() -> None:
     cone = c_map.a
     assert spell(c_map, "PLACE", cone, all_sites=all_sites) == "PLACE"
     assert resolve(c_map, "PLACE@a", all_sites=all_sites).node is cone
+
+
+def _attention_cuts(root):
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+
+    return cuttable_seams(root, free=(Axis("m", Dim(8)), Axis("n", Dim(16))))
+
+
+def _rebuild_attention_root(root, cone):
+    from emmy.compiler.ir.pure.fold import Channel, Fold
+
+    pv = root.operands[0]
+    channel = pv.channels[0]
+    rebuilt = Fold.contraction(k_axis=pv.axis, a=cone, channels=(Channel(b=channel.b, acc=channel.acc),))
+    return Fold.projection(operands=(rebuilt,))
+
+
+@pytest.mark.parametrize("difference", ["input", "op"])
+def test_grouped_cut_rejects_non_equivalent_computed_edges(difference) -> None:
+    """Same geometry is insufficient: exact operations and external buffers remain semantic."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.pure.fold import Channel, Fold, operand_name
+    from emmy.compiler.ir.stmt import Assign, Body
+    from tests.compiler.passes.test_recognize_boundary_rules import _attention_cone_term
+
+    root, cone = _attention_cone_term()
+    score = cone.operands[1]
+    channel = score.channels[0]
+    if difference == "input":
+        changed_b = replace(channel.b, input="other_k")
+        changed = Fold.contraction(k_axis=score.axis, a=score.a, channels=(Channel(b=changed_b, acc=channel.acc),))
+    else:
+        a_name = operand_name(score.a)
+        changed_a = Fold.projection(
+            operands=(score.a,),
+            body=Body((Assign(name=f"{a_name}__neg", op="negative", args=(a_name,)),)),
+        )
+        changed = Fold.contraction(k_axis=score.axis, a=changed_a, channels=(Channel(b=channel.b, acc=channel.acc),))
+    changed_cone = replace(cone, operands=(cone.operands[0], changed))
+
+    cuts = _attention_cuts(_rebuild_attention_root(root, changed_cone))
+    assert not [cut for cut in cuts if len(cut.members) > 1]
+
+
+def test_grouped_cut_rejects_more_than_two_equivalent_uses() -> None:
+    """The bounded inverse is exact-two; an additional equal use leaves every seam independent."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure.fold import Channel, Fold
+    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from tests.compiler.passes.test_recognize_boundary_rules import _attention_cone_term
+
+    root, cone = _attention_cone_term()
+    score3 = Fold.contraction(
+        k_axis=Axis("ddc", Dim(16)),
+        a=Load(names=("s3__q",), input="q", index=(Var("m"), Var("ddc"))),
+        channels=(Channel(b=Load(names=("s3__k",), input="k", index=(Var("kvb"), Var("ddc"))), acc="s3"),),
+    )
+    cone3 = Fold.projection(
+        operands=(*cone.operands, score3),
+        body=Body((*cone.body, Assign(name="pw3", op="add", args=(cone.out, "s3")))),
+    )
+
+    cuts = _attention_cuts(_rebuild_attention_root(root, cone3))
+    assert sum(1 for cut in cuts for member in cut.members if isinstance(member.node, Fold) and member.node.axis is not None) >= 3
+    assert not [cut for cut in cuts if len(cut.members) > 1]
+
+
+def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides(monkeypatch) -> None:
+    """The fused cell and its two-kernel inverse are structural siblings.
+
+    The inverse materializes one score producer. Its two contextual uses retain distinct
+    column-axis coordinates while loading the same workspace.
+    """
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.loop.fusion import _merge
+
+    grouped_over_limit: list[tuple[int, int]] = []
+    original = _merge._build_merged_region
+
+    def tracked(graph, region, sink, *, max_work=None):
+        merged = original(graph, region, sink, max_work=max_work)
+        if merged is not None and max_work is None and _merge._recognized_reuse_pieces(merged) is not None:
+            pre_work = sum(_merge._total_work(graph.nodes[node_id].op) for node_id in region)
+            raw_work = _merge._total_work(merged)
+            if raw_work > 8 * pre_work:
+                grouped_over_limit.append((pre_work, raw_work))
+        return merged
+
+    monkeypatch.setattr(_merge, "_build_merged_region", tracked)
+    graph = trace_inline_code(
+        "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
+    )["graph"]
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    loop_nodes = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loop_nodes) == 1, "recognized reuse must admit the whole fused Loop-IR cell"
+    assert grouped_over_limit, "the grouped score inverse must bypass the ordinary raw-work limit"
+
+    captured: list = []
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        captured.extend(leaves)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(["lowering/tile"], select=["recognize"]), ctx=Context.from_target((8, 0))).resolve(fused, decide)
+    assert any(isinstance(option, TileOp) for option in captured), "the fused TileOp sibling is missing"
+    grouped = [option for option in captured if isinstance(option, Graph) and any("__cut_acc" in node_id for node_id in option.nodes)]
+    assert len(grouped) == 1, "the two equivalent score uses must collapse to one materialized sibling"
+
+    (split,) = grouped
+    ws = next(node_id for node_id in split.nodes if "__cut_acc" in node_id)
+    parent = split.nodes["scaled_dot_product_attention"].op
+    loads = [load for load in parent.body.loads if load.input == ws]
+    assert len(loads) == 2, "both reconstructed uses must read the one workspace"
+    assert loads[0].index != loads[1].index, "each use must keep its contextual free-axis mapping"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "torch.manual_seed(0);"
+            "q=torch.randn(1,2,1,128,dtype=torch.float16);"
+            "k=torch.randn(1,2,8,128,dtype=torch.float16);"
+            "v=torch.randn(1,2,8,128,dtype=torch.float16);"
+            "F.scaled_dot_product_attention(q,k,v,is_causal=False)"
+        ),
+        (
+            "torch.manual_seed(0);"
+            "q=torch.randn(1,4,1,128,dtype=torch.float16);"
+            "k=torch.randn(1,2,8,128,dtype=torch.float16);"
+            "v=torch.randn(1,2,8,128,dtype=torch.float16);"
+            "F.scaled_dot_product_attention("
+            "q.reshape(1,2,2,1,128),k.reshape(1,2,1,8,128),v.reshape(1,2,1,8,128),"
+            "is_causal=False).reshape(1,4,1,128)"
+        ),
+    ],
+    ids=["mha", "gqa"],
+)
+def test_decode_sdpa_offers_grouped_fused_target(source) -> None:
+    """A unit-elided query row keeps the same fused/grouped placement alternatives."""
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    graph = trace_inline_code(source)["graph"]
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    (node,) = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    node.op.populate_io(fused, node)
+    view = fused_view(recognized_tile(node.op, name=node.id))
+    assert view is not None
+    assert [(axis.name, axis.extent) for axis in view[1][:-1]] == [("_um", Dim(1))]
+
+    captured: list = []
+
+    def decide(fork):
+        leaves = flatten_leaves(fork.options)
+        captured.extend(leaves)
+        return leaves[0]
+
+    Run(pipeline=Pipeline.build(["lowering/tile"], select=["recognize"]), ctx=Context.from_target((8, 0))).resolve(fused, decide)
+    assert any(isinstance(option, TileOp) for option in captured)
+    grouped = [option for option in captured if isinstance(option, Graph) and any("__cut_acc" in node_id for node_id in option.nodes)]
+    assert len(grouped) == 1
+
+
+@pytest.mark.parametrize("index", [(Var("m"), Var("n")), (Var("n"),)], ids=["nonunit", "missing-row"])
+def test_synthetic_decode_row_requires_a_literal_unit_coordinate(index) -> None:
+    """A real or absent row coordinate cannot opt into the M=1 contraction reading."""
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import _unit_output_row
+
+    write = Write(output="out", index=index, value="acc")
+    assert _unit_output_row((write,), "n") is None
+
+
+def test_followup_fusion_preserves_the_sdpa_grouped_inverse() -> None:
+    """A producer merge cannot consume an attention target's recovered placement sibling."""
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
+
+    graph = trace_inline_code(
+        "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
+    )["graph"]
+    graph = Pipeline.build(LOOP_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    attention = graph.nodes["scaled_dot_product_attention"]
+    assert isinstance(attention.op, LoopOp) and reusable_cut_pieces(attention.op) is not None
+
+    source = graph.nodes["x0"].output
+    graph.rename_node("x0", "q_src")
+    graph.add_node(ElementwiseOp("negative"), ["q_src"], replace(source, name="x0"), node_id="x0")
+    graph.replace_input(attention.id, "q_src", "x0")
+
+    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph, ctx=Context.from_target((8, 0)))
+    loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 2, "the producer must stay outside the reusable attention cell"
+    attention = fused.nodes["scaled_dot_product_attention"]
+    assert reusable_cut_pieces(attention.op) is not None
 
 
 # --- the realizer: pin-driven cuts, fuse-default, recursion ---------------------------------------
@@ -223,3 +437,33 @@ def test_a_cut_taken_at_a_fork_mid_batch_still_reaches_the_stamp(monkeypatch) ->
 
 
 # --- routing entries drive the same realizer -------------------------------------------------------
+
+
+def test_contraction_operand_seam_takes_the_output_dtype(monkeypatch) -> None:
+    """A seam standing in for a contraction OPERAND holds what the fused slab stored — the atom's
+    16-bit element — not the f32 its cone computed in: typed f32 (an f32-computing norm over f16
+    keys), the materialized B could feed no warp atom (only ``a`` has a converting fill)."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.passes.test_recognize_boundary_rules import _normed_sdpa_graph
+
+    g = _normed_sdpa_graph()
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    with pinned_knobs({"PLACE@b": "cut"}):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(
+            g, lambda fp: flatten_leaves(fp.options)[0]
+        )
+    ws = [n for n in out.nodes.values() if "__cut_" in n.id and isinstance(n.op, (LoopOp, TileOp))]
+    assert ws, [n.id for n in out.nodes.values()]
+    assert any(n.output.dtype == F16 for n in ws), [(n.id, str(n.output.dtype)) for n in ws]
+
+
+def test_pinned_transposed_coop_band_refuses_without_a_free_axis_to_sweep(monkeypatch) -> None:
+    """A REDUCE pin meets the transposed band's legality as a refusal, never a crash: at one row
+    the rms statistic has no innermost free axis for the band's 32 lanes to sweep (unpinned,
+    the catalog simply omits the band)."""
+    monkeypatch.setenv("EMMY_WORK", "t256")
+    monkeypatch.setenv("EMMY_REDUCE", "coop-t")
+    with pytest.raises(ValueError, match="innermost free axis"):
+        _compile(_rms_graph(S=1), None, monkeypatch)

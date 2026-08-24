@@ -21,14 +21,19 @@ stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
 constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice chain
-rooted at a local `new_zeros` / `new_full` allocation additionally reassembles the updated base as a two-source
-`IndexMapOp`: the copied value supplies the written region and the previous base supplies the remainder. Rebinding
-the allocation's FX name versions sequential slice writes and later aliases built from that name; an empty slice write
-leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
-or a view created before the write still fails closed; those forms need general alias versioning rather than this local
-functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
-instead of becoming NaN through arithmetic selection.
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice/select
+chain rooted at a locally computed tensor additionally reassembles the updated base as a two-source `IndexMapOp`: the
+copied value supplies the written region and the previous base supplies the remainder. Rebinding the root's FX name
+versions sequential overlapping writes and later aliases built from that name; an empty write leaves that version
+unchanged. The written-region predicate starts from a boolean literal, so coordinate ternaries and the source select
+retain a boolean condition in vectorized reference evaluation and after Loop IR lifting. A write through an
+input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
+before the write still fails closed; those forms need general alias versioning rather than this local functional
+update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
+instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over
+the last two axes: the selected triangular region reads the input and the complement reads a scalar zero. The
+diagonal must be a static integer; tensor-valued or symbolic diagonals fail closed instead of becoming broadcast
+elementwise operands.
 
 A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
 `fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
@@ -38,6 +43,18 @@ fail closed.
 
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
+
+Static rank-two `eye` lowers to a two-source `IndexMapOp`: output coordinates select a typed scalar one on the
+diagonal and a typed scalar zero everywhere else. Square and rectangular dimensions must be static integers and match
+the exported tensor metadata. Dynamic dimensions, non-strided layouts, pinned memory, and unsupported overloads or
+constructor options fail closed rather than being stored as an elementwise operation without coordinate semantics.
+
+An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad")` identity so a working golden
+retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
+closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.
+
+The default `aten.cumsum` overload with a static integer axis lowers to an additive `ScanOp`, preserving the input
+shape and dtype. Dynamic axes, dtype overrides, and unsupported overloads or keyword arguments fail closed.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -168,7 +185,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
   reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
   E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
-  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
+  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. DeepSeek-lineage FP8
+  checkpoints use the same per-expert module layout for ordinary 2-D weights and block scales;
+  `_stack_expert_modules` preserves FP8 bits on the uint8 carrier, stacks scales as float32, concatenates gate and up
+  along the output axis, and leaves down weights in checkpoint orientation. Ignored dense layers take the same path
+  without scales. The store also carries
   `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
   `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
   whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the

@@ -882,3 +882,36 @@ def test_pack_expert_state_shape_mismatch_raises():
     state = {"m.experts.0.down_proj.weight": torch.randn(3, 4)}  # transposed vs expected
     with pytest.raises(ValueError, match="expert packing"):
         _pack_expert_state(model, state)
+
+
+def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
+    """DeepSeek / Laguna store routed experts one MODULE per expert — ``experts.<e>.<proj>.weight``
+    with a block ``weight_scale_inv`` — not the transformers-v5 E-stacked 3-D tensors. They map
+    to the same E-leading program inputs: ``w_gate_up`` is ``[gate | up]`` along the output axis
+    (the de-interleaved convention the expert wrapper's ``chunk(2)`` reads), ``w_down`` as
+    stored, block scales concatenated alike, fp8 bits on the ``uint8`` carrier."""
+    import torch
+
+    from emmy.compiler.trace.huggingface import _expert_slot, _stack_expert_modules
+
+    assert _expert_slot("model.layers.12.mlp.experts.3.gate_proj.weight") == (12, "w_gate", 3)
+    assert _expert_slot("model.layers.12.mlp.experts.3.up_proj.weight_scale_inv") == (12, "w_up_scale", 3)
+    assert _expert_slot("model.layers.12.mlp.experts.0.down_proj.weight") == (12, "w_down", 0)
+    assert _expert_slot("model.layers.12.mlp.experts.0.down_proj.bias") is None
+
+    e, inter, hidden = 2, 4, 8
+    by_name = {
+        "w_gate": {i: torch.full((inter, hidden), 10 * i + 1, dtype=torch.uint8) for i in range(e)},
+        "w_up": {i: torch.full((inter, hidden), 10 * i + 2, dtype=torch.uint8) for i in range(e)},
+        "w_down": {i: torch.full((hidden, inter), 10 * i + 3, dtype=torch.uint8) for i in range(e)},
+        "w_gate_scale": {i: torch.full((1, 1), float(i + 1)) for i in range(e)},
+        "w_up_scale": {i: torch.full((1, 1), float(i + 5)) for i in range(e)},
+        "w_down_scale": {i: torch.full((1, 1), float(i + 9)) for i in range(e)},
+    }
+    out = _stack_expert_modules(12, by_name, model=None)
+    assert set(out) == {"w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"}
+    assert out["w_gate_up"].shape == (e, 2 * inter, hidden) and out["w_gate_up"].dtype == torch.uint8
+    assert out["w_gate_up"][1, 0, 0] == 11 and out["w_gate_up"][1, inter, 0] == 12, "[gate | up] halves per expert"
+    assert out["w_down"].shape == (e, hidden, inter)
+    assert out["w_gate_up_scale"].shape == (e, 2, 1) and out["w_gate_up_scale"][1].flatten().tolist() == [2.0, 6.0]
+    assert out["w_down_scale"][0].item() == 9.0

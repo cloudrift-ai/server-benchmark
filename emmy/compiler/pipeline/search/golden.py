@@ -701,7 +701,7 @@ def decode_record(record: GoldenRecord) -> str | None:
             return verdicts[verdict_key]
         pro = fused_view(tile)
         route_tree, route_free, route_stores = (
-            (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
+            (pro[0], (*tile.place.free, *pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
         )
         seams = cuttable_seams(route_tree, route_stores, route_free)
         all_sites = sites(route_tree)
@@ -718,7 +718,7 @@ def decode_record(record: GoldenRecord) -> str | None:
                 site = resolve(route_tree, str(key), all_sites=all_sites)
             except ValueError as exc:
                 return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or site not in seams:
+            if site is None or not any(site in cut.members for cut in seams):
                 return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
         return _remember_verdict(verdict_key, None)
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))

@@ -1945,7 +1945,7 @@ class EmmyGenRunner:
             if output_count == 1:
                 specs = (("hidden", residual.dtype),)
             elif output_count == 2:
-                specs = (("hidden", residual.dtype), ("moe_xn", residual.dtype))
+                specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype))
             elif output_count == 3:
                 specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype), ("shared_expert", torch.float32))
             else:

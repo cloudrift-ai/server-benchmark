@@ -76,10 +76,13 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
    constant overrides come from `input_data`; scalar `ConstantOp`s
    materialize as single-element arrays; scratch buffers zero-init.
    Inputs without supplied data get a deterministic pseudo-random fill
-   (useful for standalone compile-and-benchmark scripts).
+   (useful for standalone compile-and-benchmark scripts). BF16 buffers use NumPy's `uint16` carrier as raw bits:
+   numeric inputs are round-to-nearest-even encoded before upload, while an already-`uint16` source is preserved.
 2. Launch each kernel in topological order; `zero_outputs` fills run
    before the launch.
-3. Copy `graph.outputs` buffers back to numpy.
+3. Copy `graph.outputs` buffers back to numpy in their declared order, independently of buffer allocation order. BF16
+   outputs remain raw `uint16` bits at this backend boundary;
+   command-layer correctness checks decode them.
 
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its
 own permanently-live buffer — that holds all 28 layers' `[heads, S, S]` attention scratch resident at once (~29 GB for
@@ -211,6 +214,9 @@ flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program o
 eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
 `want_ref` (return that run's `(inputs, outputs)` as `run_io`). A frontend-graph job may also request
 `strict_accuracy`; it returns the direct eager proof and same-input eager outputs used to check exact-pinned rows.
+The frontend-graph response also returns the exact symbolic environment used to specialize its hint-sized inputs, so
+the parent resolves dynamic launch geometry from the execution binding instead of reconstructing it from lowered
+graph inputs that may no longer carry the symbol.
 Embedded Loop replay has no Torch twin, so its Emmy-only greedy execution returns that same-input reference too. If
 this execution completes but later repeated timing crosses the watchdog, the worker returns the reference, single-run
 timing, and exact timing error. The command marks greedy ineligible while still reference-checking pinned rows; the

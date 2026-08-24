@@ -1,6 +1,10 @@
 """Unit tests for ``op_to_expr`` — elementwise op-name → Expr translation."""
 
+import numpy as np
+import pytest
+
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr
 from emmy.compiler.ir.stmt import Assign, Body
 from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
@@ -24,6 +28,18 @@ def test_copy_is_identity_passthrough():
     """``copy`` returns its input unchanged (dropout lowers through this path)."""
     x = Literal(1.0, "float")
     assert op_to_expr("copy", [x]) is x
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_zero_width_pad_is_an_exact_typed_identity(dtype):
+    """Stored unary ``pad`` nodes represent only the zero-width frontend case."""
+    x = Literal(1.0, "float")
+    assert op_to_expr("pad", [x]) is x
+
+    values = np.array([-1.5, 0.0, 2.25], dtype=dtype)
+    actual = ElementwiseImpl("pad")(values)
+    assert actual.dtype == values.dtype
+    np.testing.assert_array_equal(actual, values)
 
 
 def test_typed_copy_is_a_cast_not_an_alias():

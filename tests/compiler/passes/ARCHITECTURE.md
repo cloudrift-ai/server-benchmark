@@ -69,7 +69,7 @@ lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/
 
 ### Fusion (`passes/loop/lifting/` + `passes/loop/fusion/`)
 
-Lifting wraps each surviving tensor primitive (elementwise / reduce /
+Lifting wraps each surviving tensor primitive (elementwise / reduce / scan /
 indexmap / gather) in a trivial single-op `LoopOp`. Fusion then splices
 adjacent `LoopOp` pairs by inlining the producer body at each consumer
 `Load` that reads it. `test_fusion_rules.py` runs lifting followed by
@@ -81,6 +81,7 @@ end-to-end there (no separate unit-test file — the old
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|
 | `loop/lifting/010_lift_elementwise.py` | `ElementwiseOp` → `LoopOp` | `test_fusion_rules.py` (pass fixpoint)                                             |
 | `loop/lifting/020_lift_reduce.py`      | `ReduceOp` → `LoopOp`      | `test_fusion_rules.py::test_contraction_*`                                         |
+| `loop/lifting/025_lift_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_sum_lifts_and_preserves_prefix_values`      |
 | `loop/lifting/030_lift_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
 | `loop/lifting/040_lift_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
 | `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |

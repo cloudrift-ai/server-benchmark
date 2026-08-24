@@ -51,6 +51,9 @@ An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad
 retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
 closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.
 
+The default `aten.cumsum` overload with a static integer axis lowers to an additive `ScanOp`, preserving the input
+shape and dtype. Dynamic axes, dtype overrides, and unsupported overloads or keyword arguments fail closed.
+
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
 `operator.getitem` resolves an integer tuple index to the matching slice, so no multi-output Graph IR is introduced.

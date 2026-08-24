@@ -421,9 +421,10 @@ Picks one element per output position. `idx` has the result's shape, and each of
 position along `axis` that one output element reads; the other coordinates come from the output position
 itself.
 
-Close to torch's `gather`, but not the same: torch allows `idx` to be smaller than `data` on the axes it does
-not gather, while this requires them equal. A narrower index is a legal `torch.gather` that prints — and
-computes — as `emmy::gather_by_axis`.
+Close to torch's `gather`, but stricter. Torch allows `idx` to be smaller than `data` on the axes it does not
+gather; `emmy::gather` requires them equal there. A node whose `idx` is smaller on such an axis is therefore
+not this operation at all — it prints as `emmy::gather_by_axis`, and that is what the graph computes, even
+though the same call in torch would have been a gather.
 
 ```rust
 fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]>(
@@ -432,8 +433,7 @@ fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]
     axis: usize,
 ) -> T[e]
     where e[k] == d[k] for every k != axis
-    // produces the tensor whose element at i is
-    // data[i[0..axis] ++ [idx[i]] ++ i[axis+1..rank]]
+    // result[i] = data[i[0..axis] ++ [idx[i]] ++ i[axis+1..rank]]
 ```
 
 #### `emmy::gather_by_axis`
@@ -448,9 +448,7 @@ fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize
     idx: i64[e],
     axis: usize,
 ) -> T[d[0..axis] ++ e ++ d[axis+1..rank]]
-    // produces the tensor whose element at i, writing j for the index tensor's own
-    // coordinates i[axis..axis+irank], is
-    // data[i[0..axis] ++ [idx[j]] ++ i[axis+irank..rank+irank-1]]
+    // result[i] = data[i[0..axis] ++ [idx[i[axis..axis+irank]]] ++ i[axis+irank..rank+irank-1]]
 ```
 
 #### `emmy::index_map`
@@ -461,5 +459,18 @@ that pairs each one with the output index, and the condition under which it supp
 the node.
 
 ```rust
-fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: [tensor]) -> T[d]
+// A tensor whose rank and shape the type does not expose — an existential type,
+// https://en.wikipedia.org/wiki/Type_system#Existential_types
+struct Tensor<T> {
+  rank: usize,
+  d: usize[rank],
+  t: T[d],
+}
+
+fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: Tensor<T>[]) -> T[d]
 ```
+
+The operands need a container because they need not share a shape — the two halves of a `cat` do, the two
+constants of a mask do not. They do share the element type `T`, and only by convention: `IndexMapOp.forward`
+takes the result's dtype from the first operand and copies every other one into it, so a mixed-dtype node would
+silently follow operand zero rather than be rejected.

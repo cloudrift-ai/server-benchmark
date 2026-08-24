@@ -701,6 +701,80 @@ def _mlp_gate_up_graph(S: int = 32) -> Graph:
     return g
 
 
+def _materialized_gate_up_graph(S: int = 32, *, up_dtype=F16) -> Graph:
+    """Two projections over one materialized activation, followed by SwiGLU."""
+    H, inter = 256, 512
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("wg", (Dim(inter), Dim(H)), dtype=F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (Dim(inter), Dim(H)), dtype=up_dtype), node_id="wu")
+    g.add_node(LinearOp(), ["x", "wg"], Tensor("gate", (1, Dim(S), Dim(inter)), dtype=F16), node_id="gate")
+    g.add_node(LinearOp(), ["x", "wu"], Tensor("up", (1, Dim(S), Dim(inter)), dtype=F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Dim(S), Dim(inter)), dtype=F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["x", "wg", "wu"], ["o"]
+    return g
+
+
+def test_materialized_gate_up_offers_one_shared_a_mma_fill_and_scalar_fallback():
+    """One materialized A may feed compatible gate/up MMA channels through one sync fill."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.pipeline.knob import family_value
+
+    rows, tile = _resolve(_materialized_gate_up_graph(), pick=_is_warp_row, ctx=Context.from_target((7, 0)))
+    node = tile.op.operands[0] if isinstance(tile.op, Fold) and tile.op.axis is None else tile.op
+    assert is_contraction(node)
+    assert isinstance(node.a, Load) and len(node.channels) == 2
+    assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
+    warp = [row for row in rows if _is_warp_row(row)]
+    assert warp and any(not _is_warp_row(row) for row in rows), "the original planar fallback remains a sibling"
+    assert {family_value(row, "STAGE") for row in warp} == {"d1/smem", "d2/smem"}
+    assert all(family_value(row, "STAGE") for row in warp), "multi-channel MMA cannot use the single-fold gmem-direct path"
+    assert all(str(family_value(row, "TILE")).startswith("mma_m8n8k4_f16_f32/") for row in warp)
+
+
+def test_materialized_gate_up_mixed_b_dtypes_keeps_scalar_fallback_only():
+    """A byte-copied B channel whose dtype differs from the atom must decline the MMA fill."""
+    rows, _tile = _resolve(_materialized_gate_up_graph(up_dtype=F32), ctx=Context.from_target((7, 0)))
+    assert rows and not any(_is_warp_row(row) for row in rows)
+
+
+def _bind_materialized_channels(*, b_layouts=("kn", "kn"), mix_a_axis=False):
+    """Bind the minimal two-channel product fold, or return ``None`` when it is ineligible."""
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes
+
+    body = [
+        Load(
+            name="av",
+            input="x",
+            index=(Var("m") + Var("n"), Var("k")) if mix_a_axis else (Var("m"), Var("k")),
+        )
+    ]
+    for i, layout in enumerate(b_layouts):
+        index = (Var("k"), Var("n")) if layout == "kn" else (Var("n"), Var("k"))
+        body.extend(
+            (
+                Load(name=f"b{i}", input=f"w{i}", index=index),
+                Assign(name=f"p{i}", op="multiply", args=("av", f"b{i}")),
+                Accum(name=f"acc{i}", value=f"p{i}", op="add", axes=("k",)),
+            )
+        )
+    fold = fold_from_loop(_stamp_axes(Loop(axis=Axis("k", Dim(32)), body=Body(tuple(body)))))
+    assert fold is not None
+    return bind_bilinear(fold, "m", "n", frozenset({"m", "n"}))
+
+
+def test_materialized_channels_with_disagreeing_b_layouts_decline():
+    """One shared A fragment cannot feed B slabs with different K orientations."""
+    assert _bind_materialized_channels(b_layouts=("kn", "nk")) is None
+
+
+def test_materialized_channels_with_mixed_role_axis_decline():
+    """An A index mixing both output axes has no addressable MMA slab role."""
+    assert _bind_materialized_channels(mix_a_axis=True) is None
+
+
 def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
     """The fused gate/up MLP edge — TWO ⊗-folds sharing one normalized-row A value (fusion
     duplicates the cone SSA per fold; the matcher dedupes by value-tree equality) with the SwiGLU

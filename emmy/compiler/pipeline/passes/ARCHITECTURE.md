@@ -173,8 +173,8 @@ single-home rule exists to prevent.
 **Derived VIEWS — the one mechanism ABOVE the product.** The stored `TileOp` is the ONE canonical tree per kernel; a
 VIEW is a pure, deterministic derivation of it, and the criterion that separates a view from a value is whether the
 derivation changes the SITE SET, because that is what a product cannot absorb. The register strip and split-K do not
-(`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); two do, mutually exclusive by shape, so
-a term has at most TWO views (`_schedule._views`):
+(`r` and `cta` are spelled TILE / REDUCE values, applied at materialization); three do, mutually exclusive by shape,
+so a term has at most TWO views (`_schedule._views`):
 
 - the MONOID-producer composition (`_classify.fused_view`) — the fused norm→linear / gate⊗up edge, whose
   contraction reads its normalized row off a COMPUTED `a` edge. It ADDS the contraction and the cone's statistic to
@@ -182,6 +182,12 @@ a term has at most TWO views (`_schedule._views`):
   contraction's K fold, so the map view spells its statistic at `REDUCE@<axis>` too. The statistic's CARRIER is not
   part of the shape: a TWISTED `(m, d)` pair binds exactly like a `PLANAR` mean/rsqrt, which is what puts a fused
   `softmax(S)·V` region on the contraction catalog (cone `exp(S − m)·(1/d)`, B the value matrix);
+- the direct unit-row contraction (`_classify.unit_contraction_view`) — a matrix contraction whose M=1 loop was
+  elided keeps its stored one-axis form and derives the missing literal-zero output row. A split partial may carry
+  output-absent partition axes before that row only when both its workspace write and a sliced operand address prove
+  the partition receipt. Ordinary batch/head context, multiple output axes, and a nonliteral or nonzero row decline.
+  The derived contraction offers both scalar and warp schedules; split computed-edge forms retain their stored scalar
+  sibling, so adding the Volta catalog never removes the fallback;
 - the COLLAPSE (`Fold.demoted`) — a computed `a` edge spliced back INLINE, REMOVING its site. With no edges the
   bilinear reading declines, so the fold derives `PLANAR` and takes the reduce tiers; this is what carries a stat-free
   cone (`f(x) @ w`) on the per-cell tiers.
@@ -214,11 +220,12 @@ statistic into a materialized operand the mma tier streams. A seam standing in f
 the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
 materialized B is a slab the warp atoms can copy.
 
-A row carries NO view ownership: the derived contraction view offers only warp tiles (a computed operand's scalar
-list is empty) and the per-cell view only scalar / per-cell ones, so the row's `WORK` tier decodes its view by
-construction — replay is a function of `(stored op, row)` and nothing else. The union carries two obligations:
-uniform key sets with `""` as a decided empty, and NO cross-view suppression (each gate is a local predicate on its
-own term — a 16-bit atom, a resolvable fill, an inventory a value can spell against).
+A row carries NO view ownership. In the MONOID-producer and COLLAPSE cases, the derived contraction view offers only
+warp tiles (a computed operand's scalar list is empty) and the per-cell view only scalar / per-cell ones, so the row's
+`WORK` tier decodes its view by construction. The direct unit-row contraction's scalar and warp schedules share its
+one derived tree. Replay remains a function of `(stored op, row)` and nothing else. A union carries two obligations:
+uniform key sets with `""` as a decided empty, and NO cross-view suppression (each gate is a local predicate on its own
+term — a 16-bit atom, a resolvable fill, an inventory a value can spell against).
 
 **Coverage, as it stands.** The recursion carries the single-site terms — the pointwise cell plus the register-strip
 term variant, the reduce partition, and the contraction's tile × stage × reduce × raster product over the scalar and

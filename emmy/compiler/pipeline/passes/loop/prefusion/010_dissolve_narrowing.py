@@ -8,7 +8,13 @@ A merge is DIRECTIONAL: it makes the SINK the region's output, so whatever width
 must now be written. Ordering on that fact is what this pass is for. A merge whose sink is no
 wider than its producer can only shrink what gets written — a product folding into its own reduce,
 an index map dissolving into its consumer's index. Taking all of those first means each contraction
-has CLOSED before anything is offered a chance to splice into its open product.
+has CLOSED before anything is offered a chance to splice into its open product. The one ordering
+exception is a same-width pure index-map chain ending at a graph output: it changes only the output
+coordinate basis, so dissolving it before its producer closes can hide an exact grouped placement
+inverse that ordinary fusion already knows how to preserve. Defer that plumbing to ordinary
+fusion too; a producer with no such inverse still merges there, while a recognized inverse reaches
+the existing preservation guard and the graph-output identity rule can retarget its Write without
+changing the loop tree.
 
 Without that ordering the outcome depends on which match the enumeration reached first, and one
 order is catastrophic: splice a compute producer into a still-open product and the product becomes
@@ -32,7 +38,12 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import closed_loop_consumer_region as _closed_loop_consumer_region
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import (
+    closed_loop_consumer_region as _closed_loop_consumer_region,
+)
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import (
+    is_pure_indexmap as _is_pure_indexmap,
+)
 from emmy.compiler.pipeline.passes.loop.fusion._merge import merge_region as _merge_region
 
 PATTERN = [Pattern("producer", LoopOp)]
@@ -53,6 +64,19 @@ def _output_numel(node: Node) -> int:
     return numel
 
 
+def _ends_at_output_layout(graph: Graph, sink: Node) -> bool:
+    """Whether ``sink`` starts a single-consumer pure index-map chain to a graph output."""
+    node = sink
+    while isinstance(node.op, LoopOp) and _is_pure_indexmap(node.op):
+        if node.id in graph.outputs:
+            return True
+        users = graph.users(node.id)
+        if len(users) != 1:
+            return False
+        node = graph.nodes[next(iter(users))]
+    return False
+
+
 def rewrite(match: Match, producer: Node) -> Graph | None:
     graph = match.graph
     if not isinstance(producer.op, LoopOp):
@@ -61,6 +85,9 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     if found is None:
         raise RuleSkipped("producer has no closed Loop consumer region")
     region, sink = found
-    if _output_numel(sink) > _output_numel(producer):
+    producer_numel, sink_numel = _output_numel(producer), _output_numel(sink)
+    if sink_numel > producer_numel:
         raise RuleSkipped("widening merge — deferred to loop/fusion, after every narrowing one has run")
+    if sink_numel == producer_numel and _ends_at_output_layout(graph, sink):
+        raise RuleSkipped("same-width output layout — deferred until its producer has closed")
     return _merge_region(match, region, sink)

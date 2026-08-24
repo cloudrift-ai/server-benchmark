@@ -348,9 +348,13 @@ decided by whichever match the enumeration hit first, and one order costs a 1-la
 `loop/prefusion` runs the same splice through the same `_merge.merge_region` with the same refusals, and
 differs from `loop/fusion` in one predicate: it takes only merges whose sink is no wider than the producer.
 Those can only shrink what gets written, so draining them first means every contraction has CLOSED before
-anything is offered a chance to splice into its open product. It **refuses nothing** — a widening merge is
-DEFERRED, and `loop/fusion` offers every one of them afterwards, where the existing refusals decide. That is
-why this is an ordering and not a gate: no legal form leaves the enumeration, so the doctrine above is intact.
+anything is offered a chance to splice into its open product. A same-width pure index-map chain ending at a
+graph output is deferred with the widening merges: dissolving that output-coordinate change first can hide a
+grouped placement inverse which becomes exact only after the producer closes. Ordinary fusion then preserves
+the existing inverse or merges the layout normally when none exists; the graph-output identity rule may also
+retarget the producer's `Write` when the layout is a flat-memory identity. `loop/prefusion` **refuses nothing** —
+every deferred merge is offered again by `loop/fusion`, where the existing refusals decide. This remains an
+ordering rather than a gate: no legal form leaves the enumeration, so the doctrine above is intact.
 
 It must be a PASS, not another rule inside `loop/fusion`. The cursor advances rule-by-rule within a pass and
 re-enumerates, so two rules' batches interleave — measured, the same predicate as a `009_` rule left the trunk

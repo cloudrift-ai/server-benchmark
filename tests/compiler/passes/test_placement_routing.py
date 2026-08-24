@@ -21,9 +21,9 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -75,6 +75,35 @@ def _activation_linear_graph(S: int = 2, H: int = 16, inter: int = 32) -> Graph:
     g.add_node(ElementwiseOp("silu"), ["x"], Tensor("xa", (Dim(S), Dim(H)), dtype=F16), node_id="xa")
     g.add_node(MatmulOp(), ["xa", "w"], Tensor("y", (Dim(S), Dim(inter)), dtype=F16), node_id="y")
     g.inputs, g.outputs = ["x", "w"], ["y"]
+    return g
+
+
+def _gqa_sdpa_flatten_graph() -> Graph:
+    """A small grouped-query attention cell followed by its output-layout flatten."""
+    batch, query_heads, kv_heads, seq, head_dim = 1, 6, 2, 8, 16
+    g = Graph()
+    _inp(g, "q", (batch, query_heads, seq, head_dim))
+    _inp(g, "k", (batch, kv_heads, seq, head_dim))
+    _inp(g, "v", (batch, kv_heads, seq, head_dim))
+    g.add_node(
+        SdpaOp(is_causal=True, scale=head_dim**-0.5),
+        ["q", "k", "v"],
+        Tensor("attention", (batch, query_heads, seq, head_dim), F16),
+        node_id="attention",
+    )
+    g.add_node(
+        TransposeOp(axes=(1, 2)),
+        ["attention"],
+        Tensor("attention_t", (batch, seq, query_heads, head_dim), F16),
+        node_id="attention_t",
+    )
+    g.add_node(
+        ReshapeOp(shape=(batch, seq, query_heads * head_dim)),
+        ["attention_t"],
+        Tensor("flat", (batch, seq, query_heads * head_dim), F16),
+        node_id="flat",
+    )
+    g.inputs, g.outputs = ["q", "k", "v"], ["flat"]
     return g
 
 
@@ -342,6 +371,37 @@ def test_followup_fusion_preserves_the_sdpa_grouped_inverse() -> None:
     assert len(loops) == 2, "the producer must stay outside the reusable attention cell"
     attention = fused.nodes["scaled_dot_product_attention"]
     assert reusable_cut_pieces(attention.op) is not None
+
+
+def test_output_flatten_preserves_the_gqa_sdpa_grouped_inverse() -> None:
+    """Pure output layout must not erase attention's exact materialized sibling."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
+
+    lowered = Pipeline.build(LOOP_PASSES).run(_gqa_sdpa_flatten_graph(), ctx=Context.from_target((8, 9)))
+    loops = [node for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
+    assert {node.id for node in loops} == {"attention_reduce", "flat"}
+    attention = lowered.nodes["attention_reduce"]
+    assert reusable_cut_pieces(attention.op) is not None
+    assert lowered.nodes["flat"].inputs == [attention.id]
+
+
+def test_output_flatten_keeps_an_ordinary_reduce_on_the_normal_fusion_path() -> None:
+    """An equal-size layout after a plain fold does not mint grouped placement evidence."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
+
+    g = Graph()
+    _inp(g, "x", (2, 3, 8))
+    g.add_node(ReduceOp(op="sum", axis=-1), ["x"], Tensor("sum", (2, 3, 1), F16), node_id="sum")
+    g.add_node(ReshapeOp(shape=(2, 3)), ["sum"], Tensor("flat", (2, 3), F16), node_id="flat")
+    g.inputs, g.outputs = ["x"], ["flat"]
+
+    lowered = Pipeline.build(LOOP_PASSES).run(g, ctx=Context.from_target((8, 9)))
+    loops = [node for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(loops) == 1
+    assert loops[0].id == "flat"
+    assert reusable_cut_pieces(loops[0].op) is None
 
 
 # --- the realizer: pin-driven cuts, fuse-default, recursion ---------------------------------------

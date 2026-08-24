@@ -643,15 +643,23 @@ _GoldenBench = namedtuple("_GoldenBench", "sample graph bench flags status corre
 
 
 def _lane(knobs: dict) -> str:
-    """The precision REGIME a knob dict realizes: ``"fm"`` (an f16-accumulate mma atom or
-    ``FAST_EXP``, :func:`~emmy.compiler.pipeline.search.golden.fast_math_knobs`) else ``"std"``.
-    Derived from the knobs, never a stored flag, so it can't drift. A working-golden target
+    """The precision REGIME a knob dict realizes or explicitly requests: ``"fm"`` for a
+    precision-trading input pin, f16-accumulate mma atom, or ``FAST_EXP``; else ``"std"``.
+    Successful rows derive it from realized knobs; a failed row falls back to its parsed pins.
+    A working-golden target
     pins BOTH the std and the ``[fm]`` config recorded under one name; comparing a pinned ``[fm]``
     latency against a ``"std"`` greedy manufactures a phantom regression, so every A/B row (and the
     greedy it's compared to) carries its lane and the parser filters to matching lanes."""
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
 
-    return "fm" if fast_math_knobs(knobs) else "std"
+    input_pins = {}
+    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
+        if name not in knobs:
+            continue
+        raw = knobs[name]
+        input_pins[name] = raw if isinstance(raw, bool) else get(name).parse(str(raw))
+    return "fm" if fast_math_knobs(knobs) or precision_trading_pins(input_pins) else "std"
 
 
 def _graph_lane(graph) -> str:
@@ -661,6 +669,13 @@ def _graph_lane(graph) -> str:
     the union keeps only the last kernel's value, and the reported lane becomes
     launch-order-dependent — the phantom-regression trap this feature exists to prevent."""
     return "fm" if any(_lane(d) == "fm" for d in _cuda_knob_dicts(graph)) else "std"
+
+
+def _pinned_lane(golden_bench) -> str:
+    """The realized lane of a pinned row, with its requested lane only as a failure fallback."""
+    if golden_bench.graph is not None:
+        return _graph_lane(golden_bench.graph)
+    return _lane(_sample_replay_knobs(golden_bench.sample))
 
 
 def _intensity_floor_flag(sample, total_us: float) -> str | None:
@@ -834,18 +849,28 @@ def _cuda_knob_dicts(graph) -> list[dict]:
 
 
 def _ab_samples(specs, dynamic=None):
-    """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` to pin
-    (the ``EMMY_KNOBS`` grammar), ``.name`` the table label, ``.shape None`` —
+    """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` holds
+    schedule pins, ``.pins`` Boolean input pins, ``.name`` the table label, and ``.shape None`` —
     the marker :func:`_print_kernel_stats` uses to nest the row by the benched
     kernel's own ``S_*`` signature instead of a golden's matmul shape. ``dynamic``
     stamps the run's own ``--dynamic`` specs on each pseudo-sample so the A/B
     re-trace builds the same symbolic graph as the greedy run."""
     from types import SimpleNamespace  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.knob import parse_knob_spec  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, family_of, get, parse_knob_spec  # noqa: PLC0415
 
     dyn = tuple(dynamic) if dynamic else None
-    return [SimpleNamespace(name=f"ab {raw}", knobs=parse_knob_spec(raw), shape=None, dynamic=dyn) for raw in specs]
+    samples = []
+    for raw in specs:
+        parsed = parse_knob_spec(raw)
+        pins = {
+            name: value
+            for name, value in parsed.items()
+            if (descriptor := get(family_of(name))) is not None and descriptor.type is KnobType.BOOL
+        }
+        knobs = {name: value for name, value in parsed.items() if name not in pins}
+        samples.append(SimpleNamespace(name=f"ab {raw}", pins=pins, knobs=knobs, shape=None, dynamic=dyn))
+    return samples
 
 
 def _sample_replay_knobs(sample) -> dict:
@@ -1124,7 +1149,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         kernels with ``--`` timings (a compile failure has no kernels — one bare
         label row keeps the failure visible)."""
         label = f"golden {gb.sample.name}" if gb.sample.shape is not None else gb.sample.name
-        label = f"{label} [{_lane(gb.sample.knobs)}]"  # so an [fm]-vs-std A/B can't be misread
+        label = f"{label} [{_pinned_lane(gb)}]"  # so an [fm]-vs-std A/B can't be misread
         if gb.flags:
             label = f"! {label}"
         if gb.graph is None:
@@ -1301,7 +1326,7 @@ def _write_ab_json(
             {
                 "name": sample.name,
                 "kind": "golden" if sample.shape is not None else "ab",
-                "lane": _lane(sample.knobs),
+                "lane": _pinned_lane(gb),
                 "status": gb.status,
                 "pinned_knobs": {k: str(v) for k, v in _sample_replay_knobs(sample).items()},
                 **_timing(gb.bench),
@@ -2359,8 +2384,9 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
 
     out = []
     for sample in _ab_samples(specs):
+        replay_knobs = _sample_replay_knobs(sample)
         try:
-            with pinned_knobs(sample.knobs):
+            with pinned_knobs(replay_knobs):
                 g = Graph.from_dict(_json.loads(Path(ir_path).read_text()))
                 if tail:
                     g = Pipeline.build(tail).run(g, db=db)
@@ -2368,7 +2394,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(sample.knobs, _cuda_knob_dicts(g))
+        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g))
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))

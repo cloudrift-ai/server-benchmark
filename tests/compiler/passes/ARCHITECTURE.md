@@ -50,7 +50,7 @@ lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/
 | Rule file          | Op                      | Structural | Correctness       |
 |--------------------|-------------------------|------------|-------------------|
 | `010_sdpa.py`      | `SdpaOp`                | ✓          | ✓                 |
-| `020_silu.py`      | `ElementwiseOp("silu")` | ✓          | ✓                 |
+| `020_silu.py`      | `ElementwiseOp("silu")` | ✓ (f16/bf16 opmath; f32/f64 controls) | ✓                 |
 | `030_pow.py`       | `ElementwiseOp("pow")`  | ✓          | ✓                 |
 | `040_linear.py`    | `LinearOp`              | ✓          | ✓ (± bias)        |
 | `070_matmul.py`    | `MatmulOp`              | ✓          | ✓ (± bias)        |

@@ -237,7 +237,10 @@ The chained fill takes one of two forms, and the first is preferred wherever it 
   in C fragments, its row pivot advances the carried one, and the ψ-RESCALE that advance puts on every carried channel
   (`carrier.exp_rescale`) is applied to the ENCLOSING drain's output fragments — the one channel that lives outside
   the fold's state. Nothing is bridged through smem: the carried `(pivot, denominator)` pair stays in registers at the
-  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement.
+  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement. A coordinate-predicated scalar
+  `Select` in the score lift stays exact through the generic `FragmentSelect`: every branch value must be uniform, and
+  its predicates use each physical fragment's existing row/column base plus layout offsets. Fragment-valued or
+  per-cell branches decline the single-pass form instead of being broadcast.
 - **TWO-PASS** (`_atom.chain_stat_fill` as the transport prologue, then `_atom.chain_a_fill`) — the statistic finishes
   over the whole axis first and bridges through the stat smem rows, and the weight fill recomputes the score to read
   it. The single-pass form declines to it wherever the two halves do not cover the same keys (a split-K partition

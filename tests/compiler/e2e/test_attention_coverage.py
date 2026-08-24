@@ -167,6 +167,92 @@ def _max_diff(backend, compiled, feed: dict, ref_fn) -> float:
     return float(np.max(np.abs(got - eager)))
 
 
+def test_fragment_lift_preserves_coordinate_select_as_fragment_values():
+    """A causal score prefix keeps its coordinate Select exact at fragment residence."""
+    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentSelect  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Assign, RenderCtx, Select, SelectBranch  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _frag_lift  # noqa: PLC0415
+
+    body = (
+        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
+        Select(
+            "bias",
+            (
+                SelectBranch("zero", BinaryExpr("<=", Var("key"), Var("query"))),
+                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
+            ),
+        ),
+        Assign("masked", ElementwiseImpl("add"), ("scaled", "bias")),
+    )
+    lifted = _frag_lift(
+        body,
+        (("_score00", "_score01"), ("_score10", "_score11")),
+        "acc",
+        ("query", "key"),
+        (
+            ((Literal(16, "int"), Literal(32, "int")), (Literal(16, "int"), Literal(40, "int"))),
+            ((Literal(32, "int"), Literal(32, "int")), (Literal(32, "int"), Literal(40, "int"))),
+        ),
+    )
+
+    assert lifted is not None
+    assert [type(stmt) for stmt in lifted] == [FragmentApply] * 4 + [FragmentSelect] * 4 + [FragmentApply] * 4
+    assert lifted[0].args == ("_score00", "scale")
+    assert lifted[4].out == "_score00__bias"
+    assert lifted[7].out == "_score11__bias"
+    assert lifted[8].args == ("_score00", "_score00__bias")
+    assert lifted[8].kinds == (FRAG, FRAG)
+    first = "\n".join(lifted[4].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
+    last = "\n".join(lifted[7].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
+    assert "__frow" not in first and "__fcol" not in first
+    assert "32 + (_t * 2" in first and "16 + _g" in first
+    assert "40 + (_t * 2" in last and "32 + _g" in last
+    assert first.count("?") == last.count("?") == 4
+
+
+def test_fragment_lift_declines_nonuniform_select_branches():
+    """A coordinate Select may not broadcast a fragment or per-cell value as a uniform branch."""
+    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Assign, Select, SelectBranch  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _frag_lift  # noqa: PLC0415
+
+    fragment_branch = (
+        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
+        Select(
+            "masked",
+            (
+                SelectBranch("scaled", BinaryExpr("<=", Var("key"), Var("query"))),
+                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
+            ),
+        ),
+    )
+    per_cell_branch = (
+        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
+        Assign("row_value", ElementwiseImpl("multiply"), ("query", "scale")),
+        Select(
+            "masked",
+            (
+                SelectBranch("row_value", BinaryExpr("<=", Var("key"), Var("query"))),
+                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
+            ),
+        ),
+    )
+    for body in (fragment_branch, per_cell_branch):
+        assert (
+            _frag_lift(
+                body,
+                (("_score",),),
+                "acc",
+                ("query", "key"),
+                (((Literal(16, "int"), Literal(32, "int")),),),
+            )
+            is None
+        )
+
+
 # =========================================================================== #
 # Scalar-tier flash (the FLASH knob).
 # =========================================================================== #
@@ -319,6 +405,34 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"single-pass fused sdpa{cfg} vs torch max_diff={md:.6e}"
+
+
+@requires_cuda
+def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
+    """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2")
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    torch.manual_seed(0)
+    B, H, S, D = 1, 2, 128, 32
+    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"], is_causal=True).cpu().flatten().float().numpy()
+
+    backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
+    assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
+    src = compiled.nodes[kernels[0]].op.kernel_source
+    assert "_a_stat_" not in src, "the causal statistic is bridged through smem — the sweep ran twice"
+    assert "_psi" in src, "the one-pass sweep does not rescale its carried output"
+    assert "?" in src, "the causal coordinate Select did not reach the fragment program"
+    md = _max_diff(backend, compiled, feed, ref)
+    assert md < 4e-3, f"single-pass causal fused sdpa vs torch max_diff={md:.6e}"
 
 
 @requires_cuda

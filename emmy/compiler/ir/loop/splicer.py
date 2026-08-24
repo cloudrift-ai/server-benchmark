@@ -311,8 +311,18 @@ class _Splicer(LoopBuilder):
 
     # -- Seed: every root Write, with its value queued ----------------------
 
+    @staticmethod
+    def _write_observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
+        """Whether ``write`` observes an accumulator before its reduce loop completes."""
+        defining = meta.defs.get(write.value)
+        reduce_axis = meta.reduce_axes.get(write.value)
+        return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
+
     def _seed(self) -> None:
-        for w, scope in self.loops[self.root].writes:
+        root = self.loops[self.root]
+        for w, scope in root.writes:
+            if self._write_observes_running_accumulator(root, w, scope):
+                raise _NotSupported(f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced")
             v_bound = self._ensure_dep(w.value, self.root, Sigma(), scope)
             self.insert(Write(output=w.output, index=w.index, value=v_bound), scope)
 
@@ -405,11 +415,16 @@ class _Splicer(LoopBuilder):
         subsequent iterations. ``target_output_buf`` selects which ``Write``
         of the target is the splice source when the target has multiple outputs."""
         target = self.loops[target_tag]
-        target_write = next((w for w, _ in target.writes if w.output == target_output_buf), None)
-        if target_write is None:
+        found = next(((w, scope) for w, scope in target.writes if w.output == target_output_buf), None)
+        if found is None:
             raise _NotSupported(
                 f"splice edge into {target_tag!r}: no Write with output={target_output_buf!r} "
                 f"(target writes {[w.output for w, _ in target.writes]}) — usually a buf-name != node-id mismatch on the producer"
+            )
+        target_write, target_scope = found
+        if self._write_observes_running_accumulator(target, target_write, target_scope):
+            raise _NotSupported(
+                f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced"
             )
         source_meta = self.loops[d.origin]
         index_rename = {

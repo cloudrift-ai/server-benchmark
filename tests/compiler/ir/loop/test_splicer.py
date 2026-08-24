@@ -231,6 +231,77 @@ def test_reduction_producer():
 
 
 # ---------------------------------------------------------------------------
+# Ordered prefix: a Write of the running accumulator cannot cross the splice
+# ---------------------------------------------------------------------------
+
+
+def _prefix_scan(*, source: str, output: str) -> LoopOp:
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input=source, index=(Var("a0"), Var("a1"))),
+                            Accum(name="prefix", value="x", op="add"),
+                            Write(output=output, index=(Var("a0"), Var("a1")), value="prefix"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_ordered_prefix_root_declines_splice():
+    """Rebuilding a root from its Writes must not move a prefix output after the reduce loop."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input="X", index=(Var("a0"), Var("a1"))),
+                            Assign(name="y", op="negative", args=("x",)),
+                            Write(output="P", index=(Var("a0"), Var("a1")), value="y"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
+
+
+def test_ordered_prefix_producer_declines_splice():
+    """Resolving a producer edge must not replace its prefix output with one final reduction."""
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input="P", index=(Var("a0"), Var("a1"))),
+                            Assign(name="y", op="negative", args=("x",)),
+                            Write(output="OUT", index=(Var("a0"), Var("a1")), value="y"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
+
+
+# ---------------------------------------------------------------------------
 # Consumer has extra input: source-remapping puts consumer inputs after producer's
 # ---------------------------------------------------------------------------
 

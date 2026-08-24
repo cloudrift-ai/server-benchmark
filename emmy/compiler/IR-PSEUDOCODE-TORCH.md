@@ -494,3 +494,10 @@ other source supplies.
 A source carries its operand's rank and shape as its own fields because the operands need not agree on either
 — `f32[2,3]` and `f32[2,5]` above, and a mask built from two `f16[1]` scalars. They do agree on the element
 type: `Graph.validate` rejects a node whose sources disagree on it, since converting is `emmy::cast`'s job.
+
+One node class covers both spellings. `emmy::tensor_from_fn` and `emmy::index_map` are the same underlying
+operation, which is general enough to read from several tensors under a condition. Almost no node needs that:
+of the 154 index maps in a TinyLlama and a Qwen3-0.6B layer, 148 read one tensor with no condition, and those
+are the broadcasts, reshapes, transposes, slices and unsqueezes a reader meets on nearly every line. Printing
+the general form for all of them would bury a one-line coordinate map in the record around it, so the simple
+case gets the simple spelling and `emmy::index_map` prints only what the closure form cannot hold.

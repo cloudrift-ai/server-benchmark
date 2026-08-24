@@ -389,10 +389,18 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "emmy tune" not in emmy_runner
     assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
     assert "setup-status.tsv" in emmy_runner
+    assert "replay_1\\treplay_2\\treference_1\\treference_2" in emmy_runner
+    assert emmy_runner.count("for repetition in 1 2") == 2
+    assert '"$results/json/$setup.replay-$repetition"' in emmy_runner
+    assert '"$results/json/$setup.reference-$repetition.json"' in emmy_runner
+    assert '"${replay_statuses[0]}" = ok' in emmy_runner
+    assert '"${replay_statuses[1]}" = ok' in emmy_runner
+    assert '"${reference_statuses[0]}" = ok' in emmy_runner
+    assert '"${reference_statuses[1]}" = ok' in emmy_runner
     assert 'test "$missing_goldens" -eq 0' in emmy_runner
     assert 'test "$successful_setups" -gt 0' in emmy_runner
     assert "run_pytorch.py" in emmy_runner
-    assert 'reference="pytorch-only:emmy-failed:$reference_status"' in emmy_runner
+    assert 'reference_statuses+=("pytorch-only:emmy-failed:$reference_status")' in emmy_runner
 
     pytorch_runner = (Path(directory) / "run_pytorch.py").read_text()
     assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner

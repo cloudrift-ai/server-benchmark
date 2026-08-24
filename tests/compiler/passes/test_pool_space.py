@@ -88,7 +88,7 @@ FIXTURES = {
 #: enumeration order. Recorded against the pre-space recursion — see the module docstring.
 EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
     "scalar_matmul": [(("TILE", "STAGE", "REDUCE"), 17988, "b30d5d0f9070cd89d130ff8fad132a84")],
-    "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 122308, "38eb4fdc94a7be1bb8cc889f3dd01462")],
+    "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
     "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
     "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
     "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3541, "4d3f19fcca6a294d9651ea9bc7ddba4b")],

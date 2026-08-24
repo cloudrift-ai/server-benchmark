@@ -1521,9 +1521,11 @@ stored).
 per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
 cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
-carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
-cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
-(any carrier; the only legal arm for a multi-component twisted carrier and for a multi-channel ⊗-combine). Pin
+carriers only, with no f16/bf16 destination; both tiers — an mma partial's C fragment rides `RegStore.atomic`),
+`g<n>k` = deferred f32 `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for a
+low-precision output, a multi-component twisted carrier, and a multi-channel ⊗-combine). A direct atomic low-precision
+destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
+carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
 `lowering/tile/030_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is

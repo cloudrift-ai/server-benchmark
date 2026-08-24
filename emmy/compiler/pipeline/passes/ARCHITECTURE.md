@@ -539,6 +539,13 @@ failing several passes later:
   memory floor. A non-unit or structurally missing row declines this reading. SSA renames track the stored algebra
   through the `Fold` rewrite handler (`rename_combine` — a verbatim combine left the cooperative combine reading a
   state name the renamed body no longer defined).
+- a **direct product contraction** whose channels read one MATERIALIZED A binds the same N-channel algebra when every
+  B load agrees on K orientation and role axes. Its warp rows use the mandatory `sync` compute-fill when the copied B
+  dtypes agree with the atom: one A slab is copied once, every B channel gets its own slab, and the one A fragment
+  feeds all C accumulator channels. The gmem-direct, byte-transport, and scalar contraction emitters remain
+  single-channel; the original demoted `PLANAR` spelling therefore stays as the scalar fallback sibling. A mixed B
+  layout, mixed role expression, or byte-copy dtype mismatch declines the warp rows instead of reaching an emitter
+  that cannot represent it.
 - a cooperative / ILP reduce (`PLANAR` / `TWISTED`, or a non-output-tiled `CONTRACTION`) needs **no** binding here — its
   accumulator dtype + the shuffle/tree fold mechanism are **derived** at materialize time (`emit_combine` off the fold
   node's `Reduction` view + `ReduceStage.combine`), never stored. Its one schedule-time staging decision follows the same
@@ -809,8 +816,8 @@ contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; a
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
-(an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction enumerates its own
-warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
+(an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction or a product contraction over one
+materialized A enumerates its own warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused

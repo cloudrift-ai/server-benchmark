@@ -1032,12 +1032,10 @@ def bind_bilinear(
         if a_edge is not None and stat is not None:
             return None  # a materialized A beside a chained statistic is not the computed-A shape
         if a_edge is not None:
-            if len(reads) > 1:
-                # A multi-channel node over a MATERIALIZED shared A (the merged QKV cell) has no
-                # consumer tier yet: cp.async / TMA staging is single-fold, and only the smem
-                # compute fill (a COMPUTED A) rides multi-channel. The fold keeps its PLANAR
-                # reading — exactly the old single-Accum candidacy's behavior.
-                return None
+            # A materialized shared A may feed every compatible channel through the synchronous
+            # smem fill. Classification only binds the one algebraic node here; scheduling keeps
+            # byte transports and gmem-direct MMA single-channel and retains the demoted planar
+            # sibling for scalar execution.
             consumed.add(id(a_edge))
         else:
             h = hoisted()

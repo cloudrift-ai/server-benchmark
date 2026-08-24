@@ -474,7 +474,7 @@ struct IndexSource<T, const rank: usize> {
 }
 
 fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(
-    sources: IndexSource<T, rank>[],
+    sources: [IndexSource<T, rank>][],
 ) -> T[d]
     // result[i] = s.operand[s.coord(i)]
     //   where s is the first source with s.select(i)

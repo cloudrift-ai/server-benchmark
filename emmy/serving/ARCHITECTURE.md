@@ -99,7 +99,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   layer and routed-expert input slice, then emits the cumulative selection counts as compact JSON every `N`
   uncaptured `EmmyGenModel` forwards. The counter update is a device-side `scatter_add_` at the router boundary, so
   whole-step CUDA-graph capture records it and every decode replay contributes without a host synchronization. The
-  snapshot runs before an uncaptured forward; a short probe can therefore delimit the workload that preceded it.
+  capture-time execution is discarded before the first uncaptured boundary snapshot; subsequent graph replays remain
+  counted. A snapshot runs before an uncaptured forward, so a short probe can delimit the workload that preceded it.
   Counts are routed rows, not kernel launches: a prefill step can select the same slice for many rows while loading
   its weights once for that grouped dispatch. The feature is off by default and intended to measure whether a
   persistent input-slice residency policy has enough skew to justify moving cold weights out of GPU memory.
@@ -279,11 +280,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   input slice.
   **Quantized-checkpoint serving load (FP8 and MXFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
-  dense trunk shard-streamed in as real values, expert tensors kept fp8 as a per-layer store of program-input-named
-  tensors in a per-layer store, and gate/up is de-interleaved once on its physical output axis. FP8 keeps raw bits,
+  dense trunk shard-streamed in as real values, expert tensors kept compressed in a per-layer store keyed by program
+  input name, and gate/up de-interleaved once on its physical output axis. FP8 keeps raw bits,
   f32 scales and value-dtype biases; `_compile_split` applies `spell_quantized_inputs`. MXFP4 keeps raw uint8 blocks,
   uint8 E8M0 scales and value-dtype biases; `_compile_split` applies `spell_mxfp4_inputs` and binds the physical feed
-  by name because its shapes differ from the traced logical weights. Every per-expert input is a per-launch slice of
+  by name because its shapes differ from the traced logical weights. Native MXFP4 currently requires every routed
+  expert layer to remain compressed; skip patterns that would mix plain and MXFP4 expert formats are rejected before
+  twin compilation. Every per-expert input is a per-launch slice of
   the store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with compressed experts. Gpt-oss checkpoints already store E-leading MXFP4
   expert tensors; the DeepSeek / Laguna lineage stores one module per expert, so the split loader stacks each layer

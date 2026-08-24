@@ -612,3 +612,6 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
     assert tuple(d.as_static() for d in spelled.nodes["w_down"].output.shape) == (64, 1, 16)
     assert tuple(d.as_static() for d in spelled.nodes["w_gate_up_scale"].output.shape) == (64, 2)
     assert profile == ["lm_head"]
+
+    with pytest.raises(NotImplementedError, match=r"requires every routed-expert layer.*layer\(s\) \[1\]"):
+        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1})

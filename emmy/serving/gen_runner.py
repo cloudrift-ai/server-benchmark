@@ -654,6 +654,7 @@ class EmmyGenRunner:
         self._routing_histogram_interval = max(0, emmy_config.gen_routing_histogram_interval()) if moe else 0
         self._routing_histogram_calls = 0
         self._routing_histogram_counts = None
+        self._routing_histogram_capture_seen = False
         # The fixed-slot tier is ALL-OR-NOTHING across groups: a whole-step CUDA graph capture
         # records one launch set for every layer, so a group left on the routed (eager) path
         # would make the captured step wrong for its layers.
@@ -2077,6 +2078,8 @@ class EmmyGenRunner:
             return
         import torch
 
+        if counts.is_cuda and torch.cuda.is_current_stream_capturing():
+            self._routing_histogram_capture_seen = True
         flat = indices.reshape(-1).to(torch.int64)
         counts[moe["local_layer"]].scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.int64))
 
@@ -2119,8 +2122,18 @@ class EmmyGenRunner:
 
         import torch
 
-        if torch.cuda.is_current_stream_capturing():
+        counts = self._routing_histogram_counts
+        if counts is None:
             return
+        if counts.is_cuda and torch.cuda.is_current_stream_capturing():
+            return
+        if getattr(self, "_routing_histogram_capture_seen", False):
+            # Capture executes the graph once while recording it. That warmup route is not a
+            # served row; clear it before the first uncaptured boundary snapshot. Replays still
+            # execute the captured scatter, without re-running this Python flag assignment.
+            counts.zero_()
+            self._routing_histogram_capture_seen = False
+            self._routing_histogram_calls = 0
         self._routing_histogram_calls += 1
         if self._routing_histogram_calls % self._routing_histogram_interval:
             return

@@ -193,10 +193,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
   `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
   whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
-  whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
-  it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
-  round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
-  the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
+  whole-dict eager/accuracy twin for models small enough to hold (FP8, native MXFP4, and EXL3 checkpoints alike). A
+  selected-layer native-MXFP4 eager twin instead decodes and attaches only its shard-streamed expert store, preserving
+  the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode padding back
+  to the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode time) and
+  packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`, the DeepSeek/GLM lineage) into the v5
+  3-D expert params (`_pack_expert_state`).
 
   Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
   asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call

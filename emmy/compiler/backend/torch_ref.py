@@ -446,7 +446,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         if type(node.op).__name__ == "ElementwiseOp":
             op_callable = _elementwise_callable(node.op.op.name)
         elif type(node.op).__name__ == "RangeOp":
-            device = next(iter(input_tensors.values())).device
+            first_input = next(iter(input_tensors.values()), None)
+            device = first_input.device if first_input is not None else torch.device("cpu")
             op_callable = (
                 lambda n, d: (
                     lambda _ins: torch.arange(

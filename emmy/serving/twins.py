@@ -469,8 +469,11 @@ def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
     from emmy.compiler.loader.quant import _is_skipped, spell_mxfp4_inputs  # noqa: PLC0415
 
     coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.gate_up_proj_blocks", patterns)}
-    if not coded:
-        return {name: graph}
+    if skipped := layers - coded:
+        raise NotImplementedError(
+            f"native MXFP4 serving requires every routed-expert layer in profile {name!r} to stay compressed; "
+            f"quantization skip patterns exclude layer(s) {sorted(skipped)}"
+        )
     specs = {}
     for inp in ("w_gate_up", "w_down"):
         k, n = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
@@ -479,10 +482,7 @@ def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
         specs[inp] = ((n, k // 32, 16), (n, k // 32))
     spelled = graph.copy()
     spell_mxfp4_inputs(spelled, specs)
-    out = {f"{name}@mxfp4": spelled}
-    if layers - coded:
-        out[name] = graph
-    return out
+    return {f"{name}@mxfp4": spelled}
 
 
 def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Graph]:

@@ -197,14 +197,16 @@ weight inputs. Marker presence selects the generic codebook algebra. An unsuppor
 coded linear fails at birth rather than falling back to materialization; ordinary padded channel
 dimensions are handled inside the generic spelling.
 
-`load_dequantized_state_dict` remains an explicit eager/reference utility and the block decoder is
-still used for an unsupported coded LM head. Neither is an automatic compiled-serving fallback.
+`load_dequantized_state_dict` remains an explicit eager/reference utility: it decodes native MXFP4 block/scale pairs
+to the architecture twin's logical expert parameters, and the block decoder is still used for an unsupported coded
+LM head. Neither is an automatic compiled-serving fallback.
 `coded_tensor_storage` remains a loader-only, weight-free inventory for tracing and release
 coverage.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
-search — may know canonical dtypes (`f8e4m3`, `u8`), generic elementwise ops, and graph algebra. They may NEVER contain
-a checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or name.
+search — may know canonical dtypes (`f8e4m3`, `u8`), generic elementwise ops, and graph algebra. They may NEVER
+contain a checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or
+name.
 Scheme-specific types and metadata belong only to checkpoint loading and birth-time spelling. Spelling must emit
 generic algebra, and frontend decomposition must leave only generic tensor IR or a regular constant before Loop IR.
 Mechanical architecture tests scan the post-decomposition source tree for format-name leaks.

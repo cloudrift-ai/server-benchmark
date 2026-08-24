@@ -858,6 +858,88 @@ def _exl3_moe_checkpoint(dirpath, cfg, *, routing_bias=None, omit_routing_bias=F
     return ref
 
 
+def _mxfp4_gpt_oss_checkpoint(dirpath, cfg):
+    """A tiny native-MXFP4 checkpoint plus its decoded architecture-twin expert values."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.loader.quant import decode_mxfp4
+
+    model = AutoModelForCausalLM.from_config(cfg).to(torch.float16).eval()
+    tensors = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+    decoded = {}
+    for layer in range(cfg.num_hidden_layers):
+        base = f"model.layers.{layer}.mlp.experts."
+        for leaf in ("gate_up_proj", "down_proj"):
+            logical = tensors.pop(base + leaf)
+            experts, in_features, out_features = logical.shape
+            codes = (
+                (
+                    torch.arange(experts * out_features * in_features, dtype=torch.int64).reshape(experts, out_features, in_features)
+                    + layer * 3
+                )
+                .remainder(16)
+                .to(torch.uint8)
+            )
+            pairs = codes.reshape(experts, out_features, in_features // 32, 16, 2)
+            blocks = pairs[..., 0] | (pairs[..., 1] << 4)
+            scales = torch.full((experts, out_features, in_features // 32), 127, dtype=torch.uint8)
+            tensors[base + leaf + "_blocks"] = blocks
+            tensors[base + leaf + "_scales"] = scales
+            decoded[base + leaf] = torch.from_numpy(decode_mxfp4(blocks.numpy(), scales.numpy())).to(torch.float16)
+        for leaf in ("gate_up_proj_bias", "down_proj_bias"):
+            bias = tensors[base + leaf]
+            bias.copy_(torch.arange(bias.numel(), dtype=torch.float32).reshape(bias.shape).mul_(0.125).to(bias.dtype))
+            decoded[base + leaf] = bias.clone()
+
+    save_file(tensors, str(dirpath / "model.safetensors"))
+    config = cfg.to_dict()
+    config["quantization_config"] = {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}
+    (dirpath / "config.json").write_text(json.dumps(config))
+    return decoded
+
+
+def test_load_quantized_twin_decodes_native_mxfp4_experts(tmp_path):
+    """Whole-model eager/reference loading must not leave random logical expert weights."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_twin
+
+    cfg = _tiny_gpt_oss_config(transformers)
+    expected = _mxfp4_gpt_oss_checkpoint(tmp_path, cfg)
+    model = load_quantized_twin(tmp_path, torch.float16)
+    state = model.state_dict()
+
+    for name, value in expected.items():
+        assert not state[name].is_meta
+        torch.testing.assert_close(state[name], value, rtol=0, atol=0)
+
+
+def test_load_quantized_layer_twin_materializes_native_mxfp4_experts(tmp_path):
+    """A shard-streamed selected-layer eager reference must attach decoded expert values."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_layer_twin
+
+    cfg = _tiny_gpt_oss_config(transformers)
+    expected = _mxfp4_gpt_oss_checkpoint(tmp_path, cfg)
+    layer = 1
+    model = load_quantized_layer_twin(tmp_path, torch.float16, layer)
+    state = model.state_dict()
+
+    prefix = f"model.layers.{layer}.mlp.experts."
+    for leaf in ("gate_up_proj", "down_proj", "gate_up_proj_bias", "down_proj_bias"):
+        name = prefix + leaf
+        assert not state[name].is_meta
+        assert state[name].is_contiguous()
+        torch.testing.assert_close(state[name], expected[name], rtol=0, atol=0)
+
+
 def test_load_quantized_split_preserves_nonzero_laguna_router_bias(tmp_path):
     """The real EXL3 source spelling aliases onto the built-in router without losing routing."""
     torch = pytest.importorskip("torch")

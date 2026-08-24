@@ -216,12 +216,11 @@ _BINARY_OP: dict[str, str] = {
     "multiply": "*",
     "divide": "/",
     "mod": "%",
-    # Comparisons + bool combines — the whole-model explicit-mask subgraph.
-    # Operands reach ``op_to_expr`` promoted to f32; C's implicit nonzero→bool
-    # conversion makes the comparison/logical spellings valid on them. The
-    # ``bitwise_*`` names carry bool-mask semantics in traced graphs (no op
-    # computes on integer tensors today), so they spell as logical ops — a
-    # float ``|`` would not compile.
+    # Comparisons + legacy bool combines — the whole-model explicit-mask subgraph.
+    # Non-integer operands reach ``op_to_expr`` promoted to f32; C's implicit
+    # nonzero→bool conversion makes these logical spellings valid on them. Typed
+    # integer operands use ``_INTEGER_BINARY_OP`` instead, including packed
+    # bitwise decode operations.
     "equal": "==",
     "not_equal": "!=",
     "greater": ">",

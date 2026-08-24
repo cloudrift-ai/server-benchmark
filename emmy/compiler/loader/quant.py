@@ -418,6 +418,11 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     ``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``). An
     unquantized checkpoint passes through unchanged.
 
+    Native MXFP4 checkpoints: each routed expert's ``<projection>_blocks`` /
+    ``<projection>_scales`` pair decodes to the logical ``<projection>`` tensor in the
+    architecture twin's ``(experts, in, out)`` orientation. The consumed storage tensors
+    are dropped.
+
     EXL3 checkpoints: each linear's sibling tensors (``<module>.trellis`` +
     ``suh``/``svh`` + markers) decode to a ``<module>.weight`` value in the
     HF ``(out, in)`` orientation, fp16 (the decode's canonical precision);
@@ -433,6 +438,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     model_dir = Path(model_dir)
     index = _build_index(model_dir)
     qc = _fp8_quant_config(model_dir)
+    mxfp4 = _mxfp4_quant_config(model_dir) is not None
     exl3 = _exl3_quant_config(model_dir) is not None
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc) if qc else []
@@ -448,6 +454,17 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     consumed: set[str] = set()
     for key in index:
+        if mxfp4 and key.endswith("_blocks"):
+            base = key[: -len("_blocks")]
+            scales_key = base + "_scales"
+            if scales_key not in index:
+                raise ValueError(f"MXFP4 tensor {key!r} is missing scales {scales_key!r}")
+            out[base] = decode_mxfp4(sources[key], sources[scales_key])
+            consumed |= {key, scales_key}
+            continue
+        if mxfp4 and key.endswith("_scales") and key[: -len("_scales")] + "_blocks" in index:
+            consumed.add(key)
+            continue
         if awq is not None and key.endswith(".qweight"):
             base = key[: -len(".qweight")]
             qzeros_key, scales_key = base + ".qzeros", base + ".scales"

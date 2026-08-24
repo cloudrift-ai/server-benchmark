@@ -410,14 +410,16 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   capture requires an attention backend declaring `AttentionCGSupport.ALWAYS`, so the emmy arm passes
   `--attention-backend TRITON_ATTN` (FA2 declares uniform-batch support only; on such a backend vLLM silently
   downgrades FULL back to FULL_DECODE_ONLY — the pre-chunk-capture behavior, also restorable explicitly with
-  `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). A model with an attention
-  head WIDER than 256 takes a CAPPED size list (`config.WIDE_HEAD_MIXED_RUNG_CAP`, 2112 — the serve command's
-  head-dim probe, plus an authoritative boot guard in `EmmyGenModel.__init__` that rejects over-cap sizes
-  readably): past that width vLLM 0.23's TRITON_ATTN raises an illegal memory access capturing WIDE mixed
-  batches (measured at 4128 tokens on gemma-4-12B's 512-wide global layers / RTX 5090; clean through 2112),
-  and FLEX_ATTENTION mis-shapes its sliding-window block mask outright — so gemma-4 runs chunk capture on the
-  2048-chunk-quantum lane and leaves wider steps eager. 5090-measured (2026-08-15, fcbc880f+fix tree, medians
-  of 3): small_c1 256/256 TTFT 90.4 → 72.2 ms (capture off → on; stock 66.5 — the 1.36x gap closes to 1.09x)
+  `EMMY_GEN_CHUNK_CAPTURE=0`, which drops the rungs and the backend override too). A capture size above
+  `--max-model-len` (only the rider-top rung can be) is safe ONLY because the plugin patches vLLM 0.23's
+  dummy-run seq lens (`vllm_patches.py`): unpatched, `_dummy_run` fills every dummy request's seq_len with the
+  step's token count, so an over-model-len capture size overruns the block table's
+  `cdiv(max_model_len, block_size)`-page rows — TRITON_ATTN's unmasked block-table load then feeds garbage page
+  ids into its K/V loads (capture-warmup illegal memory access, reproduced standalone: clean at 4096, faulting
+  from 4097, at head_dim 256 AND 512 — head width is irrelevant), and FLEX_ATTENTION fails the same arithmetic
+  loudly in its sliding-window block-mask shapes. 5090-measured with the earlier 2112 rung cap (2026-08-15,
+  fcbc880f+fix tree, medians of 3): small_c1 256/256 TTFT 90.4 → 72.2 ms (capture off → on; stock 66.5 — the
+  1.36x gap closes to 1.09x)
   with TPOT unchanged, and c64 np256 on the capped lane TPOT 34.9 → 33.1 ms, 1243 → 1255 tok/s, greedy chat
   outputs content-identical. Capture sizes at or below
   the decode bucket run the static

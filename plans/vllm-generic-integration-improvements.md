@@ -73,7 +73,9 @@ raises an illegal memory access capturing a WIDE mixed batch on gemma-4-12B (512
 offset-overflow artifact), pinned by a `CUDA_LAUNCH_BLOCKING=1` boot — and FLEX_ATTENTION fails its
 sliding-window block-mask build outright (`used_pages.masked_fill_`: 256 vs 258 pages). So wide-head models get
 their rungs capped at `config.WIDE_HEAD_MIXED_RUNG_CAP` (2112) and run chunk capture on the 2048-chunk-quantum
-lane, wider steps eager; the 4096-chunk lane stays eager until a fixed vLLM lands.
+lane, wider steps eager; the 4096-chunk lane stays eager until a fixed vLLM lands. (SUPERSEDED by the
+2026-08-15 root cause below — the attribution to head width was wrong, the cap is gone, and the 4096 lane
+runs.)
 
 Measured cells (capture ON / capture OFF / stock):
 
@@ -86,9 +88,47 @@ Measured cells (capture ON / capture OFF / stock):
 
 The c64 "TPOT at or below stock" target is NOT met on this lane (33.1 vs 27.3, but the arms are not
 shape-comparable — see the asterisk) and the projected ~5 ms/step host-idle recovery applies to the 4096-chunk
-lane, which the TRITON width fault keeps eager. Remaining follow-ups: the vLLM-side triton wide-head fix (then
-lift the cap and re-run the 4096-lane c64 cell), and re-benching against a stock arm at a comparable admission
-shape.
+lane, which the TRITON width fault keeps eager.
+
+**2026-08-15 root cause (standalone kernel repro on the dev 4080, `compute-sanitizer`-attributed):** the fault
+is NOT a head-width or batch-width limit. vLLM 0.23's `_dummy_run` fills every dummy request's seq_len with the
+step's token count, so a capture size above `--max-model-len` (only the rider-top rung can be: 4128 > 4096)
+claims more block-table pages than a row holds (258 vs 256); the unified-attention kernel's unmasked
+block-table load then reads past the tensor and the garbage page ids send K/V loads out of bounds. Clean at
+4096, faults from 4097, at head_dim 256 AND 512; FLEX_ATTENTION's 258-vs-256 block-mask error is the same
+arithmetic failing loudly. Fixed by clamping dummy seq lens to max-model-len from the plugin
+(`serving/vllm_patches.py`); `WIDE_HEAD_MIXED_RUNG_CAP`, the head-dim probe, and the wide-head boot guard are
+removed. Only vLLM 0.23's DEFAULT model runner has the defect (its newer opt-in runner — stock
+Llama/Mistral/Qwen3 only — builds dummy batches with legal per-request seq lens), and `EmmyGenModel` always
+rides the default runner. Engine-level validation on the 4080 (default runner forced): the 4128 capture's two
+over-model-len dummy runs were clamped 4128 → 4096, capture completed, greedy output correct.
+
+**2026-08-15/16 5090 validation of the clamp (rented vast.ai 5090):** the exact originally-faulting boot
+(gemma-4-12B-it @707f0a3b, fp16, TRITON_ATTN, mnbt 4128, decode bucket 32, mml 4096) now warms up and captures
+ALL 64 mixed-batch FULL rungs including 4128 (the clamp log line fires exactly at that warmup) and serves with
+greedy chat output byte-identical to stock vLLM. The 4096-chunk-lane c64 cell (decode bucket 64, mnbt 4160,
+rider-top rung 4160 > mml; bench client: 256 random prompts, 512 in / 128 out, concurrency 64, medians of 3):
+
+| arm | median TPOT ms | tok/s | median TTFT ms |
+| --- | --: | --: | --: |
+| capture ON (rungs to 4160) | 32.75 | 628 | 7125 |
+| capture OFF (decode-only) | 33.69 | 632 | 7040 |
+| stock vLLM (own defaults) | 24.93 | 589 | 9181 |
+
+Capture ON takes −0.94 ms/step TPOT over OFF on this lane (the projected ~5 ms/step applied to MIXED steps;
+this 512/128 workload is decode-dominated in steady state, so the mixed-step win dilutes — the full recovery
+needs the re-baseline's prefill-heavier mix). Emmy leads stock on throughput (+7%) and TTFT (−22%); stock
+leads TPOT — the same not-shape-comparable admission asymmetry as the 2048-lane row above. Greedy chat parity
+hashes are byte-identical across ON / OFF / stock.
+
+**Caveat — the clamp was 5090-validated on the fcbc-era tree (`bench/fcbc-clamp` = `bench/chunk-capture-fcbc880f`
++ the clamp commit), NOT on a current-main base:** trees on newer bases appeared to hang on their first serving
+step on the 5090 (100% util / ~123 W, capture ON and OFF alike, eager prefill included) while stock vLLM and
+the fcbc-era tree served fine. That was bisected separately to #482's mlp_down fork erasure — a bounded 4-5
+order-of-magnitude cold-pick slowdown (~40 s/token, so any client timeout reads as a hang), not a deadlock and
+unrelated to this clamp, which only touches dummy-run seq lens. It clears with the gemma-4-it golden re-record
+on current main. Remaining follow-ups: re-validate serving on a current-main base once that re-record lands,
+re-bench against a stock arm at a comparable admission shape, and upstream the vLLM report.
 
 ## Target architecture
 

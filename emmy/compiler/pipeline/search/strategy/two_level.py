@@ -103,6 +103,7 @@ class OpResult:
     searched_knobs: dict[str, str] | None = None
     searched_us: float | None = None
     searched_cuda_ops: int | None = None
+    searched_structural: bool = False
 
 
 @dataclass
@@ -117,17 +118,22 @@ class InnerReward:
     prior_summaries: list[str] = field(default_factory=list)
 
     def searched_winner(self) -> tuple[dict[str, str], float] | None:
-        """The actual searched winner when it maps to exactly one CUDA kernel.
+        """The actual searched winner when it has one exact replay row.
 
-        A target can contain repeated/heterogeneous post-fusion kernels, and one
-        post-fusion kernel can lower to several CudaOps. In either case there is
-        no single golden-format knob row whose latency represents the target, so
-        callers must omit a winner annotation instead of inventing one.
+        A target can contain repeated/heterogeneous post-fusion kernels. One
+        post-fusion kernel can also lower to several CudaOps; that winner is
+        replayable only when search retained the exact structural row that
+        minted its independently scheduled pieces.
         """
         if len(self.per_op) != 1:
             return None
         op = self.per_op[0]
-        if op.multiplicity != 1 or op.searched_cuda_ops != 1 or op.searched_knobs is None or op.searched_us is None:
+        if (
+            op.multiplicity != 1
+            or (op.searched_cuda_ops != 1 and not op.searched_structural)
+            or op.searched_knobs is None
+            or op.searched_us is None
+        ):
             return None
         return dict(op.searched_knobs), op.searched_us
 
@@ -440,8 +446,10 @@ class TwoLevelStrategy(SearchStrategy):
                     return
                 best = db.best_per_op_time(ctx_key, work.key, backend=backend_name)
                 searched_knobs = searched_us = searched_cuda_ops = None
+                searched_structural = False
                 if searched is not None:
-                    searched_knobs = stamp_schedule_families(searched[0])
+                    searched_structural = searched[3]
+                    searched_knobs = dict(searched[0]) if searched_structural else stamp_schedule_families(searched[0])
                     searched_us = searched[1]
                     searched_cuda_ops = searched[2]
                 results[op_idx] = OpResult(
@@ -452,6 +460,7 @@ class TwoLevelStrategy(SearchStrategy):
                     searched_knobs=searched_knobs,
                     searched_us=searched_us,
                     searched_cuda_ops=searched_cuda_ops,
+                    searched_structural=searched_structural,
                 )
                 if progress is not None:
                     progress.op_done(name, slot=op_idx)

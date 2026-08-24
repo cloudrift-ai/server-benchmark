@@ -183,20 +183,90 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
 
+def _max_head_dim(model: str, vllm_args: list[str]) -> int | None:
+    """The widest attention head the checkpoint's LOCAL config declares, or ``None`` when the
+    probe cannot tell (uncached model, unreadable config — same best-effort contract as
+    :func:`_is_moe_model`; the authoritative guard lives in ``EmmyGenModel.__init__``).
+    Gemma-4 declares ``head_dim`` for its sliding layers and a wider ``global_head_dim`` for
+    its full-attention layers, so both attributes count."""
+    cfg = _local_config(model, vllm_args)
+    if cfg is None:
+        return None
+    cfg = getattr(cfg, "text_config", cfg)
+    dims = []
+    for attr in ("head_dim", "global_head_dim"):
+        try:
+            value = getattr(cfg, attr, None)
+        except Exception:  # noqa: BLE001 — transformers' heterogeneous-config API raises on ambiguous global access
+            value = None
+        if isinstance(value, int):
+            dims.append(value)
+    if not dims:
+        hidden, heads = getattr(cfg, "hidden_size", None), getattr(cfg, "num_attention_heads", None)
+        if isinstance(hidden, int) and isinstance(heads, int) and heads > 0:
+            dims.append(hidden // heads)
+    return max(dims) if dims else None
+
+
+def _chunk_capture_rungs(vllm_args: list[str], bucket: int) -> set[int]:
+    """Token-count capture sizes for the chunk/prefill and mixed prefill+decode steps
+    (``EMMY_GEN_CHUNK_CAPTURE``). vLLM pads a step UP to the first rung at or above its
+    width, and padded prefill rows do REAL compute (prefill matmuls are compute-bound), so
+    the ladder is dense where short prompts land (stride 8 to 256, 16 to 512 — vLLM's own
+    default shape) and geometric above, where chunked prefill mostly fills steps to the
+    chunk quantum exactly. Three widths are load-bearing:
+
+    - the exact chunk width (``prefill_bucket``) — the static chunk twin's exact grids;
+    - the rider top (``prefill_bucket + decode_bucket``, capped at mnbt) — a full chunk
+      step carrying its decode riders, served by the chunk+decode twin row split;
+    - everything else rides the symbolic programs at the rung width (``run_device_sym``,
+      capture-aware).
+
+    Rungs strictly inside the rider interval would each capture a near-duplicate rider
+    graph, so they are dropped — those widths pad to the rider top instead."""
+    from emmy import config as emmy_config  # noqa: PLC0415
+
+    capacity = emmy_config.gen_prefill_capacity()
+    capacity = capacity if capacity > 0 else int(_DEFAULT_MAX_MODEL_LEN)
+    mnbt_raw = _flag_value(vllm_args, "--max-num-batched-tokens", str(capacity + bucket))
+    mnbt = int(mnbt_raw) if mnbt_raw.isdigit() else capacity + bucket
+    prefill_bucket = emmy_config.gen_prefill_bucket()
+    prefill_bucket = capacity if prefill_bucket < 0 else min(prefill_bucket, capacity)
+    top = min(capacity, mnbt)
+    dense = set(range(8, 257, 8)) | set(range(272, 513, 16))
+    tail = {640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096}
+    rungs = {r for r in dense | tail if r <= top}
+    if prefill_bucket > 0:
+        rider_top = min(prefill_bucket + bucket, mnbt)
+        rungs -= {r for r in rungs if prefill_bucket < r < rider_top}
+        if prefill_bucket <= top:
+            rungs.add(prefill_bucket)
+        if mnbt > prefill_bucket:
+            rungs.add(rider_top)
+    return rungs
+
+
 def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[str]:
-    """The eager/capture flags for emmy generative serving. DEFAULT is whole-step decode
-    capture: a compilation-config asking for FULL_DECODE_ONLY graphs (full cudagraphs need no
-    torch.compile — vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes
-    following ``--max-num-seqs``. Sizes up to the decode bucket capture the static decode
-    twin; sizes ABOVE it capture the device-resident symbolic programs (``run_device_sym``)
-    — both paths are validated under stream capture (``test_gen_capture_gpu``; the symbolic
-    path's per-size warmup precedes each capture, which is what keeps TMA descriptor
-    encoding out of the capture window). Opt out with vLLM's own ``--enforce-eager``
-    (forwards as-is); a caller-supplied ``--compilation-config`` also wins over ours. With
-    the decode bucket off (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so
-    eager is forced. Under speculative decoding the ladder is floored to multiples of
-    ``num_speculative_tokens + 1`` so the bucket rung survives vLLM's own spec re-rounding —
-    see the comment on the flooring below."""
+    """The eager/capture flags for emmy generative serving. DEFAULT is whole-step capture:
+    a compilation-config asking for FULL graphs (full cudagraphs need no torch.compile —
+    vLLM wraps the model in its ``CUDAGraphWrapper``) with capture sizes following
+    ``--max-num-seqs`` plus the chunk/prefill rungs (:func:`_chunk_capture_rungs`), and the
+    ``TRITON_ATTN`` attention backend — mixed-batch full capture needs a backend declaring
+    ``AttentionCGSupport.ALWAYS``, which the default FA2 does not (vLLM silently downgrades
+    FULL to FULL_DECODE_ONLY there). Sizes up to the decode bucket capture the static decode
+    twin; sizes above it capture the device-resident symbolic programs (``run_device_sym``);
+    the exact chunk rung captures the chunk twin and the rider-top rung the chunk+decode
+    row split — all validated under stream capture (``test_gen_capture_gpu``; each size's
+    uncaptured warmup precedes its capture, which is what keeps TMA descriptor encoding and
+    rider-destination minting out of the capture window). ``EMMY_GEN_CHUNK_CAPTURE=0``
+    restores decode-only capture (FULL_DECODE_ONLY, no backend override). Opt out entirely
+    with vLLM's own ``--enforce-eager`` (forwards as-is); a caller-supplied
+    ``--compilation-config`` also wins over ours. With the decode bucket off
+    (``EMMY_GEN_DECODE_BUCKET=0``) nothing static is capturable, so eager is forced. Under
+    speculative decoding the ladder is floored to multiples of
+    ``num_speculative_tokens + 1`` so the bucket rung survives vLLM's own spec re-rounding
+    (see the comment on the flooring below), and chunk capture stays off — the chunk rungs
+    are not spec-adjusted."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
     if model is not None and _is_moe_model(model, vllm_args):
@@ -251,6 +321,36 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         if not sizes:
             logger.warning("no capture size survives flooring to num_speculative_tokens+1=%d; serving eager", query_len)
             return ["--enforce-eager"]
+    mode = "FULL_DECODE_ONLY"
+    backend_args: list[str] = []
+    if query_len == 1 and emmy_config.gen_chunk_capture():
+        # WHOLE-STEP CHUNK CAPTURE: mode FULL records the mixed prefill+decode steps too —
+        # the eager mixed steps' per-program host framing (gpu_lock + DLPack dispatch) and
+        # their per-step staging D2D were the measured c64 TPOT loss, and the eager
+        # symbolic-prefill burst the short-prompt TTFT loss. FULL also retires the
+        # uniform-decode dispatch routine: every step dispatches by padded token count.
+        # A model with an attention head wider than 256 (the probe below) takes a CAPPED rung
+        # list instead of the full one: past that width the mixed-capture-capable vLLM 0.23
+        # backends are only partially usable — TRITON_ATTN's unified-attention kernel raises
+        # an illegal memory access capturing WIDE mixed batches (measured at 4128 tokens on
+        # gemma-4-12B / RTX 5090; clean through 2112, benched end to end with greedy chat
+        # parity), and FLEX_ATTENTION mis-shapes its sliding-window block mask outright.
+        # Steps wider than the capped top rung stay eager. The authoritative guard for a
+        # probe miss is in ``EmmyGenModel.__init__``.
+        mode = "FULL"
+        sizes = sorted(set(sizes) | _chunk_capture_rungs(vllm_args, bucket))
+        head_dim = _max_head_dim(model, vllm_args) if model is not None else None
+        if head_dim is not None and head_dim > 256:
+            cap = emmy_config.WIDE_HEAD_MIXED_RUNG_CAP
+            sizes = [s for s in sizes if s <= cap]
+            logger.info(
+                "chunk capture capped at %d-token rungs: this model's widest attention head (%d) exceeds 256, "
+                "where vLLM 0.23's TRITON_ATTN faults capturing wider mixed batches; wider steps stay eager",
+                cap,
+                head_dim,
+            )
+        if not _has_flag(vllm_args, "--attention-backend"):
+            backend_args = ["--attention-backend", "TRITON_ATTN"]
     # ``custom_ops: +rotary_embedding``: the plugin runs the model EAGERLY inside the cudagraph
     # (no inductor), but vLLM's CustomOp dispatch assumes compilation will fuse native ops and
     # hands out ``forward_native`` — a per-layer torch-op soup (4 cats + 4 adds + an fp32
@@ -258,8 +358,8 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     # custom impl dispatches ``forward_cuda`` — vLLM's fused in-place rotary kernel (valid for
     # every ``RotaryEmbedding`` subclass the plugin builds; gemma-4's proportional variant only
     # overrides the cos/sin CACHE build, not the apply).
-    cfg = f'{{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": {sizes}, "custom_ops": ["+rotary_embedding"]}}'
-    return ["--compilation-config", cfg]
+    cfg = f'{{"cudagraph_mode": "{mode}", "cudagraph_capture_sizes": {sizes}, "custom_ops": ["+rotary_embedding"]}}'
+    return ["--compilation-config", cfg] + backend_args
 
 
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:

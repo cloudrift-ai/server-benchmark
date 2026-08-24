@@ -61,9 +61,19 @@ GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
+GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
+
+#: The widest mixed-batch capture rung validated on a WIDE-HEAD model (attention heads past
+#: 256 — gemma-4-12B's 512-wide global layers) on RTX 5090 / vLLM 0.23: TRITON_ATTN's
+#: unified-attention kernel raises an illegal memory access capturing a 4128-token mixed batch
+#: but captures and serves cleanly through 2112 (the 2048 chunk quantum + a 64-wide rider top,
+#: benched end to end with greedy chat parity); the fault threshold between 2112 and 4128 is
+#: unbisected. Narrow-head models take the full rung list. Read by the serve command's rung
+#: builder and ``EmmyGenModel``'s boot guard — not an env var.
+WIDE_HEAD_MIXED_RUNG_CAP = 2112
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -374,6 +384,27 @@ def gen_prefill_capacity(default: int = -1) -> int:
     every token of capacity it never serves. Pin it at the width the deployment actually runs
     and lower ``--max-num-batched-tokens`` to match. See `serving/vllm_model_gen.py`."""
     return int_env(GEN_PREFILL_CAPACITY, default)
+
+
+def gen_chunk_capture(default: int = 1) -> int:
+    """``EMMY_GEN_CHUNK_CAPTURE`` — capture WHOLE chunk-prefill and mixed prefill+decode steps
+    as vLLM CUDA graphs (default 1 = ON). ``emmy serve --generate`` then asks for
+    ``cudagraph_mode: FULL`` instead of ``FULL_DECODE_ONLY``, extends the capture sizes with
+    token-count rungs spanning the prefill widths (the exact chunk width and the rider top
+    included), and selects the ``TRITON_ATTN`` attention backend — the one broadly-available
+    backend whose full-graph support covers mixed batches (FA2 declares uniform-batch support
+    only, and vLLM silently downgrades ``FULL`` back to ``FULL_DECODE_ONLY`` on such a
+    backend). Eager mixed steps were the measured c64 TPOT loss (~5 ms/step of host framing
+    plus ~170 MB/step of staging D2D on the 2026-08-12 5090 re-baseline) and the short-prompt
+    TTFT loss (the eager symbolic-prefill burst); with capture on, small_c1 TTFT closed from
+    1.36x to 1.09x of stock and greedy chat outputs stayed content-identical (2026-08-15 5090
+    validation). Set 0 to restore decode-only capture and vLLM's own attention-backend choice.
+    Off automatically under speculative decoding (the chunk rungs are not spec-adjusted); a
+    model with an attention head wider than 256 (gemma-4's global layers) gets its rungs
+    capped at :data:`WIDE_HEAD_MIXED_RUNG_CAP` instead — see that constant for the vLLM 0.23
+    backend faults behind the cap. See ``commands/serve.py`` and
+    `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_CHUNK_CAPTURE, default)
 
 
 def gen_embed_host(default: int = 0) -> int:

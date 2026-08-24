@@ -38,7 +38,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from emmy.compiler.context import Context
-from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import stamp_schedule_families
@@ -473,12 +472,6 @@ class TwoLevelStrategy(SearchStrategy):
                 await asyncio.gather(*tasks)
                 # Enrollment wave: everything the inventory reported while this wave ran. Waves
                 # terminate because cut/split trees strictly shrink and the seen-set dedups.
-                # A minting fragment carries InputOp boundary nodes but no ``Graph.inputs``
-                # registration (the splice never needed one) — declare them so the slice cut
-                # from it feeds them bench data instead of treating them as unproduced scratch.
-                for _nid, _op, frag in minted:
-                    if not frag.inputs:
-                        frag.inputs = [i for i, n in frag.nodes.items() if isinstance(n.op, InputOp)]
                 wave = [
                     _Work(key=key, nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
                     for nid, op, frag in minted

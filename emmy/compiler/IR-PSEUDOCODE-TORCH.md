@@ -125,7 +125,7 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
   // constants: checkpoint tensors, and the literals the trace captured
   let add_c1: f32[1] = 1.0;
 
-  let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(add_c1, |_i, _j| [0]);
+  let add_c1_bc: f32[4,8] = emmy::index_map_simple(add_c1, |_i, _j| [0]);
   let add: f32[4,8] = add(inputs.x, add_c1_bc);
 
   Outputs { add }
@@ -134,24 +134,24 @@ fn main(dynamic: Dynamic, inputs: Inputs<dynamic>) -> Outputs<dynamic> {
 
 The `add_c1` in this example is a constant, it does not depend on `inputs`, but some later operations use it as an
 argument.  The torch tracing logic has decided that `torch.randn(4,8)` is an input called `inputs.x`, while the plain
-literal `1` is a constant `add_c1`.  This example also features the `emmy::tensor_from_fn` primitive, it is used to fill
+literal `1` is a constant `add_c1`.  This example also features the `emmy::index_map_simple` primitive, it is used to fill
 up an array by given a function of its indices.  Let's look at its application more closely.
 
 ```
-  let add_c1_bc: f32[4,8] = emmy::tensor_from_fn(add_c1, |_i, _j| [0]);
-  //                 ^ emmy::tensor_from_fn infers the result size from here, it's not unambiguous,
+  let add_c1_bc: f32[4,8] = emmy::index_map_simple(add_c1, |_i, _j| [0]);
+  //                 ^ emmy::index_map_simple infers the result size from here, it's not unambiguous,
   //                 so it knows it has to iterate _i over 0..=3 and _j over 0..=7
 ```
 
-This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::tensor_from_fn` primitive
+This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::index_map_simple` primitive
 is polymorphic over the shape of the tensor it produces and over the shape of the tensor it reads. You can assume
-for simplicity that its signature is something like `fn emmy::tensor_from_fn<T, const n: usize, const m: usize,
+for simplicity that its signature is something like `fn emmy::index_map_simple<T, const n: usize, const m: usize,
 …>(operand, coord) -> T[n, m]` (the real signature serves tensors of any shape and rank, we show it in the following
 sections). Since the result's type is always annotated, the shape is never ambiguous.
 
-In practice, tensor IR can't express `emmy::tensor_from_fn` calls with arbitrary lambdas, only some specific restricted
+In practice, tensor IR can't express `emmy::index_map_simple` calls with arbitrary lambdas, only some specific restricted
 forms.  But it's not a problem for you, since you only read these lambdas and never write them.  For the precise
-definition of what lambdas can occur in `emmy::tensor_from_fn` calls, check the tensor IR definition and the code that
+definition of what lambdas can occur in `emmy::index_map_simple` calls, check the tensor IR definition and the code that
 generates it.
 
 ### Dynamic parameters
@@ -282,10 +282,10 @@ Below, we overview the `emmy::` operations.
 
 | Name | Meaning |
 | --- | --- |
-| `emmy::tensor_from_fn(x, \|i, j\| [i, j])` | build a tensor from a function of its indices (rank 2 in this example for simplicity, in principle this supports any rank) |
+| `emmy::index_map_simple(x, \|i, j\| [i, j])` | build a tensor from a function of its indices (rank 2 in this example for simplicity, in principle this supports any rank) |
 | `emmy::cast(x)` | a dtype change, the IR uses it to make the implicit casts in graph IR explicit |
 | `emmy::bitcast(x)` | reinterpret same-width elements as another dtype |
-| `emmy::index_map(a, b)` | a more advanced reindexing `emmy::tensor_from_fn` cannot hold |
+| `emmy::index_map(a, b)` | a more advanced reindexing `emmy::index_map_simple` cannot hold |
 | `emmy::gather(data, idx, axis=n)` | pick one element per output position |
 | `emmy::gather_by_axis(data, idx, axis=n)` | look up whole slices along an axis, by index |
 
@@ -382,14 +382,14 @@ fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
     where size_of::<U>() == size_of::<T>()
 ```
 
-#### `emmy::tensor_from_fn`
+#### `emmy::index_map_simple`
 
 Reads one tensor into another shape. The lambda maps an index of the result to the index it reads from the
 operand — it computes coordinates, never values, so nothing here can change a value on the way through. A printed
 line names the index vector's components instead of the vector, `|i, j, k|` for rank three.
 
 ```rust
-fn emmy::tensor_from_fn<T, const rank: usize, const orank: usize, const d: usize[rank], const od: usize[orank]>(
+fn emmy::index_map_simple<T, const rank: usize, const orank: usize, const d: usize[rank], const od: usize[orank]>(
     operand: T[od],
     coord: |usize[rank]| -> usize[orank],
 ) -> T[d]
@@ -400,15 +400,15 @@ An axis the closure never uses takes Rust's `_` prefix, which is how a broadcast
 
 ```rust
 let p_input_layernorm_weight_bc: f16[1,512,2048]
-    = emmy::tensor_from_fn(p_input_layernorm_weight, |_i, _j, k| [k]);
+    = emmy::index_map_simple(p_input_layernorm_weight, |_i, _j, k| [k]);
 ```
 
 One number per column, repeated over batch and tokens. Coordinates can also be arithmetic over the parameters,
 which is how a slice or a dropped axis reads:
 
 ```rust
-let linear_5: f16[1,512,3072] = emmy::tensor_from_fn(linear_4__cat__linear_5, |i, j, k| [i, j, (k + 3072)]);
-let linear_3: f16[1,512,1024] = emmy::tensor_from_fn(linear_3_reduce, |i, j, k| [i, j, 0, k]);
+let linear_5: f16[1,512,3072] = emmy::index_map_simple(linear_4__cat__linear_5, |i, j, k| [i, j, (k + 3072)]);
+let linear_3: f16[1,512,1024] = emmy::index_map_simple(linear_3_reduce, |i, j, k| [i, j, 0, k]);
 ```
 
 The first reads the upper half of a concatenated tensor, the second drops a size-1 axis.
@@ -455,8 +455,8 @@ fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize
 
 #### `emmy::index_map`
 
-This is the advanced version of `emmy::tensor_from_fn`. Under the hood, both are represented by the same operation, but
-we differentiate them when printing because `emmy::tensor_from_fn` represents a rather simple, but extremely common
+This is the advanced version of `emmy::index_map_simple`. Under the hood, both are represented by the same operation, but
+we differentiate them when printing because `emmy::index_map_simple` represents a rather simple, but extremely common
 special case, and using the clumsy, overly verbose `emmy::index_map` in those cases is not reasonable.
 
 Reads values from several tensors into one result, choosing per output position which tensor to read and where.

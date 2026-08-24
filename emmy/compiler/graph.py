@@ -789,12 +789,13 @@ class Graph:
         return self._users.get(buf, set())
 
     def validate(self) -> None:
-        """Check the graph's structural invariants; raise ``ValueError`` on the
-        first violation. Covers: non-empty ``node.outputs``; SSA per buffer
+        """Check the graph's structural and per-op invariants; raise ``ValueError``
+        on the first violation. Covers: non-empty ``node.outputs``; SSA per buffer
         (``_producers`` maps every buffer to exactly its producing node/slot,
         no orphan or missing entries); ``_users`` consistency with every
         ``node.inputs`` edge; ``graph.inputs`` / ``graph.outputs`` naming known
-        buffers. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
+        buffers; a ``copy`` reading its output's shape; an index map whose sources
+        agree on element type. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
         pass boundaries — never in production compile paths."""
         expected_producers: dict[str, tuple[str, int]] = {}
         for nid, node in self.nodes.items():
@@ -824,11 +825,6 @@ class Graph:
             for buf in refs:
                 if buf not in expected_producers:
                     raise ValueError(f"graph.{label} names unknown buffer {buf!r}")
-        # ``copy`` is the identity, so its declared output dtype is the whole
-        # operation and its shape must be its input's. Nothing else enforces this:
-        # ``ElementwiseOp.infer_output_shape`` states the rule for every elementwise
-        # op but no compile path calls it, and a shape-changing copy would reach the
-        # loop stage as a silent broadcast.
         # noqa: PLC0415 below — a module-level import of the dialect would cycle.
         from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp  # noqa: PLC0415
 
@@ -842,6 +838,10 @@ class Graph:
             if len(dtypes) > 1:
                 raise ValueError(f"index map {nid!r} reads sources of differing dtypes: {sorted(dtypes)}")
 
+        # ``copy`` is the identity, so its declared output dtype is the whole
+        # operation and its shape must be its input's. ``ElementwiseOp.infer_output_shape``
+        # states the rule for every elementwise op, but no compile path calls it on one,
+        # and a shape-changing copy would reach the loop stage as a silent broadcast.
         for nid, node in self.nodes.items():
             if not (isinstance(node.op, ElementwiseOp) and node.op.name == "copy"):
                 continue

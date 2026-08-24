@@ -2,7 +2,7 @@
 
 The graph stages (``--ir torch`` / ``--ir tensor``) print as one program: the
 constants become module-level bindings, the graph's inputs become the
-parameters of ``pub fn main``, every compute node becomes a ``let``, and the
+parameters of ``fn main``, every compute node becomes a ``let``, and the
 graph's outputs become the tail expression. Types carry the shape
 (``f16[1,512,4096]``), so a reader checks a line by reading its type rather
 than a trailing shape column.
@@ -22,6 +22,14 @@ from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp, GatherOp, IndexMapOp, ReduceOp, ScanOp
 
 _DIM_NAMES = ("i", "j", "k", "l", "m", "n")
+
+
+def _index_names(rank: int) -> list[str]:
+    """One name per axis of a result. Past the six short letters the names keep
+    counting, so a closure always binds every axis it is written for."""
+    return [_DIM_NAMES[d] if d < len(_DIM_NAMES) else f"i{d}" for d in range(rank)]
+
+
 # Elementwise names torch or numpy already means. Everything else in
 # ``elementwise.py``'s table is one of emmy's own scalar functions, printed under
 # ``emmy::scalar::``, so a new entry there needs no edit here.
@@ -67,7 +75,7 @@ def _binders(op: IndexMapOp) -> list[str]:
     for src in op.sources:
         for e in (*src.coord_map, *(() if src.select is None else (src.select,))):
             used |= e.free_vars()
-    return [(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}") for d, n in enumerate(_DIM_NAMES[: len(op.out_shape)])]
+    return [(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}") for d, n in enumerate(_index_names(len(op.out_shape)))]
 
 
 def _index_expr(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
@@ -107,10 +115,10 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
     if isinstance(op, IndexMapOp):
         if src_t is not None and op.is_identity(tuple(src_t.shape)):
             return args[0] if same_dtype else f"emmy::cast({args[0]})"
-        if len(op.sources) == 1 and op.sources[0].select is None and len(op.out_shape) <= len(_DIM_NAMES):
+        if len(op.sources) == 1 and op.sources[0].select is None:
             names = _binders(op)
             operand = args[op.sources[0].input_idx]
-            return f"emmy::tensor_from_fn({operand}, |{', '.join(names)}| {_index_expr(op, names, syms)})"
+            return f"emmy::index_map_simple({operand}, |{', '.join(names)}| {_index_expr(op, names, syms)})"
         return _fmt_index_sources(op, args, syms)
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same
@@ -143,7 +151,7 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
 def _fmt_index_sources(op: IndexMapOp, args: list[str], syms: dict[str, Var]) -> str:
     """The general reindexing form: one ``IndexSource`` per operand, each carrying the
     coordinate map and the condition that decides which output positions it supplies."""
-    names = list(_DIM_NAMES[: len(op.out_shape)])
+    names = _index_names(len(op.out_shape))
     rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n) for d, n in enumerate(names)} | syms
 
     def closure(expr_list: tuple, body: str) -> str:

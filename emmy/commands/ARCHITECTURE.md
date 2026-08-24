@@ -208,7 +208,9 @@ graph but are not trusted as automatic A/B pins; only verified rows with paired 
 proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
 derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
-check; the reference backend is `emmy-greedy` when no Torch twin exists. A completed reference survives a later greedy
+check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
+for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
+require direct eager correctness. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
 nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy

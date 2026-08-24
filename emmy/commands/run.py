@@ -732,13 +732,12 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     return decoded
 
 
-def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, atol: float = 1e-3) -> dict:
-    """Return a direct Emmy-vs-eager tolerance verdict with reproducible error statistics.
+def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager", rtol: float = 1e-3, atol: float = 1e-3) -> dict:
+    """Return a tolerance verdict against one named reference with reproducible error statistics.
 
     The pass rule is the same elementwise rule used by ``torch.testing.assert_close`` for
-    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Eager
-    outputs may be tensors, a positional tensor sequence, or an output-name mapping (the
-    latter is what the embedded-golden worker returns to pinned-row replay).
+    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Reference
+    outputs may be tensors, a positional tensor sequence, or an output-name mapping.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -748,13 +747,13 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         return np.asarray(value, dtype=np.float64)
 
     names = list(outputs)
-    if isinstance(eager_out, dict):
-        missing = [name for name in names if name not in eager_out]
-        extra = [name for name in eager_out if name not in outputs]
+    if isinstance(reference_out, dict):
+        missing = [name for name in names if name not in reference_out]
+        extra = [name for name in reference_out if name not in outputs]
         if missing or extra:
             return {
                 "status": "fail",
-                "reference": "eager",
+                "reference": reference,
                 "rtol": rtol,
                 "atol": atol,
                 "max_abs_error": None,
@@ -762,19 +761,19 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
                 "max_rel_error": None,
                 "error": f"output names differ: missing={missing}, extra={extra}",
             }
-        refs = [eager_out[name] for name in names]
+        refs = [reference_out[name] for name in names]
     else:
-        refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+        refs = list(reference_out) if isinstance(reference_out, (tuple, list)) else [reference_out]
         if len(refs) != len(names):
             return {
                 "status": "fail",
-                "reference": "eager",
+                "reference": reference,
                 "rtol": rtol,
                 "atol": atol,
                 "max_abs_error": None,
                 "mean_abs_error": None,
                 "max_rel_error": None,
-                "error": f"output count differs: Emmy={len(names)}, eager={len(refs)}",
+                "error": f"output count differs: Emmy={len(names)}, {reference}={len(refs)}",
             }
 
     max_abs = 0.0
@@ -786,7 +785,7 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         actual = _array(outputs[name])
         expected = _array(ref)
         if actual.shape != expected.shape:
-            failure = f"output {name!r} shape {actual.shape} != eager {expected.shape}"
+            failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
         if not np.isfinite(actual).all() or not np.isfinite(expected).all():
             failure = f"output {name!r} contains non-finite values"
@@ -803,12 +802,12 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
                 failure = (
                     f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}: "
                     f"{int((absolute > tolerance).sum())}/{absolute.size} elements, "
-                    f"worst at flat index {worst}: emmy={actual.flat[worst]:.6g} eager={expected.flat[worst]:.6g}"
+                    f"worst at flat index {worst}: emmy={actual.flat[worst]:.6g} {reference}={expected.flat[worst]:.6g}"
                 )
 
     proof = {
         "status": "fail" if failure else "pass",
-        "reference": "eager",
+        "reference": reference,
         "rtol": rtol,
         "atol": atol,
         "max_abs_error": max_abs,
@@ -862,7 +861,17 @@ def _sample_replay_knobs(sample) -> dict:
     return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
 
 
-async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None, strict_correctness=False):
+async def _bench_golden_variants(
+    backend,
+    source,
+    golden_configs,
+    *,
+    warmup,
+    iters,
+    ref=None,
+    strict_correctness=False,
+    strict_reference="eager",
+):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
     row beside the greedy pick. ``golden_configs`` are
@@ -894,15 +903,15 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
     floor (:func:`_intensity_floor_flag`) and — when ``ref`` carries reference inputs and
     outputs — an output-correctness check. The default check compares against the greedy
     Emmy output with :func:`_wrong_answer_flag`; ``strict_correctness`` compares every pinned
-    row directly against eager under rtol=atol=1e-3 and records error statistics. Flags
-    render as a ``!`` marker in the table and ride the ``--json`` record."""
+    row directly against ``strict_reference`` under rtol=atol=1e-3 and records error statistics.
+    Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
     ref_inputs, ref_outputs = ref if ref is not None else (None, None)
     if strict_correctness and (ref_inputs is None or ref_outputs is None):
-        raise ValueError("strict pinned correctness requires same-input eager reference outputs")
+        raise ValueError("strict pinned correctness requires same-input reference outputs")
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
@@ -948,9 +957,9 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
         correctness = None
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
-                correctness = _strict_correctness_proof(run_outputs, ref_outputs)
+                correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
                 if correctness["status"] != "pass":
-                    flags.append(f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}")
+                    flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
             else:
                 flag = _wrong_answer_flag(run_outputs, ref_outputs)
                 if flag:
@@ -2002,13 +2011,25 @@ def _pinned_samples_for_ir(args, embedded):
     return pinned
 
 
-def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned_rows) -> list[str]:
+def _strict_benchmark_errors(
+    args,
+    results,
+    bench,
+    captured,
+    correctness,
+    pinned_rows,
+    *,
+    frontend_runnable=True,
+    same_input_reference=False,
+) -> list[str]:
     """Return every strict verification failure in one ordinary run result."""
+
+    reference = "same-input-greedy" if not frontend_runnable and same_input_reference else "eager"
 
     def valid_proof(proof) -> bool:
         if not isinstance(proof, dict):
             return False
-        required = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
+        required = {"status": "pass", "reference": reference, "rtol": 1e-3, "atol": 1e-3}
         if any(proof.get(key) != value for key, value in required.items()):
             return False
         return all(
@@ -2027,8 +2048,10 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
         errors.append("backend comparison did not use CUDA graph capture")
     if bench is None or not bool(getattr(bench, "captured", False)):
         errors.append("deployed Emmy timing was not captured")
+    if not frontend_runnable and not same_input_reference:
+        errors.append("same-input greedy reference is unavailable")
     if not valid_proof(correctness):
-        errors.append("deployed Emmy row lacks direct strict eager correctness")
+        errors.append(f"deployed Emmy row lacks strict {reference} correctness")
 
     pinned_rows = list(pinned_rows or [])
     ab_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is None]
@@ -2062,7 +2085,7 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
             if isinstance(total_ms, bool) or not isinstance(total_ms, int | float) or total_ms <= 0:
                 errors.append(f"{label} has no positive whole-program timing")
         if not valid_proof(row.correctness):
-            errors.append(f"{label} lacks direct strict eager correctness")
+            errors.append(f"{label} lacks strict {reference} correctness")
 
     return errors
 
@@ -2100,6 +2123,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # the same table the --code path produces for a debug Graph IR input.
     # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
     frontend = graph.copy() if torch_ref.is_runnable(graph) else None
+    same_input_greedy = strict_correctness and embedded is not None and frontend is None
 
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
     db = None
@@ -2149,6 +2173,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     async def _bench_session():
         greedy_fail = results = bench = accuracy_error = correctness = ab_ref = reference_error = ab_benches = greedy_iso = None
         greedy_reference_us = None
+        same_input_reference = False
         stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
@@ -2163,7 +2188,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     iters=args.iters,
                     seed=args.seed,
                     want_ref=bool(pinned and tail),
-                    strict_accuracy=strict_correctness,
+                    strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
                 greedy_fail = f"greedy run/bench failed: {exc}"
@@ -2174,6 +2199,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 greedy_reference_us = resp.get("reference_run_us")
                 stats_sym_env = resp.get("sym_env")
                 correctness = resp.get("correctness")
+                same_input_reference = same_input_greedy and ab_ref is not None
+                if same_input_reference:
+                    correctness = _strict_correctness_proof(
+                        ab_ref[1],
+                        ab_ref[1],
+                        reference="same-input-greedy",
+                    )
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
             if pinned and tail:
@@ -2181,7 +2213,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     reason = greedy_fail or "the greedy worker returned no run outputs"
                     missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
                     reference_error = f"{missing}: {reason}"
-                elif not strict_correctness or accuracy_error is None:
+                elif same_input_greedy or not strict_correctness or accuracy_error is None:
                     if greedy_fail:
                         logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
                     else:
@@ -2194,6 +2226,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         iters=args.iters,
                         ref=ab_ref,
                         strict_correctness=strict_correctness,
+                        strict_reference="same-input-greedy" if same_input_greedy else "eager",
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:
@@ -2215,6 +2248,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             greedy_reference_us,
             stats_sym_env,
             correctness,
+            same_input_reference,
         )
 
     (
@@ -2230,6 +2264,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         greedy_reference_us,
         stats_sym_env,
         correctness,
+        same_input_reference,
     ) = asyncio.run(_bench_session())
 
     if reference_error is not None:
@@ -2263,7 +2298,20 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         greedy_iso=greedy_iso,
         sym_env=stats_sym_env,
     )
-    strict_errors = _strict_benchmark_errors(args, results, bench, captured, correctness, ab_benches) if strict_correctness else None
+    strict_errors = (
+        _strict_benchmark_errors(
+            args,
+            results,
+            bench,
+            captured,
+            correctness,
+            ab_benches,
+            frontend_runnable=frontend is not None,
+            same_input_reference=same_input_reference,
+        )
+        if strict_correctness
+        else None
+    )
     if getattr(args, "json", None):
         _write_ab_json(
             args,

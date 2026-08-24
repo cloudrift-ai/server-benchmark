@@ -353,6 +353,18 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert failed["status"] == "fail"
     assert "exceeds" in failed["error"]
 
+    greedy = _strict_correctness_proof(
+        {"o": np.array([1.0015, 100.05], dtype=np.float32)},
+        eager,
+        reference="same-input-greedy",
+    )
+    assert greedy["status"] == "pass"
+    assert greedy["reference"] == "same-input-greedy"
+    assert greedy["rtol"] == greedy["atol"] == 1e-3
+    assert greedy["max_abs_error"] > 0
+    assert greedy["mean_abs_error"] > 0
+    assert greedy["max_rel_error"] > 0
+
 
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback

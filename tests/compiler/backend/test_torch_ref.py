@@ -56,6 +56,35 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+def test_multi_output_preserves_declared_order_and_single_output_tensor_contract():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    g.add_node(ElementwiseOp(op="multiply"), ["x", "x"], Tensor("intermediate", (2, 3)), node_id="intermediate")
+    g.add_node(ElementwiseOp(op="silu"), ["intermediate"], Tensor("hidden", (2, 3)), node_id="hidden")
+    g.add_node(ElementwiseOp(op="add"), ["hidden", "x"], Tensor("final", (2, 3)), node_id="final")
+    g.inputs = ["x"]
+    # A working golden may expose a live intermediate after the semantic final
+    # output so exact target replay can validate both buffers.
+    g.outputs = ["final", "intermediate"]
+    x = np.arange(6, dtype=np.float32).reshape(2, 3) - 2
+    expected = NumpyBackend().run(g, input_data={"x": x})[0].outputs
+    fn, inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(x)})
+
+    actual = fn(*inputs)
+
+    assert isinstance(actual, tuple)
+    assert len(actual) == 2
+    for value, output_name in zip(actual, g.outputs, strict=True):
+        np.testing.assert_allclose(value.numpy(), expected[output_name], rtol=1e-4, atol=1e-4)
+
+    g.outputs = ["final"]
+    single_fn, single_inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(x)})
+    single = single_fn(*single_inputs)
+
+    assert torch.is_tensor(single)
+    np.testing.assert_allclose(single.numpy(), expected["final"], rtol=1e-4, atol=1e-4)
+
+
 @pytest.mark.parametrize(("dtype_name", "torch_dtype"), [("f16", torch.float16), ("f32", torch.float32)])
 def test_zero_width_pad_is_runnable_identity(dtype_name, torch_dtype):
     g = Graph()

@@ -908,9 +908,10 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: l
         ):
             # ONE computed edge has a copy transport: a packed-pair weight cone, whose bits stage
             # as raw bytes beside a small compute-filled block-scale slab (the mma resolver's
-            # packed arm). The test is the NODE's shape, not the want's spelling: a multi-channel
-            # product also reaches here and must take the compute fill (the copy emitters are
-            # single-channel), so trying the mma resolver on one would answer for the wrong node.
+            # packed arm). The test is the NODE's shape, not the want's spelling. A multi-channel
+            # product reaches here too and must take the compute fill, since the copy emitters
+            # carry one channel; the mma resolver declines it on its own, so naming the packed
+            # node here states the exception rather than leaning on that decline.
             resolved = legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
             if resolved is not None:
                 return resolved

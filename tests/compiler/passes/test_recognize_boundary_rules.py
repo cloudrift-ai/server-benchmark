@@ -733,6 +733,18 @@ def test_materialized_gate_up_offers_one_shared_a_mma_fill_and_scalar_fallback()
     assert all(str(family_value(row, "TILE")).startswith("mma_m8n8k4_f16_f32/") for row in warp)
 
 
+def test_materialized_gate_up_refuses_a_byte_transport_pin(monkeypatch):
+    """A `STAGE` pin naming a copy transport refuses on a product with several B channels.
+
+    The compute fill is mandatory here and the byte-transport emitters carry one channel, so there
+    is no row for the pin to name. The packed-pair (NVFP4) weight cone is the one node shape that
+    does offer those rows beside the fill, and it has a single channel by construction — which is
+    why the resolver's exception reads the node rather than the pin's transport."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    with pytest.raises(ValueError, match="no smem-async sibling"):
+        _resolve(_materialized_gate_up_graph(), ctx=Context.from_target((12, 0)))
+
+
 def test_materialized_gate_up_mixed_b_dtypes_keeps_scalar_fallback_only():
     """A byte-copied B channel whose dtype differs from the atom must decline the MMA fill."""
     rows, _tile = _resolve(_materialized_gate_up_graph(up_dtype=F32), ctx=Context.from_target((7, 0)))

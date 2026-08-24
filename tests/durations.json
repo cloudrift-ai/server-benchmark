@@ -251,6 +251,7 @@
  "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces": 0.01,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_carries_its_own_structural_identity": 0.16,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row": 0.22,
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_finalize_keeps_projection_input_edges": 1.4,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_no_piece_inherits_the_kernel_it_replaces": 0.16,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_the_split_is_consumed_by_the_kernel_that_realizes_it[g2a]": 0.22,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_the_split_is_consumed_by_the_kernel_that_realizes_it[g2k]": 0.21,

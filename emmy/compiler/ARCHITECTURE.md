@@ -112,6 +112,8 @@ autotuning cache doesn't bust on cosmetic edits.
   read only by the tuner / partition planner to size tiles for a dynamic axis.
   Graph JSON op fields use the same stable dimension wire mapping as Torch IR, so static, symbolic, and composite
   `Dim` values round-trip instead of depending on the scalar-only `Dim.value` compatibility property.
+  Program specialization also binds the named string extents admitted by the `ReshapeOp.shape` and `SliceOp.shape`
+  frontend contracts; unrelated string-valued operation fields are never interpreted as dimensions.
 - **A symbolic free axis is tiled for its hint and emitted as a *masked* tile.** A symbolic M/N axis is treated as
   size `hint`, always-overhang: the block axis becomes a composite ceil-div over the symbolic extent
   (`(seq_len + bf - 1)//bf`), and a boundary `Cond(decoded_coord < seq_len)` wraps the body, so one cached kernel runs

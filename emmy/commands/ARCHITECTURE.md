@@ -214,7 +214,11 @@ process unless `--target` narrows the file to one exact or unambiguous substring
 Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
 graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
 proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
+derived structural stamps. Registered Boolean values in an explicit `--ab` row remain input pins, so false values are
+not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
+no realized graph reports the precision lane requested by those parsed input pins, including explicit false
+overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
+compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still

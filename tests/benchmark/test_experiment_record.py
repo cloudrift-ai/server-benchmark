@@ -1,6 +1,7 @@
 """Tests for the typed, system-only YAML experiment record."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -9,6 +10,7 @@ from emmy.benchmark.execution import run_execution_group
 from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure, Provenance
 from emmy.planner import BenchmarkTask, ExecutionGroup
 from emmy.planner.variant import Variant
+from emmy.provisioning.types import VMConnectionInfo
 from emmy.recipe.types import Recipe
 from emmy.redact import register_secret
 from emmy.system_info import SystemInformation
@@ -171,6 +173,54 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
     assert not task.record_path().with_suffix(".yaml.tmp").exists()
 
 
+async def test_staged_command_provenance_ignores_shared_venv_checkout_and_unrelated_dirty_path(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=source, check=True)
+    (source / "staged.txt").write_text("staged\n")
+    (source / "unrelated.txt").write_text("clean\n")
+    subprocess.run(["git", "add", "staged.txt", "unrelated.txt"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "source",
+        ],
+        cwd=source,
+        check=True,
+    )
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+    (source / "unrelated.txt").write_text("local edit\n")
+    monkeypatch.chdir(source)
+    monkeypatch.setattr(ExperimentRecord, "_git_provenance", staticmethod(lambda: ("shared-venv-revision", True)))
+
+    recipe = Recipe.from_dict(
+        {
+            "command": {"stage": ["staged.txt"], "run": "true", "strict": True},
+            "deploy": {"gpu": "NVIDIA GeForce RTX 5090", "gpu_count": 1},
+        }
+    )
+    variant = Variant(params={"deploy.gpu": recipe.deploy.gpu, "deploy.gpu_count": 1})
+    task = BenchmarkTask(recipe_dir=str(source), variant=variant, recipe=recipe, run_dir=tmp_path / "results")
+    group = ExecutionGroup(gpu_name=task.gpu_name, gpu_count=task.gpu_count, tasks=[task])
+
+    await run_execution_group(
+        group,
+        {"benchmark": {}},
+        "/missing/ssh-key",
+        dry_run=True,
+        preallocated_conn=VMConnectionInfo(host="example.test", username="riftuser"),
+    )
+
+    assert task.record.provenance == Provenance(git_revision=revision, git_dirty=False)
+
+
 def test_record_rejects_other_schema_versions(tmp_path):
     path = tmp_path / "old.experiment.yaml"
     path.write_text("schema_version: 1\n", encoding="utf-8")
@@ -213,6 +263,9 @@ def test_strict_command_provenance_uses_typed_system_information(tmp_path):
         "NVCC provenance",
         "cuBLAS provenance",
     ]
+
+    record.provenance = Provenance(git_revision="revision", git_dirty=True)
+    assert record.missing_command_provenance()[0] == "clean staged source"
 
 
 def test_create_run_dir_uses_run_timestamp_without_replacing_prior_runs(tmp_path):

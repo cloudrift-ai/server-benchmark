@@ -33,13 +33,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Body, Load, Loop
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -66,6 +68,21 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     if pinned:
         raise ValueError(reason)
     return False
+
+
+def direct_atomic_output(outputs) -> str | None:
+    """Whether direct cross-CTA partials avoid another low-precision rounding step.
+
+    F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
+    carrier state and rounds once at the output boundary.
+    """
+    lowp = sorted({str(t.dtype) for t in outputs.values() if t.dtype in (F16, BF16)})
+    if not lowp:
+        return None
+    return (
+        f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
+        "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
+    )
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #
@@ -290,6 +307,55 @@ def fragment_epilogue(epilogue: Body) -> str | None:
                 "token to use the scalar tier."
             )
         defs.update(s.defines())
+    return None
+
+
+def _split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: bool) -> str | None:
+    """Whether the fragment store's per-cell addressing — the cell base evaluated once at the atom
+    origin, then ``+ col`` / ``+ row · ldm`` across the atom — is exact for an axis that reaches the
+    buffer as a split dim pair. It is when the row-major flatten recomposes the pair to an affine
+    address (the strides match the split), or when the ``%`` dim is the innermost carrier and its
+    modulus is a multiple of the atom extent, so an aligned atom never straddles a ``Q`` boundary."""
+    dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+    if len(dims) < 2:
+        return None
+    q = split_pair(index, name)
+    if q is None:
+        return "not a bare f/Q, f%Q pair"
+    inner = index[dims[1]]
+    if not (isinstance(inner, BinaryExpr) and inner.op == "%"):
+        return "the quotient dim is the inner one"
+    if trailing and dims[1] != len(index) - 1:
+        return "the remainder dim is not the contiguous one"
+    if shape is not None and len(shape) == len(index) and all(getattr(d, "is_static", False) for d in shape):
+        stride, strides = 1, [1] * len(index)
+        for d in reversed(range(len(index))):
+            strides[d] = stride
+            stride *= shape[d].as_static()
+        if strides[dims[0]] == q * strides[dims[1]]:
+            return None  # row-major recomposition — the address is affine in the axis
+    if q % atom_ext:
+        return f"Q={q} is not a multiple of the {atom_ext}-wide atom cell"
+    return None
+
+
+def warp_split_store(tail: list, free: tuple, atom_shape: tuple, shapes: dict) -> str | None:
+    """The fragment epilogue addresses the output (and each epilogue load) per ATOM: the cell base
+    is evaluated once at the atom origin and the lanes add ``col`` / ``row · ldm``. A re-fused
+    split axis spells its coordinate across two buffer dims (``[…, f/Q, …, f%Q]``), and that is
+    addressable only under :func:`_split_addressable`; otherwise the scalar tiers, which evaluate
+    every element's index, are the kernel's tiers."""
+    roles = [(free[-1].name, atom_shape[1], "n", True)]
+    if len(free) >= 2:
+        roles.append((free[-2].name, atom_shape[0], "m", False))
+    for s in tail:
+        if not isinstance(s, (Write, Load)):
+            continue
+        buf = s.output if isinstance(s, Write) else s.input
+        for name, ext, role, trailing in roles:
+            why = _split_addressable(s.index, getattr(shapes.get(buf), "shape", None), name, ext, trailing)
+            if why is not None:
+                return f"warp TILE: the {role} axis reaches {buf} as a split dim pair the fragment store cannot address ({why})"
     return None
 
 

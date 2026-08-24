@@ -1197,6 +1197,10 @@ _EXPERT_LEAVES = {
 # gate_up weight has no single activation-side basis to restore (see ``spell_trellis_inputs``).
 _EXL3_EXPERT_PROJ = {"gate_proj": "w_gate", "up_proj": "w_up", "down_proj": "w_down"}
 _EXL3_EXPERT_LEAF = {"trellis": "", "suh": "_suh", "svh": "_svh"}
+# The per-expert-module fp8 / dense lineage: one 2-D weight per expert projection, with its
+# block scale (DeepSeek's ``weight_scale_inv`` is the dequant MULTIPLIER — see
+# :func:`~emmy.compiler.loader.quant.scale_is_reciprocal`).
+_PER_EXPERT_LEAF = {"weight": "", "weight_scale_inv": "_scale", "weight_scale": "_scale"}
 
 
 def _auto_config_from_pretrained(model_dir):
@@ -1241,6 +1245,11 @@ def _expert_slot(key: str):
         return layer, name, None
     if len(tail) == 3 and tail[0].isdigit() and tail[1] in _EXL3_EXPERT_PROJ and tail[2] in _EXL3_EXPERT_LEAF:
         return layer, _EXL3_EXPERT_PROJ[tail[1]] + _EXL3_EXPERT_LEAF[tail[2]], int(tail[0])
+    if len(tail) == 3 and tail[0].isdigit() and tail[1] in _EXL3_EXPERT_PROJ and tail[2] in _PER_EXPERT_LEAF:
+        # The per-expert-MODULE fp8 lineage (DeepSeek / Laguna): ``experts.<e>.<proj>.weight`` with
+        # its block ``weight_scale_inv`` (or a plain bf16 ``weight`` on an ignored layer). The
+        # loader stacks them into the E-leading ``w_gate_up`` / ``w_down`` program inputs.
+        return layer, _EXL3_EXPERT_PROJ[tail[1]] + _PER_EXPERT_LEAF[tail[2]], int(tail[0])
     return None
 
 
@@ -1281,6 +1290,34 @@ def _stack_exl3_experts(layer: int, by_name: dict, model) -> dict:
         elif (stacked.shape[1] * 16, stacked.shape[2] * 16) != (-(-k // HAD_BLOCK) * HAD_BLOCK, -(-n // HAD_BLOCK) * HAD_BLOCK):
             raise ValueError(f"expert store: layer {layer} {name!r} codes {tuple(stacked.shape[1:])} do not pad the twin's {(n, k)}")
         out[name] = stacked.contiguous()
+    return out
+
+
+def _stack_expert_modules(layer: int, by_name: dict, model) -> dict:  # noqa: ARG001 — same signature as the EXL3 stacker
+    """Stack one MoE layer's per-expert-module fp8 (or dense) tensors into the E-leading program
+    inputs the runner feeds: ``w_gate_up`` is the ``[gate | up]`` concatenation along the output
+    axis (the de-interleaved convention the expert wrapper's ``chunk(2)`` reads), ``w_down`` as
+    stored, and their block scales concatenated the same way. fp8 bits stay on the ``uint8``
+    carrier; scales are f32 values. Expert order is the checkpoint's own index and must be
+    gapless."""
+    import torch  # noqa: PLC0415
+
+    order = {name: sorted(d) for name, d in by_name.items()}
+    n_e = len(next(iter(order.values())))
+    stacked: dict = {}
+    for name, indices in order.items():
+        if indices != list(range(n_e)):
+            raise ValueError(f"expert store: layer {layer} input {name!r} covers experts {indices[:4]}... — expected 0..{n_e - 1}")
+        stacked[name] = torch.stack([by_name[name][e] for e in indices], dim=0)
+    out: dict = {}
+    for suffix in ("", "_scale"):
+        gate, up = stacked.get("w_gate" + suffix), stacked.get("w_up" + suffix)
+        if gate is not None and up is not None:
+            out["w_gate_up" + suffix] = torch.cat([gate, up], dim=1).contiguous()
+        elif gate is not None or up is not None:
+            raise ValueError(f"expert store: layer {layer} has a gate without an up projection (or the reverse) at {suffix or 'weight'}")
+        if (down := stacked.get("w_down" + suffix)) is not None:
+            out["w_down" + suffix] = down.contiguous()
     return out
 
 
@@ -1373,7 +1410,8 @@ def load_quantized_split(
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
-    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss):
+    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss
+    and the DeepSeek / Laguna per-expert-module lineage):
     never materializes the whole dequantized dict (a 20B checkpoint dequantizes to ~42 GB of
     host values — the whole-dict ``load_dequantized_state_dict`` OOMs a 60 GB box). Instead:
 
@@ -1382,13 +1420,15 @@ def load_quantized_split(
     - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
       streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
       casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
-      3-D expert params are skipped — they stay meta on the twin.
+      expert params are skipped — they stay meta on the twin.
     - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
       INPUT names: fp8 weights as RAW BITS on the uint8 carrier plus their f32 scale
       tensors (the runner spells the dequant in-graph via ``spell_quantized_inputs`` and
       uploads 1-byte weights — the whole point of the fp8 checkpoint), biases (and any
-      unquantized expert weights) as ``dtype`` value tensors. An interleaved gate/up layout
-      de-interleaves here — bits, scale and bias alike (:func:`deinterleave_gate_up`).
+      unquantized expert weights) as ``dtype`` value tensors. Per-expert checkpoint modules
+      stack into the same E-leading inputs, concatenating gate and up along the output axis.
+      An interleaved gate/up layout de-interleaves here — bits, scale and bias alike
+      (:func:`deinterleave_gate_up`).
 
     EXL3 (``fmt == "exl3"``) follows the same split with the trellis format's own shapes, while
     every routed expert keeps its PACKED CODES. Experts arrive as per-expert modules, so each
@@ -1432,8 +1472,10 @@ def load_quantized_split(
         _exl3_quant_config,
         _fp8_quant_config,
         _is_skipped,
+        _skip_patterns,
         dequantize,
         dequantize_awq4,
+        scale_is_reciprocal,
     )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
@@ -1446,7 +1488,7 @@ def load_quantized_split(
 
     qc = _fp8_quant_config(model_dir) or {}
     awq = _awq_quant_config(model_dir)
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    patterns = _skip_patterns(qc)
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
     by_shard: dict[str, list[str]] = {}
@@ -1527,7 +1569,8 @@ def load_quantized_split(
                     if expert is None:
                         layers_store.setdefault(layer, {})[name] = t
                     else:
-                        fmt = "exl3"
+                        if t.dtype == torch.int16 or name.endswith(("_suh", "_svh")):
+                            fmt = "exl3"
                         per_expert.setdefault(layer, {}).setdefault(name, {})[expert] = t
                         if t.dtype == torch.int16:
                             codebooks.setdefault(layer, {})[name] = _exl3_codebook(index, k[: -len(".trellis")])
@@ -1553,7 +1596,7 @@ def load_quantized_split(
                     scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)
                     if scale_key is not None and not _is_skipped(k, patterns):
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
-                        vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_key.endswith("_inv"))
+                        vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))
                         state[_checkpoint_to_model_key(k)] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
@@ -1563,7 +1606,9 @@ def load_quantized_split(
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB
     # box survives). Dropping each layer's sources as it stacks keeps the peak at one layer over.
     for layer in sorted(per_expert):
-        layers_store.setdefault(layer, {}).update(_stack_exl3_experts(layer, per_expert.pop(layer), model))
+        by_name = per_expert.pop(layer)
+        stack = _stack_exl3_experts if any(t.dtype == torch.int16 for d in by_name.values() for t in d.values()) else _stack_expert_modules
+        layers_store.setdefault(layer, {}).update(stack(layer, by_name, model))
 
     # De-interleave the gate/up family once, so the wrapper's chunk-half split holds.
     trunk = getattr(model, "model", model)

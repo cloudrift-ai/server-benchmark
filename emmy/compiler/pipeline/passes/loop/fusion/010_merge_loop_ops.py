@@ -19,10 +19,14 @@ entangle a multi-statistic compound (the online-softmax pair) beyond its readabl
 flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
 expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
 one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
-``PLACE`` seam), so evidence could never price the split back — plus one boundedness bound:
-``_total_work`` sums the
-enclosing free×reduce iteration count of every compute leaf, and a merge that grows it by more
-than ``_BLOWUP_FACTOR`` is refused. That bound is what keeps the downstream problem finite, not a
+``PLACE`` seam), so evidence could never price the split back. One exact exception is structural:
+recognition may prove two alpha-equivalent computed edges reconstruct one producer through a
+grouped placement cut; the fused cell and that materialized form remain priced siblings. The same
+witness makes the work bound count the child once plus its parent instead of the raw duplicated
+spelling. A later merge may preserve that witness, but never consume it and leave no placement
+inverse for evidence to price. Otherwise ``_total_work`` sums the enclosing free×reduce iteration count of every
+compute leaf, and a merge that grows it by more than ``_BLOWUP_FACTOR`` is refused. That bound is
+what keeps the downstream problem finite, not a
 performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest
 (measured: 57 nested loops with the row statistic replayed inside a ~10¹³-iteration nest) — a
 form no schedule can run and recognition cannot certify. Within the bound, every fused/split

@@ -423,7 +423,12 @@ def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: fro
     return Prior.sig_groups(index, sig)
 
 
-def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict]) -> tuple[int, float] | None:
+def _db_measured_pick(
+    index: dict[frozenset, list[tuple[dict, float, bool]]],
+    rows: list[dict],
+    *,
+    exact_families: frozenset[str] = frozenset(),
+) -> tuple[int, float] | None:
     """Measured-evidence argmin over candidate knob rows against the DB index —
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
@@ -473,7 +478,7 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
             for row_tun, us, deployable in measured:
                 # A row counts as evidence when it matches every knob the candidate
                 # has decided; undecided knobs are free (``evidence_row_vouches``).
-                if not evidence_row_vouches(cand_tun, row_tun):
+                if not evidence_row_vouches(cand_tun, row_tun, exact_families=exact_families):
                     continue
                 if deployable:
                     if better(us, i, best):
@@ -481,6 +486,49 @@ def _db_measured_pick(index: dict[frozenset, list[tuple[dict, float, bool]]], ro
                 elif better(us, i, best_rank):
                     best_rank = (i, us)
     return best if best is not None else best_rank
+
+
+def _placement_candidate_rows(leaves: list[object]) -> list[dict] | None:
+    """Exact PLACE identities for one placement fork, aligned with ``leaves``.
+
+    A Graph has no ordinary knob row because its kernels may carry conflicting
+    schedules. Its placement route is different: every fragment stamps the one
+    exact PLACE subset that identifies it, while the fused Op has an empty
+    subset. ``None`` means this is not a placement fork; an empty list means the
+    offered routes are ambiguous and measured evidence must not decide them.
+    """
+    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+
+    rows: list[dict] = []
+    saw_place = False
+    ambiguous = False
+    for leaf in leaves:
+        ordinary = {
+            key: value for key, value in _leaf_knobs(leaf).items() if not key.startswith(("S_", "H_")) and family_of(key) != "PLACE"
+        }
+        if not _is_structural_option(leaf):
+            rows.append(ordinary)
+            continue
+        route = {}
+        for node in _leaf_graph(leaf).nodes.values():
+            for key, value in (getattr(node.op, "knobs", None) or {}).items():
+                if family_of(key) != "PLACE":
+                    continue
+                value = str(value)
+                if key in route and route[key] != value:
+                    ambiguous = True
+                route[key] = value
+        if route:
+            saw_place = True
+            rows.append({**ordinary, **route})
+        else:
+            ambiguous = True
+            rows.append(ordinary)
+    if not saw_place:
+        return None
+    keys = [canonical_row_key(row) for row in rows]
+    return [] if ambiguous or len(set(keys)) != len(keys) else rows
 
 
 def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict], node_id: str) -> None:
@@ -809,6 +857,22 @@ def greedy_decide(
         # The pick equals scoring the flat candidate set, invariant to how
         # the lazy tree's levels are arranged.
         leaves = flatten_leaves(fp.options)
+        base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+        placement_rows = _placement_candidate_rows(leaves)
+        picker = getattr(the_prior, "pick", None)
+        if price_structural and placement_rows and picker is not None:
+            from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+            placement_base = {key: value for key, value in base.items() if family_of(key) != "PLACE"}
+            evidence_rows = [{**placement_base, **row} for row in placement_rows]
+            exact_families = frozenset({"PLACE"})
+            ev = getattr(the_prior, "evidence_pick", None)
+            got = ev(evidence_rows, exact_families=exact_families) if ev is not None else None
+            if got is None and db_index():
+                got = _db_measured_pick(db_index(), evidence_rows, exact_families=exact_families)
+            if got is not None:
+                best_i, fp.score = got
+                return leaves[best_i]
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a
         # multi-kernel Graph option is meaningless. :func:`_priced_pick` asks
@@ -837,7 +901,6 @@ def greedy_decide(
         # The constant base under this fork's deltas: the offer op's knobs
         # (its ``S_*`` structural identity) plus the ``H_*`` host/hardware
         # regime — the feature base tune trained on (``two_level.inner_reward``).
-        base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
         # Tiles this node already failed to lower on an earlier attempt — skip
         # the matching leaf so greedy falls back to the next prior-ranked one.
         node_blocked = blocked.get(fp.node_id) if blocked else None
@@ -854,8 +917,7 @@ def greedy_decide(
         # eighth-sweep finding 2); (3) the model argmin only when no candidate
         # has evidence at all. An env pin overrides everything upstream of the
         # fork (a pinned family never reaches a decide).
-        picker = getattr(the_prior, "pick", None)
-        if picker is not None:
+        if picker is not None and placement_rows is None:
             ev = getattr(the_prior, "evidence_pick", None)
             got = ev(rows) if ev is not None else None
             if got is None and db_index():
@@ -863,7 +925,7 @@ def greedy_decide(
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
             best_i, price = got if got is not None else picker(rows)
-        else:  # bare-mean_scores prior object (tests / custom callers)
+        else:  # bare-mean_scores prior, or placement with no whole-route evidence
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
             s = the_prior.mean_scores(rows)

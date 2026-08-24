@@ -5,8 +5,20 @@ def require($condition; $message):
 def exact_fields($fields):
   (keys | sort) == ($fields | sort);
 
+# The agent may fence its object, or keep reasoning after it. Prefer the last fenced or bare
+# candidate carrying exactly the selection fields; fall back to the whole text, then to a greedy span.
+def selection_fields:
+  ["scores", "maintained_model_ids", "obsolete_models", "new_onboarding_models", "onboarding_deployments"];
+
 def parse_selection:
-  ($selection | fromjson?) // ($selection | capture("(?s)(?<json>\\{.*\\})").json | fromjson);
+  (
+    [$selection, ($selection | splits("```(?:json)?"))]
+    | map(fromjson?)
+    | map(select(type == "object" and exact_fields(selection_fields)))
+    | last
+  )
+  // ($selection | fromjson?)
+  // ($selection | capture("(?s)(?<json>\\{.*\\})").json | fromjson);
 
 def model_ids($items):
   [$items[]?.model_id];
@@ -31,7 +43,7 @@ def model_ids($items):
 | parse_selection as $choice
 | require(
     ($choice | type) == "object"
-      and ($choice | exact_fields(["scores", "maintained_model_ids", "obsolete_models", "new_onboarding_models"]));
+      and ($choice | exact_fields(selection_fields));
     "Discovery selection has an invalid shape"
   )
 | require(
@@ -92,6 +104,15 @@ def model_ids($items):
     ($choice.new_onboarding_models | type) == "array";
     "new_onboarding_models must be an array"
   )
+| require(
+    ($choice.onboarding_deployments | type) == "array"
+      and all($choice.onboarding_deployments[]; type == "object" and exact_fields(["model_id", "deployments"]));
+    "Each sized deployment must contain exactly model_id and deployments"
+  )
+| (
+    [$choice.onboarding_deployments[] | select((.deployments | type) == "array" and (.deployments | length) > 0)]
+    | INDEX(.model_id)
+  ) as $sized
 | ($choice.maintained_model_ids | INDEX(.)) as $maintained
 | ($obsolete_ids | INDEX(.)) as $obsolete
 | {
@@ -118,12 +139,17 @@ def model_ids($items):
             task,
             rationale: $scores[.model_id].rationale,
             heat: $scores[.model_id].heat,
-            deployments: [.deployments[] | {"deploy.gpu": .gpu, "deploy.gpu_count": .gpu_count}]
+            deployments: (
+              $sized[.model_id].deployments
+                // [.deployments[] | {"deploy.gpu": .gpu, "deploy.gpu_count": .gpu_count}]
+            )
           }
       ]
       + [
           $choice.new_onboarding_models[]
           | select((.model_id as $model_id | $recipe_ids | index($model_id)) == null)
+          | select($sized[.model_id] != null)
+          | . + {deployments: $sized[.model_id].deployments}
         ]
     )
   }

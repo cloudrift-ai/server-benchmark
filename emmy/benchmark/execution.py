@@ -8,7 +8,7 @@ from pathlib import Path
 
 from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_group_file_handler
 from emmy.benchmark.command_workload import run_command_workload
-from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure
+from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure, Provenance
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
 from emmy.deploy import DeployParams
 from emmy.deploy import deploy as deploy_entry
@@ -166,7 +166,7 @@ async def run_execution_group(
             strict_stage = any(
                 task.recipe.command.strict for task in group.tasks if task.recipe.kind == "command" and task.recipe.command is not None
             )
-            await stage_to_remote(
+            staged_provenance = await stage_to_remote(
                 Path.cwd(),
                 stage_paths,
                 conn.address,
@@ -176,6 +176,14 @@ async def run_execution_group(
                 dry_run=dry_run,
                 require_clean=strict_stage,
             )
+            if staged_provenance is not None:
+                for task in group.tasks:
+                    if task.recipe.kind == "command" and task.recipe.command and task.recipe.command.stage:
+                        task.record.provenance = Provenance(
+                            git_revision=staged_provenance.git_revision,
+                            git_dirty=staged_provenance.git_dirty,
+                        )
+                        _persist(task, dry_run)
         for task in group.tasks:
             active_run_dir.set(task.run_dir)
             recipe = task.recipe

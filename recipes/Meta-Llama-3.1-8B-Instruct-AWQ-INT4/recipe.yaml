@@ -7,11 +7,9 @@ tags:
 
 model:
   huggingface: "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
-  rationale: "AWQ 4-bit Llama uniquely fits one 16GB V100 SXM2 where the FP16 checkpoint fails outright."
-  heat: 35
+  rationale: "Preserves chat contract on V100; Llama 3.1 aged."
+  heat: 20
   revision: db1f81ad4b8c7e39777509fac66c652eb0a52f91
-    Public 4-bit AWQ preserves the Llama 3.1 8B Instruct chat and tool-use contract
-    while fitting one 16 GB V100; the official FP16 checkpoint does not fit there.
   task: generate
 
 engine:
@@ -21,10 +19,9 @@ engine:
     gpu_memory_utilization: 0.88
     max_concurrent_requests: 8
     vllm:
-      image: "cloudriftai/1cat-vllm-sm70@sha256:8405bb60d24610417d0d6da278a753e2c968bfd1e0d7ff7f79cd6601a038b2be"
+      image: "cloudriftai/1cat-vllm-sm70:1.0.0"
       extra_args: >-
         --dtype half
-        --language-model-only
         --attention-backend FLASH_ATTN_V100
         --max-num-batched-tokens 4096
         --enable-auto-tool-choice

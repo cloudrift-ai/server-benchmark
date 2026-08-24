@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: baidu/Unlimited-OCR
+  rationale: Novel 3B vision-language OCR with massive downloads and API utility.
+  heat: 65
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 1

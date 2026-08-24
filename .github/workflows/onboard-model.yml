@@ -66,7 +66,7 @@ jobs:
       EMMY_RENTAL_TAGS: emmy,workflow:model-verification-onboarding,gh-job:${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       VM_LEASE: /tmp/emmy-onboard-${{ github.run_id }}-${{ github.run_attempt }}.json
       ONBOARD_SUMMARY: /tmp/emmy-onboard-summary-${{ github.run_id }}-${{ github.run_attempt }}.json
-      AGENT_PROMPT: /tmp/emmy-onboard-prompt-${{ github.run_id }}-${{ github.run_attempt }}.md
+      AGENT_TASK: /tmp/emmy-onboard-task-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_EVENTS: /tmp/emmy-onboard-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_OUTPUT: /tmp/emmy-onboard-agent-${{ github.run_id }}-${{ github.run_attempt }}.txt
       PROVIDER_CONFIG: /tmp/emmy-onboard-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
@@ -74,6 +74,7 @@ jobs:
       SSH_KEY: /tmp/emmy-onboard-ssh-${{ github.run_id }}-${{ github.run_attempt }}
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
       WORKFLOW_SOURCE: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}
+      OPENCODE_CONFIG_DIR: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
@@ -441,67 +442,27 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh_user }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          mode = os.environ["ONBOARD_MODE"]
-          if mode == "onboarding":
-              task = (
-                  "Use the existing onboarding/untested recipe shell when present, or create the recipe for a direct "
-                  "manual request. Preserve model.heat and replace onboarding and untested with best-effort after "
-                  "qualification."
-              )
-          else:
-              task = (
-                  "Reverify the existing recipe from its current configuration, refresh its measured artifacts, and "
-                  f"preserve its {os.environ['EXPECTED_LIFECYCLE']} lifecycle tag and model.heat."
-              )
-          prompt = f"""Use the onboard-model skill non-interactively.
-
-          The attached exact-workflow-SHA copies of the onboard-model, tune-kernels, and run-experiment skills are authoritative.
-          Follow them instead of any older skill copies in the artifact worktree.
-
-          Operation mode: {mode}
-          Hugging Face model ID: {os.environ['MODEL_ID']}
-          Exact target: {os.environ['TARGET_GPU']} x {os.environ['TARGET_GPU_COUNT']}
-          SSH target: {os.environ['SSH_TARGET']}
-          Raw SSH host: {os.environ['SSH_HOST']}
-          Raw SSH user: {os.environ['SSH_USER']}
-          SSH port: {os.environ['SSH_PORT']}
-          SSH private key: {os.environ['SSH_KEY']} (pass --ssh-key {os.environ['SSH_KEY']} to every Emmy remote command)
-          Absolute deadline: {os.environ['ONBOARD_DEADLINE']}
-          Multimodal mode: {os.environ['MULTIMODAL_MODE']}
-          Publication authorized: {os.environ['PUBLISH_IMAGE']}
-          Atomic summary output: {os.environ['ONBOARD_SUMMARY']}
-
-          {task}
-          Do not select a model or GPU, provision or delete the VM, commit, push, or open/update a pull request.
-          For missing images or unfamiliar launch failures, investigate current official registries, release notes,
-          engine documentation, and upstream issues. Test an evidence-backed current repository/tag when the configured
-          image moved or disappeared, then pin the exact working tag or digest. You may implement a bounded,
-          model-agnostic compatibility fix with focused tests when it is necessary for this exact qualification.
-          You may delegate independent read-only research or failure diagnosis to the onboard-investigator subagent;
-          retain responsibility for all edits, measurements, and conclusions.
-          Always write the required atomic summary with mode set to {mode}, including experiment_artifacts with
-          the shared experiment recipe and RESULTS.md plus the exact results_<gpu-short>x<gpu-count>.tar.gz archive.
-          The archive must contain the platform's system-only experiment records; do not retain those records as
-          top-level files. Replace only this platform's archive and preserve every other platform archive and
-          RESULTS.md section. Do not retain the ignored dated run directory or onboarding summaries. Update the final
-          recipe's RESULTS.md for this platform while preserving still-valid measurements for its other platforms.
-          Git LFS is already configured through the workflow's local attributes. Verify the named archive reports
-          filter: lfs, but do not run git lfs track and do not modify or list .gitattributes in the summary.
-          Include artifacts listing every intended created, modified, or deleted repository file and no exploratory
-          output. Allowed areas are recipes/ (including the model's golden/ subdirectory), experiments/,
-          docker/vllm-emmy-serve/models/, and a bounded small fix under emmy/ with its focused tests and nearest
-          ARCHITECTURE.md updates.
-          Include one-line deployment_summary and performance_summary values drawn from the exact selected recipe lane.
-          On failure, set failure.regression=true only when a previously qualified behavior or performance lane
-          regressed and the bounded fix attempt could not restore it; include a concise, credential-free message for
-          the Discord notification.
-          """
-          Path(os.environ["AGENT_PROMPT"]).write_text(prompt)
-          PY
+          jq -n \
+            --arg mode "$ONBOARD_MODE" \
+            --arg model_id "$MODEL_ID" \
+            --arg gpu "$TARGET_GPU" \
+            --argjson gpu_count "$TARGET_GPU_COUNT" \
+            --arg ssh_target "$SSH_TARGET" \
+            --arg ssh_host "$SSH_HOST" \
+            --arg ssh_user "$SSH_USER" \
+            --arg ssh_port "$SSH_PORT" \
+            --arg ssh_key "$SSH_KEY" \
+            --arg deadline "$ONBOARD_DEADLINE" \
+            --arg multimodal_mode "$MULTIMODAL_MODE" \
+            --argjson publish_image "$PUBLISH_IMAGE" \
+            --arg summary_path "$ONBOARD_SUMMARY" \
+            --arg expected_lifecycle "$EXPECTED_LIFECYCLE" \
+            '{schema_version: 1, mode: $mode, model_id: $model_id, gpu: $gpu, gpu_count: $gpu_count,
+              ssh_target: $ssh_target, ssh_host: $ssh_host, ssh_user: $ssh_user, ssh_port: $ssh_port,
+              ssh_key: $ssh_key, deadline: $deadline, multimodal_mode: $multimodal_mode,
+              publish_image: $publish_image, summary_path: $summary_path,
+              expected_lifecycle: $expected_lifecycle}' \
+            > "$AGENT_TASK"
 
           set +e
           opencode run \
@@ -510,9 +471,12 @@ jobs:
             --model cloudrift/agent \
             --format json \
             --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
+            --file "$WORKFLOW_SOURCE/prompts/onboard-model/qualify.md" \
+            --file "$WORKFLOW_SOURCE/prompts/onboard-model/investigate.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
-            --file "$AGENT_PROMPT" > "$AGENT_EVENTS"
+            --file "$AGENT_TASK" > "$AGENT_EVENTS"
           agent_status=$?
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
@@ -871,7 +835,7 @@ jobs:
           rm -f \
             "$APP_KEY_FILE" \
             "$AGENT_EVENTS" \
-            "$AGENT_PROMPT" \
+            "$AGENT_TASK" \
             "$AGENT_OUTPUT" \
             "$ONBOARD_SUMMARY" \
             "$PR_SUMMARY" \

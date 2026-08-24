@@ -5,10 +5,13 @@ Two access shapes over one arithmetic: :meth:`LinearModel.quality` takes a featu
 scores a live candidate) and :meth:`LinearModel.quality_rows` takes a packed pool matrix (what ``emmy fit``
 descends on — one fp16 golden enumerates ~78k rows, so the per-dict path is not an option there). Before this
 module the two were separate transcriptions of the same formula kept in step by a parity test; drift between them
-would mean the fitter optimizing something other than what deploys.
+would mean the fitter optimizing something other than what deploys. :meth:`LinearModel.score_rows` is the front
+door onto the matrix shape rather than a third shape: it takes a whole candidate pool and decides, once and here,
+which columns this model class wants out of it.
 
 The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features``,
-``mean_scores_features`` and ``explain_features``. That is deliberate: ``FallbackPrior`` and the attribution
+``mean_scores_features`` and ``explain_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this
+module's own vocabulary, not ``Prior``'s). That is deliberate: ``FallbackPrior`` and the attribution
 diagnostics already compose priors on exactly those, so a holder can delegate to any model through them without a
 second vocabulary. :mod:`.catboost_model` is the other model class answering the same surface.
 :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
@@ -16,27 +19,45 @@ quantity a derivative-free descent walks, which a tree model has no additive equ
 point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
 
 Weight-set routing is ONE fact read from ONE place: the ``S_ext_n_symbolic_axis`` stamp
-(:data:`ROUTING_FEATURES`). A symbolic-axis (masked-tile) kernel prices differently from its static counterpart —
-boundary-guard tax on small tiles, staged prologues locked out, occupancy over a free-dim product that excludes
-the symbolic axis — so it ranks under ``weights_dynamic``. That stamp must never ALSO be a fitted weight: it is
-constant across a candidate pool, so a linear term on it adds the same constant to every candidate and cancels
-exactly out of the within-pool ranking. The rank objective cannot see it, and whatever value a descent lands on
+(:data:`~..features.ROUTING_FEATURES`, spelled by the featurizer and read by
+:func:`~..features.is_dynamic_row`; what the stamp MEANS is this module's business). A symbolic-axis
+(masked-tile) kernel prices differently from its static counterpart — boundary-guard tax on small tiles,
+staged prologues locked out, occupancy over a free-dim product that excludes the symbolic axis — so it ranks
+under ``weights_dynamic``. That stamp must never ALSO be a fitted weight: it is constant across a candidate
+pool, so a linear term on it adds the same constant to every candidate and cancels exactly out of the
+within-pool ranking. The rank objective cannot see it, and whatever value a descent lands on
 there is decided by the regularizer and noise. It routes; it is never a coordinate.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, ROUTING_FEATURES, is_dynamic_row
+from emmy.compiler.pipeline.search.prior.base import latency_proxy
 
-# Features that SELECT a weight set rather than contribute a term. Owned here because routing is the model's
-# business; ``fit/group.py`` imports this to hold the columns out of the fitted matrix entirely, so a routing
-# feature cannot become a descent coordinate by accident.
-ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
+if TYPE_CHECKING:
+    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
+    # subprocess) onto the deploy path, which loads none of it today.
+    from emmy.compiler.pipeline.search.data.group import Group
+
+
+def descent_cols(names) -> tuple[str, ...]:
+    """``names`` minus the routing stamps — the coordinates a linear descent may walk (why: the module
+    docstring's identifiability argument).
+
+    The narrowing lives with the model class, not with the dataset: the dataset packs every column it is
+    given, and a tree splits on this one. A dataset that withheld it to protect THIS model class would be
+    deciding for both — and did, leaving the tree a column of NaN.
+
+    Filtering preserves relative order, so ``descent_cols(sorted(union | routing))`` is
+    ``sorted(union - routing)`` exactly, which is why packing the column left every fitted artifact
+    byte-identical."""
+    return tuple(n for n in names if n not in ROUTING_FEATURES)
+
 
 # The scalar params the FIT searches, in descent-coordinate order — the atomic-free interaction, the one term
 # the deployed quality cannot express as a linear weight. ``fit/linear.py`` walks exactly these coordinates.
@@ -130,18 +151,35 @@ class LinearModel:
     atomic_free_weight: float
     atomic_free_split_threshold: float
 
+    def __post_init__(self) -> None:
+        """A routing feature may never carry a fitted weight.
+
+        Withholding the column from the matrix used to make this structural. It is a convention now that
+        every column is packed and each model class narrows for itself (:func:`descent_cols`), so it gains
+        a guard at construction — the one place a hand-edited artifact is also caught.
+
+        Worth being precise about the harm, since the module docstring above says such a term "cancels
+        exactly": within one candidate pool it does, and it cancels out of the greedy argmin, out of
+        ``normalize_policy`` and out of ``TiltBlend`` for the same reason. The exception is
+        ``policy/greedy._resolved_price``, which SUMS per-kernel scores to compare whole kernel sets — a
+        routing weight there scales every symbolic-axis kernel's price and biases the fusion comparison."""
+        for name, w_set in (("weights", self.weights), ("weights_dynamic", self.weights_dynamic)):
+            if bad := set(w_set or {}) & set(ROUTING_FEATURES):
+                raise ValueError(
+                    f"{name} carries a fitted weight for routing feature(s) {sorted(bad)} — a routing stamp is "
+                    f"constant within a candidate pool, so it selects a weight set and never contributes a term"
+                )
+
     # --- the shared model surface (Prior's own names) ---------------------------------------------------
 
     def mean_score_features(self, feats: dict) -> float:
         """Latency proxy (``exp(-scale · quality)``), lower is better. A row the weights have no opinion on
         scores the neutral ``1.0``, so ties fall to enumeration order.
 
-        The clip is on the exp ARGUMENT, never the quality: a former ±80 quality clip sat inside the live range
-        (at scale 0.1 thousands of good warp tiles score past 80), so the whole good region collapsed onto one
-        ``exp(-8)`` plateau and greedy's argmin fell through to emission order. Within ±700 the proxy stays
-        strictly ordered; beyond it ``exp`` would overflow or underflow anyway. Consumers needing a BOUNDED value
-        (the ``FallbackPrior`` tilt multiplier) clamp on their side."""
-        return math.exp(max(min(-self.scale * self.quality(feats), 700.0), -700.0))
+        The transform, its exponent bound and the warning that bound fires live in
+        :func:`~.base.latency_proxy` — one definition, so this model class and the tree cannot drift on what a
+        deployed score means."""
+        return latency_proxy(self.quality(feats), self.scale)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score_features`, element-wise — this model has no vectorized per-dict path, and
@@ -159,7 +197,7 @@ class LinearModel:
         and the number it decomposes are one thing rather than two that have to be kept in step. Terms that would
         be ``±0.0`` (an absent or zero feature, or the gate on a row with no finalize kernel) are dropped: they
         are neutral in the total and would only pad the explanation."""
-        w_set = self.weight_set(self.is_dynamic_row(feats))
+        w_set = self.weight_set(is_dynamic_row(feats))
         terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
         finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
         if finalize:
@@ -193,10 +231,25 @@ class LinearModel:
             mat, vec, gate_columns(mat, names), weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
         )
 
-    @staticmethod
-    def is_dynamic_row(feats: dict) -> bool:
-        """Whether a featurized row takes the dynamic weight set — the ONE reading of the routing stamp."""
-        return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """:meth:`quality_rows` over a whole packed pool — the pool-shaped entry point, and the ONE place the
+        linear model's column choice is made. :class:`~..catboost_model.CatBoostModel` answers the same
+        shape, which is what lets the trainer and the fold harness hand either model class a group and rank it
+        without knowing which one they hold.
+
+        Two things a caller must not re-derive, which is why they live here rather than at each call site.
+        The COLUMNS are the weight set's names UNION :data:`GATE_DEFAULTS`: the interaction's two inputs have
+        to be present whether or not the weight dict names them, since a pruned zero weight drops the key.
+        The WEIGHT SET comes from :meth:`weight_set`, so the static-vs-dynamic choice is made once, here,
+        and a second copy of that routing cannot drift from it.
+
+        ``None`` when the group needs the dynamic set and this model has none — the unfittable
+        cross-validation fold. Asking :meth:`weight_set` instead would raise, and a fold harness wants an
+        answer it can skip on, not an exception."""
+        if group.dynamic and self.weights_dynamic is None:
+            return None
+        names = sorted(set(self.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
+        return self.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
 
     def weight_set(self, dynamic: bool) -> dict[str, float]:
         """The weight dict a row of this kind scores under — the ONE place the two sets are chosen between.

@@ -130,8 +130,11 @@ In automated lifecycle mode, follow `prompts/discover-models/lifecycle.md`: invo
 once and in parallel, then invoke `discover-scorer` once per deterministic recipe batch and in parallel. Each source
 investigator stays read-only, uses at most three public-web calls, and returns a compact source-specific candidate
 list. Each scorer follows `prompts/discover-models/score-recipes.md` without doing more research or choosing lifecycle
-state. The parent alone reconciles identities, compares scores globally, selects the maintained set, and proposes new
-onboarding models.
+state. Invoke `discover-fit` once per onboarding model — every new candidate and every existing onboarding shell —
+in parallel; each sizes exactly one checkpoint under `prompts/model-fit.md` and
+`prompts/discover-models/size-deployments.md` and returns that model's deployments. The parent alone reconciles
+identities, compares scores globally, selects the maintained set, and proposes new onboarding models; it relays the
+sized deployments verbatim and authors none of them.
 
 Layer quantitative demand with qualitative mindshare — what people are actually saying. For each top candidate,
 search for:
@@ -182,49 +185,16 @@ mechanical lists.
 
 ## Step 4 — Hardware requirements per finalist
 
-For each finalist, pull from the HF model card / `config.json` (web search or the repo): **total parameters**,
-**active parameters** (MoE), and the **available quantizations** (is there an FP8 / AWQ / NVFP4 / INT4 repo, or
-only BF16?). Then compute VRAM to fit.
+For each finalist, follow [`prompts/model-fit.md`](../../../prompts/model-fit.md) — the shared VRAM fit contract
+that `onboard-model` follows too, so a proposed platform and a measured one mean the same thing. It defines how to
+read total parameters from `config.json`, the footprint arithmetic, the Mixture of Experts and quantization traps,
+tensor-parallel sizing, and the requirement to state the numbers behind every fit claim.
 
-**VRAM rules of thumb** (weights only; per GPU):
+Read canonical GPU names and their `vram_mib` from `emmy/gpu.py`; that registry is the authority on fleet capacity.
 
-```
-weight VRAM ≈ total_params(B) × bytes_per_param
-    bytes_per_param:  BF16/FP16 = 2  ·  FP8 = 1  ·  AWQ/INT4 ≈ 0.5
-min-to-serve ≈ weight VRAM × 1.3        # + CUDA graphs, activations, a small KV cache at modest context
-long-context / high-concurrency ≈ weight VRAM × 1.5+  (KV cache grows with context × concurrency)
-```
-
-Two traps:
-- **MoE VRAM is governed by TOTAL params** (all experts load into memory), not active params — active params
-  only drive *throughput*. A 235B-A22B MoE needs ~235B worth of weights resident.
-- **Quantization decides the GPU.** The same model in BF16 vs AWQ can be a 4× VRAM difference — always check
-  which quant repos actually exist before assigning a tier.
-
-**Multi-GPU:** if it doesn't fit on one card, tensor-parallel across N (`tensor_parallel_size`): per-GPU need
-≈ `min-to-serve / N` + per-GPU overhead. N must divide the model's attention head count; prefer 2/4/8.
-
-**Fleet VRAM** (single GPU; multiply by `gpu_count` for multi-GPU nodes):
-
-| GPU (hardware.py name) | VRAM | short |
-|---|---|---|
-| `NVIDIA B200` | ~180 GB | b200 |
-| `NVIDIA H200 141GB` | 141 GB | h200 |
-| `NVIDIA H100 80GB` | 80 GB | h100 |
-| `NVIDIA RTX PRO 6000 Blackwell {Workstation/Max-Q/Server} Edition` | 96 GB | pro6000 |
-| `NVIDIA GeForce RTX 5090` | 32 GB | rtx5090 |
-| `NVIDIA GeForce RTX 4090` | 24 GB | rtx4090 |
-
-**Quick fit reference** (weights only — apply ×1.3 for real serving; pick the quant that exists):
-
-| Total params | BF16 (×2) | FP8 (×1) | AWQ/INT4 (×0.5) |
-|---|---|---|---|
-| ~8B | 16 GB → 1×4090(tight)/5090 | 8 GB → 1×4090 | 4 GB → 1×4090 |
-| ~30B | 60 GB → 1×H100/Pro6000 | 30 GB → 1×5090(tight)/Pro6000 | 15 GB → 1×4090(tight)/5090 |
-| ~70B | 140 GB → 1×H200/2×H100 | 70 GB → 1×H100/Pro6000 | 35 GB → 1×Pro6000/5090(tight) |
-| ~120B | 240 GB → 2×H200/2×B200 | 120 GB → 1×B200/2×H100 | 60 GB → 1×H100/Pro6000 |
-| ~235B | 470 GB → 4×B200 | 235 GB → 2×B200/4×H100 | ~120 GB → 1×B200/2×H100 |
-| ~400B+ | 800 GB → 8×B200 | 400 GB → 4×B200/8×H100 | ~200 GB → 2×B200/4×H100 |
+In automated lifecycle mode this step belongs to the `discover-fit` subagents, one per onboarding model, so each
+checkpoint is sized on its own evidence rather than alongside the demand signals that selected it. A model whose
+weights no fleet platform can hold yields no deployment and is dropped.
 
 ## Step 5 — Hardware → model matrix (the deliverable)
 
@@ -263,14 +233,11 @@ If the user just wanted the survey, stop at the matrix.
 
 - **Don't rank by downloads alone** — it's lagging and size-biased (tiny fine-tuning bases dominate). `trending`
   + arena `elo` + Step-2 hype together are the demand signal.
-- **Don't size MoE by active params.** VRAM follows TOTAL params; active params only set throughput.
-- **Don't assign a GPU tier without checking the quant exists.** "Fits H100 at FP8" is meaningless if only a
-  BF16 repo is published. Verify the AWQ/FP8/NVFP4 repo on HF first.
+- **Don't assign a platform from the model name.** `prompts/model-fit.md` is the contract: total parameters read
+  from `config.json`, a quantization whose repository exists, and the stated arithmetic behind the claim.
 - **Don't treat a blank arena Elo as "bad".** It usually means the model is too new for the last weekly arena
   snapshot — lean on HF `trending` + news there.
 - **Don't spam the script.** HF rate-limits bursts; use `--workers 4` and re-run sparingly (transient failures
   land in the script's "COULD NOT VERIFY" bucket — wait and re-run, don't hammer).
 - **Don't deploy or edit recipes in this skill.** The automated workflow applies a validated lifecycle manifest;
   `onboard-model` owns real deployment and qualification.
-- **Don't forget overhead.** The fit table is weights-only; real serving needs ~1.3× for activations + KV, more
-  for long context / high concurrency.

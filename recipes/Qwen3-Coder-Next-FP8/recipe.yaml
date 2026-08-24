@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Flagship 80B coding MoE FP8 with 1.4M HF downloads served on a single Pro 6000 at 262K context."
-  heat: 71
+  rationale: "FP8 coding variant overshadowed by Qwen3.8 Coder waves."
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

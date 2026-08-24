@@ -353,6 +353,18 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert failed["status"] == "fail"
     assert "exceeds" in failed["error"]
 
+    greedy = _strict_correctness_proof(
+        {"o": np.array([1.0015, 100.05], dtype=np.float32)},
+        eager,
+        reference="same-input-greedy",
+    )
+    assert greedy["status"] == "pass"
+    assert greedy["reference"] == "same-input-greedy"
+    assert greedy["rtol"] == greedy["atol"] == 1e-3
+    assert greedy["max_abs_error"] > 0
+    assert greedy["mean_abs_error"] > 0
+    assert greedy["max_rel_error"] > 0
+
 
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
@@ -1075,6 +1087,42 @@ def test_bind_inputs_preserves_int_dtype():
     np.testing.assert_array_equal(bound["position_ids"], np.arange(8, dtype=np.int32)[None, :])
 
 
+def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
+    import numpy as np
+
+    from emmy.commands.run import _bind_inputs, _comparison_outputs
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (2,), dt.BF16), node_id="x")
+    g.add_node(
+        op=ConstantOp(name="weight", source_path="weight"),
+        inputs=[],
+        output=Tensor("weight", (2,), dt.BF16),
+        node_id="weight",
+    )
+    g.inputs = ["x"]
+    g.outputs = ["x"]
+
+    class _Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([3.0, -4.0], dtype=torch.bfloat16))
+
+    x = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+    bound = _bind_inputs(g, _Module(), (x,), {})
+
+    assert bound["x"].dtype == np.uint16
+    assert bound["weight"].dtype == np.uint16
+    np.testing.assert_array_equal(bound["x"], x.view(torch.uint16).numpy())
+    np.testing.assert_array_equal(
+        _comparison_outputs({"x": bound["x"]}, g)["x"],
+        np.array([1.0, -2.0], dtype=np.float32),
+    )
+
+
 def test_bind_inputs_arity_mismatch_raises():
     """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
     also runs inside the bench worker child, where an exit(1) reached the parent as an
@@ -1380,6 +1428,34 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp
 
 
+def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _print_kernel_stats
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.expr import Var
+
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="k_dynamic", grid=((Var("num_tokens"),), (1,), (1,))),
+        inputs=[],
+        output=Tensor("out", (1,)),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    bench = SimpleNamespace(
+        min_ms=0.5,
+        time_ms=0.5,
+        per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)],
+        e2e_min_ms=None,
+    )
+
+    _print_kernel_stats(graph, bench, sym_env={"num_tokens": 32})
+
+    assert "k_dynamic" in capsys.readouterr().out
+
+
 def _iso_bench_fixtures():
     """One-kernel greedy graph + interleaved bench (500 µs) + isolated re-bench (400 µs)
     ``_GoldenBench`` — the ``greedy_iso`` display/json inputs."""
@@ -1486,3 +1562,34 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
     assert pinned["timing_semantics"] == "whole_program_e2e"
     assert pinned["captured"] is True
     assert pinned["num_launches"] == 2
+
+
+def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatch):
+    """A realized cross-CTA ``REDUCE`` split leaves no knob stamp, so the gate must not read one.
+
+    ``030_split_reduce`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
+    schedule row, so no piece may carry the ``g<n>`` it came from — ``test_split_fresh_kernels``
+    asserts exactly that. The receipt is the piece's sliced reduce axis, which knob stamps cannot
+    show, so a ``g2a`` pin that DID realize used to be reported ``realized (off)`` and its row went
+    unbenched. What the pieces still stamp is the rest of the row, and that stays gateable.
+    """
+    from emmy.compiler.pipeline import knob as knob_mod
+    from emmy.compiler.pipeline.knob import Knob, KnobType
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    monkeypatch.setattr(
+        knob_mod,
+        "_REGISTRY",
+        {"REDUCE": Knob("REDUCE", KnobType.STR, off=""), "WORK": Knob("WORK", KnobType.STR, off="")},
+    )
+
+    # Wholly structural: the whole value is the cross-CTA stage, so there is nothing left to gate.
+    assert unreproducible_pin_flag({"REDUCE": "g2a"}, [{"REDUCE": "", "WORK": "t16x8"}]) is None
+    assert unreproducible_pin_flag({"REDUCE": "g4k"}, [{"REDUCE": "", "WORK": "t16x8"}]) is None
+    # The remainder is still gated: ``coop`` is stamped by the piece that realizes it.
+    assert unreproducible_pin_flag({"REDUCE": "g2k/coop"}, [{"REDUCE": "coop"}]) is None
+    flag = unreproducible_pin_flag({"REDUCE": "g2k/coop"}, [{"REDUCE": ""}])
+    assert flag is not None and "REDUCE=g2k/coop" in flag
+    # A value with no cross-CTA stage is unaffected — the old behaviour stands.
+    assert "unreproducible pin" in unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": ""}])
+    assert unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": "coop"}]) is None

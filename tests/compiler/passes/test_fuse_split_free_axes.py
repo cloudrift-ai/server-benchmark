@@ -4,8 +4,10 @@ A view fused into a contraction iterates the post-view axes while the operand lo
 producer's single axis through a composite index — which locks the kernel out of contraction
 binding (the trailing free pair reads the wrong row and the weight load carries a third grid
 axis). The canonicalization restores the single-axis spelling; these tests pin the fuse cases
-(N split, M split), the decline cases (an axis addressed alone, a permuted-stride split), the
-downstream classification of the canonical nest, and the binder's per-expr role purity."""
+(N split, M split, the pair across an intervening free loop — the transposed projection, the
+permuted split store), the decline case (an axis addressed alone), the downstream classification
+of the canonical nest, the warp tier's split-store addressability, and the binder's per-expr
+role purity."""
 
 from __future__ import annotations
 
@@ -142,11 +144,75 @@ def test_axis_addressed_alone_declines():
     assert [ln.axis.extent for ln in _free_chain(op)] == [Dim(M), Dim(H), Dim(D)], "the pair must decline"
 
 
-def test_permuted_split_declines():
+def test_permuted_split_fuses_with_the_split_store():
     """A store whose dims transpose the split (``[…, d, h]`` under an ``h*D + d`` operand index)
-    has no matching stride — the flatten cannot fold the residue, so the pair declines."""
+    still fuses: the output keeps the honest ``f%D, f//D`` pair — exact per element on every
+    scalar tier; whether the warp tier can address it is the scheduler's legality question."""
     op = _run(_graph(_split_n_body((Literal(0, "int"), Var("a0"), Var("a2"), Var("a1"))), (1, M, D, H)))
-    assert [ln.axis.extent for ln in _free_chain(op)] == [Dim(M), Dim(H), Dim(D)]
+    chain = _free_chain(op)
+    assert [ln.axis.extent for ln in chain] == [Dim(M), Dim(H * D)]
+    n = chain[1].axis.name
+    wr = next(s for s in op.body.iter() if isinstance(s, Write))
+    assert wr.index[2] == BinaryExpr("%", Var(n), Literal(D, "int"))
+    assert wr.index[3] == BinaryExpr("//", Var(n), Literal(D, "int"))
+
+
+def _transposed_body() -> Body:
+    """The attention projection's ``view(b, s, h, d).transpose(1, 2)``: free (h, s, d) — the
+    split pair (h, d) is NOT adjacent, ``s`` sits between — with the weight addressed
+    ``w[h*D + d, k]`` and the output stored ``[0, h, s, d]``."""
+    comp = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(D, "int")), Var("a2"))
+    kloop = Loop(
+        axis=Axis("k", Dim(K)),
+        body=Body(
+            (
+                Load(name="wv", input="w", index=(comp, Var("k"))),
+                Load(name="xv", input="x", index=(Literal(0, "int"), Var("a1"), Var("k"))),
+                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("wv", "xv")),
+                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    cell = (kloop, Write(output="out", index=(Literal(0, "int"), Var("a0"), Var("a1"), Var("a2")), value="acc"))
+    nest = Loop(
+        axis=Axis("a0", Dim(H)),
+        body=Body((Loop(axis=Axis("a1", Dim(M)), body=Body((Loop(axis=Axis("a2", Dim(D)), body=Body(cell)),))),)),
+    )
+    return Body((nest,))
+
+
+def test_split_pair_fuses_across_an_intervening_free_loop():
+    """The transposed projection: the pair interchanges past ``s`` (free loops are parallel) and
+    fuses under it — the weight load collapses to the bare axis, the store keeps the permuted
+    ``[0, f//D, s, f%D]``."""
+    op = _run(_graph(_transposed_body(), (1, H, M, D)))
+    chain = _free_chain(op)
+    assert [ln.axis.extent for ln in chain] == [Dim(M), Dim(H * D)], "s stays outer; the (h, d) pair fuses under it"
+    n = chain[1].axis.name
+    wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
+    assert wv.index == (Var(n), Var(_reduce_name(op)))
+    wr = next(s for s in op.body.iter() if isinstance(s, Write))
+    s_name = chain[0].axis.name
+    assert wr.index == (
+        Literal(0, "int"),
+        BinaryExpr("//", Var(n), Literal(D, "int")),
+        Var(s_name),
+        BinaryExpr("%", Var(n), Literal(D, "int")),
+    )
+
+
+def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
+    """Downstream: the lift positions an axis by the INNERMOST store dim carrying it, so under
+    the permuted store the fused axis stays the trailing ``n`` (its ``%`` dim is the contiguous
+    one) and the contraction binds with the weight as B. Positioning by the quotient dim would
+    make the fused axis ``m`` and the stride-``D`` ``s`` the column — the mma store's ``+ col``
+    would then address the wrong element (and did: a hang on the GPU)."""
+    op = _run(_graph(_transposed_body(), (1, H, M, D)))
+    tile = recognized_tile(op)
+    assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
+    node = tile.op
+    assert node.axis is not None and node.role is AxisRole.CONTRACTION
+    assert isinstance(node.b, Load) and node.b.input == "w"
 
 
 def test_canonical_nest_classifies_as_contraction():
@@ -183,14 +249,14 @@ def test_canonical_nest_classifies_as_contraction():
     assert isinstance(node.b, Load) and node.b.input == "w"
 
 
-def _bilinear_fold(w_index: tuple, x_index: tuple):
+def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply"):
     loop = Loop(
         axis=Axis("k", Dim(K)),
         body=Body(
             (
                 Load(name="wv", input="w", index=w_index),
                 Load(name="xv", input="x", index=x_index),
-                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("wv", "xv")),
+                Assign(name="prod", op=ElementwiseImpl(product), args=("wv", "xv")),
                 Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
             )
         ),
@@ -220,3 +286,97 @@ def test_bind_bilinear_declines_composite_role_expr():
         con, _ = r
         for ch in con.channels:
             assert not isinstance(ch.b, Load), "the impure composite must not become a direct slab load"
+
+
+def test_bind_bilinear_accepts_grouped_computed_b_independent_of_product_order():
+    """A flattened GQA value row is a computed B cone when the query-head group and channel
+    share one index expression. The multiply's commutative argument order cannot decide whether
+    that cone is discovered: fusion emits the value load first in the deployed attention cell."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+    )
+
+    r = bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"}))
+
+    assert r is not None
+    con, epi = r
+    assert not epi
+    assert isinstance(con.a, Load) and con.a.input == "x"
+    assert all(not isinstance(channel.b, Load) for channel in con.channels), "the flattened grouped value must use a computed B cone"
+
+
+def test_bind_bilinear_rejects_grouped_b_that_changes_with_the_row():
+    """A grouped value address that also reads the output row is not one B slab per tile.
+    Trying the commutative product's other orientation must still fail closed."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
+    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+    )
+
+    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
+
+
+def test_bind_bilinear_does_not_reorder_a_noncommutative_product():
+    """Trying the opposite direct/computed role is licensed only for a commutative product."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+        product="subtract",
+    )
+
+    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
+
+
+# --- the warp tier's split-store addressability --------------------------------------------------- #
+
+
+def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16, 8, 16)) -> str | None:
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+
+    free = tuple(Axis(nm, Dim(4)) for nm in free_names)
+    shapes = {"out": Tensor("out", shape)}
+    return legal.warp_split_store([Write(output="out", index=index, value="acc")], free, atom, shapes)
+
+
+def _pair(name: str, q: int, op: str):
+    return BinaryExpr(op, Var(name), Literal(q, "int"))
+
+
+def test_warp_split_store_legality():
+    """The fragment store evaluates the cell base once per atom and adds ``col`` / ``row·ldm``:
+    a split dim pair is addressable when the row-major flatten recomposes it (strides match the
+    split, any ``Q``), or when the ``%`` dim is the innermost carrier, contiguous for ``n``, with
+    ``Q`` a multiple of the atom extent — an aligned atom never straddles a ``Q`` boundary."""
+    lit0 = Literal(0, "int")
+    # #561's row-major N split: affine recomposition, Q=4 is fine.
+    assert _split_store_ok((lit0, Var("m"), _pair("n", 4, "//"), _pair("n", 4, "%")), (1, 8, 3, 4)) is None
+    # The transposed projection: permuted strides, Q % 8 == 0.
+    assert _split_store_ok((lit0, _pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), (1, 2, 8, 32)) is None
+    # Permuted with Q=12: an 8-wide atom straddles a head boundary.
+    assert "Q=12" in _split_store_ok((lit0, _pair("n", 12, "//"), Var("m"), _pair("n", 12, "%")), (1, 4, 8, 12))
+    # The within-pair transpose (quotient dim inner) never addresses — in either stride regime.
+    assert "quotient" in _split_store_ok((lit0, Var("m"), _pair("n", 32, "%"), _pair("n", 32, "//")), (1, 8, 32, 2))
+    # An M-side permuted split (a batch dim between the row's pair) needs 16-row atoms inside
+    # one ``P`` block.
+    assert _split_store_ok((lit0, _pair("m", 32, "//"), Var("b"), _pair("m", 32, "%"), Var("n")), (1, 2, 3, 32, 16)) is None
+    assert "Q=8" in _split_store_ok((lit0, _pair("m", 8, "//"), Var("b"), _pair("m", 8, "%"), Var("n")), (1, 2, 3, 8, 16))
+
+
+def test_warp_roles_move_only_the_innermost_carrier():
+    """An epilogue load under a split store carries ``n`` in two dims; only the innermost (the
+    ``%`` dim) moves within the atom — both dims moving would add the lane offset at two
+    strides."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_roles
+
+    lit0 = Literal(0, "int")
+    assert _warp_roles((lit0, Var("m"), _pair("n", 32, "//"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "fixed", "n")
+    assert _warp_roles((_pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "n")
+    assert _warp_roles((Var("b"), Var("m"), Var("n")), "m", "n") == ("fixed", "m", "n")

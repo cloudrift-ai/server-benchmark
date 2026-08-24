@@ -12,11 +12,11 @@ top, greedy (which descends fork-by-fork) can't either.
 
 from __future__ import annotations
 
-import math
 import statistics
 from dataclasses import dataclass
 
 from emmy.compiler.pipeline.search.data import Dataset, ShapeKey
+from emmy.compiler.pipeline.search.metrics import spearman, topk_pick, topk_regret
 
 
 def _n_tunable(knobs: dict) -> int:
@@ -47,19 +47,28 @@ def _op_label(sig: tuple) -> str:
 
 def reachability(prior, groups: dict) -> list[tuple]:
     """Per op: ``(label, best_us, pick_us, ratio, n_leaf_configs)`` — the config the
-    prior predicts fastest (``mean_score`` argmin) over the op's measured *leaf*
-    configs vs the measured best (ratio = the picked config's latency / the best's;
-    1.0 = recovers the optimum). ``groups`` maps an ``S_*`` signature to its
-    :class:`Sample`s (from :meth:`Dataset.group_by_op`)."""
+    prior predicts fastest over the op's measured *leaf* configs vs the measured best
+    (ratio = :func:`~..metrics.topk_regret` at ``k=1``; 1.0 = recovers the optimum).
+    ``groups`` maps an ``S_*`` signature to its :class:`Sample`s (from
+    :meth:`Dataset.group_by_op`).
+
+    Score ties resolve to the worst-measured candidate, the same rule :func:`fork_records`
+    prices a fork with: a tie expresses no preference, so the model gets the guarantee it
+    offers rather than the enumeration order it happened to draw."""
     out = []
     for sig, grp in groups.items():
         kmax = max(_n_tunable(s.all_knobs()) for s in grp)
         leaves = [s for s in grp if _n_tunable(s.all_knobs()) == kmax]
         if len(leaves) < 2:
             continue
-        best_us = min(s.latency_us for s in leaves)  # labels are latency µs — lower is better
-        pick_us = min(leaves, key=lambda s: prior.mean_score(s.all_knobs())).latency_us
-        out.append((_op_label(sig), best_us, pick_us, pick_us / best_us, len(leaves)))
+        # labels are latency µs and so is ``mean_score`` — both lower-is-better, which is what
+        # ``metrics``' regret family takes.
+        preds = [prior.mean_score(s.all_knobs()) for s in leaves]
+        lats = [s.latency_us for s in leaves]
+        best_us, picked = min(lats), topk_pick(preds, lats, 1)
+        if best_us <= 0:  # a label that is not a latency; a ratio against it would be meaningless
+            continue
+        out.append((_op_label(sig), best_us, lats[picked], lats[picked] / best_us, len(leaves)))
     return out
 
 
@@ -67,16 +76,14 @@ def _calibration(prior, groups: dict) -> float | None:
     """Median per-op Spearman ρ between the prior's predicted latency and the
     measured latency over each op's leaf configs (both µs → ρ near ``+1`` when
     well-calibrated)."""
-    from scipy.stats import spearmanr  # noqa: PLC0415
-
     rhos = []
     for grp in groups.values():
         kmax = max(_n_tunable(s.all_knobs()) for s in grp)
         leaves = [s for s in grp if _n_tunable(s.all_knobs()) == kmax]
         if len(leaves) < 3:
             continue
-        rho = spearmanr([prior.mean_score(s.all_knobs()) for s in leaves], [s.latency_us for s in leaves]).statistic
-        if not math.isnan(rho):
+        rho = spearman([prior.mean_score(s.all_knobs()) for s in leaves], [s.latency_us for s in leaves])
+        if rho is not None:
             rhos.append(rho)
     return statistics.median(rhos) if rhos else None
 
@@ -353,19 +360,14 @@ def fork_records(prior, nodes) -> list[ForkRecord]:
             continue
         fvecs = [knob_features(s.features) for s in sibs]
         scores = prior.mean_scores_features(fvecs)
-        picked_i, best_i = _pessimistic_pick(scores, sibs), min(range(len(sibs)), key=lambda i: sibs[i].value_us)
+        values = [s.value_us for s in sibs]
+        picked_i = topk_pick(scores, values, 1)
+        best_i = min(range(len(sibs)), key=lambda i: values[i])
         family = _fork_family(by_key.get(parent_key), sibs)
         records.append(
-            ForkRecord(_node_op_label(sibs[0].features), family, sibs[picked_i].value_us / true_best, sibs, fvecs, scores, picked_i, best_i)
+            ForkRecord(_node_op_label(sibs[0].features), family, topk_regret(scores, values, 1), sibs, fvecs, scores, picked_i, best_i)
         )
     return records
-
-
-def _pessimistic_pick(scores: list[float], sibs: list) -> int:
-    """The child index the prior's argmin picks, ties resolved to the WORST measured
-    value among tied children (a tie is a miss — see :class:`ForkRecord`)."""
-    best_pred = min(scores)
-    return max((i for i, p in enumerate(scores) if p == best_pred), key=lambda i: sibs[i].value_us)
 
 
 def sibling_regret(prior, nodes) -> list[tuple[str, str, float, int]]:
@@ -660,7 +662,7 @@ def _anchor_walk(prior, tree_nodes: list, gold: dict) -> tuple[int, list[_Anchor
             step = None
             if len(group) >= 2:
                 scores = prior.mean_scores_features([knob_features(s.features) for s in group])
-                picked = group[_pessimistic_pick(scores, group)]
+                picked = group[topk_pick(scores, [s.value_us for s in group], 1)]
                 kept = any(picked is m for m in matching)
                 gap = None
                 if not kept:
@@ -791,8 +793,8 @@ def _repick_regret(prior, r: ForkRecord, key: str) -> float:
     re-scoring — a deleted key carries each model's own absent semantics (``0.0``
     term for the linear prior = exact term removal; ``NaN`` routing for CatBoost)."""
     masked = [{k: v for k, v in f.items() if k != key} for f in r.fvecs]
-    picked = _pessimistic_pick(prior.mean_scores_features(masked), r.siblings)
-    return r.siblings[picked].value_us / r.siblings[r.best_i].value_us
+    # Never ``None``: :func:`fork_records` only builds a record from >= 2 siblings with a positive best.
+    return topk_regret(prior.mean_scores_features(masked), [s.value_us for s in r.siblings], 1)
 
 
 def _ablation_lines(prior, records: list[ForkRecord], *, min_support: int = 5) -> list[str]:

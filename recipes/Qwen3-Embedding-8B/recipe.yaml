@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "Largest Qwen3 embedding and primary compiler-plugin comparison target across consumer GPU family."
-  heat: 65
+  rationale: "Strong download and like counts in the embedding space."
+  heat: 58
   task: embed
 
 engine:

@@ -8,19 +8,30 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.commands import tune
+from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline.passes.identity import IdentityStrategy
+from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
+from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
+from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
+    _ProposalLoopIdentity,
     load_working_targets,
+    measure_proposals,
     persist_proposal_rankings,
     persist_tune_winner,
     realized_tuning_knobs,
     validate_working_gpu,
 )
+from emmy.compiler.pipeline.strategy import discovered_strategies
 from emmy.compiler.torch_wire import intern_program
 
 
@@ -181,6 +192,25 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert "measurements" not in winner
 
 
+def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
+    document, targets = load_working_targets(path)
+    target = targets[0]
+    rankings = [{"status": "ok", "latency_us": 8.0, "compile_flags": "-O1", "measured_knobs": {"TILE": "f2x2"}}] * len(target.proposals)
+
+    # ``tune`` persists per target and reuses the pools it loaded; the file must still be the
+    # one a full revalidating dump of the same document writes.
+    persist_proposal_rankings(path, document, target, rankings)
+    canonical = tmp_path / "canonical.yaml"
+    dump_golden_file(document, canonical)
+    assert path.read_bytes() == canonical.read_bytes()
+
+    document["configs"][0]["realizations"][0]["pins"] = "not-a-mapping"
+    with pytest.raises(ValueError, match="pins must be a mapping"):
+        persist_proposal_rankings(path, document, target, rankings)
+
+
 def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm")), path)
@@ -193,6 +223,426 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     assert len(got["configs"]) == 1
     assert got["configs"][0]["realizations"][0]["name"] == "mm"
     assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+
+
+def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    document, targets = load_working_targets(path)
+    route = {
+        "WORK": "w1x1",
+        "TILE": "mma_m16n8k16_f16_f32/f1x4/k8",
+        "REDUCE": "g8k",
+        "STAGE": "d1/smem",
+        "RASTER": "",
+    }
+    reward = InnerReward(
+        total_us=6.0,
+        ok=True,
+        per_op=[
+            OpResult(
+                name="mm",
+                op_key="key",
+                best_us=6.0,
+                searched_knobs=route,
+                searched_us=6.0,
+                searched_cuda_ops=2,
+                searched_structural=True,
+            )
+        ],
+    )
+
+    persist_tune_winner(path, document, targets[0], reward.searched_winner(), compile_flags="-O1")
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert realizations[1]["knobs"] == route
+    assert realizations[1]["ranking"] == {
+        "status": "ok",
+        "latency_us": 6.0,
+        "compile_flags": "-O1",
+        "measured_knobs": route,
+        "source": "tune",
+        "tune_winner": True,
+    }
+
+
+def test_place_proposal_records_only_the_fresh_fragment_cut(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    _, targets = load_working_targets(path)
+    loop_graph = Pipeline.build(LOOP_PASSES).run(targets[0].program.copy(), ctx=Context((8, 9)))
+    [original_loop] = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
+
+    identity = _ProposalLoopIdentity()
+    original = TileOp(knobs={"S_n_loop": 2.0})
+    cut_fragment = Graph()
+    cut_fragment.add_node(
+        LoopOp(body=original_loop.body, knobs={"PLACE@map": "cut"}),
+        [],
+        Tensor("cut", (1,)),
+        node_id="cut",
+    )
+    identity.on_splice(SimpleNamespace(root_op=original, fragment=cut_fragment))
+
+    propagated = TileOp(knobs={"S_n_loop": 1.0, "PLACE@map": "cut"})
+    later_fragment = Graph()
+    later_fragment.add_node(LoopOp(body=original_loop.body), [], Tensor("later", (1,)), node_id="later")
+    identity.on_splice(SimpleNamespace(root_op=propagated, fragment=later_fragment))
+
+    assert len(identity.structural_parents) == 1
+    route, key, knobs = identity.structural_parents[0]
+    assert route == {"PLACE@map": "cut"}
+    assert knobs == {"S_n_loop": 2.0, "PLACE@map": "cut"}
+    assert key == TileOp(knobs=knobs).cache_key()
+    assert identity.structural_parent(route) == (key, knobs)
+
+
+def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(tmp_path, monkeypatch):
+    from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
+
+    route = {
+        "WORK": "w2x1",
+        "TILE": "mma_m16n8k16_f16_f32/f4x8/k8",
+        "REDUCE": "g4k",
+        "STAGE": "d1/smem-async",
+        "RASTER": "",
+    }
+    terminal = Graph()
+    terminal.add_node(
+        CudaOp(kernel_name="partial", knobs={**route, "REDUCE": ""}),
+        [],
+        Tensor("partial", (1,)),
+        node_id="partial",
+    )
+    terminal.add_node(
+        CudaOp(kernel_name="finalize", knobs={key: "" for key in route}),
+        [],
+        Tensor("finalize", (1,)),
+        node_id="finalize",
+    )
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs=route)), path)
+    document, targets = load_working_targets(path)
+    stable_graph = targets[0].program
+    loop_graph = Pipeline.build(LOOP_PASSES).run(stable_graph.copy(), ctx=Context((8, 9)))
+    [original_loop] = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
+    identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
+    original_op_sig = identity.op_sig(original_loop, loop_graph)
+    structural_features = {key: float(value) for key, value in original_loop.knobs.items() if key.startswith("S_")}
+    live_features = {**structural_features, "S_warp_eligible": 1.0}
+    active_route = route
+
+    class FakeSearch(TuningSearch):
+        def __init__(self, **kwargs):
+            assert kwargs["base_knobs"] == ctx.features()
+            self._base_knobs = dict(kwargs["base_knobs"])
+            self.tree = SearchTree()
+            self.last_status = "ok"
+            self.last_stats = PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
+            self.o3_rows = []
+
+    class FakePipeline:
+        def __init__(self):
+            self.strategies = ()
+
+        @classmethod
+        def build(cls, _passes):
+            return cls()
+
+        def with_strategies(self, *strategies):
+            self.strategies = strategies
+            return self
+
+        async def tune_async(self, graph, **kwargs):
+            assert isinstance(graph.nodes["matmul"].op, MatmulOp)
+            event = SimpleNamespace(graph=loop_graph)
+            for strategy in self.strategies:
+                strategy.on_pass_end(event)
+            route_parent = TileOp(knobs=dict(live_features))
+            fragment = Graph()
+            if any(key.startswith("PLACE") for key in active_route):
+                piece = LoopOp(body=original_loop.body, knobs={**structural_features, **active_route})
+                fragment.add_node(piece, [], Tensor("piece", (1,)), node_id="piece")
+            else:
+                route_parent.knobs.update(active_route)
+            splice = SimpleNamespace(root_op=route_parent, fragment=fragment)
+            for strategy in self.strategies:
+                strategy.on_splice(splice)
+            search = kwargs["search"]
+            leaf = SearchNode(candidate=SimpleNamespace(resolved_knobs=None))
+            leaf.visits = 1
+            leaf.best_reward = 1.0 / 59.61
+            leaf.realized_knobs = None
+            leaf.realized_cuda_ops = 2
+            leaf.bench_status = "ok"
+            leaf.bench_stats = search.last_stats
+            search.tree.root.children = [leaf]
+            search.tree.root.visits = 1
+            search.tree.root.best_reward = leaf.best_reward
+            yield SimpleNamespace(graph=terminal)
+
+    monkeypatch.setattr("emmy.compiler.pipeline.TuningSearch", FakeSearch)
+    monkeypatch.setattr("emmy.compiler.pipeline.Pipeline", FakePipeline)
+    ctx = Context(
+        (8, 9),
+        compile_flags="-O3",
+        gpu_name="NVIDIA GeForce RTX 4090",
+        device_props={"sm_count": 128},
+    )
+    db_path = tmp_path / "proposal.db"
+    db = SearchDB(db_path)
+    proposals = [((0, 1), route)]
+    rankings = asyncio.run(
+        measure_proposals(stable_graph, proposals, backend=object(), db=db, ctx=ctx, max_candidates=1, run_id="proposal-run")
+    )
+    assert rankings == [
+        {
+            "status": "ok",
+            "latency_us": 59.61,
+            "compile_flags": "-O3",
+            "measured_knobs": route,
+        }
+    ]
+    db.close()
+    reloaded_db = SearchDB.open_readonly(db_path)
+    measured_nodes = list(reloaded_db.iter_nodes(context_key=ctx.structural_key(), op_sig=original_op_sig))
+    assert len(measured_nodes) == 2
+    parent = next(row for row in measured_nodes if row.parent_key is None)
+    branch = next(row for row in measured_nodes if row.parent_key is not None)
+    assert branch.parent_key == parent.node_key
+    assert parent.op_sig == branch.op_sig == original_op_sig
+    assert branch.features["REDUCE"] == "g4k"
+    assert branch.value_us == pytest.approx(59.61)
+    route_parent = TileOp(knobs={**live_features, **route})
+    assert route_parent.cache_key() != original_loop.cache_key()
+    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
+    assert perf is not None
+    assert perf.status == "ok"
+    assert perf.stats == PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
+    assert perf.captured is True
+    assert perf.knobs == {**ctx.features(), **live_features, **route}
+    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    reloaded_db.close()
+
+    # A later ordinary search keeps its own whole-slice bookkeeping and lowering
+    # evidence under the unpinned Loop key. Neither may replace or hide the exact
+    # structural parent measured by the proposal.
+    db = SearchDB(db_path)
+    bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
+    monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
+    fallback = {**route, "REDUCE": ""}
+    fallback_key = "monolithic-cuda"
+    db.record_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda", status="ok", stats=bookkeeping, captured=True)
+    db.record_lowering(
+        original_loop.cache_key(),
+        "loop",
+        fallback_key,
+        "cuda",
+        knobs=fallback,
+        measured_median_us=monolithic.median,
+    )
+    db.record_perf(
+        ctx.structural_key(),
+        fallback_key,
+        backend="cuda",
+        status="ok",
+        stats=monolithic,
+        knobs={**ctx.features(), **live_features, **fallback},
+        captured=True,
+    )
+    db.close()
+    reloaded_db = SearchDB.open_readonly(db_path)
+    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
+    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda")
+    assert route_perf is not None and route_perf.stats.median == pytest.approx(59.61)
+    assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
+    lowering = reloaded_db.lookup_lowering(original_loop.cache_key())
+    assert lowering is not None and lowering.child_key == fallback_key
+    candidates = [{**live_features, **fallback}, {**live_features, **route}]
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (1, 59.61)
+    reloaded_db.close()
+    persist_proposal_rankings(path, document, targets[0], rankings)
+    reloaded, reloaded_targets = load_working_targets(path)
+    proposal = reloaded["configs"][0]["realizations"][1]
+    assert proposal["knobs"] == route
+    assert proposal["ranking"]["measured_knobs"] == route
+    assert proposal["ranking"]["status"] == "ok"
+    assert reloaded_targets[0].proposals == [((0, 1), route)]
+
+    place = {"PLACE@map": "cut"}
+    active_route = place
+    place_db = SearchDB(tmp_path / "place.db")
+    [place_ranking] = asyncio.run(
+        measure_proposals(
+            stable_graph,
+            [((0, 1), place)],
+            backend=object(),
+            db=place_db,
+            ctx=ctx,
+            max_candidates=1,
+            run_id="place-proposal-run",
+        )
+    )
+    place_parent = TileOp(knobs={**live_features, **place})
+    assert place_parent.cache_key() != original_loop.cache_key()
+    place_perf = place_db.lookup_perf(ctx.structural_key(), place_parent.cache_key(), backend="cuda")
+    assert place_ranking["status"] == "ok"
+    assert place_ranking["measured_knobs"] == place
+    assert place_perf is not None
+    assert place_perf.knobs == {**ctx.features(), **live_features, **place}
+    assert place_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    place_db.close()
+
+    from emmy.compiler.pipeline.search.policy.greedy import (
+        _db_measured_index,
+        _db_measured_pick,
+        _placement_candidate_rows,
+    )
+    from emmy.compiler.pipeline.search.prior.online import OnlinePrior
+
+    fused = TileOp()
+
+    def cut(route):
+        graph = Graph()
+        graph.add_node(TileOp(knobs=route), [], Tensor("cut", (1,)), node_id="cut")
+        return graph
+
+    leaves = [fused, cut({"PLACE@a": "cut"}), cut({"PLACE@map": "cut"}), cut({"PLACE@a0": "cut"})]
+    placement_rows = _placement_candidate_rows(leaves)
+    assert placement_rows == [{}, {"PLACE@a": "cut"}, {"PLACE@map": "cut"}, {"PLACE@a0": "cut"}]
+    evidence_rows = [{**ctx.features(), **live_features, **row} for row in placement_rows]
+
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (2, 59.61)
+    reloaded_db.close()
+
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+
+    class NoEvidencePrior:
+        def evidence_pick(self, _rows, **_kwargs):
+            return None
+
+        def mean_scores(self, rows):
+            return [1_000_000.0] * len(rows)
+
+        def pick(self, _rows):
+            raise AssertionError("exact measured placement evidence was not selected")
+
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    root = LoopOp(body=original_loop.body, knobs=live_features)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._verified_index", lambda _ctx: ({}, {}))
+    priced_calls = []
+    monkeypatch.setattr(
+        "emmy.compiler.pipeline.search.policy.greedy._priced_pick",
+        lambda *_args: priced_calls.append(True) or leaves[0],
+    )
+    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
+    assert selected is leaves[2]
+    assert fork.score == pytest.approx(59.61)
+    assert priced_calls == []
+    reloaded_db.close()
+
+    def stats(us):
+        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
+
+    place_db = SearchDB(tmp_path / "place.db")
+    place_db.record_perf(
+        ctx.structural_key(),
+        "fused",
+        backend="cuda",
+        status="ok",
+        stats=stats(40.0),
+        knobs={**ctx.features(), **live_features},
+        captured=True,
+    )
+    place_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
+    assert selected is leaves[0]
+    assert fork.score == pytest.approx(40.0)
+    assert priced_calls == []
+    reloaded_db.close()
+
+    place_db = SearchDB(tmp_path / "place.db")
+    place_db.record_perf(
+        ctx.structural_key(),
+        "other-cut",
+        backend="cuda",
+        status="ok",
+        stats=stats(30.0),
+        knobs={**ctx.features(), **live_features, "PLACE@a": "cut"},
+        captured=True,
+    )
+    place_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
+    reloaded_db.close()
+
+    unmatched_db = SearchDB(tmp_path / "unmatched-place.db")
+    unmatched_db.record_perf(
+        ctx.structural_key(),
+        "unmatched-cut",
+        backend="cuda",
+        status="ok",
+        stats=stats(1.0),
+        knobs={**ctx.features(), **live_features, "PLACE@foreign": "cut"},
+        captured=True,
+    )
+    unmatched_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "unmatched-place.db")
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), evidence_rows, exact_families=frozenset({"PLACE"})) is None
+    reloaded_db.close()
+
+    reservoir = OnlinePrior()
+    reservoir.add_rows(
+        [
+            ({**ctx.features(), **live_features, **place}, 59.61),
+            ({**ctx.features(), **live_features}, 40.0),
+            ({**ctx.features(), **live_features, "PLACE@foreign": "cut"}, 1.0),
+        ]
+    )
+    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=reservoir, db=None)(fork)
+    assert selected is leaves[0]
+    assert fork.score == pytest.approx(40.0)
+    assert priced_calls == []
+
+    reservoir.add_rows([({**ctx.features(), **live_features, "PLACE@a": "cut"}, 30.0)])
+    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=reservoir, db=None)(fork)
+    assert selected is leaves[1]
+    assert fork.score == pytest.approx(30.0)
+    assert priced_calls == []
+
+    nonstructural = {**route, "REDUCE": ""}
+    active_route = nonstructural
+    negative_db = SearchDB(tmp_path / "negative.db")
+    [ambiguous] = asyncio.run(
+        measure_proposals(
+            stable_graph,
+            [((0, 1), nonstructural)],
+            backend=object(),
+            db=negative_db,
+            ctx=ctx,
+            max_candidates=1,
+            run_id="proposal-run",
+        )
+    )
+    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    negative_db.close()
+    assert ambiguous["status"] == "ambiguous_multi_kernel"
+    assert ambiguous["measured_knobs"] is None
 
 
 def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):

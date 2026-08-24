@@ -324,7 +324,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     resolve_golden_arg(args)
 
     reference = ({"x": object()}, {"y": object()})
-    returned = {"reference": reference, "greedy_error": None, "reference_run_us": None}
+    returned = {"reference": reference, "greedy_error": None, "reference_run_us": None, "accuracy_error": None}
     seen = {}
 
     class FakePipeline:
@@ -347,7 +347,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
                 "result": None,
                 "captured": False,
                 "torch_available": False,
-                "accuracy_error": None,
+                "accuracy_error": returned["accuracy_error"],
                 "run_io": returned["reference"],
                 "greedy_error": returned["greedy_error"],
                 "reference_run_us": returned["reference_run_us"],
@@ -366,6 +366,8 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
 
     async def fake_pinned(_backend, _source, _pins, **kwargs):
         seen["ref"] = kwargs["ref"]
+        if kwargs["strict_correctness"]:
+            seen["strict_reference"] = kwargs["strict_reference"]
         return []
 
     monkeypatch.setattr(Pipeline, "build", lambda _passes: FakePipeline())
@@ -376,6 +378,23 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     run_module._handle_run_ir(args, FakeBackend, FakeDump)
 
     assert seen == {"want_ref": True, "ref": reference}
+
+    args.strict_correctness = True
+    returned["accuracy_error"] = "strict eager correctness unavailable: frontend IR is not runnable"
+    returned["reference"] = ({"x": [1.0]}, {"y": [1.0]})
+    seen.clear()
+    with pytest.raises(SystemExit) as exc:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    assert exc.value.code == 1
+    assert seen == {
+        "want_ref": True,
+        "ref": returned["reference"],
+        "strict_reference": "same-input-greedy",
+    }
+
+    args.strict_correctness = False
+    returned["accuracy_error"] = None
+    returned["reference"] = reference
 
     async def fail_if_isolated(*_args, **_kwargs):
         raise AssertionError("a failed greedy timing must not be re-benched or made eligible")

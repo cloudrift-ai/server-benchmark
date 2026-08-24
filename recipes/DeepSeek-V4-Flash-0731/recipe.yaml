@@ -1,12 +1,15 @@
-# Qualified on 16x V100 SXM3 32GB with a zero-JIT request cache and CUDA graphs. The tag was validated locally;
-# image publication requires approval and cloudriftai namespace access.
+# Qualified on 16x V100 SXM3 32GB with CUDA graphs. The image below is published; reverified 2026-08-19.
+# The request cache is not fully zero-JIT: eight Triton kernels compile once during the first warm-up and then
+# stay cached, so only the priming requests pay for them (see RESULTS.md).
+# The 16 GPUs sit behind NVSwitches: without a running nvidia-fabricmanager matching the driver, every worker
+# fails at cudaGetDeviceCount() with error 802. `emmy deploy` installs and starts it automatically.
 tags:
   - maintained
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "Only open-weight model with qualified zero-JIT 16xV100 path at 1M context and unique legacy support."
-  heat: 72
+  rationale: "High HF trending and strong OR support indicate sustained attention."
+  heat: 85
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 

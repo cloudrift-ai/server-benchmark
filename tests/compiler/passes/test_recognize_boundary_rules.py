@@ -22,11 +22,12 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
@@ -223,6 +224,61 @@ def _m1_linear_graph() -> Graph:
     return g
 
 
+def _m1_contraction_tile(*, row: int | Var = 0, context: str | None = None) -> TileOp:
+    """A direct unit-row contraction, optionally nested under an ordinary output axis."""
+    n, k = Axis("n", Dim(16)), Axis("k", Dim(16))
+    row_index = Literal(row) if isinstance(row, int) else row
+    load_prefix = (Var(context),) if context is not None else ()
+    store_prefix = (Var(context),) if context is not None else ()
+    cell = Body(
+        (
+            Loop(
+                axis=n,
+                body=Body(
+                    (
+                        Loop(
+                            axis=k,
+                            body=Body(
+                                (
+                                    Load(name="a", input="x", index=(*load_prefix, Literal(0), Var("k"))),
+                                    Load(name="b", input="w", index=(Var("n"), Var("k"))),
+                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a", "b")),
+                                    Accum(name="acc", value="p", op=ElementwiseImpl("add"), axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Write(output="o", index=(*store_prefix, row_index, Var("n")), value="acc"),
+                    )
+                ),
+            ),
+        )
+    )
+    body = cell if context is None else Body((Loop(axis=Axis(context, Dim(8)), body=cell),))
+    node, free, stores = _lift_tree(body)
+    from emmy.compiler.ir.tile import Placement
+
+    return TileOp(op=node, place=Placement(free=tuple(free)), stores=stores)
+
+
+def test_unit_contraction_view_restores_only_the_literal_zero_output_row():
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    view = unit_contraction_view(_m1_contraction_tile())
+    assert view is not None and [axis.name for axis in view[1]] == ["_um", "n"]
+    assert unit_contraction_view(_m1_contraction_tile(row=1)) is None
+    assert unit_contraction_view(_m1_contraction_tile(row=Var("m"))) is None
+
+
+@pytest.mark.parametrize("context", ["batch", "head"])
+def test_unit_contraction_view_does_not_reclassify_output_context(context):
+    """A second output axis is not M unless a realized split receipt proves otherwise."""
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    tile = _m1_contraction_tile(context=context)
+    assert [axis.name for axis in tile.place.free] == [context, "n"]
+    assert unit_contraction_view(tile) is None
+
+
 def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict], TileOp]:
     """Run the tile passes, capturing every fork leaf's knob row; ``pick`` selects the applied
     leaf (default: option-0, the emission-order head). Returns ``(rows, the one TileOp)``."""
@@ -277,6 +333,15 @@ def test_wide_m1_flinear_offers_the_warp_k_fold_and_a_pin_realizes_it(monkeypatc
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
     assert [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"] == ["coop"]
     assert tile.knobs.get("WORK") == "t32"
+
+
+def test_direct_m1_contraction_offers_scalar_and_volta_mma_rows():
+    """Restoring the unit M axis adds the Volta tier without losing scalar schedules."""
+    ctx = Context.from_target((7, 0), gpu_name="NVIDIA Tesla V100 SXM3 32GB")
+    rows, _ = _resolve(_m1_linear_graph(), ctx=ctx)
+
+    assert any(str(row.get("WORK", "")).startswith("t") for row in rows)
+    assert any(str(row.get("WORK", "")).startswith("w") and "mma_m8n8k4_f16_f32" in str(row.get("TILE", "")) for row in rows)
 
 
 def test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows():
@@ -345,8 +410,9 @@ def test_norm_linear_cone_is_an_inline_node_tree():
 
     _, tile = _resolve(_norm_linear_graph(), pick=_is_warp_row)
     # The single-channel form's projection was ONLY the root ``Write`` — moved to ``TileOp.stores``
-    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper dropped with its last stmt).
-    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    # (1q), so the row stores the BARE product fold (the ``Map`` wrapper drops with its last stmt).
+    fold = tile.op
+    assert fold.role is AxisRole.CONTRACTION, "an empty identity projection must not wrap the product fold"
     assert len(tile.stores) == 1 and tile.stores[0].write.output == "y"
     c = fold
     assert not isinstance(c.a, Load)
@@ -385,7 +451,9 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
         init=(float("-inf"), 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,))
+    # The prologue passes ``mx`` through beside its own ``rd``: the cell binds both positionally
+    # (``make_cone``'s closure rule), so no λ in the tree captures.
+    prologue = Fold.projection(body=Body((Assign(name="rd", op="reciprocal", args=("dn",)),)), operands=(stat,), results=("rd", "mx"))
     cone = Fold.projection(
         body=Body(
             (
@@ -437,6 +505,43 @@ def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
     # …and the statistic edge keeps its own reduce site — it is realized per tile ROW, not per cell.
     stat = cone.operands[0].operands[0]
     assert any(s.node is stat for s in family_sites("REDUCE", all_sites))
+
+
+@pytest.mark.parametrize("shape", ["sdpa", "norm_linear"])
+def test_cone_cell_lambda_is_closed(shape):
+    """Every λ in a stored term is CLOSED: the per-cell normalize reads the statistic it
+    normalizes against (softmax's ``m``, RMSNorm's ``rsqrt``) through the prologue's RESULTS,
+    bound positionally, never as a captured name. The seam between statistic and normalize is
+    then a positional edge like every other; what bridges through the stat smem rows is exactly
+    that edge's results."""
+    from emmy.compiler.ir.tile.ops import cone_seam
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values, cuttable_seams
+
+    _, tile = _resolve_sdpa(is_causal=True) if shape == "sdpa" else _resolve(_norm_linear_graph(), pick=_is_warp_row)
+    fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
+    cone = fold.a
+    prologue = cone.operands[0]
+    assert "captures" not in tile.pretty_body()
+    if shape == "sdpa":  # ``exp(s − m)`` reads the carrier's ``m`` itself; RMSNorm's cell reads only the projected rsqrt
+        from emmy.compiler.ir.pure.fold import is_contraction, operand_name
+
+        score_edges = cone.operands[1:]
+        assert len(score_edges) == 1 and is_contraction(score_edges[0]), "the cell has one computed score operand"
+        score = score_edges[0]
+        assert cone.lift.params == (*prologue.lift.results, operand_name(score)), (
+            "bridged statistics and the computed score bind positionally"
+        )
+        groups = [cut for cut in cuttable_seams(tile.op, tile.stores, tile.place.free) if len(cut.members) == 2]
+        assert len(groups) == 1 and any(member.node is score for member in groups[0].members), (
+            "the closed computed score must be one use of the grouped placement inverse"
+        )
+        assert set(prologue.operands[0].combine.results) & set(prologue.lift.results), "the statistic's own state passes through"
+    else:
+        assert cone.lift.params == prologue.lift.results, "the cell binds every prologue result positionally"
+    _, _, stats = cone_seam(cone, fold.axis.name)
+    assert set(stats) == set(prologue.lift.results), f"the bridge is the prologue's results: {stats} vs {prologue.lift.results}"
+    axes = stmt_axis_names(cone.lower()) | {a.name for a in (*tile.place.free, *tile.place.grid)} | {fold.axis.name}
+    assert not _captured_values(cone, axes) and not _captured_values(prologue, axes)
 
 
 def test_cone_per_cell_edge_reaches_the_per_cell_emitter():
@@ -580,8 +685,8 @@ def test_norm_linear_symbolic_m_offers_warp_rows():
     assert any(_is_warp_row(r) for r in rows)
 
 
-def _mlp_gate_up_graph() -> Graph:
-    S, H, inter = 32, 1024, 3072
+def _mlp_gate_up_graph(S: int = 32) -> Graph:
+    H, inter = 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
     g.add_node(InputOp(), [], Tensor("wn", (Dim(H),), dtype=F16), node_id="wn")
@@ -727,6 +832,8 @@ def _prologue_shape(*, b_layouts, cone_per_channel=False):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
+    from emmy.compiler.ir.tile.ops import cone_seam
+
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = _fused(node, free)
     assert bound is not None
@@ -735,6 +842,9 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
     assert product.role is AxisRole.CONTRACTION
     assert len(product.channels) == 2, "two channels over ONE shared edge — sharing is the node's arity"
     assert product.a is not None
+    prologue, _cell, stats = cone_seam(product.a, product.axis.name)
+    assert stats == ("rs",)
+    assert sum(isinstance(s, Load) and s.input == "x" for s in Body(prologue).iter()) == 1
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():
@@ -821,3 +931,112 @@ def test_masked_score_cone_keeps_its_predicate_per_cell():
     pro, cell, _stats = cone_seam(fold.a, fold.axis.name)
     assert any(isinstance(s, Select) for s in cell), "the mask predicates the per-cell weight"
     assert not any(isinstance(s, Select) for s in pro), "the mask is k-varying — it never joins the row prologue"
+
+
+def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
+    """Gemma-shaped attention scores: RMSNorm'd Q against RMSNorm'd K. Root formation chains the
+    score fold over both statistics' projected scales; the binder reads it as ONE contraction
+    whose A and B are both computed cones, each sourcing its own statistic. The ``b`` seam —
+    the normalized keys — is then a legal cut: the form that turns the per-query replay of the
+    key statistic into a materialized operand the mma tier streams."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.ir.tile.path import spell
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
+    scores = next(n for n in g.nodes.values() if isinstance(n.op, LoopOp) and n.id.endswith("_scaled"))
+    tile = recognized_tile(scores.op, name=scores.id)
+    pro = fused_view(tile)
+    assert pro is not None, "the chained score column binds through the fused view"
+    node = pro[0].operands[0]
+    assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
+    seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, *pro[1]))]
+    assert "PLACE@b" in seams, seams
+
+
+def _m1_norm_gate_up_body() -> Body:
+    """One row of norm → gate/up → SiLU·up as loop fusion leaves it: the row statistic, its
+    epilogue, the SiLU's fill constant (``one``) loaded ahead of the column sweep, and the
+    combine tail reading it after the two-channel contraction."""
+    lit0 = Literal(0, "int")
+    stat = Loop(
+        axis=Axis("k0", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xs",), input="x", index=(lit0, lit0, Var("k0"))),
+                Assign(name="xf", op="copy", args=("xs",), dtype=F32),
+                Assign(name="sq", op="multiply", args=("xf", "xf")),
+                Accum(name="ss", value="sq", op="add", axes=("k0",)),
+            )
+        ),
+    )
+    col = Loop(
+        axis=Axis("k", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xc",), input="x", index=(lit0, lit0, Var("k"))),
+                Load(names=("wn",), input="w", index=(Var("k"),)),
+                Assign(name="xcf", op="copy", args=("xc",), dtype=F32),
+                Assign(name="wnf", op="copy", args=("wn",), dtype=F32),
+                Assign(name="sc", op="multiply", args=("rs", "xcf")),
+                Assign(name="nm", op="multiply", args=("sc", "wnf")),
+                Assign(name="nh", op="copy", args=("nm",), dtype=F16),
+                Load(names=("g",), input="wg", index=(Var("k"), Var("n"))),
+                Assign(name="pg", op="multiply", args=("g", "nh")),
+                Accum(name="ag", value="pg", op="add", axes=("k",)),
+                Load(names=("u",), input="wu", index=(Var("k"), Var("n"))),
+                Assign(name="pu", op="multiply", args=("nh", "u")),
+                Accum(name="au", value="pu", op="add", axes=("k",)),
+            )
+        ),
+    )
+    sweep = Loop(
+        axis=Axis("n", Dim(128)),
+        body=Body(
+            (
+                col,
+                Assign(name="ng", op="negative", args=("ag",)),
+                Assign(name="eg", op="exp", args=("ng",)),
+                Assign(name="dn", op="add", args=("one", "eg")),
+                Assign(name="sg", op="reciprocal", args=("dn",)),
+                Assign(name="si", op="multiply", args=("ag", "sg")),
+                Assign(name="o", op="multiply", args=("au", "si")),
+                Write(output="out", index=(lit0, lit0, Var("n")), value="o"),
+            )
+        ),
+    )
+    return Body(
+        (
+            stat,
+            Load(names=("cnt",), input="count", index=(lit0,)),
+            Assign(name="mean", op="divide", args=("ss", "cnt")),
+            Load(names=("eps",), input="eps", index=(lit0,)),
+            Assign(name="ve", op="add", args=("eps", "mean")),
+            Assign(name="rs", op="rsqrt", args=("ve",)),
+            Load(names=("one",), input="silu_one", index=(lit0,)),
+            sweep,
+        )
+    )
+
+
+def test_fused_view_tail_prefix_is_alpha_renamed_from_the_statistic_prologue():
+    """At one row the fused gate/up reading prepends the tail's stat-free cone stmts (the
+    SiLU's fill constant) so the store side re-evaluates them — a SECOND spelling of names the
+    statistic prologue also defines. A PLACE cut flattens both into one raw loop body (the
+    parent piece), so the copies must carry their own names or the piece defines a name twice
+    and the cut is refused (Qwen3.8 ``PLACE@a0=cut`` on norm→gate/up M=1)."""
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.ir.tile.ir import effect_tail
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _nest
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_m1_norm_gate_up_body()))
+    pro = fused_view(TileOp(op=tile.op, place=Placement(free=tuple(tile.place.free)), stores=tuple(tile.stores)))
+    assert pro is not None, "the one-row norm→gate/up must bind the fused (computed-A) reading"
+    tree, added_axes, stores = pro
+    assert any(s.name.endswith("__p") for s in tree.body if isinstance(s, Load)), [s for s in tree.body]
+    # The parent piece of any cut is this flattening; it must be a valid single-scope program.
+    LoopOp(body=Body(tuple(_nest(effect_tail(tree.lower(), stores), [*tile.place.free, *added_axes]))))

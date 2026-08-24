@@ -87,9 +87,9 @@ The benchmark library is an experiment-agnostic runner: it retains complete clie
 generic system information, and partial raw results after failure. It treats execution and result-collection
 failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
 backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
-may opt into the single `command.strict` integrity contract for a clean Git worktree, required declared results, and
-Git/GPU/NVCC/cuBLAS provenance. The complete boundary lives in
-`emmy/benchmark/ARCHITECTURE.md`.
+may opt into the single `command.strict` integrity contract for clean declared stage paths, required declared results,
+and Git/GPU/NVCC/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
+environment or reused remote source tree. The complete boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
 `--backend openai-embeddings --endpoint /v1/embeddings` and drop `--random-output-len` because nothing is generated.
@@ -129,10 +129,14 @@ and Emmy always rebuild the same module and example inputs. Inductor compiles wi
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
-Emmy-vs-eager proof authoritative. It records max/mean/relative error in `--json` and exits
+Emmy-vs-eager proof authoritative. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
+backend output bits are decoded to numeric values before every command-layer correctness check. The command records
+max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
+result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
@@ -161,6 +165,12 @@ independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
 
+`run --golden PATH` without `--target` replays every embedded target in one process. It parses and validates the
+document once and hands that object to each target's resolution step, because a whole-model inventory is large
+enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
+15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
+read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
+
 The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
 dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
 per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
@@ -173,8 +183,16 @@ realizations are measured in file order before MCTS and written back as working-
 `--max-candidates N`
 is a per-tuned-kernel budget: every supplied proposal reserves one slot, while an MCTS DB cache hit does not spend a
 remaining live-measurement slot. A traced target normally maps to one post-fusion kernel, but lowering may materialize
-several CudaOps; conflicting multi-CudaOp knob rows are reported as ambiguous instead of being assigned an invented
-winner. Proposal feedback is written immediately after measurement, before MCTS, so an interruption preserves it.
+several CudaOps. A conflicting multi-CudaOp proposal is replayable only when search retains the original exact
+structural row that minted the pieces; otherwise it is reported as ambiguous instead of being assigned an invented
+winner. The measured CUDA pipeline captures the finalized single Loop identity even when the working target starts
+from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. An authoritative structural
+proposal whose realized-pin check passes therefore persists one captured whole-slice perf row under that exact
+route-specific parent cache key and context, carrying the complete scheduler feature row and route. The unpinned Loop
+key remains two-level cost bookkeeping. The measured DB index consumes the route row after a cold reload;
+parent-linked node rows remain diagnostic and training evidence. Proposal feedback is written immediately after
+measurement, before MCTS, so an interruption
+preserves it.
 The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
 the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
 flags and never writes the trusted
@@ -198,7 +216,9 @@ graph but are not trusted as automatic A/B pins; only verified rows with paired 
 proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
 derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
-check; the reference backend is `emmy-greedy` when no Torch twin exists. A completed reference survives a later greedy
+check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
+for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
+require direct eager correctness. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
 nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
@@ -650,12 +670,13 @@ pools it is given and therefore selects nothing.
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
-the trainer's own**: `fit/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
-`fit/group.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an additive model
-cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*` interaction mirrors), each
-of which a tree re-derives by splitting on columns the view keeps. `fit/group.MATMUL_FEATURES` is a third ready spec,
-holding just the 52 features that can move a matmul ranking — the rest are either constant within every pool or
-affine copies of a kept feature, so excluding them is expressiveness-neutral. `--out DIR` defaults to
+the trainer's own**: `search/data/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
+`prior/fit/catboost.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an
+additive model cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*`
+interaction mirrors), each of which a tree re-derives by splitting on columns the view keeps.
+`search/data/group.MATMUL_FEATURES` is a third ready spec, holding just the 53 features that can move a matmul
+ranking — the rest are either constant within every pool or affine copies of a kept feature, so excluding them is
+expressiveness-neutral. `--out DIR` defaults to
 `_tune/fits/<timestamp>-<trainer>-<data>/`.
 
 A run writes `metrics.json` — the per-run record two fits

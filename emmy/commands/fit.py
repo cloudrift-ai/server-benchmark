@@ -25,20 +25,22 @@ import json
 import logging
 import subprocess
 import time
-from dataclasses import replace
+from collections import defaultdict
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+import numpy as np
 
 from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, GoldenRecord
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
-from emmy.compiler.pipeline.search.prior.fit import Group
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
-from emmy.compiler.pipeline.search.prior.fit.group import DEFAULT_FEATURES, TREE_FEATURES, feature_view
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
@@ -124,20 +126,36 @@ def _shape_group(g) -> str:
     return str(replace(g.shape_key, is_dyn=False, is_warp=False))
 
 
-def _pool_identity(group: Group) -> tuple:
-    """A group's identity as a CANDIDATE POOL: everything about it except which golden pinned which row.
+@dataclass
+class _Pool:
+    """One packed candidate pool and every golden found in it, before it becomes a :class:`Group`.
 
-    Two goldens belong in one group when this matches — the featurized pool is then byte-identical, so the
-    second golden's row index addresses the same row the first one's does and the two are simply two verified
-    answers to one question. Membership is decided by CONSTRUCTION this way, never by a metadata key: most
-    same-name duplicates are ``FAST_MATH`` siblings whose pools are genuinely disjoint (the fast-math
-    enumeration offers an f16-accumulate atom the standard one never emits), and merging on the name would
-    produce indices for rows that do not exist. Comparing the packed matrix cannot make that mistake.
+    ``namer`` is the first golden the builder found in this pool — it supplies the group's key, name,
+    card and fold group. Deliberately not "the first record considered": a record can be grouped onto this
+    pool and then fail to match a row in it, and naming a case after a golden the same run reports as
+    skipped would put a rank in ``metrics.json`` under a name nothing pinned."""
+
+    namer: GoldenRecord
+    tier: str
+    packed: tuple[tuple[str, ...], np.ndarray, bool]
+    total: int
+    goldens: list[int]
+
+
+def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool]) -> tuple:
+    """A candidate pool's identity: everything about it except which golden pinned which row.
+
+    Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
+    one enumeration's row index addresses the same row the other's does, and the goldens behind them are
+    several verified answers to one question. Deciding it from the packed pool rather than from a key is what
+    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_key`
+    cannot see.
 
     The identity fields ride along with the matrix digest because they decide things the matrix does not: the
     weight set (``dynamic``), the fold group (``shape``) and the report axes. Requiring them to agree can only
-    hold two goldens apart, never fuse two that differ."""
-    return (group.gpu, group.tier, group.shape, group.dynamic, group.feat_names, hashlib.blake2b(group.feats, digest_size=16).digest())
+    hold two pools apart, never fuse two that differ."""
+    names, matrix, dynamic = packed
+    return (g.gpu_name, tier, _shape_group(g), dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
 def _pool_bucket(g) -> tuple:
@@ -148,7 +166,7 @@ def _pool_bucket(g) -> tuple:
     one that matters: an over-broad bucket costs a few extra retained rows, while a too-narrow one
     would hand two goldens over one pool different keep-sets, retain different rows, and stop them
     merging into a single training case."""
-    return (g.gpu_name, tuple(g.compute_cap), tuple(sorted((k, str(v)) for k, v in g.pin_map.items())))
+    return (g.gpu_name, tuple(g.compute_cap), g.pin_key)
 
 
 def _keep_sets(records) -> dict[tuple, frozenset]:
@@ -167,7 +185,7 @@ def _keep_sets(records) -> dict[tuple, frozenset]:
 
 def build_golden_groups(
     features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
-) -> tuple[list[Group], list[tuple[str, str, str]]]:
+) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, pinned rows,
     per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
@@ -178,9 +196,10 @@ def build_golden_groups(
 
     **A group is a candidate pool, not a golden.** Several goldens can land on one pool — the same shape
     recorded under two names, or a name recorded twice — and they then share ONE group, each contributing a
-    row to :attr:`Group.pinned`. Which goldens share a pool is decided by :func:`_pool_identity`, i.e. by the
-    featurized pool itself, so how many goldens merge is an OUTPUT of the run rather than something a key
-    predicts — this logs it, and the caller records groups against positives in the metrics header.
+    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_key``)
+    BEFORE anything is enumerated, so each pool is enumerated, featurized and packed once, then folded by
+    :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
+    groups against positives in the metrics header.
 
     Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
     pool ``eval offline`` and the greedy deploy rank over (fp32 → thread tier,
@@ -207,11 +226,11 @@ def build_golden_groups(
     recording card's regime — not one global cap — for the rank objective to match
     the deployed per-card featurization."""
     keep = feature_view(features_spec)
-    cases: list[Group] = []
+    cases: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
-    by_pool: dict[tuple, int] = {}  # pool identity -> its index in ``cases``
-    joined = 0
+    matched = 0
+    pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every golden found in it
     # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
     # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
     # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
@@ -221,7 +240,15 @@ def build_golden_groups(
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
     keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
+    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_key`) before touching
+    # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the cases
+    # come out in the order they always did.
+    by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
+        by_pool[g.pool_key].append(g)
+
+    for members in by_pool.values():
+        g = members[0]  # the pool is a property of the KEY; every member spells it identically
         card = (tuple(g.compute_cap), g.gpu_name)
         ctx = ctxs.get(card)
         if ctx is None:
@@ -240,43 +267,66 @@ def build_golden_groups(
         tier = "dyn" if g.dynamic else (g.shape_key.kind or ("warp" if g.shape_key.is_warp else "thread"))
         if not rows:
             logger.info("  !! %s: nothing enumerated — skipping", g.name)
-            skipped.append((g.gpu_name, g.name, "nothing enumerated"))
+            skipped.extend((m.gpu_name, m.name, "nothing enumerated") for m in members)
             continue
-        # Match the legacy-recorded golden against the native candidate rows by
-        # schema-agnostic structural signature (free-axis slots + reduce decomp +
-        # atom) — the candidate rows use the native ``MOVE@element`` keys while the
-        # golden YAML records legacy GEMM-letter keys, so comparing key-value tuples
-        # directly never matches.
-        want = features.tile_signature(g.knobs)
-        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
-        if gidx is None:
-            logger.info("  !! %s: golden not in %d candidates — skipping", g.name, len(rows))
-            skipped.append((g.gpu_name, g.name, f"golden not in {len(rows)} candidates"))
+        # Each member locates its OWN recorded config in the shared pool, by schema-agnostic structural
+        # signature (free-axis slots + reduce decomp + atom) — the candidate rows use the native
+        # ``MOVE@element`` keys while the golden YAML records legacy GEMM-letter keys, so comparing
+        # key-value tuples directly never matches. A member that misses is dropped on its own; the pool
+        # still stands for the members that hit.
+        goldens, namer = [], None
+        for m in members:
+            want = features.tile_signature(m.knobs)
+            gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
+            if gidx is None:
+                logger.info("  !! %s: golden not in %d candidates — skipping", m.name, len(rows))
+                skipped.append((m.gpu_name, m.name, f"golden not in {len(rows)} candidates"))
+            else:
+                goldens.append(gidx)
+                namer = namer or m  # the pool is named after a golden that is actually IN it
+        if not goldens:
             continue
+        matched += len(goldens)
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
-        # ``MMA_tier`` — see its rationale in ``prior/fit/group.py``) filters here, before
+        # ``MMA_tier`` — see its rationale in ``search/data/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
         # ``feature_view`` keeps the routing features whatever the spec says, so a narrower
         # ``--features`` cannot silently misroute a symbolic-axis pool.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
-        group = Group.from_dicts(f"{g.gpu_name}/{g.name}", g.name, tier, g.gpu_name, _shape_group(g), gidx, feats, total=candidates.total)
-        at = by_pool.get(identity := _pool_identity(group))
-        if at is not None:
-            # Same pool as an earlier golden: this one is another verified answer to it, not a second case.
-            # ``replace`` shares the packed matrix — only the pin tuple grows. A golden recorded twice at the
-            # same config pins the same row and folds away entirely, where it used to become a ``#2`` case
-            # that double-counted one fact in every metric.
-            joined += 1
-            cases[at] = replace(cases[at], pinned=tuple(sorted({*cases[at].pinned, gidx})))
-            continue
-        # A NEW pool. The ``#N`` suffix exists only to keep ``Group.key`` unique (``cv.run_folds`` keys its
-        # train accumulator on it), so it is spent here rather than once per record: same-name goldens that
-        # merged never reach this line.
-        by_pool[identity] = len(cases)
-        key_counts[group.key] = n = key_counts.get(group.key, 0) + 1
-        cases.append(group if n == 1 else replace(group, key=f"{group.key}#{n}"))
+        packed = pack_features(feats)
+        # Second stage: two enumerations can still land on one pool — the same program recorded in different
+        # sessions keys apart above but packs identically here. Fold those together, so a pool is one case
+        # however many times it was recorded.
+        pool = pools.get(identity := _pool_identity(namer, tier, packed))
+        if pool is None:
+            pools[identity] = _Pool(namer, tier, packed, candidates.total, goldens)
+        else:
+            pool.goldens.extend(goldens)
+
+    # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
+    # construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator
+    # on it) and is spent per POOL in first-appearance order, so goldens that merged never claim one.
+    for pool in pools.values():
+        g = pool.namer
+        key_str = f"{g.gpu_name}/{g.name}"
+        key_counts[key_str] = n = key_counts.get(key_str, 0) + 1
+        cases.append(
+            GoldenGroup.over(
+                key_str if n == 1 else f"{key_str}#{n}",
+                g.name,
+                pool.tier,
+                g.gpu_name,
+                _shape_group(g),
+                pool.packed,
+                pool.goldens,
+                pool.total,
+            )
+        )
     logger.info(
-        "  %d matched goldens over %d candidate pools (%d joined a pool an earlier golden opened)", len(cases) + joined, len(cases), joined
+        "  %d matched goldens over %d candidate pools (%d beyond one golden per pool)",
+        matched,
+        len(cases),
+        matched - len(cases),
     )
     return cases, skipped
 
@@ -362,11 +412,11 @@ def _catboost_trainers(args, names: list[str]):
 
 # Each trainer's factory and its default feature view. The views differ because the model classes do: the
 # linear one needs the engineered step / fold / interaction features, having no way to form them, and the
-# tree re-derives every one of them from the columns :data:`TREE_FEATURES` keeps. ``--features`` overrides
+# tree re-derives every one of them from the columns ``fit_catboost.TREE_FEATURES`` keeps. ``--features`` overrides
 # either, which is how the two views are compared on one model class.
 TRAINERS = {
     "linear": (_linear_trainers, DEFAULT_FEATURES),
-    "catboost": (_catboost_trainers, TREE_FEATURES),
+    "catboost": (_catboost_trainers, fit_catboost.TREE_FEATURES),
 }
 
 
@@ -392,7 +442,7 @@ def handle_fit(args) -> None:
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
     # ``merged`` is the positives beyond one per pool; the builder logs the record-level count, which also
     # counts a golden recorded twice at one config (it pins a row already pinned, so it adds no positive).
-    positives = sum(len(c.pinned) for c in cases)
+    positives = sum(len(c.golden_ids) for c in cases)
     logger.info(
         "  %d static + %d dynamic golden cases (%d positives, %d merged), %d D_* features, %d skipped",
         len(cases) - n_dyn,

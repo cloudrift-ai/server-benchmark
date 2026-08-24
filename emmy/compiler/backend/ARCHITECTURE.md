@@ -28,12 +28,17 @@ distinction is whether the graph has been fused yet. See
 Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect graph through **real PyTorch**, the eager /
 `torch.compile` baseline for `emmy run --ir`. Each frontend / tensor op is mapped to its torch twin
 (`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
-`LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`→the torch elementwise/reduce, layout ops→view/transpose/cat).
+`LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
+ops→view/transpose/cat).
+The stored unary `pad` form is an identity because tracing admits it only when every explicit pad width is zero and
+fails closed otherwise.
 FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while
 `from_f8*` performs the inverse reinterpretation before widening. `is_runnable(graph)` is `True` only when every
 compute op and every elementwise operation name has a mapping. Data-dependent `GatherOp` / `ScatterOp` remain
 unsupported, so `run --ir` falls back to emmy-only benchmarking for those graphs. `build_callable(graph,
-input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. Symbolic
+input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline) so `torch.compile` can trace it. A
+single-output graph returns its tensor directly; a multi-output graph returns an ordered tuple following
+`graph.outputs`, matching the backend result boundary. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
 shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
@@ -118,6 +123,8 @@ grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the co
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
+The declared output list is also the runtime return order; allocation planning may reorder buffers, but cannot reorder
+observable program results.
 
 `plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
 It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while

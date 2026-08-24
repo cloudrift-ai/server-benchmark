@@ -23,12 +23,14 @@ matmul lane, i.e. sit under the compute floor — the same silent direction. Sym
 skipped: at boot their buffers sit at capacity, not at a serving width, so a timing there measures
 the wrong shape.
 
-The audit is advisory only — it logs and never raises; any failure inside it is swallowed (a boot
-warning must not become a boot blocker).
+The audit is advisory only — it logs and never raises (a boot warning must not become a boot
+blocker). A measurement failure is swallowed to debug; an unusable ``EMMY_GPU_LOCK`` path is not —
+taking the lock is setup, not measurement, so that fault warns instead of reading as a clean audit.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 logger = logging.getLogger(__name__)
@@ -127,10 +129,17 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
     plus the weight INPUTS an expert program takes per launch. ``m_tokens`` is the program's static
     token width, ``dtype_bytes`` the weight itemsize — together they turn ``weight_bytes`` into the
     matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises."""
-    try:
-        from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy import config
+    from emmy.compiler.backend.gpu_lock import gpu_lock
 
-        with gpu_lock():
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(gpu_lock())
+        except Exception:  # noqa: BLE001 — taking the lock is setup, not measurement: an unusable
+            # lock path is an environment fault and must not read as a clean audit at debug level.
+            logger.warning("[roofline] boot audit skipped: GPU lock %r unusable", config.gpu_lock_path(), exc_info=True)
+            return
+        try:
             bw = measure_copy_bw()
             try:
                 flops_per_s = measure_matmul_flops()
@@ -143,18 +152,19 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
                 if verdict is not None:
                     floor_us, ratio = verdict
                     flagged.append((label, floor_us, ratio))
-        for label, floor_us, ratio in flagged:
-            logger.warning(
-                "[roofline] %s runs %.0fx over its roofline floor (~%.0f us) — a deployed kernel pick "
-                "is far off the weight-streaming/compute floor for this model/GPU. Capture and tune the "
-                "serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → 'Tuning what serving "
-                "actually runs').",
-                label,
-                ratio,
-                floor_us,
-            )
-        if named_programs and not flagged:
-            n = len(named_programs)
-            logger.info("[roofline] boot audit clean: %d static program(s) within %sx of the roofline floor", n, int(WARN_RATIO))
-    except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
-        logger.debug("[roofline] boot audit skipped", exc_info=True)
+        except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
+            logger.debug("[roofline] boot audit skipped", exc_info=True)
+            return
+    for label, floor_us, ratio in flagged:
+        logger.warning(
+            "[roofline] %s runs %.0fx over its roofline floor (~%.0f us) — a deployed kernel pick "
+            "is far off the weight-streaming/compute floor for this model/GPU. Capture and tune the "
+            "serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → 'Tuning what serving "
+            "actually runs').",
+            label,
+            ratio,
+            floor_us,
+        )
+    if named_programs and not flagged:
+        n = len(named_programs)
+        logger.info("[roofline] boot audit clean: %d static program(s) within %sx of the roofline floor", n, int(WARN_RATIO))

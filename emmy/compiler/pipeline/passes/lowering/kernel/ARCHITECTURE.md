@@ -222,6 +222,16 @@ the `ldmatrix` drain undoes (`RegStore.swizzle`, stamped through the fill's `Wri
 bank conflicts than the operands beside it. The nested score's own staged operands (its per-chunk keys, its
 loop-invariant query tile) carry their mode on the cp.async fill the same way.
 
+A `RegEpilogue` predicate carries the semantic cell origin captured from the producer's substitution plus
+per-fragment row/column placeholders. The destination index remains only an address: a chained fill may rebase that
+index to a tile-local slab, but it must not rebase a causal or other coordinate predicate. Later cell replication
+substitutes the predicate's real coordinate variables and the store fills only its element offsets. Inferring the
+predicate origin from `RegStore.dst_index` would make every nonzero chunk compare slab-local coordinates instead.
+The epilogue also retains every captured `Assign.dtype`: fragment-local pointwise operations use the same promotion,
+native-operation, and final-conversion rules as the scalar Loop tail. In particular, an f32 accumulator crossing a
+declared f16 tensor boundary narrows before a later activation consumes it; register fusion cannot erase that store/load
+semantic boundary.
+
 The chained fill takes one of two forms, and the first is preferred wherever it reads:
 
 - **SINGLE-PASS** (`_atom.chain_stream_fill`) — the statistic and the weight come off ONE pass of the score. The two
@@ -231,7 +241,10 @@ The chained fill takes one of two forms, and the first is preferred wherever it 
   in C fragments, its row pivot advances the carried one, and the ψ-RESCALE that advance puts on every carried channel
   (`carrier.exp_rescale`) is applied to the ENCLOSING drain's output fragments — the one channel that lives outside
   the fold's state. Nothing is bridged through smem: the carried `(pivot, denominator)` pair stays in registers at the
-  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement.
+  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement. A coordinate-predicated scalar
+  `Select` in the score lift stays exact through the generic `FragmentSelect`: every branch value must be uniform, and
+  its predicates use each physical fragment's existing row/column base plus layout offsets. Fragment-valued or
+  per-cell branches decline the single-pass form instead of being broadcast.
 - **TWO-PASS** (`_atom.chain_stat_fill` as the transport prologue, then `_atom.chain_a_fill`) — the statistic finishes
   over the whole axis first and bridges through the stat smem rows, and the weight fill recomputes the score to read
   it. The single-pass form declines to it wherever the two halves do not cover the same keys (a split-K partition

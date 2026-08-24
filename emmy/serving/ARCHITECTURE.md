@@ -79,7 +79,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
   (each floor is a true lower bound for its regime, both calibrations undershoot peak, quantized weights only
   underestimate the compute floor, and FAST_MATH kernels can only sit *under* the f32-acc-calibrated compute floor),
-  advisory only (never raises, never blocks boot). Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
+  advisory only (never raises, never blocks boot). A measurement failure is swallowed to debug, but an unusable
+  `EMMY_GPU_LOCK` path is not — taking the lock is setup, not measurement, so that WARNs and an environment fault
+  never reads as a clean audit. Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
   served a fused-norm kernel ~150x off the floor (54x TPOT gap) with zero boot-time signal.
   **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
   class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it
@@ -103,6 +105,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
   GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
   `scripts/capture_gen_twins.py` remains the full-checkpoint diagnostic capture.
+  Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
+  the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
+  `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
+  `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
+  plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four).
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
@@ -250,7 +257,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
   expert programs; indirect operands compose (bits + scale slices both table-resolved).
-  **Quantized-checkpoint serving load (gpt-oss fp8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
+  **Quantized-checkpoint serving load (FP8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
   dense trunk shard-streamed in as real values, expert tensors kept fp8 as a per-layer store of program-input-named
   tensors (bits on the uint8 carrier + f32 scales + `dtype` biases, gate/up de-interleaved). `from_model` then
@@ -260,7 +267,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   examples as its last entries. Every per-expert input — weights, biases, scales — is a per-launch slice of the
   store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
   T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
-  card, the rest is vLLM's KV budget.
+  card, the rest is vLLM's KV budget. Gpt-oss checkpoints already store E-leading expert tensors; the DeepSeek /
+  Laguna lineage stores one module per expert, so the split loader stacks each layer into the same program inputs,
+  concatenating gate/up weights and block scales along their output axis while leaving ignored dense layers unscaled.
   **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
   codes and padded channel-vector tensors. Gate and up remain separate program inputs.
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the

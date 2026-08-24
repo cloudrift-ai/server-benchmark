@@ -79,7 +79,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
-| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -160,8 +160,9 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
 | `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
-| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
-| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
+| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/data/group.Group`, one layer down: a pool is data, not a fitter detail. |
+| `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
+| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
 | `search/audit.py` | The verified-tier drift audit: one MATCH / DRIFT / GAP verdict per consultation, collected off a whole card's graphs under isolated evidence. Backs the `emmy eval golden --serving-config` release gate. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
@@ -243,7 +244,12 @@ Two binding scopes share the protocol:
 
 The two discovered strategies: **`ProvenanceStrategy`** owns op provenance end to end (`seed` at run start,
 `propagate` from the splice receipt, mint for `frontend/decomposition`'s fragments, aggregate for everything else)
-— a pipeline built without it has no provenance anywhere, and `graph.py` imports none of it.
+and keeps the replaced result's ultimate `Op.source` object on its rewrite fragments. The pattern root may be an
+upstream producer while `Match.output` names the consumer result that the fragment replaces. A fragment may consume
+inputs from other origins without losing that result identity; those producer edges retain their own sources. The
+source identity lets semantic rewrites distinguish a frontend operation's private decomposition edges from tensor
+boundaries between operations. A pipeline built without the strategy has no provenance anywhere, and `graph.py`
+imports none of it.
 **`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
 `op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
 `loop/stamp`), minted pieces (a cut's fragments, a split's pieces) at the splice event, before the fragment even
@@ -399,11 +405,13 @@ What a newcomer needs to know about the fit:
   `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
   fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
   the metrics header, along with the loss — two fits are only comparable under the same one.
-- **A case is a candidate pool, and it may have more than one right answer.** `Group.pinned` is the set of rows in
-  that pool a golden verified — usually one, several when the builder matched several goldens onto one pool (the
-  same shape recorded under two names, or one name recorded twice). The per-case term is then the BEST rank over
-  that set (`fit/rank.best_rank`), because deploy ships one config: any acceptable one ranked first is the win, and
-  a mean would spend weights pushing up the runner-up. At one positive it is the single-golden rank exactly, so the
+- **A case is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
+  set of rows in that pool a golden verified: usually one, several when the builder matched
+  several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
+  goldens share a pool is settled before any group is built, so a group's labels are final at construction.
+  The per-case term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
+  At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
   tree fit's negatives, which had been teaching it that a measured-good config was bad.
 - **A pool may be a SAMPLE of itself.** `emmy fit --pool-sample N` draws its candidates during enumeration
@@ -428,8 +436,9 @@ What a newcomer needs to know about the fit:
   the prior object). A weight key that is no longer used, inside an artifact of the current version, is
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
-  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**, and the fit holds it out of
-  the feature matrix structurally rather than by feature view. The reason is identifiability: the stamp is constant
+  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**: the dataset packs it like
+  any other column, and the linear fit narrows it out of its own descent coordinates (`descent_cols`) while a tree
+  splits on it to price both regimes in one model. The reason is identifiability: the stamp is constant
   across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
   ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
   noise rather than a fitted quantity.
@@ -466,7 +475,7 @@ The names below recur throughout this document; together they are the whole publ
 
 | Member | Caller | What it is |
 |--------|--------|------------|
-| `score(knobs)` | MCTS selection (PUCT) only | Predicted latency, used to steer exploration. On the composite prior this is the one call that blends the two halves (see the calibration-gate section below). |
+| `policy(knobs_list)` | MCTS selection (PUCT) only | How much the model prefers each sibling in ONE fork's set, normalized within it. The one call that may combine the two halves (see the calibration-gate section below). |
 | `mean_score` / `mean_scores` | deploy + eval ranking | The model's latency prediction for one row / for a batch of candidates. `FallbackPrior` routes these to the online half when it is `trustworthy`, else to the offline half — no blending. |
 | `evidence_pick(rows)` | deploy tier 2 | The pick made from measured reservoir rows (defined below). Returns `(index, measured_µs)` or `None`. Consulted whatever the calibration verdict says, because measured evidence needs no trusted model: a quarantined model — or a checkpoint whose reservoir has rows but no fitted model yet — still supplies this tier. |
 | `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the verified tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
@@ -476,7 +485,7 @@ The names below recur throughout this document; together they are the whole publ
 
 ### The deploy evidence hierarchy
 
-`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `score`. `greedy_decide` (`compile` / `run`, via
+`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `policy`. `greedy_decide` (`compile` / `run`, via
 `Run.resolve`) never explores: at each fork it picks once, working down the list below from the top. **This list is
 the authoritative order** — the summaries elsewhere in this file defer to it.
 
@@ -529,7 +538,10 @@ Three definitions the list leans on:
 - **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
-  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
+  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided. At
+  a placement fork, `PLACE` is the exception: each candidate's complete `PLACE` subset must exactly equal the measured
+  row's subset, including the fused candidate's empty subset. A cut measurement therefore vouches only for that cut,
+  while the same prefix rule continues to apply to every non-`PLACE` knob.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so
@@ -581,8 +593,13 @@ the fused form plus one cut fragment per legal seam, so `tune` discovers cuts an
 prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
 whichever prior is loaded. That costing exists because a `Graph` leaf carries no knob row the ordinary ranking
 could score, not to defend the fused side: when some leaf cannot be priced the pricing decides nothing and every
-leaf, cuts included, goes on to the ordinary ranking. A chosen cut's
-parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut records and replays as the exact pin. A
+leaf, cuts included, goes on to the ordinary ranking. A measured whole-route row is direct evidence for the complete
+fused or cut candidate, so the reservoir and DB tiers consult it before estimating a route from its child kernels;
+only a placement fork without exact aggregate evidence reaches that structural cost estimate. Exactly two computed
+seams whose runnable normalized Loop bodies are alpha-equivalent collapse to one cut fragment: one workspace producer
+replaces both contextual uses. Different external buffers or operations, and equivalence classes larger than two,
+remain independent seams. A chosen cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut
+records and replays as the exact pin. A
 **routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
 schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
 unpinned compile.
@@ -848,7 +865,8 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
   It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
-  inputs and persisted Loop programs stay byte-identical across fresh Python processes.
+  inputs and persisted Loop programs stay byte-identical across fresh Python processes. Every retained `InputOp` is
+  registered as a slice input even when a minting fragment did not list the boundary in its own `Graph.inputs`.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
 - **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
@@ -920,17 +938,37 @@ for a forkless anchor) is compiled with scoped authoritative pins and measured t
 the normal isolated benchmark and DB persistence path before MCTS continues in the same input pin regime. A
 realized-vs-requested check marks an
 unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
-rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
-the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
-only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
+rows feed the shared prior immediately, so the following MCTS can use their evidence. The measured pipeline captures
+the exact finalized single Loop's stamped structural identity, even when the working file starts from stable Torch IR.
+At the kernel-set-changing splice it also captures the consumed parent carrying the complete scheduler feature row and
+exact structural route. The proposal's measured whole-slice latency persists under that route-specific parent cache
+key and context. This captured perf row is deploy evidence: the measured DB index can select the route again after a
+cold reload while the unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain
+their independent terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and
+training; they do not drive deploy selection. The direct row is written only when the authoritative pins pass
+realized-pin validation, search retains the exact structural route, one consumed parent realizes it, and the terminal
+measurement succeeds. Ranking feedback is flushed to the working file as soon as proposal measurement finishes,
+before MCTS. A multi-CudaOp result records realized knobs only when their union is conflict-free, or when search
+retained that exact structural replay row; otherwise the ranking is explicitly ambiguous.
+
+Each of those per-target persists rewrites the whole file, so its cost is the size of the inventory rather than of
+the entry that changed, and a whole-model sweep pays it once per target. They are written **incrementally**: the
+program and loop pools are nearly all of such a file by size and no persist mutates them, so an incremental write
+keeps the text they were already serialized to and reserializes only the configurations. The document is still
+validated in full and the bytes written are the ones a full dump writes; canonical and promotion dumps simply
+reserialize everything. On the 279-target DeepSeek V4 Flash V100 inventory a persist is 2.5 s before and 0.24 s
+after — the sweep's write path was most of its wall time.
 
 `--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
 already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
-provides both its knob row and cost. A later greedy deploy replay can select different golden/DB evidence and is never
-paired with that search reward. These `-O1` ranking numbers never populate
+provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its first
+exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule row for
+a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their heterogeneous
+schedules into one row or falls back to a slower monolithic sibling. A later greedy deploy replay can select different
+golden/DB evidence and is never paired with that search reward. These `-O1` ranking numbers never populate
 `emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
@@ -1225,7 +1263,7 @@ rejects any that remain.
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
-compiled, repeated O3 `emmy-greedy` row as its positive reference only when the candidate and reference execute on
+compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
 this checks compiler-configuration parity rather than independent framework correctness. The original frontend
 program remains embedded for provenance, while the selected standalone target is what both configurations execute.
@@ -1267,7 +1305,12 @@ explicit working file whose GPU header is checked against the selected tune devi
    registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
    raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it.
+   match it. Two realizations are **structural** and cannot be read off a knob stamp at all, so the check skips them:
+   a `PLACE` cut, and the `g<n>` cross-CTA stage of a `REDUCE` value. A split replaces the kernel it splits, and
+   `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
+   from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
+   value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a
+   `g<n>` pin which genuinely never split cannot be told apart from one that did.
 2. **Arithmetic-intensity check.** A row whose FLOP/s, implied by its shape, exceeds the peak recorded in the live
    GPU's `GpuSpec` is flagged as a bad measurement rather than a fast kernel.
 3. **Wrong-answer check.** Each pinned config is executed once on the greedy run's inputs and its outputs are
@@ -1320,7 +1363,7 @@ golden's rank counts every candidate scoring strictly better PLUS every candidat
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
 once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29×. Both counts come from
-ONE computation (`prior/fit/rank.dual_rank`): the pessimistic rank is
+ONE computation (`search/metrics.dual_rank`): the pessimistic rank is
 the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy fit`'s metrics file.
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
@@ -1495,9 +1538,11 @@ stored).
 per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
 cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
-carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
-cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
-(any carrier; the only legal arm for a multi-component twisted carrier and for a multi-channel ⊗-combine). Pin
+carriers only, with no f16/bf16 destination; both tiers — an mma partial's C fragment rides `RegStore.atomic`),
+`g<n>k` = deferred f32 `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for a
+low-precision output, a multi-component twisted carrier, and a multi-channel ⊗-combine). A direct atomic low-precision
+destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
+carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
 `lowering/tile/030_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
@@ -1616,15 +1661,19 @@ of algebraic rewrites they may apply are documented there too.
 |---------------------------|----------------------------------------------------------------------------------------------|
 | `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
-| `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
+| `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
 | `loop/prefusion/`         | `dissolve_narrowing` runs the SAME splice as `loop/fusion` (both call `_merge.merge_region`) over the subset of regions whose sink is no wider than the producer. A merge makes the sink the region's output, so those can only shrink what gets written; draining them to fixpoint first means every contraction has CLOSED before anything can splice into its open product and force the outer product to gmem. It refuses nothing — a widening merge is deferred, and `loop/fusion` offers it afterwards. A separate PASS because rule batches interleave WITHIN a pass but a pass is left only once quiescent. |
-| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
+| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them. A merged nested-reduce or multi-statistic cell stays fail-closed unless tile recognition proves one exact grouped placement inverse; that witness also replaces duplicated raw-loop work with the child-once + parent count for the boundedness gate, while fused and materialized forms remain priced siblings. `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/recognize/`         | Empty (retired) — recognition is classification of the lifted Fold tree (`lowering/tile/_classify`), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
 | `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
 | `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/_classify.bind_bilinear` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` resolves dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+
+SiLU decomposition follows PyTorch opmath precision: f16 and bf16 inputs widen once to f32, the primitive
+negative/exp/denominator/reciprocal chain and final product compute in f32, and the result converts once to the
+declared output dtype. F32 and f64 inputs retain their dtype, so decomposition never demotes a wider input.
 
 ## Dump hooks (`dump.py`)
 

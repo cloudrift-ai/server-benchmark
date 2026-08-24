@@ -108,7 +108,7 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view, unit_contraction_view
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -472,6 +472,9 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
     - the MONOID-producer composition (``_classify.fused_view``) — the stored map form plus
       the derived fused contraction. The contraction's tree is the REFERENCE namespace: bare
       ``REDUCE`` must mean its K fold, so the map view spells its statistic at ``REDUCE@<axis>``;
+    - the direct unit-row contraction (``_classify.unit_contraction_view``) — the stored one-axis
+      term reclassified with its proven synthetic M axis, exposing the ordinary contraction
+      schedule without changing the canonical tree;
     - the COLLAPSE (:meth:`Fold.demoted`) — a stored computed-A contraction plus the derived
       per-cell splice, which carries the cone on the reduce tiers.
 
@@ -480,11 +483,23 @@ def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
 
     No view's rows depend on whether its sibling produced any: each gate is a local predicate on
     its own term (a 16-bit atom, a resolvable fill, an inventory a value can spell against)."""
-    base = _Term(tile, tile.place.on_grid(), ctx)
+    # The per-cell reading of a CHAINED root is itself a derivation (``demoted_chain`` — the
+    # statistic back at the root, the column as its captured loop): the reduce tiers partition
+    # the root node, so that is the tree they schedule and materialize.
+    cell_op = demoted_chain(tile.op)
+    cell = replace(tile, op=cell_op) if cell_op is not tile.op else tile
+    base = _Term(cell, tile.place.on_grid(), ctx)
     pro = fused_view(tile)
     if pro is not None:
-        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, pro[1]), stores=pro[2])
-        return [_Term(tile, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, *pro[1]), stores=pro[2])
+        return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
+    unit = unit_contraction_view(tile)
+    if unit is not None:
+        contraction = _view(tile, unit[0], ctx, free=unit[1])
+        unit_node = head(unit[0])
+        if unit_node is not None and _has_computed_operand(unit_node):
+            return [_Term(cell, tile.place.on_grid(), ctx, ref=contraction.sched), contraction], 1
+        return [contraction], 0
     node = head(tile.op)
     if node is None or not is_contraction(node):
         return [base], 0
@@ -541,6 +556,9 @@ def _tile_ok(term: _Term, node, plan: TilePlan) -> bool:
     row needs, plus the exact-cover geometry a COMPUTED ``a`` edge's compute fill adds. Both are
     ``_legality`` predicates, dropped here and RAISED on a pin (:func:`_contraction_values`)."""
     if not legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=False):
+        return False
+    shapes = {**term.tile.inputs, **term.tile.outputs}
+    if not legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=False):
         return False
     conv = _converting_a(node, plan.atom, term.tile.inputs)
     # The converting fill reads A per element through its own σ — the fragment loader's contiguous
@@ -776,25 +794,34 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     A cross-CTA split is offered here only in COMPOSITE with the transposed band — every split
     candidate in the catalog is one, so the loop below states the catalog's shape rather than
     adding a rule."""
-    pin = term.pin("REDUCE", node)
-    if pin is not None:
-        return [_consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))]
-    extent = _hint_extent(node.axis)
-    cands = [ReducePlan()]
     inner = _inner_free(term.place)
     k_static = node.axis.extent.as_static() if node.axis.extent.is_static else None
     # Term-wide, so it is asked ONCE, not per candidate.
     epilogue = legal.coop_band_epilogue(projection_tail(term.tile))
+
+    def band_legal(p: ReducePlan, *, pinned: bool) -> bool:
+        # The transposed band's own requirements: the geometry (shared with the contraction tier)
+        # plus this tier's epilogue condition. A pin meets the same test, as a refusal.
+        if not p.coop_transposed:
+            return True
+        return legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=pinned) and legal.enforce(epilogue, pinned=pinned)
+
+    pin = term.pin("REDUCE", node)
+    if pin is not None:
+        plan = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        band_legal(plan, pinned=True)
+        if plan.needs_split and plan.finalize == "atomic":
+            legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
+        return [plan]
+    extent = _hint_extent(node.axis)
+    cands = [ReducePlan()]
     for p in coop_reduce_moves():
         if p.needs_split and not _splittable_axis(term, node):
             continue  # the axis is already a slice — its cross-CTA partition was consumed
-        if p.coop_transposed:
-            # The band's own requirements: the geometry (shared with the contraction tier) plus
-            # this tier's epilogue condition.
-            if not legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=False):
-                continue
-            if not legal.enforce(epilogue, pinned=False):
-                continue
+        if not band_legal(p, pinned=False):
+            continue
+        if p.finalize == "atomic" and not legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False):
+            continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
     return cands
@@ -816,10 +843,17 @@ def _fill_realized(parent: _Node | None, site: Site) -> bool:
     prologue stripes a cone's statistic ONE ROW PER WARP, the warp's 32 lanes striding the fold and
     closing it on the shuffle butterfly (``lowering/kernel/_stage.sync_stat_fill``) — a single
     hardwired partition, so any value here would stamp a knob no kernel realizes."""
-    if parent is None or not is_contraction(parent.site.node) or isinstance(parent.site.node.a, Load):
+    if parent is None or not is_contraction(parent.site.node):
         return False
     depth = len(parent.site.segments)
-    return len(site.segments) > depth and site.segments[depth] == "a"
+    if len(site.segments) <= depth:
+        return False
+    role = site.segments[depth]
+    if role == "a":
+        return not isinstance(parent.site.node.a, Load)
+    # A computed B CONE (a zero-axis projection) is evaluated by the same fill per slab cell, its
+    # statistic with it; an inline B fold WITH an axis is a real nested schedule site.
+    return role == "b" and all(isinstance(ch.b, Fold) and ch.b.axis is None for ch in parent.site.node.channels if isinstance(ch.b, Fold))
 
 
 def _band_of(plan: ReducePlan) -> Workers | None:
@@ -960,7 +994,12 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     pin = term.pin("REDUCE", node)
     if pin is not None:
         pinned = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
+        ext = node.axis.extent
+        # A pin meets the transposed band's geometry as a refusal, not an emitter crash.
+        legal.enforce(legal.coop_band_geometry(pinned, ext.as_static() if ext.is_static else None, _inner_free(term.place)), pinned=True)
         if pinned.needs_split:
+            if pinned.finalize == "atomic":
+                legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -988,10 +1027,14 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+        atomic_ok = (
+            len(node.channels) == 1
+            and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+            and legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False)
+        )
         for sp in splitk_moves():
             if sp.finalize == "atomic" and not atomic_ok:
-                continue  # a non-distributive projection would raise at 030_split_reduce
+                continue  # the carrier, projection, or destination cannot realize a direct atomic finalize
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(sp)
     return out
@@ -1029,6 +1072,8 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
                     legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)
                 legal.enforce(legal.warp_k_step(node, plan), pinned=True)
                 legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
+                shapes = {**term.tile.inputs, **term.tile.outputs}
+                legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=True)
                 if _has_computed_operand(node) or conv:
                     legal.enforce(legal.computed_operand_cover(node, plan.placed_on(term.place), converting_a=conv), pinned=True)
                     legal.enforce(

@@ -133,14 +133,19 @@ def _emit(op, ctx: Ctx) -> Frag:
         # edge per computed input: the row statistic, plus (attention) the per-cell score
         # contraction its ``exp(s − m)`` reads.
         prefix = [s for e in op.operands for s in _emit(e, ctx).body]
-        return Frag(body=[*prefix, *_emit_body(op.body, ctx)], out=_map_wire(op))
+        # A body member that is itself a node (a fold reading the store's sweep axis, chained
+        # over its statistic) emits in place, per cell.
+        body = [s for m in op.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
+        return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx)], out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
-        # included, since a contraction is this same node under the bilinear reading. Operand
-        # edges splice ahead of first use.
+        # included, since a contraction is this same node under the bilinear reading. Loop-
+        # invariant edges (a chained statistic) emit once ahead of the loop; the rest splice into
+        # the step ahead of first use.
+        hoisted = [s for e in op._hoisted_edges() for s in _emit(e, ctx).body]
         stmts = _emit_body(Body(op.spliced_step()), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
-        return Frag(body=[loop], out=Handle(op.out))
+        return Frag(body=[*hoisted, loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
 
 

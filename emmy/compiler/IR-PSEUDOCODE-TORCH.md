@@ -143,11 +143,11 @@ up an array by given a function of its indices.  Let's look at its application m
   //                 so it knows it has to iterate _i over 0..=3 and _j over 0..=7
 ```
 
-This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::tensor_from_fn`
-primitive is polymorphic over the shape of the tensor it produces and over the shape of the tensor it reads, so
-its type signature is something like `fn emmy::tensor_from_fn<T, const n: usize, const m: usize, …>(operand, coord)
--> T[n, m]` and the same name serves tensors of any shape and rank. Since the result's type is always annotated,
-the shape is never ambiguous.
+This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::tensor_from_fn` primitive
+is polymorphic over the shape of the tensor it produces and over the shape of the tensor it reads. You can assume
+for simplicity that its signature is something like `fn emmy::tensor_from_fn<T, const n: usize, const m: usize,
+…>(operand, coord) -> T[n, m]` (the real signature serves tensors of any shape and rank, we show it in the following
+sections). Since the result's type is always annotated, the shape is never ambiguous.
 
 In practice, tensor IR can't express `emmy::tensor_from_fn` calls with arbitrary lambdas, only some specific restricted
 forms.  But it's not a problem for you, since you only read these lambdas and never write them.  For the precise
@@ -386,8 +386,7 @@ fn emmy::bitcast<T, U, const rank: usize, const d: usize[rank]>(x: T[d]) -> U[d]
 
 Reads one tensor into another shape. The lambda maps an index of the result to the index it reads from the
 operand — it computes coordinates, never values, so nothing here can change a value on the way through. A printed
-line names the index vector's components instead of the vector, `|i, j, k|` for rank three, which is why rank six is
-the limit — the printer has six index names.
+line names the index vector's components instead of the vector, `|i, j, k|` for rank three.
 
 ```rust
 fn emmy::tensor_from_fn<T, const rank: usize, const orank: usize, const d: usize[rank], const od: usize[orank]>(

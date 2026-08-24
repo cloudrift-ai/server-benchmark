@@ -165,6 +165,8 @@ def _serialize_field(v):
     Special cases:
 
     - ``ir.elementwise.ElementwiseImpl`` → its ``name`` string.
+    - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
+      composite expressions round-trip through op fields.
     - ``ir.stmt.Body`` → the underlying ``stmts`` tuple. Body is an
       in-memory wrapper; on disk we keep the tuple-of-stmts form so
       ``_deserialize_field``'s list-of-Stmt-reprs path keeps working
@@ -198,7 +200,9 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        return v.value
+        from emmy.compiler.torch_wire import dim_to_wire
+
+        return {"__dim__": dim_to_wire(v)}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -225,6 +229,11 @@ def _deserialize_field(k, v):
     the IR's ``__all__`` exports — same classes the Stmt reprs reference."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
+    if isinstance(v, dict) and set(v) == {"__dim__"}:
+        from emmy.compiler.torch_wire import dim_from_wire
+
+        return dim_from_wire(v["__dim__"])
+
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
@@ -249,6 +258,8 @@ def _deserialize_field(k, v):
         fields = {fk: _deserialize_field(fk, fv) for fk, fv in v.get("fields", {}).items()}
         return op_cls(**fields) if fields else op_cls()
     if isinstance(v, list) and v and all(isinstance(e, dict) and "__op__" in e for e in v):
+        return tuple(_deserialize_field(k, e) for e in v)
+    if isinstance(v, list) and v and any(isinstance(e, dict) and "__dim__" in e for e in v):
         return tuple(_deserialize_field(k, e) for e in v)
     if isinstance(v, list):
         # Constructor-repr string *elements* rehydrate under the same known-class guard —

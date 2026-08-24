@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "nvidia/DeepSeek-V4-Pro-NVFP4"
-  rationale: "Niche NVFP4 spec with zero adoption signals and very low interest."
-  heat: 10
+  rationale: "NVFP4 specialization with zero adoption signals and very low interest."
+  heat: 25
 # DeepSeek-V4-Pro: 1.6T / 49B-active MoE, CSA+HCA hybrid attention, MIT, native 1M ctx.
 # Engine = vLLM (NOT SGLang): SGLang #25704 produces NaN/garbage on DeepSeek-V4-Pro NVFP4 on
 #   8xB200 single-node TP=8 unless EAGLE spec-decode is forced. vLLM has clean day-0 support.

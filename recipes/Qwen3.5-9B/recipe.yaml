@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.5-9B
-  rationale: "Consumer VLM; 9B size fits RTX 5090 but eclipsed by 3.6 family."
-  heat: 40
+  rationale: "New generation but lower attention than siblings; moderate compact model interest."
+  heat: 45
   task: generate
 matrices:
-- deploy.gpu: NVIDIA GeForce RTX 5090
+- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
   deploy.gpu_count: 1

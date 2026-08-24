@@ -7,7 +7,7 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "Strong HuggingFace downloads and likes drive breakout attention."
+  rationale: "5K likes, 5M downloads, trending 5121; breakout attention across sources."
   heat: 92
   revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate

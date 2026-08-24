@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-3.3-70B-Instruct
-  rationale: "Massive HuggingFace download momentum and sustained active serving."
+  rationale: "Arena rank 243 with very high serving volume; strong established presence."
   heat: 95
   task: generate
 matrices:

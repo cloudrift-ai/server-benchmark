@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-  rationale: "FP8 variant of older architecture with limited general interest."
-  heat: 25
+  rationale: "Unreleased FP8 variant lacks trending signals; speculative heat adjusted down."
+  heat: 20
 engine:
   llm:
     pipeline_parallel_size: 1

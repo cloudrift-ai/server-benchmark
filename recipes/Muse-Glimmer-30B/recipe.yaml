@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Reddit mindshare visible but limited OpenRouter evidence suggests ephemeral interest."
+  rationale: "Reddit mindshare visible but limited OpenRouter evidence; ephemeral interest."
   heat: 50
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA A100 80GB
+  deploy.gpu_count: 4

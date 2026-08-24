@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: zai-org/GLM-5.2
-  rationale: "Breakout signals with 2.7M downloads and 5K likes; high community momentum."
-  heat: 92
+  rationale: "Strong HF trending with 2.7M downloads, 5K likes, and high arena rank."
+  heat: 94
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

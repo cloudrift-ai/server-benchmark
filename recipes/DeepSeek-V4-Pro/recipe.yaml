@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "Established 1.6T MoE with strong sustained downloads and community interest."
+  rationale: "Strong HF trending (5472), high downloads, and arena rank 52."
   heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 16
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8

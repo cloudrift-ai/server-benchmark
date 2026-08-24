@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: ai9stars/G9v3-39A5B
-  rationale: "Novel MoE architecture shows moderate traction with niche interest."
-  heat: 45
+  rationale: "Unclear identity with no trending or community signals found."
+  heat: 9
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA A100 80GB
+  deploy.gpu_count: 2

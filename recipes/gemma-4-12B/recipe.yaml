@@ -6,8 +6,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Base model with little attention overshadowed by instruction variants."
-  heat: 15
+  rationale: "Base model with little attention compared to instruction-tuned variants."
+  heat: 30
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion
 

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Strong HF likes and downloads provide solid attention across sources."
-  heat: 72
+  rationale: "Frontier MoE hosting success on B300s; 10.9K HF likes validate high interest."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-R1
-  rationale: "Dominant arena presence with breakout downloads and community engagement."
-  heat: 98
+  rationale: "Top HF trending (13584), strong Reddit and arena presence across all sources."
+  heat: 96
   task: generate
 matrices:
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 16

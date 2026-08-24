@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Overshadowed by the more popular 27B variant in the same family."
+  rationale: "Overshadowed by the more dominant 27B variant in the same family."
   heat: 25
   task: generate
 matrices:

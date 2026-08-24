@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Specialized compiler model with minimal adoption and low commercial relevance."
-  heat: 5
+  rationale: "Established MoE but no current trending or community activity."
+  heat: 12
   task: generate
 matrices:
-- deploy.gpu: NVIDIA GeForce RTX 5090
+- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
   deploy.gpu_count: 1

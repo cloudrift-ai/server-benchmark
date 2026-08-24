@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: BAAI/bge-m3
+  rationale: Multilingual SOTA embedding with 36M downloads and MTEB leadership.
+  heat: 55
+  task: embed
+matrices:
+- deploy.gpu: NVIDIA A100 80GB
+  deploy.gpu_count: 1

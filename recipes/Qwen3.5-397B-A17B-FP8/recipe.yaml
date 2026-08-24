@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Old architecture with no current momentum; minimal interest."
+  rationale: "No HF downloads or community discussion; high speculation low heat."
   heat: 15
 engine:
   llm:

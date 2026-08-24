@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "31B dense VLM with strong OpenRouter presence and established serving."
+  rationale: "Top vision score, strong HF downloads and trend; high community interest."
   heat: 75
 engine:
   llm:

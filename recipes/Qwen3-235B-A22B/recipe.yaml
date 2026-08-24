@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3-235B-A22B
-  rationale: "MoE flagship with strong OpenRouter presence; fits strong demand band."
+  rationale: "High arena rank 173 and MoE architecture draw sustained strong attention."
   heat: 78
   task: generate
 matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 4
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 8

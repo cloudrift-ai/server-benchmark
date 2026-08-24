@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - obsolete
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Qwen3 coder outshined by newer 3.8 variants; moderate sustained usage."
-  heat: 45
+  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: AWQ quant of older coder model; no independent trending evidence."
+  heat: 10
 engine:
   llm:
     tensor_parallel_size: 1

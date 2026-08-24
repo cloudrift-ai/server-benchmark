@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Active on OpenRouter; 3.6/3.8 family momentum strong."
-  heat: 70
+  rationale: "Directly matches hot Qwen3.8 35B A3B demand; strong community interest."
+  heat: 85
 engine:
   llm:
     tensor_parallel_size: 2

@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Sustained momentum in embedding space; stable heat reflects niche."
+  rationale: "Small embedding variant serves the broader Qwen embedding family momentum."
   heat: 55
   task: embed
 

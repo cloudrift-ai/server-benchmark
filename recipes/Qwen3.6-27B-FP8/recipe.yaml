@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Predecessor to trending 3.8 series; moderate FP8 appeal."
-  heat: 50
+  rationale: "Related to hot Qwen3.8 27B; FP8 serving value supports moderate heat."
+  heat: 65
 engine:
   llm:
     tensor_parallel_size: 1

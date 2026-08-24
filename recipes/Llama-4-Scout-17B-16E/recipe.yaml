@@ -3,9 +3,13 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
-  rationale: "Gated model with active serving and onboarding momentum; strong OpenRouter presence."
+  rationale: "Gated model but has active serving and strong OpenRouter presence."
   heat: 78
   task: generate
 matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA A100 80GB
+  deploy.gpu_count: 4
 - deploy.gpu: NVIDIA H100 80GB
   deploy.gpu_count: 8

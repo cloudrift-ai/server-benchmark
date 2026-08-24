@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Overshadowed by Qwen3.8 ecosystem; momentum present but declining."
+  rationale: "FP8 coding quant provides moderate niche serving value for developers."
   heat: 52
 engine:
   llm:

@@ -454,6 +454,7 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     script = next(step["run"] for step in job["steps"] if step.get("name") == "Run onboard-model agent")
     readme = (workspace / "README.md").read_text()
     qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
+    benchmark = (workspace / "prompts" / "onboard-model" / "benchmark.md").read_text()
     investigate = (workspace / "prompts" / "onboard-model" / "investigate.md").read_text()
     skill = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
     investigator = (workspace / ".opencode" / "agents" / "onboard-investigator.md").read_text()
@@ -461,6 +462,7 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
     assert '--file "$WORKFLOW_SOURCE/README.md"' in script
     assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/qualify.md"' in script
+    assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/benchmark.md"' in script
     assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/investigate.md"' in script
     assert '--file "$AGENT_TASK"' in script
     assert "jq -n \\" in script
@@ -472,7 +474,11 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
         assert f"https://github.com/{project}" in readme
     assert "`../<repository-name>`" in readme
     assert "prompts/onboard-model/qualify.md" in skill
+    assert "prompts/onboard-model/benchmark.md" in skill
     assert "prompts/onboard-model/investigate.md" in skill
+    assert benchmark.strip()
+    assert "http://" not in benchmark
+    assert "https://" not in benchmark
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
         assert f"{field}:" in script
         assert f"`{field}`" in qualify

@@ -89,6 +89,16 @@ is not a serving speedup. Profiling a strict k2 kernel attributes the gap to 14.
 255 registers per thread, and 3.4% DRAM throughput; schedule-neighbor, staging, raster, and fast-exponential sweeps did
 not close it.
 
+A follow-up exact-source audit at revision `4db44ff182073898a0c1589cee7a9a9361a2d971` tested whether a structural
+split could close the attention gap. The split recovered the stable-softmax `(m, l, O)` carrier and passed strict
+`-O3` comparison with maximum absolute error 0.001953125. Its partial and finalize kernels measured 150,246.4 and
+85.8 us, however, for 150,643.7 us end to end versus 63.66 us for eager PyTorch.
+
+The recovered P@V contraction remained a derived singleton site, and lowering offered zero warp/MMA candidates for
+it. The existing scheduler has no route that schedules and materializes the outer carrier as a tensor-core
+contraction. The algebraically correct split is therefore a compiler-boundary result, not a competitive candidate or
+a serving improvement.
+
 Until strict correctness passes across the inventory and attention reaches parity, this recipe intentionally has no
 `golden/` directory and no Emmy serving lane.
 

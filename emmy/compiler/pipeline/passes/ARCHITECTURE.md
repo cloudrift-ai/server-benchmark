@@ -401,7 +401,9 @@ commutative-monoid ⊕, by the `ElementwiseImpl` traits, never op names) arbitra
 loads, hoistable k-invariant factor chains, computed cones), with role purity checked per index EXPR — another
 free axis may ride a separate dim of an operand load (a batch offset the grid absorbs) but never the same expr
 as the role axis, since that composite has no slab address and must decline instead of reaching an emitter
-that cannot spell it; the monoid composition (`fused_view`) binding its
+that cannot spell it. For a commutative product, the lift's SSA argument order does not decide which edge is the
+direct operand and which is a computed cone: the binder derives those roles from their indices. A noncommutative
+product is never reordered. The monoid composition (`fused_view`) binds its
 channels through the same read. A stage that declines rewrites nothing — the fold already derives PLANAR
 structurally. What stays case-by-case is the dispatch — which composition applies — never the parsing: no
 classification stage holds a private stmt-pattern reading of the algebra.

@@ -422,6 +422,10 @@ class TuningSearch(Search):
         if node is None:
             return None
         structural = self._structural_replay_row(node)
+        # A compatible multi-CUDA terminal has one exact merged row even though
+        # its kernel-set-changing choice never appeared as a search-tree fork.
+        if structural is None and (node.realized_cuda_ops or 0) > 1:
+            structural = self._structural_row(node.realized_knobs)
         if structural is None and node.realized_knobs is None and (node.realized_cuda_ops or 0) > 1:
             structural = self._structural_row(validated_input_route)
         if structural is not None:

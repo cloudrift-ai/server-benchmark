@@ -144,6 +144,22 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
     assert search.best_realized() == (stamp_schedule_families(row), 6.0, 2, True)
 
 
+def test_best_realized_uses_a_compatible_multi_cuda_terminal_placement_route() -> None:
+    tree = SearchTree()
+    tree.root.children = [
+        _ok_leaf(
+            6.0,
+            realized_knobs={"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "PLACE@map": "cut"},
+            cuda_ops=2,
+        )
+    ]
+
+    search = TuningSearch.__new__(TuningSearch)
+    search.tree = tree
+
+    assert search.best_realized() == ({"PLACE@map": "cut"}, 6.0, 2, True)
+
+
 def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
     tree = SearchTree()
     route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE@map": "cut", "WORK": "w1x1"}), parent=tree.root)

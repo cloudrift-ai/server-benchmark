@@ -64,6 +64,7 @@ def torch_dtype(dtype) -> torch.dtype | None:
         # numeric torch float8 value.
         "f8e4m3": torch.uint8,
         "f8e5m2": torch.uint8,
+        "bool": torch.bool,
         "i32": torch.int32,
         "i64": torch.int64,
     }.get(str(dtype))

@@ -42,6 +42,7 @@ SUPPORTED = frozenset(
         "ElementwiseOp",
         "ReduceOp",
         "ScanOp",
+        "RangeOp",
         "IndexMapOp",
     }
 )
@@ -65,8 +66,13 @@ def torch_dtype(dtype) -> torch.dtype | None:
         "f8e4m3": torch.uint8,
         "f8e5m2": torch.uint8,
         "bool": torch.bool,
+        "u8": torch.uint8,
+        "i16": torch.int16,
         "i32": torch.int32,
         "i64": torch.int64,
+        "u16": torch.uint16,
+        "u32": torch.uint32,
+        "u64": torch.uint64,
     }.get(str(dtype))
 
 
@@ -114,6 +120,13 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "prod": lambda a: a[0] * a[1],
         "divide": lambda a: a[0] / a[1],
         "true_divide": lambda a: a[0] / a[1],
+        "floor_divide": lambda a: torch.floor_divide(a[0], a[1]),
+        "remainder": lambda a: torch.remainder(a[0], a[1]),
+        "left_shift": lambda a: torch.bitwise_left_shift(a[0], a[1]),
+        "right_shift": lambda a: torch.bitwise_right_shift(a[0], a[1]),
+        "bitwise_and": lambda a: torch.bitwise_and(a[0], a[1]),
+        "bitwise_or": lambda a: torch.bitwise_or(a[0], a[1]),
+        "bitwise_xor": lambda a: torch.bitwise_xor(a[0], a[1]),
         "pow": lambda a: a[0] ** a[1],
         "maximum": lambda a: torch.maximum(a[0], a[1]),
         "minimum": lambda a: torch.minimum(a[0], a[1]),
@@ -183,6 +196,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
     name = type(op).__name__
     if name == "ElementwiseOp":
         return _elementwise(op.op.name, ins)
+    if name == "RangeOp":
+        return torch.arange(op.start, op.stop, op.step, dtype=torch_dtype(op.dtype))
     if name == "ReduceOp":
         x, ax, fn = ins[0], op.axis, op.op.name
         if fn in ("sum", "add"):
@@ -392,6 +407,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     inside the traced function used to trigger a dynamo recompile per distinct
     op (``add`` vs ``multiply`` vs …), hitting the recompile limit on big
     graphs."""
+    import torch  # noqa: PLC0415
+
     from emmy.compiler.ir.expr import Var  # noqa: PLC0415
     from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
 
@@ -428,6 +445,20 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
             continue
         if type(node.op).__name__ == "ElementwiseOp":
             op_callable = _elementwise_callable(node.op.op.name)
+        elif type(node.op).__name__ == "RangeOp":
+            first_input = next(iter(input_tensors.values()), None)
+            device = first_input.device if first_input is not None else torch.device("cpu")
+            op_callable = (
+                lambda n, d: (
+                    lambda _ins: torch.arange(
+                        n.op.start,
+                        n.op.stop,
+                        n.op.step,
+                        dtype=torch_dtype(n.op.dtype),
+                        device=d,
+                    )
+                )
+            )(node, device)
         else:
             op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env))(node)
         compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))

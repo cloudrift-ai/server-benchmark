@@ -122,9 +122,9 @@ autotuning cache doesn't bust on cosmetic edits.
   at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expr` factor, resolved via
   `Expr.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The backend
   benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
-  `backend/cuda/program.py` `_resolve_symbolic`), so `tune` and `compile` agree on a hint-sized variant. (The masked tensor-core / cooperative /
-  split-K tiers for symbolic axes are part of the in-flight tile-IR rebuild — see `pipeline/passes/ARCHITECTURE.md`
-  and the tile IR sources for current coverage.)
+  `backend/cuda/program.py` `_resolve_symbolic`), so `tune` and `compile` agree on a hint-sized variant. (The masked
+  tensor-core / cooperative / split-K tiers for symbolic axes are part of the in-flight tile-IR rebuild — see
+  `pipeline/passes/ARCHITECTURE.md` and the tile IR sources for current coverage.)
 - **`ElementwiseOp` inputs must already share the output shape.** The
   decomposition helper
   `pipeline/passes/frontend/decomposition/_broadcast.broadcast_to` wraps
@@ -140,7 +140,7 @@ autotuning cache doesn't bust on cosmetic edits.
   `Backend.run` topo-walk (`backend/base.py`) run post-fusion graphs on
   CPU — fusion correctness can be checked without a GPU.
 
-## Quantized checkpoints (FP8)
+## Quantized checkpoints
 
 A quantized checkpoint never reaches the trace: the trace runs over the bf16 architecture twin built from config
 (quantization is a property of the checkpoint, not the architecture). Immediately post-trace,
@@ -151,11 +151,10 @@ on any shared IR type. Storage-decode cones stay in-graph unconditionally: fp8 b
 memory, the dtype decode is absorbed at the fragment load, and a compatible scale is hoisted to the epilogue. The
 generic constant folder deliberately excludes storage-decode cones because materializing them would expand the
 buffer into its compute dtype. Scale pairing is the general `<key>_scale` / `<key>_scale_inv` rule — it subsumes the
-`.weight` → `.weight_scale` convention and covers non-`.weight` leaves (gpt-oss's 3-D expert params,
-`…experts.gate_up_proj` + `…experts.gate_up_proj_scale`). DeepSeek-lineage `weight_scale_inv` names the inverse of
-the quantization scale, which is the stored dequant multiplier: both suffixes therefore reconstruct the weight by
-multiplication. Only a checkpoint contract that explicitly declares a reciprocal dequant multiplier may select the
-division path; the key suffix alone never does.
+`.weight` → `.weight_scale` convention and covers non-`.weight` expert leaves. DeepSeek-lineage `weight_scale_inv`
+names the inverse of the quantization scale, which is the stored dequant multiplier: both suffixes therefore
+reconstruct the weight by multiplication. Only a checkpoint contract that explicitly declares a reciprocal dequant
+multiplier may select the division path; the key suffix alone never does.
 
 When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
 wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.
@@ -171,11 +170,18 @@ and `graph.inputs` slot but its dtype becomes the f8 storage dtype — the feed 
 fp8 bits carrier, the same rule as the constant side (`emmy/serving/gen_runner.py`'s `_compile_split` binds every plan
 input at its own traced dtype for this reason) — and a new `<name>_scale` input is appended, with the same decode-cast
 / broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
-at gpt-oss expert shapes the gate_up matmul streams fp8 bytes with the scale on the accumulator epilogue at both the
-mma and the M=1 coop-reduce tiers. Whether the down matmul's cone (the down projection sum-contracts the exp-bearing
-SwiGLU activation) inlines or stays materialized is loop fusion's ordinary outcome — a fusion-band decision upstream
-of the tile binding, shared with the constant path.
+the gate/up matmul can stream fp8 bytes with the scale on the accumulator epilogue. Whether the down matmul's cone
+(the down projection sum-contracts the exp-bearing SwiGLU activation) inlines or stays materialized is loop fusion's
+ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
+
+**Native MXFP4 expert inputs.** OpenAI gpt-oss stores each routed matrix as uint8 `*_blocks` (two FP4 nibbles per
+byte, 32 values per group) plus uint8 E8M0 `*_scales`. `loader.quant.spell_mxfp4_inputs` re-mints a traced logical
+`(in, out)` expert input at its packed `(out, in/32, 16)` shape, appends the `(out, in/32)` scale input, and spells
+generic integer extraction, the exact FP4 value map, power-of-two scaling, reshape, and transpose algebra. U8 is an
+ordinary one-byte integer dtype throughout the generic compiler; no MXFP4 operation or metadata crosses the
+birth-time spelling boundary. `decode_mxfp4` is the NumPy value reference. The serving loader preserves the packed
+checkpoint tensors and only permutes the gate/up output axis once to restore concatenated gate/up halves.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
@@ -191,14 +197,16 @@ weight inputs. Marker presence selects the generic codebook algebra. An unsuppor
 coded linear fails at birth rather than falling back to materialization; ordinary padded channel
 dimensions are handled inside the generic spelling.
 
-`load_dequantized_state_dict` remains an explicit eager/reference utility and the block decoder is
-still used for an unsupported coded LM head. Neither is an automatic compiled-serving fallback.
+`load_dequantized_state_dict` remains an explicit eager/reference utility: it decodes native MXFP4 block/scale pairs
+to the architecture twin's logical expert parameters, and the block decoder is still used for an unsupported coded
+LM head. Neither is an automatic compiled-serving fallback.
 `coded_tensor_storage` remains a loader-only, weight-free inventory for tracing and release
 coverage.
 
 **Invariant: quantization is not a concept past the decomposition band.** Downstream layers — lowering, backends,
-search — may know canonical dtypes (`f8e4m3`), generic elementwise ops, and graph algebra. They may NEVER contain a
-checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or name.
+search — may know canonical dtypes (`f8e4m3`, `u8`), generic elementwise ops, and graph algebra. They may NEVER
+contain a checkpoint format's op, statement, helper, pass branch, schedule feature, environment gate, comment, or
+name.
 Scheme-specific types and metadata belong only to checkpoint loading and birth-time spelling. Spelling must emit
 generic algebra, and frontend decomposition must leave only generic tensor IR or a regular constant before Loop IR.
 Mechanical architecture tests scan the post-decomposition source tree for format-name leaks.
@@ -217,9 +225,9 @@ It rides on one chokepoint: `Graph.splice` calls `provenance.propagate` with a `
 fragment node as a fresh piece of the consumed origins; fusion / lifting / optimization folds *aggregate* the consumed
 piece sets onto the merged node (unioning the dissolved producers so a multi-output splice drops nothing). Lowering is
 in-place `Op` rebinds, so prov rides through `LoopOp → TileOp → KernelOp → CudaOp` untouched. Seeded once at
-`Pipeline.tune_async` / `Pipeline.run` entry (idempotent); pure metadata, excluded from structural / cache keys. Boundary sentinels
-(`InputOp`/`ConstantOp`) never carry prov: `put` refuses to stamp them and `propagate` scrubs splice outputs that land
-on one (the generic hint merge would otherwise copy prov onto e.g. the ConstantOp produced by the sm_90+
+`Pipeline.tune_async` / `Pipeline.run` entry (idempotent); pure metadata, excluded from structural / cache keys.
+Boundary sentinels (`InputOp`/`ConstantOp`) never carry prov: `put` refuses to stamp them and `propagate` scrubs splice
+outputs that land on one (the generic hint merge would otherwise copy prov onto e.g. the ConstantOp produced by the sm_90+
 weight-transpose fold, inflating `totals` so every kernel of that origin read partial coverage).
 
 Consumers: `provenance.name_for` (called from `pipeline/passes/loop/stamp/010_stamp_loop_names.py`, the

@@ -286,6 +286,39 @@ def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live():
         torch.testing.assert_close(out, ref2, rtol=1e-4, atol=1e-5)
 
 
+def test_routing_histogram_discards_capture_warmup_and_counts_outer_replays():
+    """Capture work is a baseline, while every replay must count its routed rows."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._routing_histogram_counts = torch.zeros((1, 4), dtype=torch.int64, device="cuda")
+    runner._routing_histogram_interval = 1
+    runner._routing_histogram_calls = 0
+    runner._routing_histogram_capture_seen = False
+    moe = {"local_layer": 0, "layer": 0, "num_experts": 4, "top_k": 2}
+    runner._moe = [moe]
+    indices = torch.tensor([[1, 3], [1, 2]], dtype=torch.int64, device="cuda")
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        runner._record_routing(moe, indices)
+
+    assert runner._routing_histogram_capture_seen
+    runner.maybe_log_routing_histogram()
+    assert not runner._routing_histogram_capture_seen
+    assert runner._routing_histogram_counts.count_nonzero() == 0
+    graph.replay()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert runner._routing_histogram_counts.cpu().tolist() == [[0, 4, 2, 2]]
+
+
 def test_run_device_sym_aliased_input_backing_replays_live():
     """The A2 chained-seam primitive on the SYMBOLIC path: the caller writes INTO the sym
     program's own input backing (what the previous layer's chained post output is, after A2),

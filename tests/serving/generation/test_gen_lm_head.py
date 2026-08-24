@@ -179,9 +179,6 @@ def test_non_last_pipeline_stage_loads_only_its_attention_sinks():
         ("lm_head.weight", torch.zeros(VOCAB, HIDDEN)),
     ]
 
-    assert _load(model, weights) == {
-        "model.layers.2.self_attn.sinks",
-        "model.layers.3.self_attn.sinks",
-    }
+    assert _load(model, weights) == {"sinks.0", "sinks.1"}
     assert torch.equal(model.sinks[0], torch.full((3,), 2.0))
     assert torch.equal(model.sinks[1], torch.full((3,), 3.0))

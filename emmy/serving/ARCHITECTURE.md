@@ -95,6 +95,15 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   representative program. GLM-4.5-Air's one boot flag, `L0.post.chunk.m512` at 46x, is **0.15 % of a 512-token
   prefill step**; 85 % of that step's GPU time is in the routed-expert programs, which the audit cannot even build a
   twin for. Rank by measured cost, not by ratio-over-floor, when deciding what to tune.
+- **Routed input-slice usage histogram.** `EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=N` adds one persistent int64 counter per
+  layer and routed-expert input slice, then emits the cumulative selection counts as compact JSON every `N`
+  uncaptured `EmmyGenModel` forwards. The counter update is a device-side `scatter_add_` at the router boundary, so
+  whole-step CUDA-graph capture records it and every decode replay contributes without a host synchronization. The
+  capture-time execution is discarded before the first uncaptured boundary snapshot; subsequent graph replays remain
+  counted. A snapshot runs before an uncaptured forward, so a short probe can delimit the workload that preceded it.
+  Counts are routed rows, not kernel launches: a prefill step can select the same slice for many rows while loading
+  its weights once for that grouped dispatch. The feature is off by default and intended to measure whether a
+  persistent input-slice residency policy has enough skew to justify moving cold weights out of GPU memory.
 - `sampling.py` — **no vLLM, no CUDA**. Pure-numpy token sampling (`Sampler`: greedy / temperature / top-k / top-p) +
   `apply_chat_template` (delegates to the HF tokenizer). Used by the standalone **generation oracle**
   (`commands/generate.py`) — `emmy generate`'s host loop re-runs the whole fp16 prefix each step on the CUDA
@@ -109,7 +118,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
   `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
-  plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four).
+  plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four), and
+  native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales).
   Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
   `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
   The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
@@ -128,16 +138,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`SERVE_CONSULT_BASELINE`) cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
-  rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens` programs per layer** (`pre` +
-  `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's √hidden embed-scale folded into the
+  rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`
+  programs per layer** (`pre` + `post`) over the flattened `[num_tokens, H]` layout, and exposes `embed` (Gemma's
+  √hidden embed-scale folded into the
   gather table) / `forward_layer_pre(L,…)→(q,k,v)` (un-rotated 2-D seam; carves q/k/**v**-norm, and Gemma-4's global
   `attention_k_eq_v` where V reuses K's projection) / `forward_layer_post(L, attn_out, residual)→hidden` / `final_norm`.
   A Laguna post program recomputes the input normalization needed by its softplus `g_proj` and applies that gate to
   the flattened attention output before `o_proj`; a per-head gate temporarily views the seam as
   `[num_tokens, num_heads, head_dim]`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
-  use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The caller stitches between
-  `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention` in Phase 3). **I/O:**
+  use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
+  caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
+  in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
   captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
   step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = the dynamic-dim
@@ -221,7 +233,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   stay fp16. Checkpoint-provenanced attention, dense, routed, and shared down outputs return fp32; routed and fixed-slot
   combines accumulate fp32, and the final norm returns fp16 for the head. The marked post program returns the fp32
   base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
-  without a narrowing cast. Ordinary routers and non-Laguna checkpoints retain their existing hot paths.
+  without a narrowing cast. gpt-oss MXFP4 uses the narrower form of the same residual contract: embedding and the
+  inter-layer residual stay fp32, pre/post norms cast their projection and router activations back to fp16, expert
+  partials and their weighted combine stay fp16, and the routed result is added to the fp32 base before the final norm
+  returns fp16 for the output head. This prevents late-layer residual adds from overflowing on fp16-only GPUs without
+  widening attention or expert kernels. Other checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
@@ -260,19 +276,21 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   model dtype — an f8-dtype input binds the raw bit pattern on the uint8 fp8 bits carrier (a torch fp8 example tensor
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
-  expert programs; indirect operands compose (bits + scale slices both table-resolved).
-  **Quantized-checkpoint serving load (FP8, MoE M3):** `EmmyGenRunner.create` detects a quantized checkpoint
+  expert programs. Native MXFP4 blocks and scales bind as plain `u8`; indirect operands compose across every stored
+  input slice.
+  **Quantized-checkpoint serving load (FP8 and MXFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
-  dense trunk shard-streamed in as real values, expert tensors kept fp8 as a per-layer store of program-input-named
-  tensors (bits on the uint8 carrier + f32 scales + `dtype` biases, gate/up de-interleaved). `from_model` then
-  compiles the expert programs with `quant_specs` — `_compile_split` traces the wrapper at value dtypes (the trace
-  is quantization-blind), applies `spell_quantized_inputs` post-trace (bits input + appended scale inputs + the
-  in-graph decode/scale algebra the W8A16 binding absorbs), and the caller's example list carries the scale
-  examples as its last entries. Every per-expert input — weights, biases, scales — is a per-launch slice of the
-  store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
-  T=1 dispatch stays capture-legal with fp8 experts. VRAM: ~19 GB expert bits + dense fp16 + tables on the 32 GB
-  card, the rest is vLLM's KV budget. Gpt-oss checkpoints already store E-leading expert tensors; the DeepSeek /
-  Laguna lineage stores one module per expert, so the split loader stacks each layer into the same program inputs,
+  dense trunk shard-streamed in as real values, expert tensors kept compressed in a per-layer store keyed by program
+  input name, and gate/up de-interleaved once on its physical output axis. FP8 keeps raw bits,
+  f32 scales and value-dtype biases; `_compile_split` applies `spell_quantized_inputs`. MXFP4 keeps raw uint8 blocks,
+  uint8 E8M0 scales and value-dtype biases; `_compile_split` applies `spell_mxfp4_inputs` and binds the physical feed
+  by name because its shapes differ from the traced logical weights. Native MXFP4 currently requires every routed
+  expert layer to remain compressed; skip patterns that would mix plain and MXFP4 expert formats are rejected before
+  twin compilation. Every per-expert input is a per-launch slice of
+  the store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
+  T=1 dispatch stays capture-legal with compressed experts. Gpt-oss checkpoints already store E-leading MXFP4
+  expert tensors; the DeepSeek / Laguna lineage stores one module per expert, so the split loader stacks each layer
+  into the same program inputs,
   concatenating gate/up weights and block scales along their output axis while leaving ignored dense layers unscaled.
   **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
   codes and padded channel-vector tensors. Gate and up remain separate program inputs.
@@ -306,8 +324,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
   `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;
-  FA2/FlashInfer reject sinks there); `load_weights` claims `*.self_attn.sinks` beside `lm_head.weight` (untied
-  embeddings — no embed adoption; the runner owns the embed table from the checkpoint). The alternating
+  FA2/FlashInfer reject sinks there); `load_weights` maps stage-local `*.self_attn.sinks` checkpoint tensors to the
+  registered `sinks.<local-layer>` names beside `lm_head.weight` (untied embeddings — no embed adoption; the runner
+  owns the embed table from the checkpoint). The alternating
   sliding/full pattern rides the existing `_layer_window` (`layer_types`), and YaRN flows through the flat
   `config.rope_parameters` into `_build_rotary`/`get_rope` unchanged — one nuance: stock vLLM builds the gpt-oss
   rope at fp32 while the plugin's rotary follows the model dtype (fp16); q/k re-cast to the trunk dtype either
@@ -344,9 +363,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   allocates a KV-cache spec and runs paged attention; each is built at its **per-layer** dims (`runner.layer_meta` —
   Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers
   window correctly) + one RoPE module **per layer** (`_build_rotaries`: homogeneous models share one; Gemma-3/4
-  keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` + `LogitsProcessor`
-  (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies; `compute_logits` also -infs the
-  generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens `<image|>`/`<audio|>` there, HF
+  keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` +
+  `LogitsProcessor` (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies; `compute_logits`
+  also -infs the generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens
+  `<image|>`/`<audio|>` there, HF
   generate and stock vLLM honor the list, and a degenerate text prompt can genuinely rank one top-1, which would
   decode to empty output). The trunk compute (embed + per-layer
   pre/post + final norm) is the `EmmyGenRunner`; the last vLLM stage owns the output-head boundary, and `load_weights`
@@ -378,7 +398,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   are filtered before shard files open, so a rank never reads or materializes another stage's coded weights. Execution
   plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
-  Laguna EXL3 contract therefore preserves its fp32 residual stream across ranks while q/k/v and attention stay fp16.
+  Laguna EXL3 and gpt-oss MXFP4 contracts therefore preserve their fp32 residual streams across ranks while q/k/v and
+  attention stay fp16.
   The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
   `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the coded compiler program
   row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline

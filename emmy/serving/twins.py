@@ -180,12 +180,13 @@ def capture_twin_graphs(
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
-    profile includes unconverted experts. ``static_only`` is the deliberate exception: it accepts
+    profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
+    ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
     only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import fp8_weight_profile, strip_engine_quant_config  # noqa: PLC0415
+    from emmy.compiler.loader.quant import fp8_weight_profile, mxfp4_weight_profile, strip_engine_quant_config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
     from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
         build_attention_split_wrapper,
@@ -204,6 +205,7 @@ def capture_twin_graphs(
         )
     storage = coded_tensor_storage(model, cfg, revision=revision)
     fp8 = fp8_weight_profile(text)
+    mxfp4 = mxfp4_weight_profile(text)
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
     if (text.pad_token_id or 0) >= text.vocab_size:
@@ -291,6 +293,8 @@ def capture_twin_graphs(
                     graphs.update(_spell_expert_twins(expert_name, graph, storage))
                 elif fp8 is not None:
                     graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
+                elif mxfp4 is not None:
+                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members))
                 else:
                     graphs[expert_name] = graph
     return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes) if storage else graphs
@@ -458,6 +462,27 @@ def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) 
     if layers - coded:
         out[name] = graph
     return out
+
+
+def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int]) -> dict[str, Graph]:
+    """The native MXFP4 routed-expert twin derived from logical input shapes."""
+    from emmy.compiler.loader.quant import _is_skipped, spell_mxfp4_inputs  # noqa: PLC0415
+
+    coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.gate_up_proj_blocks", patterns)}
+    if skipped := layers - coded:
+        raise NotImplementedError(
+            f"native MXFP4 serving requires every routed-expert layer in profile {name!r} to stay compressed; "
+            f"quantization skip patterns exclude layer(s) {sorted(skipped)}"
+        )
+    specs = {}
+    for inp in ("w_gate_up", "w_down"):
+        k, n = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+        if k % 32:
+            raise ValueError(f"MXFP4 expert input {inp!r} has input width {k}, not divisible by 32")
+        specs[inp] = ((n, k // 32, 16), (n, k // 32))
+    spelled = graph.copy()
+    spell_mxfp4_inputs(spelled, specs)
+    return {f"{name}@mxfp4": spelled}
 
 
 def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Graph]:

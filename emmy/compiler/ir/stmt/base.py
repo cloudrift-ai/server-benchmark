@@ -145,7 +145,7 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -184,7 +184,7 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
         # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
         # wins a tie, while a strictly wider signed type can represent the narrower unsigned
         # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
-        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        widths = {"u8": 8, "i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
         signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
         unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
         if unsigned_width >= signed_width:
@@ -216,12 +216,11 @@ _BINARY_OP: dict[str, str] = {
     "multiply": "*",
     "divide": "/",
     "mod": "%",
-    # Comparisons + bool combines — the whole-model explicit-mask subgraph.
-    # Operands reach ``op_to_expr`` promoted to f32; C's implicit nonzero→bool
-    # conversion makes the comparison/logical spellings valid on them. The
-    # ``bitwise_*`` names carry bool-mask semantics in traced graphs (no op
-    # computes on integer tensors today), so they spell as logical ops — a
-    # float ``|`` would not compile.
+    # Comparisons + legacy bool combines — the whole-model explicit-mask subgraph.
+    # Non-integer operands reach ``op_to_expr`` promoted to f32; C's implicit
+    # nonzero→bool conversion makes these logical spellings valid on them. Typed
+    # integer operands use ``_INTEGER_BINARY_OP`` instead, including packed
+    # bitwise decode operations.
     "equal": "==",
     "not_equal": "!=",
     "greater": ">",
@@ -748,6 +747,12 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             )
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            if s.dtype is not None:
+                # The defining Assign is omitted below, so its normal render path cannot
+                # register the SSA dtype. Preserve it for the consumer: otherwise an inlined
+                # integer shift feeding a bitwise mask is mistaken for f32 and rendered with
+                # logical ``&&``/``||`` instead of integer ``&``/``|``.
+                ctx.ssa_dtypes[s.name] = s.dtype.name
             bases[s.name] = names
             inlined.add(s.name)
         if inlined:

@@ -483,6 +483,11 @@ node must rename its body `Write.output` to match (`fusion/_helpers.py::rename_w
 Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops`
 — `compile -vv` shows which pattern a rejected edge hit.
 
+A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
+splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
+the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. The standalone
+`LoopOp` remains the raw-loop escape, so the accumulator update and its `Write` stay in one serial loop.
+
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
 global cache would require; the memo is discarded with the splicer.

@@ -383,6 +383,36 @@ def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
 
 
 @requires_cuda
+def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
+    """A causal predicate in the two-pass computed fill keeps the absolute query/key coordinates.
+
+    Two cross-CTA partitions and two chunks per partition make both offsets nonzero. The fragment epilogue writes
+    weights to a tile-local shared-memory slab, but its predicate still compares the source program's absolute
+    coordinates; deriving them from that local write index admits future keys in every chunk after the first.
+    """
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
+    torch.manual_seed(0)
+    B, H, S, D = 1, 2, 128, 32
+    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"], is_causal=True).cpu().flatten().float().numpy()
+
+    backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
+    src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
+    assert "_a_stat_" in src, "the split partition must use the two-pass computed fill"
+    assert "_ks - _ks" not in src, "the causal predicate lost the absolute key-chunk base"
+    md = _max_diff(backend, compiled, feed, ref)
+    assert md < 4e-3, f"split-K causal fused sdpa vs torch max_diff={md:.6e}"
+
+
+@requires_cuda
 @pytest.mark.parametrize("variant", ["plain", "gqa", "mask"])
 def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
     """Symbolic ``seq_len`` (Q/K/V dim -2): ONE cached kernel carrying ``int seq_len`` serves every

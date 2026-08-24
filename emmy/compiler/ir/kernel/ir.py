@@ -1805,8 +1805,9 @@ class RegEpilogue:
     # Coord-predicated Selects (the causal attention mask), rendered before the
     # ``ops`` chain as per-element ternaries. Each is ``(name, branches)`` where
     # ``branches`` is ``((cond_expr | None, value_name), ...)`` — the predicate
-    # carries ``__M__`` / ``__N__`` placeholder Vars the store substitutes with
-    # the fragment element's own (row, col); the last branch is the else.
+    # carries its σ-applied cell bases plus ``__M__`` / ``__N__`` placeholder
+    # Vars the store substitutes with the fragment element's row/col offsets;
+    # the last branch is the else.
     selects: tuple[tuple[str, tuple[tuple[Expr | None, str], ...]], ...] = ()
     # Additional ``(acc_name, frag_name)`` accumulator bindings — a multi-fold contraction's
     # extra C fragments (the fused gate/up edge): each name substitutes to its fragment's
@@ -1973,20 +1974,12 @@ class RegStore(Stmt):
         coords = self._element_coords()
         if self.epilogue is None:
             return [[] for _ in coords], [f"{self.frag}[{i}]" for i in range(len(coords))]
-        from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
+        from emmy.compiler.ir.expr import Var  # noqa: PLC0415
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
         from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
 
         epi = self.epilogue
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
-        # Coord-predicated Selects (causal mask) need the cell-base M / N coords
-        # (the last two var-bearing output dims) — the element adds its own
-        # (row, col) to get the absolute coordinate the predicate compares.
-        sel_m_base = sel_n_base = None
-        if epi.selects:
-            dvd = [e for e in self.dst_index if e.free_vars()]
-            sel_m_base = dvd[-2] if len(dvd) >= 2 else None
-            sel_n_base = dvd[-1] if dvd else None
         per_elem: list[list[str]] = []
         vals: list[str] = []
         for i, (row, col, row_off, col_off) in enumerate(coords):
@@ -2011,11 +2004,9 @@ class RegStore(Stmt):
                 lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{ld.buffer}[{addr}]')};")
                 env[ld.name] = temp
             # Coord-predicated Selects (the causal mask): a per-element ternary.
-            # ``__M__`` / ``__N__`` substitute to this element's absolute (row,
-            # col); branches fold right with the last branch as the else.
-            m_abs = BinaryExpr("+", sel_m_base, row_off) if sel_m_base is not None else row_off
-            n_abs = BinaryExpr("+", sel_n_base, col_off) if sel_n_base is not None else col_off
-            coord = {"__M__": m_abs, "__N__": n_abs}
+            # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
+            # the captured predicate already carries its semantic cell base.
+            coord = {"__M__": row_off, "__N__": col_off}
             for sel_name, branches in epi.selects:
                 expr = env[branches[-1][1]]
                 for cond, value in reversed(branches[:-1]):
@@ -2631,10 +2622,15 @@ def _(s: RegStore, rename, sigma, axis_fn):
             ),
             ops=epilogue.ops,
             result=epilogue.result,
-            # Select predicates carry ``__M__`` / ``__N__`` placeholders (not
-            # real partition vars), so they're cell-invariant — pass through; the
-            # per-cell M/N offset reaches them via ``dst_index`` at render.
-            selects=epilogue.selects,
+            # Captured predicates carry semantic cell-base expressions plus
+            # placeholders, so replicate the real coordinate vars like load indices.
+            selects=tuple(
+                (
+                    name,
+                    tuple((None if cond is None else sigma.apply(cond), value) for cond, value in branches),
+                )
+                for name, branches in epilogue.selects
+            ),
             # The extra channel accumulators rename with the store's own fragment (they are
             # per-cell C-fragment names too) — dropping them here left the multi-channel combine
             # (the gemma GeGLU ``acc2``) unbound at render.

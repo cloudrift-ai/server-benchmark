@@ -222,6 +222,12 @@ the `ldmatrix` drain undoes (`RegStore.swizzle`, stamped through the fill's `Wri
 bank conflicts than the operands beside it. The nested score's own staged operands (its per-chunk keys, its
 loop-invariant query tile) carry their mode on the cp.async fill the same way.
 
+A `RegEpilogue` predicate carries the semantic cell origin captured from the producer's substitution plus
+per-fragment row/column placeholders. The destination index remains only an address: a chained fill may rebase that
+index to a tile-local slab, but it must not rebase a causal or other coordinate predicate. Later cell replication
+substitutes the predicate's real coordinate variables and the store fills only its element offsets. Inferring the
+predicate origin from `RegStore.dst_index` would make every nonzero chunk compare slab-local coordinates instead.
+
 The chained fill takes one of two forms, and the first is preferred wherever it reads:
 
 - **SINGLE-PASS** (`_atom.chain_stream_fill`) — the statistic and the weight come off ONE pass of the score. The two

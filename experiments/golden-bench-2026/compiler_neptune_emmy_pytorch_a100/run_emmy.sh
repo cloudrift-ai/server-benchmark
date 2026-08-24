@@ -92,5 +92,6 @@ done
 # A missing golden is a broken lane input, not a measurement: fail rather than silently
 # reporting a shorter sweep.
 test "$missing_goldens" -eq 0
-# Only setups with both O3 replays and both strict reference proofs support a performance conclusion.
-test "$successful_setups" -gt 0
+# Every requested setup needs both O3 replays and both strict reference proofs. The status file preserves
+# all failures, but a partial sweep cannot support the experiment row's performance conclusion.
+test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"

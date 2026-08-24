@@ -46,6 +46,7 @@ from emmy.compiler.pipeline.knob import (
 )
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
+from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async
 from emmy.compiler.structural import digest
@@ -90,6 +91,10 @@ class SearchNode:
     # CUDA kernels (for example a split reduction + combine). A candidate-file
     # annotation is only unambiguous in the one-CudaOp case.
     realized_cuda_ops: int | None = field(default=None, repr=False)
+    # Decision rows from the directly measured per-kernel receipts. Structural winners use them to
+    # reject a parent row whose ordinary schedule pins describe a different
+    # independently tuned child than the terminal actually measured.
+    realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
     # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
     # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
     # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
@@ -250,6 +255,7 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
+        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _us, _status in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -429,6 +435,12 @@ class TuningSearch(Search):
         if structural is None and node.realized_knobs is None and (node.realized_cuda_ops or 0) > 1:
             structural = self._structural_row(validated_input_route)
         if structural is not None:
+            place_only = all(family_of(key) == "PLACE" for key in structural)
+            if not place_only and (
+                not node.realized_cuda_knobs
+                or unreproducible_pin_flag(structural, node.realized_cuda_knobs, reject_conflicts=True) is not None
+            ):
+                return None
             return structural, float(node.bench_stats.median), node.realized_cuda_ops, True
         if node.realized_knobs is None:
             return None

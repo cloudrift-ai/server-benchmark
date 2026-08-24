@@ -998,7 +998,7 @@ def _launch_order_cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
-def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None):
+def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None, sym_env=None):
     """Per-kernel breakdown. Pulls structural stats off each ``CudaOp``
     (block / grid / smem), per-launch timings from ``bench.per_launch``,
     and per-kernel hardware attributes from the compiled cupy RawKernels
@@ -1051,11 +1051,12 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     # Symbolic grids (ceil-div over a dynamic axis) need a concrete env to
     # resolve for display — use each symbolic input dim's hint, so the printed
     # geometry reflects the hint-sized tile the kernel was tuned for.
-    sym_env: dict[str, int] = {}
-    for nid in graph.inputs:
-        for dim in graph.buffer(nid).shape:
-            if isinstance(dim.expr, Var) and dim.hint is not None:
-                sym_env.setdefault(dim.expr.name, dim.hint)
+    if sym_env is None:
+        sym_env = {}
+        for nid in graph.inputs:
+            for dim in graph.buffer(nid).shape:
+                if isinstance(dim.expr, Var) and dim.hint is not None:
+                    sym_env.setdefault(dim.expr.name, dim.hint)
 
     def _geom(op, attrs: dict):
         block_dims = [resolve_dim(d, sym_env) for d in op.block]
@@ -1786,6 +1787,7 @@ async def bench_lowered_vs_torch(
     capture_graphs=True,
     ref_out=None,
     ref_us_out=None,
+    sym_env_out=None,
     strict_accuracy=False,
     return_reference=False,
 ):
@@ -1840,6 +1842,8 @@ async def bench_lowered_vs_torch(
     from emmy.compiler.dim import Dim
 
     sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [lowered])
+    if sym_env_out is not None:
+        sym_env_out.append(dict(sym_env))
 
     def _static(shape):
         return tuple((d.as_static() if d.is_static else int(d.expr.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
@@ -2145,6 +2149,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     async def _bench_session():
         greedy_fail = results = bench = accuracy_error = correctness = ab_ref = reference_error = ab_benches = greedy_iso = None
         greedy_reference_us = None
+        stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
         try:
@@ -2167,6 +2172,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
                 ab_ref = resp["run_io"]
                 greedy_reference_us = resp.get("reference_run_us")
+                stats_sym_env = resp.get("sym_env")
                 correctness = resp.get("correctness")
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
@@ -2207,6 +2213,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             ab_benches,
             greedy_iso,
             greedy_reference_us,
+            stats_sym_env,
             correctness,
         )
 
@@ -2221,6 +2228,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         ab_benches,
         greedy_iso,
         greedy_reference_us,
+        stats_sym_env,
         correctness,
     ) = asyncio.run(_bench_session())
 
@@ -2247,7 +2255,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         print()
         for line in render_table([Col("Backend"), Col("Latency (us)", "r")], [["Emmy", f"{bench.time_ms * 1000:.0f}"]], rule=True):
             print(line)
-    _print_kernel_stats(graph, bench, golden_benches=ab_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
+    _print_kernel_stats(
+        graph,
+        bench,
+        golden_benches=ab_benches,
+        greedy_fail=greedy_fail,
+        greedy_iso=greedy_iso,
+        sym_env=stats_sym_env,
+    )
     strict_errors = _strict_benchmark_errors(args, results, bench, captured, correctness, ab_benches) if strict_correctness else None
     if getattr(args, "json", None):
         _write_ab_json(

@@ -571,6 +571,40 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
     assert response["result"] is None and response["results"] is None
 
 
+def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.backend.cuda import _bench_worker
+    from emmy.compiler.backend.cuda import backend as backend_mod
+
+    class _FakeBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+    async def _fake_compare(*_args, sym_env_out, **_kwargs):
+        sym_env_out.append({"num_tokens": 32})
+        return {"Emmy": 1.0}, SimpleNamespace(captured=True), False, True, None
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", _fake_compare)
+
+    response = asyncio.run(
+        _bench_worker._run_job(
+            {
+                "graph": "LOWERED",
+                "torch_spec": ("frontend_graph", "FRONTEND"),
+                "bench_backends": "emmy",
+                "warmup": 1,
+                "iters": 1,
+                "seed": 0,
+            }
+        )
+    )
+
+    assert response["sym_env"] == {"num_tokens": 32}
+
+
 @requires_cuda
 def test_worker_hang_is_sigkilled_not_wedged() -> None:
     import asyncio

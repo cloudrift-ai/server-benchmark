@@ -157,6 +157,7 @@
  "tests/compiler/e2e/test_attention_coverage.py::test_flash_form_fork_offers_geometry_grid": 0.16,
  "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama@cuda": 6.0,
  "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama_seq512@cuda": 5.8,
+ "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates": 10.8,
  "tests/compiler/e2e/test_block.py::test_qwen_block_accuracy@cuda": 9.1,
  "tests/compiler/e2e/test_block.py::test_tinyllama_block_accuracy[cpu]": 4.96,
  "tests/compiler/e2e/test_block.py::test_tinyllama_block_accuracy[cuda]@cuda": 7.3,

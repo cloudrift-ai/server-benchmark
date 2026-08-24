@@ -183,11 +183,15 @@ def _warp_epilogue(
     an optional causal ``Select``. Each leaf ``Load`` becomes an :class:`EpilogueLoad` at the
     cell-base coordinate (σ-applied; the render adds the per-element row/col motion on the
     ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args)`` op; a coord-predicated
-    ``Select`` (causal mask) rewrites its ``m``/``n`` coordinate vars to the ``__M__`` / ``__N__``
-    placeholders the store substitutes with the element's own (row, col)."""
+    ``Select`` (causal mask) captures its σ-applied cell bases plus ``__M__`` / ``__N__``
+    placeholders; the store substitutes only the element's row/col offsets. This keeps semantic
+    source coordinates independent of a later store to a tile-local shared-memory slab."""
     loads, ops, selects = [], [], []
     write = None
-    ph = {m_name: Var("__M__"), n_name: Var("__N__")}
+    ph = {
+        m_name: BinaryExpr("+", sigma.apply(Var(m_name)), Var("__M__")),
+        n_name: BinaryExpr("+", sigma.apply(Var(n_name)), Var("__N__")),
+    }
     for s in tail:
         if isinstance(s, Load):
             loads.append(

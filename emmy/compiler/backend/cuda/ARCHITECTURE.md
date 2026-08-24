@@ -213,6 +213,9 @@ flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program o
 eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
 `want_ref` (return that run's `(inputs, outputs)` as `run_io`). A frontend-graph job may also request
 `strict_accuracy`; it returns the direct eager proof and same-input eager outputs used to check exact-pinned rows.
+The frontend-graph response also returns the exact symbolic environment used to specialize its hint-sized inputs, so
+the parent resolves dynamic launch geometry from the execution binding instead of reconstructing it from lowered
+graph inputs that may no longer carry the symbol.
 Embedded Loop replay has no Torch twin, so its Emmy-only greedy execution returns that same-input reference too. If
 this execution completes but later repeated timing crosses the watchdog, the worker returns the reference, single-run
 timing, and exact timing error. The command marks greedy ineligible while still reference-checking pinned rows; the

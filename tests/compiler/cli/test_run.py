@@ -1416,6 +1416,34 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp
 
 
+def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _print_kernel_stats
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.expr import Var
+
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="k_dynamic", grid=((Var("num_tokens"),), (1,), (1,))),
+        inputs=[],
+        output=Tensor("out", (1,)),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    bench = SimpleNamespace(
+        min_ms=0.5,
+        time_ms=0.5,
+        per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)],
+        e2e_min_ms=None,
+    )
+
+    _print_kernel_stats(graph, bench, sym_env={"num_tokens": 32})
+
+    assert "k_dynamic" in capsys.readouterr().out
+
+
 def _iso_bench_fixtures():
     """One-kernel greedy graph + interleaved bench (500 µs) + isolated re-bench (400 µs)
     ``_GoldenBench`` — the ``greedy_iso`` display/json inputs."""

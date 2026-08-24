@@ -14,11 +14,13 @@ preserves semantics without needing a GPU.
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
+from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 
 _backend = NumpyBackend()
 rng = np.random.default_rng(0)
@@ -110,6 +112,28 @@ def test_reduce_sum():
     loop = launches[0].op
     assert _has_update(loop.body)
     assert any(lb.op.name == "add" for lb in loop.body.accums)
+
+
+def test_scan_sum_lifts_and_preserves_prefix_values():
+    def make_graph():
+        graph = Graph()
+        _input(graph, "x", (2, 4))
+        graph.add_node(op=ScanOp(op="sum", axis=-1), inputs=["x"], output=Tensor("out", (2, 4)), node_id="out")
+        graph.inputs = ["x"]
+        graph.outputs = ["out"]
+        return graph
+
+    result = _compile(make_graph())
+    launches = _loop_nodes(result)
+    assert len(launches) == 1
+    assert any(accum.op.name == "add" for accum in launches[0].op.body.accums)
+    _assert_pipeline_preserves_semantics(make_graph, {"x": np.arange(8, dtype=np.float32).reshape(2, 4)}, rtol=0, atol=0)
+
+    lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
+    cuda_ops = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(cuda_ops) == 1
+    source = cuda_ops[0].kernel_source
+    assert source.index("+=") < source.index("out[")
 
 
 def test_matmul():

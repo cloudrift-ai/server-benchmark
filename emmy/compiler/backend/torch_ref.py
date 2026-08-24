@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
     from emmy.compiler.graph import Graph
 
-# Frontend / tensor ops with a torch twin. Everything else (IndexMapOp,
-# GatherOp, ScatterOp, ScanOp, …) makes a graph non-runnable as a torch ref.
+# Frontend / tensor ops with a torch twin. Everything else (GatherOp,
+# ScatterOp, …) makes a graph non-runnable as a torch ref.
 SUPPORTED = frozenset(
     {
         "TransposeOp",
@@ -41,6 +41,7 @@ SUPPORTED = frozenset(
         "SoftmaxOp",
         "ElementwiseOp",
         "ReduceOp",
+        "ScanOp",
         "IndexMapOp",
     }
 )
@@ -82,6 +83,8 @@ def is_runnable(graph: Graph) -> bool:
                 _elementwise_callable(node.op.op.name)
             except NotImplementedError:
                 return False
+        if type(node.op).__name__ == "ScanOp" and node.op.op.name not in ("sum", "add"):
+            return False
     return True
 
 
@@ -190,6 +193,11 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
         if fn in ("minimum", "amin", "min"):
             return x.amin(dim=ax, keepdim=True)
         raise NotImplementedError(f"torch_ref: reduce {fn!r} unmapped")
+    if name == "ScanOp":
+        fn = op.op.name
+        if fn in ("sum", "add"):
+            return torch.cumsum(ins[0], dim=op.axis)
+        raise NotImplementedError(f"torch_ref: scan {fn!r} unmapped")
     if name == "LinearOp":
         return F.linear(ins[0], ins[1], ins[2] if op.has_bias else None)
     if name == "MatmulOp":

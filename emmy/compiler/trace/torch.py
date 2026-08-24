@@ -34,7 +34,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
 
 if TYPE_CHECKING:
     import torch
@@ -1238,6 +1238,47 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             ),
             inputs=[one_id, zero_id],
             output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        return
+
+    # ``aten.cumsum`` is an ordered prefix reduction, not an elementwise function. Keep the
+    # static axis on ``ScanOp`` and reject dtype-changing or otherwise unrepresented forms.
+    if op_name == "cumsum":
+        overload = str(fx_node.target)
+        if overload != "aten.cumsum.default":
+            raise NotImplementedError(f"unsupported aten.cumsum overload {overload}")
+        if len(fx_node.args) != 2:
+            raise NotImplementedError(f"aten.cumsum requires one tensor and one static integer axis, got {len(fx_node.args)} arguments")
+        axis = fx_node.args[1]
+        if not isinstance(axis, int) or isinstance(axis, bool):
+            raise NotImplementedError(f"aten.cumsum requires a static integer axis, got {axis!r}")
+        kwargs = fx_node.kwargs or {}
+        unexpected = set(kwargs) - {"dtype"}
+        if unexpected:
+            raise NotImplementedError(f"aten.cumsum unsupported keyword arguments: {sorted(unexpected)}")
+        if kwargs.get("dtype") is not None:
+            raise NotImplementedError(f"aten.cumsum dtype override is unsupported, got {kwargs['dtype']}")
+
+        source_name = getattr(fx_node.args[0], "name", None)
+        source_id = node_map.get(source_name)
+        if not isinstance(source_id, str) or source_id not in g.nodes:
+            raise ValueError("aten.cumsum requires one traced tensor input")
+        source = g.nodes[source_id].output
+        ndim = len(source.shape)
+        normalized_axis = axis if axis >= 0 else axis + ndim
+        if normalized_axis < 0 or normalized_axis >= ndim:
+            raise ValueError(f"aten.cumsum axis {axis} out of range for rank {ndim}")
+        output = Tensor(name, shape, dtype)
+        if tuple(output.shape) != tuple(source.shape) or output.dtype != source.dtype:
+            raise ValueError(
+                f"aten.cumsum without a dtype override must preserve shape and dtype, got "
+                f"{tuple(source.shape)}/{source.dtype} -> {tuple(output.shape)}/{output.dtype}"
+            )
+        node_map[name] = g.add_node(
+            op=ScanOp(op="sum", axis=axis),
+            inputs=[source_id],
+            output=output,
             node_id=name,
         )
         return

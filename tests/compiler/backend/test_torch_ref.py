@@ -11,7 +11,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 
 # torch is only needed to build reference tensors / call the evaluator; the
 # emmy imports above are torch-free, so gate after them.
@@ -70,6 +70,20 @@ def test_zero_width_pad_is_runnable_identity(dtype_name, torch_dtype):
 
     assert actual.dtype == torch_dtype
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_scan_sum_is_runnable_and_matches_torch():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 4)), node_id="x")
+    g.add_node(ScanOp(op="sum", axis=-1), ["x"], Tensor("out", (2, 4)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {"x": x})
+    actual = fn(*inputs)
+
+    torch.testing.assert_close(actual, torch.cumsum(x, dim=-1), rtol=0, atol=0)
 
 
 def test_where_preserves_bool_condition_dtype_and_broadcasts():

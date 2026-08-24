@@ -206,6 +206,68 @@ def test_trace_sum_reduction():
     assert reduces[0].op.name == "sum"
 
 
+def test_trace_cumsum_as_static_scan_preserves_axis_and_values():
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import ScanOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class CumulativeSum(nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-2)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(CumulativeSum(), (x,))
+    scans = [node for node in graph.nodes.values() if isinstance(node.op, ScanOp)]
+
+    assert len(scans) == 1
+    assert scans[0].op.name == "sum"
+    assert scans[0].op.axis == -2
+    result, _ = NumpyBackend().run(graph, input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_array_equal(result.outputs[graph.outputs[0]], CumulativeSum()(x).numpy())
+
+
+def test_trace_cumsum_rejects_dynamic_axis():
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.trace.torch import _handle_call_function
+
+    graph = Graph()
+    source_id = graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    source = SimpleNamespace(name="x_fx")
+    fx_node = SimpleNamespace(
+        target=torch.ops.aten.cumsum.default,
+        args=(source, SimpleNamespace(name="dynamic_axis")),
+        kwargs={},
+        meta={"val": torch.empty((2, 3))},
+        name="cumsum",
+    )
+
+    with pytest.raises(NotImplementedError, match="static integer axis"):
+        _handle_call_function(graph, fx_node, {source.name: source_id})
+
+
+def test_trace_cumsum_rejects_dtype_override():
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class WideningCumulativeSum(nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-1, dtype=torch.float32)
+
+    with pytest.raises(NotImplementedError, match="dtype override"):
+        trace_module(WideningCumulativeSum(), (torch.randn(2, 3, dtype=torch.float16),))
+
+
 def test_trace_max_reduction():
     """aten.amax traces to ReduceOp(amax) — torch's name is preserved."""
     import torch

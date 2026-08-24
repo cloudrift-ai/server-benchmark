@@ -28,7 +28,8 @@ distinction is whether the graph has been fused yet. See
 Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect graph through **real PyTorch**, the eager /
 `torch.compile` baseline for `emmy run --ir`. Each frontend / tensor op is mapped to its torch twin
 (`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
-`LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`→the torch elementwise/reduce, layout ops→view/transpose/cat).
+`LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
+ops→view/transpose/cat).
 The stored unary `pad` form is an identity because tracing admits it only when every explicit pad width is zero and
 fails closed otherwise.
 FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while

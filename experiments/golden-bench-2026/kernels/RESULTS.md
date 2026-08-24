@@ -1,59 +1,63 @@
-# Golden-bench kernel corpus: tuned golden datasets on RTX 4090 / RTX 5090 / V100 SXM3
+# Golden-bench kernel corpus: retuned golden datasets after the first fix wave (main @ 001d4f44)
 
-## What this directory now contains
+## What this refresh is
 
-Per-GPU **tuned golden datasets** for the corpus models, produced so compiler improvements have measured baselines
-to beat — not to claim wins. Each `goldens/<model>_<gpu>.yaml` embeds every post-fusion kernel target of the
-model's layer 0 (seq_len 512 and 1 as separate realizations), the **deployed knobs after tuning**
-(single-kernel targets; multi-kernel targets record `knobs: {}` and their per-kernel breakdown lives in the
-archives), and **median 3-repeat `-O3` measurements**: `emmy_us` vs `reference_us` (`torch-eager`), losses
-included. Raw evidence per platform: `results_<platform>.tar.gz` (traces, tune logs with search feedback,
-per-target verification JSONs incl. `torch.compile` numbers, system info, progress log).
+Second measurement pass over the corpus, after the maintainer's fixes landed (#561 split-axis re-fusion, #556
+conv1d/einsum lowering, #549/#547 FA restoration, #513-era search changes). Same three GPUs, fresh hosts,
+recipe budgets, three `-O3` repeats per target. Each `goldens/<model>_<gpu>.yaml` was rebuilt from a fresh
+trace + tune + 3-repeat verification on `001d4f44`; the previous values remain in git history for comparison.
 
-Run: 2026-08-19/20, revision `c1abcc91`, recipe budgets (`--max-candidates 12/8, --patience 4/3, --seed 0`),
-one caller-supplied single-GPU host per platform. Model x GPU cells follow raw memory fit, not the recipe's GPU
-matrix (per request): 0.6B + 0.6B-FP8 everywhere; 32B-FP8 on 4090 + V100; Qwen3.6-27B attempted on V100 only.
+Runs were driven by an updated benchmark flow — one row per committed golden on its exact GPU, three `-O3`
+repeats of `emmy run --golden <file> --bench --bench-backends eager,tcompile,emmy`, no tracing or tuning at
+measurement time — kept UNCOMMITTED in this PR per review direction; `recipe.yaml` in-tree is unchanged.
 
-## Layer-level summary (sum over kernel targets, median of 3 `-O3` repeats, µs)
+## Before/after (sum of measured kernel targets, median of 3 repeats, µs; old = previous committed goldens)
 
-`tcompile` is `torch.compile(mode="max-autotune")` and its column sums only the kernels where its lane measured
-(it fails on some SDPA targets), so ratios are approximate but directionally unambiguous.
+| platform | model/seq | old emmy | new emmy | gain | new vs eager |
+| --- | --- | ---: | ---: | ---: | ---: |
+| v100x1 | 0.6B s512 | 71714 | 58981 | 1.2x | 0.07x |
+| v100x1 | 0.6B-FP8 s512 | 147160 | 71084 | 2.1x | 0.10x |
+| v100x1 | 32B-FP8 s512 | 408241 | 395773 | 1.0x | 0.06x |
+| rtx4090x1 | 0.6B s512 | 35305 | 34466 | 1.0x | 0.03x |
+| rtx4090x1 | 0.6B-FP8 s512 | 34496 | 24525 | 1.4x | 0.04x |
+| rtx4090x1 | 32B-FP8 s512 | 650248 | 117839 | **5.5x** | 0.08x |
+| rtx5090x1 | 0.6B s512 | 32870 | 27620 | 1.2x | 0.03x |
+| rtx5090x1 | 0.6B-FP8 s512 | 28830 | 17843 | 1.6x | 0.10x |
 
-| platform | model / seq | eager | tcompile | emmy (tuned deploy) |
-| --- | --- | ---: | ---: | ---: |
-| rtx5090x1 | 0.6B s512 / s1 | 918 / 467 | 181 / 42 | 32868 / 11108 |
-| rtx5090x1 | 0.6B-FP8 s512 / s1 | 1789 / 1208 | 153 / 23 | 28835 / 482 |
-| rtx4090x1 | 0.6B s512 / s1 | 1027 / 444 | 210 / 40 | 35285 / 9988 |
-| rtx4090x1 | 0.6B-FP8 s512 / s1 | 2287 / 1452 | 173 / 10 | 34540 / 759 |
-| rtx4090x1 | 32B-FP8 s512 / s1 | 57546 / 48455 | 259 / 19 | 650274 / 2957 |
-| v100x1 | 0.6B s512 / s1 | 4418 / 974 | 899 / 59 | 71727 / 17246 |
-| v100x1 | 0.6B-FP8 s512 / s1 | 7367 / 3320 | 821 / 30 | 147232 / 2628 |
-| v100x1 | 32B-FP8 s512 / s1 | 24357 / 55282 | 3876 / 45 | 408201 / 16696 |
+Decode (s1) rows improved 4-13x on the FP8 corpora but changed measurement coverage (19 -> 8-11 targets, from
+new fusion identity plus bench failures), so their sums are not clean ratios; per-target values are in the
+archives. Matched-kernel gains on the V100 0.6B corpus: geomean 2.6x, led by q_proj 4.5x (992 -> 219 µs, 0.88x
+eager on Volta — #561's tensor-core unlock confirmed in silicon), k/v_proj 3.4x, and the SDPA matmul fusions
+21.5x / 16.8x (FA restoration).
 
-Reading: tuning improves individual reachable kernels (agent-seeded warp/staged proposals were injected per
-linear target before each s512 tune), but the layer totals stay 1-3 orders behind `torch.compile` because the
-dominant kernels cannot enter the search at all (below). These datasets are the baselines that make that gap
-concrete per kernel, per card.
+## Why layer totals still trail torch.compile: the remaining defects, diagnosed
 
-## Failures and defects surfaced (all reproduced in the archives)
+1. **RoPE-fusion statistic replay (dominates every s512 total; unchanged).** `k_sdpa_mean_reduce`'s loop nest
+   recomputes the k-norm statistic (a full 512x128 reduce) inside every q-row iteration — a 512x replay
+   (~23000-29300 µs of each card's s512 total; the s1 variant is fine, replay factor 1). Consistent with the
+   #513 guard removal enumerating this fused form and cold greedy deploying it. Fix directions: hoist
+   loop-invariant statistics in loop/canonicalize, or make the placement-cut alternative evidence-reachable
+   cold. Diagnosis-only here per review direction.
+2. **Computed-A (fused norm+gate/up) misdeploys, worst at decode.** New extreme case: on the rtx4090,
+   `k_linear_mean_reduce_549927.s1` deploys KNOBLESS at **116445 µs vs eager 108** (~1000x); the V100 s512
+   sibling regressed 679 -> 1035 µs. The search reaches no schedule for this form and the fallback is
+   catastrophic.
+3. **Qwen3.6-27B capture advanced one op and is blocked again**: conv1d now lowers (#556), the trace now stops
+   at `aten.masked_fill requires resolved self, mask, and fill inputs`. Still no 27B golden.
+4. **Hung kernel under the 32B corpus on V100**: `k_mul_12__partial` exceeds the 2 s bench watchdog in the
+   tuned deploy (16/19 targets measured around it).
+5. **Unmeasured golden rows are real bench failures, kept as inventory**: fp8 files carry 11-22 unmeasured
+   realizations each (hangs, compile failures, or the coverage change); only the 0.6B BF16 files validate at
+   REPOSITORY level on all three cards, the rest at WORKING level.
 
-1. **MCTS crash on the 32B-FP8 s512 corpus, both sm_89 and sm_70**: `AttributeError: 'NoneType' object has no
-   attribute 'items'` at `emmy/compiler/pipeline/search/policy/mcts.py:518` (`_node_key`), mid-search after ~5
-   shapes. Deterministic across cards on `c1abcc91`. Tune logs: `tune-qwen3-32b-fp8-s512.log` in the rtx4090/v100
-   archives.
-2. **Qwen3.6-27B is untraceable**: `ValueError: cannot map fallback aten.conv1d as elementwise for output shape
-   (1, 10240, 515)` (`emmy/compiler/trace/torch.py`). Frontend coverage gap; no 27B golden exists.
-   Log: `trace-qwen36-27b-s512.log` in the v100 archive.
-3. **Known schedule lockouts dominate the totals** (prior sessions' diagnosis, still true on `c1abcc91`): the
-   q/k-proj kernels fuse a reshape-to-heads that splits the output axis, so the warp tiler offers no rows and the
-   contraction demotes to a scalar loop; SDPA online-softmax splices carry no structural identity and every
-   candidate dies at the `005_stamp` assertion. The goldens record these kernels' measured scalar deploys as the
-   baseline to improve.
-4. **V100 32B-FP8 s512 verification exited nonzero on all 3 repeats** while still writing 16/19 target JSONs;
-   the 4 unmeasured realizations are kept (inventory-only) in `qwen3-32b-fp8_v100.yaml`, which therefore
-   validates at WORKING level; the other seven golden files pass REPOSITORY validation.
-5. Host provisioning traps (recorded for reuse): fresh CloudRift boxes need `apt-get update` before
-   `python3.12-venv`; V100 needs torch cu126 + `cupy-cuda12x==13.6.0` + `fastrlock` (nvrtc 13 dropped Volta).
+## Environment caveats (hosts are rented and heterogeneous)
+
+- The rtx4090 host ran an old driver (CUDA 12.2-era) and nvcc 12.1: the default cu130 torch cannot initialize
+  (fixed with the cu126 wheel + matching cu12 libraries), and a subset of fp8 kernels fail to COMPILE under
+  nvcc 12.1 that compiled under CUDA 13.3 on the first pass — its fp8 numbers carry that asterisk.
+- V100 requires torch cu126 and `cupy-cuda12x==13.6.0` + `fastrlock` (nvrtc 13 dropped Volta), as before.
+- Pre-run canaries must check BOTH `cupy.full` AND `torch.cuda.is_available()`; a cupy-only canary passed on
+  the old-driver 4090 while every torch-side measurement failed.
 
 ## Platform a100x1 — latest tuned routing evidence (2026-08-23)
 
@@ -255,30 +259,23 @@ regression is a contraction binding rather than a placement.
 
 ## Platform sections
 
-### rtx5090x1
-0.6B + 0.6B-FP8 (large models excluded by RAM fit: 30 GB host). 4 traces, 4 tunes, 12 verification runs, zero
-chain failures. Goldens: `qwen3-06b_rtx5090.yaml` (18/18 measured), `qwen3-06b-fp8_rtx5090.yaml` (38/38).
-Archive: `results_rtx5090x1.tar.gz` (root `gb-rtx5090x1/`).
+### v100x1 — full pipeline (rebench + retune, 4 models attempted, 27B blocked at trace)
+Goldens: `qwen3-06b_v100.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_v100.yaml` (27/38), `qwen3-32b-fp8_v100.yaml`
+(23/38). Archive: `results_v100x1.tar.gz`.
 
-### rtx4090x1
-0.6B, 0.6B-FP8, 32B-FP8. The 32B s512 tune crashed (defect 1); verification still measured every target, so its
-golden records greedy/partially-tuned deploys. Goldens: `qwen3-06b_rtx4090.yaml` (18/18),
-`qwen3-06b-fp8_rtx4090.yaml` (38/38), `qwen3-32b-fp8_rtx4090.yaml` (38/38).
-Archive: `results_rtx4090x1.tar.gz` (root `gb-rtx4090x1/`).
+### rtx4090x1 — full pipeline; measurements re-run after the driver fix
+Goldens: `qwen3-06b_rtx4090.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_rtx4090.yaml` (16/38),
+`qwen3-32b-fp8_rtx4090.yaml` (19/38). Archive: `results_rtx4090x1.tar.gz`.
 
-### v100x1
-0.6B, 0.6B-FP8, 32B-FP8 (no fp8-mma on sm_70 — FP8 checkpoints run the dequant path), 27B attempted (defect 2).
-Goldens: `qwen3-06b_v100.yaml` (18/18), `qwen3-06b-fp8_v100.yaml` (38/38), `qwen3-32b-fp8_v100.yaml` (38
-realizations, 34 measured). Archive: `results_v100x1.tar.gz` (root `gb-v100x1/`).
+### rtx5090x1 — full pipeline on a replacement host (first instance had unstable SSH and a failing toolchain)
+Goldens: `qwen3-06b_rtx5090.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_rtx5090.yaml` (27/38).
+Archive: `results_rtx5090x1.tar.gz`. Large models excluded by RAM fit (30 GB host), as before.
 
 ## Limitations
 
-- Layer-0 evidence only; never a whole-model claim (lm_head/embedding uncovered).
-- Tune-lane `-O1` rankings appear inside the working files' `ranking` blocks as search feedback; every number in
-  the goldens' `measurements` and in this file is deployable `-O3`.
-- The tcompile comparison column is partial where its lane failed; per-target values are in the verification JSONs.
-- `knobs: {}` on multi-kernel targets is a format limitation, not "no schedule"; see the archives for per-kernel
-  `record_knobs`.
+Layer-0 evidence only; `-O3` numbers throughout; tcompile per-target values live in the archives (its lane
+fails on some SDPA targets); s1 sums are not comparable across passes due to coverage changes; multi-kernel
+targets record `knobs: {}` with per-kernel `record_knobs` in the archives.
 
 ## Platform h200x8 — earlier failed attempt (retained)
 

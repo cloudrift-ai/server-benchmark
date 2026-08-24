@@ -12,7 +12,7 @@ seed gives every unseeded node a fresh self-origin.
 from __future__ import annotations
 
 from emmy.compiler import provenance
-from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent
+from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent, SpliceEvent
 
 
 class ProvenanceStrategy(PipelineStrategy):
@@ -26,6 +26,32 @@ class ProvenanceStrategy(PipelineStrategy):
 
     def on_run_start(self, e: RunStartEvent) -> None:
         provenance.seed(e.graph)
+
+    def on_splice(self, e: SpliceEvent) -> None:
+        """Keep the replaced result's frontend origin object on its rewrite fragments.
+
+        ``Op.source`` is the executable identity used while a rewrite is still in flight;
+        hints remain reporting metadata. A decomposition and later rewrites therefore share
+        the result operation's ultimate source even when the pattern root is an upstream producer
+        and the fragment consumes inputs from other origins; those producer edges retain their own
+        sources and remain distinct at semantic boundary checks.
+        """
+        results = tuple(e.match.output) if isinstance(e.match.output, dict) else (e.match.output or e.match.root_node_id,)
+        origins: dict[int, object] = {}
+        for result in results:
+            result_node = e.graph.producer(result)
+            origin = result_node.op if result_node is not None else e.root_op
+            for source in origin.source_chain():
+                origin = source
+            origins[id(origin)] = origin
+        if len(origins) != 1:
+            return  # one fragment replacing several unrelated results has no single executable source
+        origin = next(iter(origins.values()))
+        for node in e.fragment.nodes.values():
+            op = node.op
+            if provenance.is_boundary(op) or op is origin or op.source is not None:
+                continue
+            op.source = origin
 
     def on_spliced(self, e: SplicedEvent) -> None:
         r = e.receipt

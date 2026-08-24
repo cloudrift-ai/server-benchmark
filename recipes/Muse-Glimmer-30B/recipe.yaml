@@ -3,11 +3,11 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "29.6B agentic vision-language with tool use and failure recovery; strong Reddit discussion confirmed."
-  heat: 68
+  rationale: "Reddit mindshare present but limited OR demand caps to moderate."
+  heat: 55
   task: generate
 matrices:
-  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-    deploy.gpu_count: 1
-  - deploy.gpu: NVIDIA H200 141GB
-    deploy.gpu_count: 1
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

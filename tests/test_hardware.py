@@ -1,6 +1,11 @@
 """Unit tests for hardware lookup tables."""
 
+from pathlib import Path
+
+import yaml
+
 from emmy.hardware import GPU_INSTANCE_TYPES, GPU_SHORT_NAMES, gpu_short_name, resolve_instance_type
+from emmy.recipe.catalog import deployment_setups
 
 # ── resolve_instance_type ────────────────────────────────────────
 
@@ -62,3 +67,13 @@ def test_gpu_short_names_covers_all_instance_types():
     """Every GPU in GPU_INSTANCE_TYPES has a short name."""
     for gpu_name in GPU_INSTANCE_TYPES:
         assert gpu_name in GPU_SHORT_NAMES, f"GPU '{gpu_name}' missing from GPU_SHORT_NAMES"
+
+
+def test_every_declared_recipe_deployment_is_provisionable():
+    """A recipe deployment naming a GPU absent from the table can never be rented or selected."""
+    recipes = Path(__file__).parents[1] / "recipes"
+    for recipe_path in sorted(recipes.glob("*/recipe.yaml")):
+        config = yaml.safe_load(recipe_path.read_text()) or {}
+        for setup in deployment_setups(config):
+            gpu_name = setup["deploy.gpu"]
+            assert gpu_name in GPU_INSTANCE_TYPES, f"{recipe_path} declares '{gpu_name}', missing from GPU_INSTANCE_TYPES"

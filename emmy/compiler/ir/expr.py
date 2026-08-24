@@ -340,6 +340,9 @@ class BinaryExpr(_ExprOps):
                 return right
             if _is_zero(right):
                 return left
+            recomposed = _fold_divmod_recompose(left, right, ctx)
+            if recomposed is not None:
+                return recomposed
         elif op == "-":
             if _is_zero(right):
                 return left
@@ -813,6 +816,58 @@ def _cancel_common_factors(op: str, left: Expr, right: Expr, ctx: SimplifyCtx) -
     return BinaryExpr(op, new_left, new_right)
 
 
+def _addend_chain(e: Expr) -> list[Expr]:
+    """Flatten a ``+`` tree into its addend list, left-to-right."""
+    if isinstance(e, BinaryExpr) and e.op == "+":
+        return _addend_chain(e.left) + _addend_chain(e.right)
+    return [e]
+
+
+def _scaled_term(e: Expr, ops: tuple[str, ...]) -> tuple[Expr, int, int] | None:
+    """Read ``e`` as ``(x <op> c) * a`` — either ``*`` operand order, bare form ``a = 1`` —
+    with ``op`` one of ``ops`` and both ``c`` and ``a`` positive int literals. Returns
+    ``(x, c, a)`` or ``None``."""
+    a = 1
+    if isinstance(e, BinaryExpr) and e.op == "*":
+        for lit_side, other in ((e.right, e.left), (e.left, e.right)):
+            if isinstance(lit_side, Literal) and lit_side.dtype == "int" and isinstance(lit_side.value, int) and lit_side.value > 0:
+                a, e = lit_side.value, other
+                break
+    if isinstance(e, BinaryExpr) and e.op in ops:
+        c = e.right
+        if isinstance(c, Literal) and c.dtype == "int" and isinstance(c.value, int) and c.value > 1:
+            return e.left, c.value, a
+    return None
+
+
+def _fold_divmod_recompose(left: Expr, right: Expr, ctx: SimplifyCtx) -> Expr | None:
+    """Fold the split-index recomposition ``(x / c) * (c·k) + (x % c) * k → x * k`` inside an
+    additive chain (any term positions; ``k = 1`` is the common bare pair). The identity is
+    unconditional for C integer semantics — ``(x / c) * c + x % c == x`` holds for every int
+    ``x`` under truncated *and* floor division — so no range guard is needed; the int-literal
+    dtype checks keep float arithmetic out. Returns the re-simplified sum, or ``None``."""
+    terms = _addend_chain(left) + _addend_chain(right)
+    for i, t1 in enumerate(terms):
+        q = _scaled_term(t1, ("/", "//"))
+        if q is None:
+            continue
+        x, c, a = q
+        if a % c:
+            continue
+        k = a // c
+        for j, t2 in enumerate(terms):
+            if j == i:
+                continue
+            r = _scaled_term(t2, ("%",))
+            if r is None or r != (x, c, k):
+                continue
+            out: Expr = x if k == 1 else BinaryExpr("*", x, _make_int_literal(k))
+            for t in (t for pos, t in enumerate(terms) if pos not in (i, j)):
+                out = BinaryExpr("+", out, t)
+            return out.simplify(ctx)
+    return None
+
+
 def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr] | None:
     """Try to express ``expr`` as ``n * q + r`` with ``0 <= r < n``, both
     proven from operand ranges. Used by ``BinaryExpr.simplify`` to fold
@@ -829,12 +884,23 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
         for k_side, other_side in ((expr.right, expr.left), (expr.left, expr.right)):
             if not (isinstance(k_side, Literal) and k_side.dtype == "int" and isinstance(k_side.value, int)):
                 continue
-            if k_side.value <= 0 or k_side.value % n != 0:
+            if k_side.value <= 0:
                 continue
             rng = other_side.range(ctx)
-            if rng is not None and rng.lo >= 0:
-                q_expr = BinaryExpr("*", other_side, _make_int_literal(k_side.value // n)).simplify(ctx)
+            if rng is None or rng.lo < 0:
+                continue
+            k = k_side.value
+            if k % n == 0:
+                q_expr = BinaryExpr("*", other_side, _make_int_literal(k // n)).simplify(ctx)
                 return (q_expr, _make_int_literal(0))
+            if n % k == 0:
+                # ``x*k = n*(x / d) + k*(x % d)`` for ``d = n/k``: the collapsed-reshape index
+                # ``(head*128 + col) / 1024`` (a GQA group fold over the head-dim sweep) reads as
+                # ``head / 8`` once the remainder ``(head % 8)*128 + col`` proves below ``n``.
+                d = _make_int_literal(n // k)
+                q_expr = BinaryExpr("/", other_side, d).simplify(ctx)
+                r_expr = BinaryExpr("*", BinaryExpr("%", other_side, d), _make_int_literal(k)).simplify(ctx)
+                return (q_expr, r_expr)
     if isinstance(expr, BinaryExpr) and expr.op == "+":
         L = _div_mod_decompose(expr.left, n, ctx)
         R = _div_mod_decompose(expr.right, n, ctx)

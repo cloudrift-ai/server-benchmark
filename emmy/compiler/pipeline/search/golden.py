@@ -7,6 +7,8 @@ target identity needed by search consumers directly as data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import tempfile
@@ -176,6 +178,31 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
+
+    @cached_property
+    def pool_key(self) -> tuple:
+        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
+        consumer that groups goldens groups them the same way.
+
+        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
+        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
+        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
+        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
+        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
+        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
+        does not go stale when the scheduler changes.
+
+        When a group identity is recorded with the golden instead, this property returns it and its callers
+        do not change."""
+        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+        kind = "loop" if self.loop_wire is not None else "prog"
+        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
+        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+
+    @cached_property
+    def pin_key(self) -> tuple:
+        """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
+        return tuple((k, str(v)) for k, v in self.pins)
 
     @cached_property
     def program(self):
@@ -372,10 +399,8 @@ def validate_golden_file(
         program_ref = entry.get("program")
         if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
-        try:
-            graph_from_wire(programs[program_ref])
-        except ValueError as exc:
-            raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+        # The pool check above already decoded every program. A whole-model inventory points
+        # hundreds of configurations at a handful of programs, so do not decode again per config.
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
@@ -676,7 +701,7 @@ def decode_record(record: GoldenRecord) -> str | None:
             return verdicts[verdict_key]
         pro = fused_view(tile)
         route_tree, route_free, route_stores = (
-            (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
+            (pro[0], (*tile.place.free, *pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
         )
         seams = cuttable_seams(route_tree, route_stores, route_free)
         all_sites = sites(route_tree)
@@ -693,7 +718,7 @@ def decode_record(record: GoldenRecord) -> str | None:
                 site = resolve(route_tree, str(key), all_sites=all_sites)
             except ValueError as exc:
                 return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or site not in seams:
+            if site is None or not any(site in cut.members for cut in seams):
                 return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
         return _remember_verdict(verdict_key, None)
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
@@ -871,23 +896,56 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     return result
 
 
+_POOL_KEYS = ("programs", "loops")
+_POOL_CACHE: tuple[list, dict[str, str]] | None = None
+
+
+def _dump_block(key: str, value: object) -> str:
+    """One top-level key as YAML. Block-style keys concatenate into exactly the document
+    ``yaml.dump`` writes for the whole mapping, so a block can be reused verbatim."""
+    return yaml.dump({key: value}, Dumper=_GoldenDumper, sort_keys=False, width=140)
+
+
+def _pool_blocks(document: Mapping, *, reuse: bool) -> dict[str, str]:
+    """The serialized program and loop pools, kept across repeated persists of one document.
+
+    Keyed by pool identity, and the cache holds the pools it serialized: a document whose pools
+    are the very objects that were dumped last has the same bytes for them.
+    """
+    global _POOL_CACHE
+
+    pools = [document.get(key) for key in _POOL_KEYS]
+    if reuse and _POOL_CACHE is not None and all(cached is pool for cached, pool in zip(_POOL_CACHE[0], pools, strict=True)):
+        return _POOL_CACHE[1]
+    blocks = {key: _dump_block(key, [_style_program(program) for program in document[key]]) for key in _POOL_KEYS if key in document}
+    if reuse:
+        _POOL_CACHE = (pools, blocks)
+    return blocks
+
+
 def dump_golden_file(
     document: Mapping,
     path: str | Path,
     *,
     validation: GoldenFileValidation = GoldenFileValidation.WORKING,
     overwrite: bool = False,
+    incremental: bool = False,
 ) -> Path:
+    """Write one golden document, atomically.
+
+    ``incremental`` is for the repeated working-golden persists of a single loaded document that
+    ``tune`` makes as it records ranking feedback per target: those persists mutate realizations
+    only, so the program and loop pools keep the text they were serialized to instead of being
+    reserialized once per target. The whole document is still validated, and the bytes written are
+    the ones a full dump writes. Canonical and promotion dumps leave it off and reserialize everything.
+    """
     validate_golden_file(document, validation=validation)
     destination = Path(path)
     if destination.exists() and not overwrite:
         raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    styled = dict(document)
-    styled["programs"] = [_style_program(program) for program in document["programs"]]
-    if "loops" in document:
-        styled["loops"] = [_style_program(program) for program in document["loops"]]
-    payload = yaml.dump(styled, Dumper=_GoldenDumper, sort_keys=False, width=140)
+    blocks = _pool_blocks(document, reuse=incremental)
+    payload = "".join(blocks[key] if key in blocks else _dump_block(key, value) for key, value in document.items())
     temporary = None
     mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
     try:

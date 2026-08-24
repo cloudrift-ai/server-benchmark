@@ -465,7 +465,8 @@ def _run_golden_targets(args) -> None:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        records = load_golden_records(load_golden_file(args.golden))
+        document = load_golden_file(args.golden)
+        records = load_golden_records(document)
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
@@ -485,6 +486,7 @@ def _run_golden_targets(args) -> None:
     for index, name in enumerate(names):
         target_args = copy(args)
         target_args.golden_file = args.golden
+        target_args._golden_document = document
         target_args.golden = name
         target_args.golden_target = None
         if output_dir is not None:
@@ -711,13 +713,31 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
-def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, atol: float = 1e-3) -> dict:
-    """Return a direct Emmy-vs-eager tolerance verdict with reproducible error statistics.
+def _comparison_outputs(outputs: dict, graph) -> dict:
+    """Decode physical carriers before command-layer correctness checks."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dtype import decode_bf16  # noqa: PLC0415
+
+    if not hasattr(graph, "buffer"):
+        return outputs
+    decoded = outputs
+    for name, value in outputs.items():
+        arr = np.asarray(value)
+        dtype = graph.buffer(name).dtype
+        if dtype.name == "bf16" and arr.dtype == np.uint16:
+            if decoded is outputs:
+                decoded = dict(outputs)
+            decoded[name] = decode_bf16(arr)
+    return decoded
+
+
+def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager", rtol: float = 1e-3, atol: float = 1e-3) -> dict:
+    """Return a tolerance verdict against one named reference with reproducible error statistics.
 
     The pass rule is the same elementwise rule used by ``torch.testing.assert_close`` for
-    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Eager
-    outputs may be tensors, a positional tensor sequence, or an output-name mapping (the
-    latter is what the embedded-golden worker returns to pinned-row replay).
+    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Reference
+    outputs may be tensors, a positional tensor sequence, or an output-name mapping.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -727,13 +747,13 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         return np.asarray(value, dtype=np.float64)
 
     names = list(outputs)
-    if isinstance(eager_out, dict):
-        missing = [name for name in names if name not in eager_out]
-        extra = [name for name in eager_out if name not in outputs]
+    if isinstance(reference_out, dict):
+        missing = [name for name in names if name not in reference_out]
+        extra = [name for name in reference_out if name not in outputs]
         if missing or extra:
             return {
                 "status": "fail",
-                "reference": "eager",
+                "reference": reference,
                 "rtol": rtol,
                 "atol": atol,
                 "max_abs_error": None,
@@ -741,19 +761,19 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
                 "max_rel_error": None,
                 "error": f"output names differ: missing={missing}, extra={extra}",
             }
-        refs = [eager_out[name] for name in names]
+        refs = [reference_out[name] for name in names]
     else:
-        refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
+        refs = list(reference_out) if isinstance(reference_out, (tuple, list)) else [reference_out]
         if len(refs) != len(names):
             return {
                 "status": "fail",
-                "reference": "eager",
+                "reference": reference,
                 "rtol": rtol,
                 "atol": atol,
                 "max_abs_error": None,
                 "mean_abs_error": None,
                 "max_rel_error": None,
-                "error": f"output count differs: Emmy={len(names)}, eager={len(refs)}",
+                "error": f"output count differs: Emmy={len(names)}, {reference}={len(refs)}",
             }
 
     max_abs = 0.0
@@ -765,7 +785,7 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         actual = _array(outputs[name])
         expected = _array(ref)
         if actual.shape != expected.shape:
-            failure = f"output {name!r} shape {actual.shape} != eager {expected.shape}"
+            failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
         if not np.isfinite(actual).all() or not np.isfinite(expected).all():
             failure = f"output {name!r} contains non-finite values"
@@ -778,11 +798,16 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
             abs_sum += float(absolute.sum())
             count += int(absolute.size)
             if failure is None and not np.all(absolute <= tolerance):
-                failure = f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}"
+                worst = int(np.argmax(absolute - tolerance))
+                failure = (
+                    f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}: "
+                    f"{int((absolute > tolerance).sum())}/{absolute.size} elements, "
+                    f"worst at flat index {worst}: emmy={actual.flat[worst]:.6g} {reference}={expected.flat[worst]:.6g}"
+                )
 
     proof = {
         "status": "fail" if failure else "pass",
-        "reference": "eager",
+        "reference": reference,
         "rtol": rtol,
         "atol": atol,
         "max_abs_error": max_abs,
@@ -790,7 +815,7 @@ def _strict_correctness_proof(outputs: dict, eager_out, *, rtol: float = 1e-3, a
         "max_rel_error": max_rel,
     }
     if failure:
-        proof["error"] = failure
+        proof["error"] = f"{failure} (max_abs={max_abs:.3g}, mean_abs={proof['mean_abs_error']:.3g}, max_rel={max_rel:.3g})"
     return proof
 
 
@@ -836,7 +861,17 @@ def _sample_replay_knobs(sample) -> dict:
     return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
 
 
-async def _bench_golden_variants(backend, source, golden_configs, *, warmup, iters, ref=None, strict_correctness=False):
+async def _bench_golden_variants(
+    backend,
+    source,
+    golden_configs,
+    *,
+    warmup,
+    iters,
+    ref=None,
+    strict_correctness=False,
+    strict_reference="eager",
+):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
     row beside the greedy pick. ``golden_configs`` are
@@ -868,15 +903,15 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
     floor (:func:`_intensity_floor_flag`) and — when ``ref`` carries reference inputs and
     outputs — an output-correctness check. The default check compares against the greedy
     Emmy output with :func:`_wrong_answer_flag`; ``strict_correctness`` compares every pinned
-    row directly against eager under rtol=atol=1e-3 and records error statistics. Flags
-    render as a ``!`` marker in the table and ride the ``--json`` record."""
+    row directly against ``strict_reference`` under rtol=atol=1e-3 and records error statistics.
+    Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
     ref_inputs, ref_outputs = ref if ref is not None else (None, None)
     if strict_correctness and (ref_inputs is None or ref_outputs is None):
-        raise ValueError("strict pinned correctness requires same-input eager reference outputs")
+        raise ValueError("strict pinned correctness requires same-input reference outputs")
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
@@ -918,12 +953,13 @@ async def _bench_golden_variants(backend, source, golden_configs, *, warmup, ite
             logger.warning("[golden] %s: bench of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, g_compiled, None, [f"bench_fail: {exc}"], "bench_fail"))
             continue
+        run_outputs = _comparison_outputs(run_outputs, g_compiled) if run_outputs is not None else None
         correctness = None
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
-                correctness = _strict_correctness_proof(run_outputs, ref_outputs)
+                correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
                 if correctness["status"] != "pass":
-                    flags.append(f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}")
+                    flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
             else:
                 flag = _wrong_answer_flag(run_outputs, ref_outputs)
                 if flag:
@@ -971,7 +1007,7 @@ def _launch_order_cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
-def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None):
+def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None, sym_env=None):
     """Per-kernel breakdown. Pulls structural stats off each ``CudaOp``
     (block / grid / smem), per-launch timings from ``bench.per_launch``,
     and per-kernel hardware attributes from the compiled cupy RawKernels
@@ -1024,11 +1060,12 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     # Symbolic grids (ceil-div over a dynamic axis) need a concrete env to
     # resolve for display — use each symbolic input dim's hint, so the printed
     # geometry reflects the hint-sized tile the kernel was tuned for.
-    sym_env: dict[str, int] = {}
-    for nid in graph.inputs:
-        for dim in graph.buffer(nid).shape:
-            if isinstance(dim.expr, Var) and dim.hint is not None:
-                sym_env.setdefault(dim.expr.name, dim.hint)
+    if sym_env is None:
+        sym_env = {}
+        for nid in graph.inputs:
+            for dim in graph.buffer(nid).shape:
+                if isinstance(dim.expr, Var) and dim.hint is not None:
+                    sym_env.setdefault(dim.expr.name, dim.hint)
 
     def _geom(op, attrs: dict):
         block_dims = [resolve_dim(d, sym_env) for d in op.block]
@@ -1759,6 +1796,7 @@ async def bench_lowered_vs_torch(
     capture_graphs=True,
     ref_out=None,
     ref_us_out=None,
+    sym_env_out=None,
     strict_accuracy=False,
     return_reference=False,
 ):
@@ -1813,6 +1851,8 @@ async def bench_lowered_vs_torch(
     from emmy.compiler.dim import Dim
 
     sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [lowered])
+    if sym_env_out is not None:
+        sym_env_out.append(dict(sym_env))
 
     def _static(shape):
         return tuple((d.as_static() if d.is_static else int(d.expr.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
@@ -1867,11 +1907,12 @@ async def bench_lowered_vs_torch(
             input_data[nid] = arr.flatten().tolist()
 
     result, _ = backend.run(lowered, input_data=input_data)
+    result_outputs = _comparison_outputs(result.outputs, lowered)
     if frontend is None and ref_out is not None:
-        ref_out.append((input_data, result.outputs))
+        ref_out.append((input_data, result_outputs))
     if ref_us_out is not None:
         ref_us_out.append(result.time_ms * 1000)
-    for nid, arr in result.outputs.items():
+    for nid, arr in result_outputs.items():
         finite = np.isfinite(arr).all()
         logger.info("Output %s: shape=%s finite=%s mean=%.4f", nid, arr.shape, bool(finite), float(arr.mean()))
 
@@ -1883,12 +1924,12 @@ async def bench_lowered_vs_torch(
             with torch.no_grad():
                 eager_out = torch_fn(*torch_inputs)
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result.outputs, eager_out)
+                correctness = _strict_correctness_proof(result_outputs, eager_out)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
             else:
-                accuracy_error = _check_accuracy(result.outputs, eager_out)
-            reference = (input_data, _eager_outputs_by_name(result.outputs, eager_out))
+                accuracy_error = _check_accuracy(result_outputs, eager_out)
+            reference = (input_data, _eager_outputs_by_name(result_outputs, eager_out))
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
@@ -1970,13 +2011,25 @@ def _pinned_samples_for_ir(args, embedded):
     return pinned
 
 
-def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned_rows) -> list[str]:
+def _strict_benchmark_errors(
+    args,
+    results,
+    bench,
+    captured,
+    correctness,
+    pinned_rows,
+    *,
+    frontend_runnable=True,
+    same_input_reference=False,
+) -> list[str]:
     """Return every strict verification failure in one ordinary run result."""
+
+    reference = "same-input-greedy" if not frontend_runnable and same_input_reference else "eager"
 
     def valid_proof(proof) -> bool:
         if not isinstance(proof, dict):
             return False
-        required = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
+        required = {"status": "pass", "reference": reference, "rtol": 1e-3, "atol": 1e-3}
         if any(proof.get(key) != value for key, value in required.items()):
             return False
         return all(
@@ -1995,8 +2048,10 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
         errors.append("backend comparison did not use CUDA graph capture")
     if bench is None or not bool(getattr(bench, "captured", False)):
         errors.append("deployed Emmy timing was not captured")
+    if not frontend_runnable and not same_input_reference:
+        errors.append("same-input greedy reference is unavailable")
     if not valid_proof(correctness):
-        errors.append("deployed Emmy row lacks direct strict eager correctness")
+        errors.append(f"deployed Emmy row lacks strict {reference} correctness")
 
     pinned_rows = list(pinned_rows or [])
     ab_rows = [row for row in pinned_rows if getattr(row.sample, "shape", None) is None]
@@ -2030,7 +2085,7 @@ def _strict_benchmark_errors(args, results, bench, captured, correctness, pinned
             if isinstance(total_ms, bool) or not isinstance(total_ms, int | float) or total_ms <= 0:
                 errors.append(f"{label} has no positive whole-program timing")
         if not valid_proof(row.correctness):
-            errors.append(f"{label} lacks direct strict eager correctness")
+            errors.append(f"{label} lacks strict {reference} correctness")
 
     return errors
 
@@ -2068,6 +2123,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # the same table the --code path produces for a debug Graph IR input.
     # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
     frontend = graph.copy() if torch_ref.is_runnable(graph) else None
+    same_input_greedy = strict_correctness and embedded is not None and frontend is None
 
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
     db = None
@@ -2117,6 +2173,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     async def _bench_session():
         greedy_fail = results = bench = accuracy_error = correctness = ab_ref = reference_error = ab_benches = greedy_iso = None
         greedy_reference_us = None
+        same_input_reference = False
+        stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
         try:
@@ -2130,7 +2188,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     iters=args.iters,
                     seed=args.seed,
                     want_ref=bool(pinned and tail),
-                    strict_accuracy=strict_correctness,
+                    strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
                 greedy_fail = f"greedy run/bench failed: {exc}"
@@ -2139,7 +2197,15 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]
                 ab_ref = resp["run_io"]
                 greedy_reference_us = resp.get("reference_run_us")
+                stats_sym_env = resp.get("sym_env")
                 correctness = resp.get("correctness")
+                same_input_reference = same_input_greedy and ab_ref is not None
+                if same_input_reference:
+                    correctness = _strict_correctness_proof(
+                        ab_ref[1],
+                        ab_ref[1],
+                        reference="same-input-greedy",
+                    )
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
             if pinned and tail:
@@ -2147,7 +2213,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     reason = greedy_fail or "the greedy worker returned no run outputs"
                     missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
                     reference_error = f"{missing}: {reason}"
-                elif not strict_correctness or accuracy_error is None:
+                elif same_input_greedy or not strict_correctness or accuracy_error is None:
                     if greedy_fail:
                         logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
                     else:
@@ -2160,6 +2226,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         iters=args.iters,
                         ref=ab_ref,
                         strict_correctness=strict_correctness,
+                        strict_reference="same-input-greedy" if same_input_greedy else "eager",
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:
@@ -2179,7 +2246,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             ab_benches,
             greedy_iso,
             greedy_reference_us,
+            stats_sym_env,
             correctness,
+            same_input_reference,
         )
 
     (
@@ -2193,7 +2262,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         ab_benches,
         greedy_iso,
         greedy_reference_us,
+        stats_sym_env,
         correctness,
+        same_input_reference,
     ) = asyncio.run(_bench_session())
 
     if reference_error is not None:
@@ -2219,8 +2290,28 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         print()
         for line in render_table([Col("Backend"), Col("Latency (us)", "r")], [["Emmy", f"{bench.time_ms * 1000:.0f}"]], rule=True):
             print(line)
-    _print_kernel_stats(graph, bench, golden_benches=ab_benches, greedy_fail=greedy_fail, greedy_iso=greedy_iso)
-    strict_errors = _strict_benchmark_errors(args, results, bench, captured, correctness, ab_benches) if strict_correctness else None
+    _print_kernel_stats(
+        graph,
+        bench,
+        golden_benches=ab_benches,
+        greedy_fail=greedy_fail,
+        greedy_iso=greedy_iso,
+        sym_env=stats_sym_env,
+    )
+    strict_errors = (
+        _strict_benchmark_errors(
+            args,
+            results,
+            bench,
+            captured,
+            correctness,
+            ab_benches,
+            frontend_runnable=frontend is not None,
+            same_input_reference=same_input_reference,
+        )
+        if strict_correctness
+        else None
+    )
     if getattr(args, "json", None):
         _write_ab_json(
             args,
@@ -2330,14 +2421,25 @@ def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None
     input_data: dict[str, np.ndarray] = {}
     torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
     for nid, tensor in zip(input_ids, flat_inputs, strict=True):
-        np_dtype = compiled.nodes[nid].output.dtype.np
+        dtype = compiled.nodes[nid].output.dtype
+        np_dtype = dtype.np
         tensor = tensor.detach().cpu()
         # An fp8 activation/weight INPUT binds the raw bit pattern on its uint8 carrier —
         # numpy has no fp8 scalar type, and a value cast would decode the bits (the same
         # rule the constant side and the serving expert feed already follow).
         if tensor.dtype in torch_f8:
             tensor = tensor.view(torch.uint8)
-        input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
+        if dtype.name == "bf16":
+            from emmy.compiler.dtype import encode_bf16  # noqa: PLC0415
+
+            if tensor.dtype == torch.bfloat16:
+                input_data[nid] = tensor.contiguous().view(torch.uint16).numpy()
+            else:
+                input_data[nid] = encode_bf16(tensor.numpy())
+        else:
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.float()
+            input_data[nid] = tensor.numpy().astype(np_dtype, copy=False)
 
     # ``remove_duplicate=False`` so tied weights (e.g. a model whose lm_head
     # shares the embedding matrix) are surfaced under *every* name, including
@@ -2345,9 +2447,19 @@ def _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=None
     # picked may be the one torch dedups away and the constant won't bind.
     sources: dict[str, np.ndarray] = {}
     for path, tensor in module.named_parameters(remove_duplicate=False):
-        sources[path] = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
     for path, tensor in module.named_buffers(remove_duplicate=False):
-        sources[path] = tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+        tensor = tensor.detach().cpu()
+        sources[path] = (
+            tensor.contiguous().view(torch.uint16).numpy()
+            if tensor.dtype == torch.bfloat16
+            else tensor.numpy().astype(np.float32, copy=False)
+        )
 
     input_data.update(bind_constants(compiled, sources))
 

@@ -26,6 +26,24 @@ def test_local_result_name_subdir_files_do_not_collide():
     assert std != fm
 
 
+def test_local_result_names_use_collision_safe_row_stem():
+    recipe = Recipe(command=CommandConfig(run="true", result_files=["artifacts.tar.gz"]))
+    common = {"deploy.gpu": "NVIDIA A100 80GB", "deploy.gpu_count": 1, "lane": "emmy"}
+    tasks = [
+        BenchmarkTask(
+            recipe_dir="experiment",
+            variant=_variant({**common, "operator": operator}),
+            recipe=recipe,
+        )
+        for operator in ("prefill_global", "prefill_gqa")
+    ]
+
+    assert str(tasks[0].variant) == str(tasks[1].variant) == "a100x1_lemmy_op-g"
+    names = {_local_result_name(task.file_stem, "artifacts.tar.gz") for task in tasks}
+    assert names == {f"{task.file_stem}_artifacts.tar.gz" for task in tasks}
+    assert len(names) == 2
+
+
 def test_build_substitution_map_flattens_dot_keys():
     v = _variant({"deploy.gpu": "NVIDIA GeForce RTX 5090", "deploy.gpu_count": 1, "marker": "a"})
     subs = build_substitution_map(v, [0], repo_dir="/tmp/repo", task_dir="/tmp/task")
@@ -105,8 +123,9 @@ async def test_failed_command_still_pulls_preserved_result(monkeypatch, tmp_path
     )
 
     assert success is False
-    assert info["result_paths"] == [str(tmp_path / "rtx5090x1_case_artifacts.tar.gz")]
-    assert (tmp_path / "rtx5090x1_case_artifacts.tar.gz").read_bytes() == b"archive"
+    expected = tmp_path / f"{task.file_stem}_case_artifacts.tar.gz"
+    assert info["result_paths"] == [str(expected)]
+    assert expected.read_bytes() == b"archive"
 
 
 @pytest.mark.asyncio

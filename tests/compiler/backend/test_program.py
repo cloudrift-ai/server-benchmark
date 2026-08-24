@@ -3,7 +3,19 @@
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import _collapse_inert_dims, _Compiled, _resolve_symbolic, benchmark_program, run_program
+from emmy.compiler.backend.cuda.program import (
+    CompiledProgram,
+    _collapse_inert_dims,
+    _Compiled,
+    _load_plan,
+    _numpy_storage,
+    _resolve_symbolic,
+    benchmark_program,
+    run_program,
+)
+from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan
+from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import BF16, F32, decode_bf16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
@@ -13,7 +25,64 @@ from tests.compiler.helpers import requires_cuda
 def _minimal_compiled(**kw) -> _Compiled:
     """A ``_Compiled`` with no kernels — enough to exercise ``_resolve_symbolic``
     (which only reads the symbolic_* maps). No CUDA needed."""
-    return _Compiled(bufs=[], buf_by_name={}, constants={}, kernels={}, launches=[], **kw)
+    return _Compiled(bufs=[], buf_by_name={}, constants={}, kernels={}, launches=[], outputs=[], **kw)
+
+
+def test_bf16_host_values_materialize_as_bits():
+    values = np.array([1.0, -2.0, np.pi], dtype=np.float32)
+    storage = _numpy_storage(values, BF16)
+
+    assert storage.dtype == np.uint16
+    np.testing.assert_array_equal(decode_bf16(storage), np.array([1.0, -2.0, 3.140625], dtype=np.float32))
+    np.testing.assert_array_equal(_numpy_storage(storage, BF16), storage)
+
+
+def test_compiled_program_outputs_follow_declared_order_not_allocation_order():
+    class HostArray:
+        def __init__(self, value):
+            self.value = np.atleast_1d(np.asarray(value, dtype=np.float32))
+
+        def get(self):
+            return self.value.copy()
+
+        def ravel(self):
+            return HostArray(self.value.ravel())
+
+        def __getitem__(self, item):
+            return HostArray(self.value[item])
+
+        def reshape(self, shape):
+            return self.value.reshape(shape)
+
+    plan = ExecutionPlan(
+        backend="cuda",
+        inputs=[],
+        outputs=["first", "second"],
+        buffers=[
+            BufferSpec("second", (Dim(1),), F32, "output"),
+            BufferSpec("scratch", (Dim(1),), F32, "scratch"),
+            BufferSpec("first", (Dim(1),), F32, "output"),
+        ],
+        constants={},
+        runtime_constants={},
+        launches=[],
+        kernels={},
+    )
+    program = CompiledProgram(
+        compiled=_load_plan(plan),
+        arrays={"second": HostArray(2), "scratch": HostArray(3), "first": HostArray(1)},
+        descs={},
+    )
+
+    outputs = program.outputs(sym_values={})
+    device_outputs = program.output_prefix_device(sym_values={})
+
+    assert list(outputs) == ["first", "second"]
+    np.testing.assert_array_equal(outputs["first"], [1])
+    np.testing.assert_array_equal(outputs["second"], [2])
+    assert list(device_outputs) == ["first", "second"]
+    np.testing.assert_array_equal(device_outputs["first"], [1])
+    np.testing.assert_array_equal(device_outputs["second"], [2])
 
 
 class TestSymbolicCapacityGuard:

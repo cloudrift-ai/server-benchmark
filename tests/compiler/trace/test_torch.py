@@ -206,6 +206,68 @@ def test_trace_sum_reduction():
     assert reduces[0].op.name == "sum"
 
 
+def test_trace_cumsum_as_static_scan_preserves_axis_and_values():
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import ScanOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class CumulativeSum(nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-2)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(CumulativeSum(), (x,))
+    scans = [node for node in graph.nodes.values() if isinstance(node.op, ScanOp)]
+
+    assert len(scans) == 1
+    assert scans[0].op.name == "sum"
+    assert scans[0].op.axis == -2
+    result, _ = NumpyBackend().run(graph, input_data={graph.inputs[0]: x.numpy()})
+    np.testing.assert_array_equal(result.outputs[graph.outputs[0]], CumulativeSum()(x).numpy())
+
+
+def test_trace_cumsum_rejects_dynamic_axis():
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.trace.torch import _handle_call_function
+
+    graph = Graph()
+    source_id = graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    source = SimpleNamespace(name="x_fx")
+    fx_node = SimpleNamespace(
+        target=torch.ops.aten.cumsum.default,
+        args=(source, SimpleNamespace(name="dynamic_axis")),
+        kwargs={},
+        meta={"val": torch.empty((2, 3))},
+        name="cumsum",
+    )
+
+    with pytest.raises(NotImplementedError, match="static integer axis"):
+        _handle_call_function(graph, fx_node, {source.name: source_id})
+
+
+def test_trace_cumsum_rejects_dtype_override():
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class WideningCumulativeSum(nn.Module):
+        def forward(self, x):
+            return torch.cumsum(x, dim=-1, dtype=torch.float32)
+
+    with pytest.raises(NotImplementedError, match="dtype override"):
+        trace_module(WideningCumulativeSum(), (torch.randn(2, 3, dtype=torch.float16),))
+
+
 def test_trace_max_reduction():
     """aten.amax traces to ReduceOp(amax) — torch's name is preserved."""
     import torch
@@ -359,6 +421,7 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
 
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tensor.ir import IndexMapOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
@@ -385,6 +448,11 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
         node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2 and node.id.endswith("_base")
     ]
     assert len(updates) == 4
+    for update in updates:
+        select = update.op.sources[0].select
+        while isinstance(select, BinaryExpr) and select.op == "&&":
+            select = select.left
+        assert select == Literal(True, "bool")
 
     backend = NumpyBackend()
     result, _ = backend.run(
@@ -395,6 +463,37 @@ def test_trace_reassembles_static_local_slice_copies_observed_through_base():
 
     lowered = Pipeline.build(LOOP_PASSES).run(graph)
     assert all(isinstance(node.op, (InputOp, ConstantOp, LoopOp)) for node in lowered.nodes.values())
+
+
+def test_trace_reassembles_qwen_chunk_recurrence_on_computed_local_base():
+    """Sequential select/slice writes version Qwen's computed attention matrix and local output."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class ChunkRecurrence(nn.Module):
+        def forward(self, x):
+            attn = -(x @ x.transpose(-1, -2))
+            for i in range(1, 4):
+                row = attn[..., i, :i].clone()
+                sub = attn[..., :i, :i].clone()
+                attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+            output = torch.zeros_like(attn)
+            output[..., 0, :].copy_(attn[..., 0, :])
+            return attn, output
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 4, 4)
+    graph = trace_module(ChunkRecurrence(), (x,))
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    with torch.no_grad():
+        expected = ChunkRecurrence()(x)
+    for got, want in zip(result.outputs.values(), expected, strict=True):
+        np.testing.assert_allclose(got, want.numpy(), rtol=1e-5, atol=1e-5)
 
 
 def test_trace_treats_empty_static_local_slice_copy_as_noop():
@@ -580,6 +679,91 @@ def test_trace_rejects_noninteger_arange():
         trace_module(FloatRange(), (torch.randn(4),))
 
 
+@pytest.mark.parametrize(("shape", "dtype"), [((4, 4), "float32"), ((3, 5), "float16")])
+def test_trace_static_eye_uses_index_map_and_matches_eager(shape, dtype):
+    """Eye is a diagonal coordinate map with typed scalar sources, not an elementwise function."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Eye(nn.Module):
+        def forward(self, x):
+            if x.shape[0] == x.shape[1]:
+                return x + torch.eye(x.shape[0], dtype=x.dtype, device=x.device)
+            return x + torch.eye(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
+
+    x = torch.zeros(shape, dtype=getattr(torch, dtype))
+    graph = trace_module(Eye(), (x,))
+    eye_maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2]
+    assert len(eye_maps) == 1
+    assert not any(isinstance(node.op, ElementwiseOp) and node.op.fn == "eye" for node in graph.nodes.values())
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    expected = Eye()(x)
+    assert got.dtype == expected.numpy().dtype
+    np.testing.assert_array_equal(got, expected.numpy())
+
+
+def test_trace_eye_rejects_symbolic_dimensions():
+    """Dynamic eye extents cannot be serialized as static IndexMap output dimensions."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class DynamicEye(nn.Module):
+        def forward(self, x):
+            return torch.eye(x.shape[0], x.shape[1], dtype=x.dtype, device=x.device)
+
+    rows = torch.export.Dim("rows", min=2, max=8)
+    columns = torch.export.Dim("columns", min=2, max=8)
+    with pytest.raises(NotImplementedError, match="static integer dimensions"):
+        trace_module(
+            DynamicEye(),
+            (torch.randn(3, 5),),
+            dynamic_shapes={"x": {0: rows, 1: columns}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("target_name", "kwargs", "message"),
+    [
+        ("default", {"layout": "sparse"}, "strided layout"),
+        ("default", {"pin_memory": True}, "pinned-memory"),
+        ("default", {"requires_grad": True}, "unsupported keyword arguments"),
+        ("out", {}, "unsupported aten.eye overload"),
+    ],
+)
+def test_trace_eye_rejects_unrepresented_constructor_semantics(target_name, kwargs, message):
+    """Eye options without stable tensor-IR fields fail before any invalid node is added."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.trace.torch import _handle_call_function
+
+    if kwargs.get("layout") == "sparse":
+        kwargs = {"layout": torch.sparse_coo}
+    fx_node = SimpleNamespace(
+        target=getattr(torch.ops.aten.eye, target_name),
+        args=(3,),
+        kwargs=kwargs,
+        meta={"val": torch.empty((3, 3))},
+        name="eye",
+    )
+    graph = Graph()
+    with pytest.raises(NotImplementedError, match=message):
+        _handle_call_function(graph, fx_node, {})
+    assert not graph.nodes
+
+
 def test_trace_reassembles_ling_mtp_roll_select_fill_observed_through_base():
     """Ling's exact MTP token shift versions the rolled base through its selected view."""
     import numpy as np
@@ -688,6 +872,33 @@ def test_trace_masked_fill_lowers_to_ternary_where_and_matches_eager():
     result, _ = backend.run(compiled, input_data=input_data)
     got = next(iter(result.outputs.values()))
     np.testing.assert_array_equal(got, MaskedFill()(x, mask).numpy())
+
+
+def test_trace_triangular_filters_lower_to_index_maps_and_match_eager():
+    """Function and tensor triangular APIs select the last two axes and zero the rest."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class TriangularFilters(nn.Module):
+        def forward(self, x):
+            return torch.triu(x, diagonal=1), x.tril(diagonal=-1)
+
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    graph = trace_module(TriangularFilters(), (x,))
+    triangular_maps = [node for node in graph.nodes.values() if isinstance(node.op, IndexMapOp) and len(node.op.sources) == 2]
+    assert len(triangular_maps) == 2
+
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    with torch.no_grad():
+        expected = TriangularFilters()(x)
+    for got, want in zip(result.outputs.values(), expected, strict=True):
+        np.testing.assert_array_equal(got, want.numpy())
 
 
 def test_trace_transpose():
@@ -1457,3 +1668,31 @@ def test_trace_clamp_matches_torch_eager():
     with torch.no_grad():
         want = m(gate, up).numpy()
     np.testing.assert_allclose(next(iter(outs.values())), want, rtol=1e-5, atol=1e-6)
+
+
+def test_trace_factory_constructors_and_like_forms_match_eager():
+    """``torch.ones``/``zeros``/``full`` export as input-less leaves; ``ones_like`` carries a template.
+
+    Before, a zero-input factory produced no graph node at all, so its consumer lost an operand
+    and failed later with an unrelated error (the ``triu``/``masked_fill`` chunk-mask idiom).
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class Factories(nn.Module):
+        def forward(self, x):
+            ones = torch.ones(x.shape[-1], x.shape[-1], dtype=x.dtype)
+            full = torch.full((x.shape[-1],), 2.5, dtype=x.dtype)
+            like = torch.ones_like(x) - torch.zeros_like(x)
+            return x * ones.sum(dim=0) + full + like
+
+    x = torch.randn(2, 3, 4)
+    graph = trace_module(Factories(), (x,))
+    backend = NumpyBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
+    got = next(iter(result.outputs.values()))
+    np.testing.assert_allclose(got, Factories()(x).numpy(), rtol=1e-5, atol=1e-5)

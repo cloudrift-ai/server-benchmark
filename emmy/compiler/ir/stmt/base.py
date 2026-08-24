@@ -268,7 +268,7 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         return FuncCallExpr("pow", tuple(inputs))
     if fn == "negative":
         return BinaryExpr("-", Literal(0.0, "float"), inputs[0])
-    if fn == "copy":
+    if fn in ("copy", "pad"):
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
         # fp8 decode cast: the value semantics live in the dtype conversion the

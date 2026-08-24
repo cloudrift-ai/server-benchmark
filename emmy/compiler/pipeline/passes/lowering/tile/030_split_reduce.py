@@ -19,7 +19,9 @@ the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBR
   - ``"atomic"`` — the partial ``atomicAdd``\\ s its (additive) state into the output (applying
     the kernel's projection epilogue per-partition first, when that epilogue *distributes* over
     the add — ``mean``'s ``×1/N``; a non-distributive one like ``l2``'s ``sqrt`` is refused, use
-    ``"kernel"``); the output is zero-init'd per launch. **1 node.** Additive carriers only.
+    ``"kernel"``); the output is zero-init'd per launch. **1 node.** Additive carriers with
+    non-f16/bf16 output storage only — schedule legality routes low-precision outputs through
+    the f32 deferred workspace so they round once rather than once per partition.
 
 **Every piece is a BRAND-NEW kernel, minted in the LOOP dialect.** Each leaves here as a plain
 ``LoopOp`` (:func:`_piece`) — the term lowered to per-cell stmts with its boundary stores put back,
@@ -152,6 +154,13 @@ def _frag(match: Match, root: Node) -> Graph:
     return frag
 
 
+def _piece_inputs(root: Node, op: Fold, *first: str) -> list[str]:
+    """Graph edges for a minted piece: fragment-created buffers first, followed by external
+    inputs the piece actually reads. Every rendered CUDA argument must remain a registered edge."""
+    reads = {load.input for load in op.body.loads}
+    return [*first, *(inp for inp in root.inputs if inp in reads)]
+
+
 def _one(frag: Graph, root: Node, piece: LoopOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
@@ -213,11 +222,10 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     atom, scalar otherwise. No ``_slice_loop`` (unlike the residual plain-sum path).
 
     Finalize matches the additive-carrier finalize: ``atomic`` (``g<w>a``) atomicAdds the partition's
-    ``acc`` into the zero-init'd output — ONE kernel, both tiers (an mma partial's C fragment rides
-    ``RegStore.atomic``: the packed f16x2/bf16x2 ``atomicAdd`` pair, per-element for f32) — at the
-    cost of one output-dtype rounding per partition (the deferred arm's f32 workspace rounds once);
-    ``kernel`` (``g<w>k``) writes each partition's ``acc`` to a ``ws[ksplit, *cell]`` workspace and a
-    sibling finalize kernel sums it + runs the projection epilogue."""
+    ``acc`` into the zero-init'd output — ONE kernel, both tiers, admitted only when the output
+    storage is not f16/bf16. Low-precision output takes ``kernel`` (``g<w>k``): each partition's
+    ``acc`` is written to a f32 ``ws[ksplit, *cell]`` workspace and a sibling finalize kernel sums
+    it + runs the projection epilogue, rounding the output once instead of once per partition."""
     out = root.output
     grid = tile.place.grid
     cell = tuple(Var(a.name) for a in grid)
@@ -308,7 +316,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag
 
@@ -460,6 +468,6 @@ def rewrite(match: Match, root: Node) -> Graph:
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    frag.add_node(op=fin_tile, inputs=[ws_name], output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
     frag.outputs = [out.name]
     return frag

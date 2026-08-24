@@ -189,7 +189,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 
 | Symbol                               | Role                                                           |
 |--------------------------------------|----------------------------------------------------------------|
-| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…). |
+| `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…); unary `pad` is the frontend's exact zero-width identity. |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
 | `RangeOp`                            | Static one-dimensional integer sequence.                       |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
@@ -483,6 +483,34 @@ node must rename its body `Write.output` to match (`fusion/_helpers.py::rename_w
 Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops`
 — `compile -vv` shows which pattern a rejected edge hit.
 
+A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
+splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
+the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. The standalone
+`LoopOp` remains the raw-loop escape, so the accumulator update and its `Write` stay in one serial loop.
+
+An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
+declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that
+boundary as a typed `copy` alias. Nodes created by decomposing and rewriting one frontend operation share the ultimate
+`Op.source` object and may reconstruct their private edge directly. A private output stays recognizable even when its
+consumer fragment already mixes origins: it is absent from the ultimate frontend source's declared outputs. Missing
+or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
+ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
+
+Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
+live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
+global cache would require; the memo is discarded with the splicer.
+
+`Sigma` computes canonical expression text once for each initial substitution. Derived substitutions created by
+`extend` and `restrict` retain the applicable canonical entries from their parent, so dependency placement neither
+reformats deep coordinate trees nor retains duplicate canonical strings.
+
+Fusion may give the splicer the ordinary work-growth ceiling before construction. The splicer accumulates the exact
+static-extent arithmetic-leaf work at each inserted scope (using 128 for a symbolic extent, as the final fusion metric
+does) and refuses as soon as the monotonic partial work exceeds that ceiling. Untyped identity-copy aliases are
+excluded because normalization removes them from the finished body; a typed copy is a real conversion and counts as
+work. An admitted bounded splice constructs the same body bytes as an unbounded splice; the bound only terminates a
+candidate whose final ordinary work limit is already impossible.
+
 ### `loop/runner.py` — C++ JIT executor
 
 `execute_loop_op_cpp(loop, input_arrays, out_shape) → ndarray` renders the
@@ -493,8 +521,10 @@ default `Backend.run` topo-walk like any pre-fusion graph.
 
 ### `loop/builder.py` — fluent construction
 
-`LoopBuilder` helper used by decomposition/fusion tests to construct
-LoopOp bodies without spelling out every `Loop(Axis(…))` nest.
+`LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
+nest. Fresh SSA names retain the lowest available deterministic suffix while a per-hint monotonic cursor ensures each
+occupied suffix is tested at most once; the used-name set remains authoritative when another hint claims a future
+suffix.
 
 ## `tile/`
 
@@ -607,9 +637,10 @@ downstream in `lowering/kernel` against the op tree + schedule. The older tile-l
 **The structural dump** (`tile/_dump.pretty` / `TileOp.pretty_body`, what `emmy compile --ir tile` and the `EMMY_DUMP_DIR`
 `.txt` artifacts print) renders the STORED tree as a tree, never a lowered nest — the dump is where a reader meets the
 term directly, so it has to show what the term IS. Each node prints its kind and stored params as labelled branches
-(`operands` first, then `init` / `lift` / `combine`, with the bilinear reading labelling its edges `operand[a]` /
-`operand[b<i>]` — the same `a` / `b` tokens the path codec spells, so a dump line matches a `PLACE@a` key by eye),
-and every operand edge is recursed into and tagged with its inhabitant — `‹computed›`
+(`operands` first, then `init` / `lift` / `combine`). Every edge uses its bound lift parameter or parameters as its
+label (`operand[p]:` or `operand[p, q]:`), making the positional substitution explicit even though the bilinear view
+prints A before B while its stored operand order is `(b₀, a, b₁…)`, and every operand edge is recursed into and tagged
+with its inhabitant — `‹computed›`
 for an inline node subtree, `‹materialized›` for a leaf gmem `Load`. **A λ-valued field labels its own branch with its
 signature and nests its body two under it** — `lift:` / `combine:` / `fn:` all read the same way, so a binder is always
 adjacent to what it binds; none of them ride the node header, where on a big fold the signature sat a screenful above
@@ -619,9 +650,11 @@ non-empty (`λ() [captures m_i__t5] -> (…)`) — the free names that are not i
 closure predicate applies (`axis_names`, relocated to `tile/ops.py` so the dump and `_cut._captured_values` share one
 definition; the iteration space is the term's axes ∪ the placement's free/grid ∪ the boundary stores' sweep axes).
 Without a capture set a λ reads as closed, and closure is precisely what decides whether a subtree can hoist to an
-operand edge — combine-derived material captures the carrier's running state, which is why its seam is not cuttable. The
-set is measured only when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted
-rather than reporting grid coordinates as captures.
+operand edge. No stored term carries one: the computed-A cone (`ops.make_cone`) passes every statistic value its
+per-cell normalize reads through the prologue's results (softmax's `m`, read by `exp(s − m)`), so the cell binds it
+positionally and the seam between statistic and normalize is a positional edge like any other. The set is measured only
+when the owning `TileOp` is supplied; a bare term has no placement, so the annotation is omitted rather than reporting
+grid coordinates as captures.
 
 **Nothing DERIVED is printed** — not the per-cell step, not the nodes synthesized inside it, not the lowered nest.
 The structure is already complete in the stored tree: the operand edges and their nesting say it, and a derived
@@ -655,6 +688,7 @@ directly (no separate AST class).
 | `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. A 1-byte staged slab (`byte_slab=True`) has no `ldmatrix` below sm_100a and drains through the cooperative gather too; when it also carries a `scale_buffer` the slab holds PACKED PAIRS (an NVFP4 weight — one byte, two K elements, and one scale per k block in that companion slab), and the loader decodes both codes through the f16 value table and scales them as it fills the fragment. |
 | `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
+| `FragmentSelect`   | Coordinate-predicated uniform values over one C fragment. It substitutes each fragment element's absolute row/column through the shared fragment layout, then uses scalar `Select` branch order and casts exactly; fragment-valued or per-cell branches fail closed at the lifting boundary. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. Stores f32 directly or downconverts to f16. Optional `RegEpilogue` loads and pointwise chains are evaluated at each element's own coordinates; guarded tails predicate every load and store. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Write`, `Select`, `Cond`. |
 

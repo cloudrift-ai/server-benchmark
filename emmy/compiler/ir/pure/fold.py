@@ -500,7 +500,7 @@ class Fold:
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 
     @classmethod
-    def projection(cls, operands: tuple = (), *, body=None) -> Fold:
+    def projection(cls, operands: tuple = (), *, body=None, results: tuple | None = None) -> Fold:
         """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
         No axis and no monoid: the synthesized binder IS the ``lift`` and IS the per-cell compute,
         so softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over
@@ -510,12 +510,16 @@ class Fold:
         binds every channel accumulator, so the geglu combine's second read is a bound param and
         never a free name. ``body`` is the raw-loop-IR arm, where :func:`_loop_ir_fn` tolerates an
         impure body; its params come from the operands' components and its results from the last
-        def. A caller holding a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly —
-        this builder exists for the body form, which is the only one anything spells."""
+        def unless ``results`` names them (a prologue passing a bound statistic through to the
+        consumer that reads it — :func:`~emmy.compiler.ir.tile.ops.make_cone`). A caller holding
+        a ready ``Lambda`` constructs ``Fold(axis=None, ...)`` directly — this builder exists for
+        the body form, which is the only one anything spells."""
         operands = tuple(operands)
         b = Body.coerce(body) if body is not None else Body()
         params = tuple(n for s in operands for n in _operand_result_names(s))
-        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, _map_results(b) or params[:1]))
+        if results is None:
+            results = _map_results(b) or params[:1]
+        return cls(axis=None, operands=operands, lift=_loop_ir_fn(params, b, tuple(results)))
 
     def external_reads(self) -> tuple[str, ...]:
         """Every input buffer read anywhere under this node's operand edges (deep — an inline
@@ -598,15 +602,28 @@ class Fold:
         bound param (:func:`splice_operands` — positional binding names the edges, ties in
         operand order), so a fold with hoisted inputs lowers byte-identically to the flat form
         that carried them in its body."""
-        stmts = splice_operands(self._splice_edges(), _flatten_nodes(self.step_stmts()))
+        stmts = splice_operands(self._step_edges(), _flatten_nodes(self.step_stmts()))
         return Loop(axis=self.axis, body=Body(stmts), unroll=self.unroll, role=self.role)
+
+    def _hoisted_edges(self) -> tuple:
+        """The operand edges the loop does NOT re-evaluate per step: a computed edge whose subtree
+        never reads the fold's iteration var (a chained producer — the normalized row's
+        statistic, a sibling fold's projected result) is loop-invariant and lowers ONCE, ahead of
+        the loop. A gmem ``Load`` edge always rides the step (its index is the operand slab)."""
+        if self.axis is None:
+            return ()
+        return tuple(e for e in self._splice_edges() if isinstance(e, Fold) and self.axis.name not in deep_reads(list(e.lower())))
+
+    def _step_edges(self) -> tuple:
+        hoisted = {id(e) for e in self._hoisted_edges()}
+        return tuple(e for e in self._splice_edges() if id(e) not in hoisted)
 
     def spliced_step(self) -> tuple[Stmt, ...]:
         """The (derived) step with every operand edge's body spliced before its first use — the
         stmt sequence the emit-side node walk consumes (nested structural nodes NOT flattened;
         :attr:`loop` additionally flattens them). Edges the derived blocked evaluation already
         consumed (a twisted fold's head node / expectation Load) never splice twice."""
-        return splice_operands(self._splice_edges(), self.step_stmts())
+        return splice_operands(self._step_edges(), self.step_stmts())
 
     @property
     def out(self) -> str:
@@ -629,8 +646,8 @@ class Fold:
         import back into :mod:`~emmy.compiler.ir.tile.ops`."""
         if self.axis is None:
             prefix = [s for e in self.operands for s in operand_body(e)]
-            return [*prefix, *self.body]
-        return [self.loop]
+            return [*prefix, *_flatten_nodes(tuple(self.body))]
+        return [*(s for e in self._hoisted_edges() for s in operand_body(e)), self.loop]
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
     # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its

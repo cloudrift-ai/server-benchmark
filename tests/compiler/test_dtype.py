@@ -16,8 +16,10 @@ from emmy.compiler.dtype import (
     F4E2M1x2,
     F16x2,
     StructuredType,
+    decode_bf16,
     decode_f4,
     decode_f4x2,
+    encode_bf16,
     encode_f4,
     encode_f4x2,
     get,
@@ -46,6 +48,14 @@ def test_f8_bits_carriers():
         assert dt.nbytes == 1
         assert get(dt.name) is dt
         assert get(alias) is dt
+
+
+def test_bf16_bits_carrier_round_trips_values():
+    values = np.array([0.0, 1.0, -2.0, np.pi], dtype=np.float32)
+    bits = encode_bf16(values)
+
+    np.testing.assert_array_equal(bits, np.array([0x0000, 0x3F80, 0xC000, 0x4049], dtype=np.uint16))
+    np.testing.assert_array_equal(decode_bf16(bits), np.array([0.0, 1.0, -2.0, 3.140625], dtype=np.float32))
 
 
 def test_i16_packed_code_carrier():

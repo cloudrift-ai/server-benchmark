@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all test modules."""
 
+import functools
 import json
 import os
 import random
@@ -23,7 +24,10 @@ import yaml
 # without this serialization, peer-worker CUDA activity interleaves
 # with our kernels and the per-position fp32 rounding drift breaks
 # the accuracy comparison.
-os.environ.setdefault("EMMY_GPU_LOCK", "/tmp/emmy-gpu.lock")
+# Per-uid path: on a multi-user runner the first user's lock file (mode 0644, sticky /tmp)
+# is unopenable by everyone else, so a shared path fails the run with PermissionError
+# instead of serializing (CI run 32339655489). Cross-user serialization was never real.
+os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 
 
 # ── CUDA context poisoning containment ──────────────────────────────
@@ -305,21 +309,42 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
-def _cuda_toolchain_available() -> bool:
-    """Whether tests can compile and execute Emmy CUDA programs.
+_NO_TOOLCHAIN = "CUDA not available (need cupy + GPU + nvcc)"
+
+
+@functools.cache
+def _cuda_unavailable_reason() -> str | None:
+    """Why Emmy CUDA tests cannot run here, or ``None`` when they can.
 
     A visible device and importable CuPy are not sufficient: Emmy compiles its
     kernels with the CUDA toolkit's ``nvcc`` binary.  Some CI runners expose a
-    GPU through the driver while installing only the CuPy runtime wheel.
+    GPU through the driver while installing only the CuPy runtime wheel.  The
+    other silent case is a pre-Turing card whose NVRTC is too new to target it:
+    left unnamed, one setup problem reads as dozens of unrelated
+    ``NVRTC_ERROR_INVALID_OPTION`` failures.  Cached — the answer is a property
+    of the host, and the probe touches the driver.
     """
     try:
         import cupy as cp
 
         from emmy.compiler.backend.cuda.nvcc import nvcc_path
+        from emmy.compiler.target import check_nvrtc_supports_live_device
 
-        return cp.cuda.runtime.getDeviceCount() > 0 and nvcc_path() is not None
+        if cp.cuda.runtime.getDeviceCount() == 0 or nvcc_path() is None:
+            return _NO_TOOLCHAIN
+        check_nvrtc_supports_live_device()  # raises SystemExit, carrying the remedy
+    except SystemExit as exc:
+        return str(exc)
     except Exception:  # noqa: BLE001 -- an unusable CUDA runtime means skip
-        return False
+        return _NO_TOOLCHAIN
+    return None
+
+
+def pytest_report_header() -> list[str]:
+    """Name an unusable CUDA toolchain once, at the top of the run, instead of
+    letting it reappear as every CUDA test's individual failure."""
+    reason = _cuda_unavailable_reason()
+    return reason.splitlines() if reason else []
 
 
 # xdist_group for every IN-PROCESS CUDA-touching test. The host only has
@@ -380,11 +405,12 @@ def pytest_collection_modifyitems(config, items):
     # already grouped.
     cuda_items: list = []
     other_items: list = []
-    cuda_available = _cuda_toolchain_available()
-    skip_cuda = pytest.mark.skip(reason="CUDA not available (need cupy + GPU + nvcc)")
+    cuda_reason = _cuda_unavailable_reason()
+    # Only the first line on each item — the full remedy is in the report header.
+    skip_cuda = pytest.mark.skip(reason=cuda_reason.splitlines()[0] if cuda_reason else "")
     for it in items:
         if _is_cuda_item(it):
-            if not cuda_available:
+            if cuda_reason:
                 it.add_marker(skip_cuda)
             group = _CUDA_CLI_GROUP if "run_cli" in getattr(it, "fixturenames", ()) else _CUDA_GROUP
             it.add_marker(pytest.mark.xdist_group(group))

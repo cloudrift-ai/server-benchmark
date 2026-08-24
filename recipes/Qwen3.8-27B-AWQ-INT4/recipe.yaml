@@ -6,16 +6,16 @@
 # This is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no `benchmark:` block. The workload
 # grid that justifies these values lives in experiments/Qwen3.8-27B-AWQ-INT4/serving/.
 #
-# There is no Emmy lane here. Qwen3.8 is a hybrid checkpoint whose 48 Gated DeltaNet linear-attention layers need a
-# depthwise causal `conv1d`, which Emmy's compiler frontend cannot map; see RESULTS.md for the exact reproducer.
+# There is no Emmy lane here. Exact compiler coverage is complete, but strict correctness and attention performance
+# still block a canonical golden file; see RESULTS.md for the measured qualification gates.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
+  rationale: "Dominant Qwen3.8 wave with high OR heat and Reddit engagement."
+  heat: 95
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
-  rationale: "Only W4A16 Qwen3.8 build that fits one 24 GB consumer card, giving the 27B-class dense entry point."
-  heat: 92
   task: generate
 
 engine:

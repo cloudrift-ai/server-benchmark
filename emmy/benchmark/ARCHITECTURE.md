@@ -6,8 +6,9 @@ judging or interpreting experiment data.
 ## Experiment record
 
 An actual `emmy bench` invocation creates `<recipe_dir>/<YYYY-MM-DD_HH-MM-SS>/`. Dry runs never create, delete, or
-modify a run directory. Every expanded row receives one collision-safe `*.experiment.yaml`; there is no JSON, TXT,
-task manifest, instance manifest, or inline aggregate result path.
+modify a run directory. Every expanded row receives one collision-safe `*.experiment.yaml`; each declared result file
+uses the same readable variant plus stable row ID before its task-relative name, so abbreviated variants cannot
+overwrite each other. There is no JSON, TXT, task manifest, instance manifest, or inline aggregate result path.
 
 `ExperimentRecord` is a typed dataclass schema. It is initialized before provisioning, serialized directly to YAML,
 and atomically rewritten at each lifecycle transition. A handled failure therefore leaves a terminal row rather than
@@ -49,9 +50,11 @@ The orchestrator MUST NOT:
 - reject a filtered matrix for scientific reasons; or
 - generate `RESULTS.md` or invoke result-validation or report-generation scripts.
 
-Command records preserve timing, status, errors, and system information. `command.strict` requires a clean Git
-worktree, every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve
-declared results.
+Command records preserve timing, status, errors, and system information. For a staged command, Git provenance names
+the invoking worktree revision and the dirty state of the exact declared stage paths; neither the installed package
+nor a reused remote source tree supplies that provenance. `command.strict` requires those staged paths to be clean,
+every declared result file, GPU identity, NVCC, and cuBLAS. A failed command still attempts to retrieve declared
+results.
 
 The repository `run-experiment` skill validates row coverage, keeps the latest records inside the archived raw-run
 tree, writes a thoughtful interpretation grounded in the raw evidence, replaces the exact GPU platform's named Git

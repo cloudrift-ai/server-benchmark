@@ -289,10 +289,13 @@ def test_spell_2d_block_interleaved_reshape_pair(tmp_path):
     assert any(isinstance(lop, ReshapeOp) for lop in scale_node.op.load_ops)
 
 
-def test_spell_inverse_scale_divides(tmp_path):
+def test_spell_scale_inv_multiplies(tmp_path):
+    """DeepSeek's ``weight_scale_inv`` names the dequant MULTIPLIER (the inverse of the
+    quantization scale), not a reciprocal to divide by — ``q * s``, as its own ``weight_dequant``
+    and vLLM's block-fp8 path compute it."""
     g, _bits, _scale = _spelled(tmp_path, scale_shape=(8, 1), inverse=True)
     names = [n.op.op.name for n in _ops_by_type(g, ElementwiseOp)]
-    assert "divide" in names and "multiply" not in names
+    assert "multiply" in names and "divide" not in names
 
 
 def test_spell_e5m2_selects_its_cast(tmp_path):
@@ -546,7 +549,9 @@ def _torch_ref(bits, scale_np, *, fmt="f8e4m3", inverse=False):
         s = s.reshape(())
     else:
         s = np.repeat(np.repeat(s, vals.shape[0] // s.shape[0], axis=0), vals.shape[1] // s.shape[1], axis=1)
-    return vals / s if inverse else vals * s
+    # ``inverse`` selects the ``weight_scale_inv`` key; the stored value is the multiplier either way.
+    del inverse
+    return vals * s
 
 
 def _run_spelled(graph: Graph, model_dir: str) -> np.ndarray:
@@ -1340,16 +1345,30 @@ def test_trace_model_spells_cones_and_binds_dequantized_twin(tmp_path):
         torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
 
+def _dynamic_fp8_activation_hook(_module, args):
+    """Eager mirror of the spelled dynamic fp8 activation algebra
+    (``quant.py::_spell_dynamic_activation``): per-row amax with a 1e-12 floor, scale to the
+    e4m3 finite max, round-trip through fp8 bits."""
+    (x,) = args
+    scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 448.0
+    return ((x / scale).to(torch.float8_e4m3fn).float() * scale,)
+
+
 def _run_e2e(tmp_path, config, ref_sd):
     """Compile the traced quantized model on the CUDA backend, bind computed buffers from the
     wrapper and every checkpoint tensor through the safetensors loader (bits + scales for the
     in-graph cone and plain reads for the rest), and return
-    ``(emmy_logits, ref_logits, compiled)``."""
+    ``(emmy_logits, ref_logits, compiled)``. When the checkpoint declares dynamic fp8
+    activations, the eager reference applies the same activation quantization on every
+    coded projection, matching the algebra the trace spells in-graph — the pure dequantized
+    model would differ by the inherent activation rounding (~1e-2 on these logits), which is
+    not a backend error."""
     import transformers
 
     from emmy.commands.compile import _trace_model
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import _dynamic_activation_declaration, _fp8_quant_config
 
     graph, (wrapper, _args, _kws) = _trace_model(str(tmp_path), None, 16)
     backend = CudaBackend()
@@ -1368,6 +1387,12 @@ def _run_e2e(tmp_path, config, ref_sd):
 
     ref_model = transformers.AutoModelForCausalLM.from_config(config).float().eval()
     ref_model.load_state_dict(ref_sd)
+    enabled, fmt = _dynamic_activation_declaration(_fp8_quant_config(tmp_path))
+    if enabled:
+        assert fmt == "f8e4m3", f"the hook mirrors e4m3 only, checkpoint declares {fmt}"
+        for name, module in ref_model.named_modules():
+            if isinstance(module, torch.nn.Linear) and ".layers." in name:  # the fp8-stored projections
+                module.register_forward_pre_hook(_dynamic_fp8_activation_hook)
     with torch.no_grad():
         ref_logits = ref_model(input_ids=ids).logits.numpy()
     return emmy_logits, ref_logits, compiled
@@ -1384,7 +1409,8 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
     compiled on the CUDA backend with the dequant cone unconditionally in-graph: fp8 bits stay
-    compressed in device memory, and the output matches the dequantized eager reference."""
+    compressed in device memory, and the output matches the eager reference running the same
+    dequant + dynamic-activation algebra."""
     config, ref_sd = _tiny_fp8_checkpoint(tmp_path)
     emmy_logits, ref_logits, compiled = _run_e2e(tmp_path, config, ref_sd)
     assert _f8_constants(compiled), "no fp8-dtype constant survived to the compiled graph — the cone did not stay in-graph"

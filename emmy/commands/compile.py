@@ -199,11 +199,16 @@ def resolve_golden_arg(args) -> None:
     # purpose is to verify the exact target currently being tuned (including Loop IR fallbacks).
     document = None
     if golden_file:
-        try:
-            document = load_golden_file(golden_file)
-        except ValueError as exc:
-            logger.error(str(exc))
-            sys.exit(2)
+        # A multi-target replay hands us the document it already parsed: this file is a
+        # whole model inventory, so re-reading and re-validating it per target is the
+        # difference between minutes and days on a large golden.
+        document = getattr(args, "_golden_document", None)
+        if document is None:
+            try:
+                document = load_golden_file(golden_file)
+            except ValueError as exc:
+                logger.error(str(exc))
+                sys.exit(2)
         records = load_golden_records(document)
         available = records
     else:

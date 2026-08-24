@@ -40,6 +40,15 @@ Use only the supplied SSH server. The caller owns VM creation and deletion; this
 must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
 to rescue a failed run.
 
+## Step 0 — Choose the run mode
+
+Use **interactive mode** when a developer drives the run from a checkout: ask for the missing inputs below and report
+in conversation. For a non-interactive **automated run**, read
+[`prompts/onboard-model/qualify.md`](../../../prompts/onboard-model/qualify.md) completely before doing task work.
+That file is the canonical automation prompt and defines the attached task payload, the per-mode recipe policy, the
+caller-owned boundaries, and the artifact and summary contract used by GitHub Actions. Do not ask follow-up questions
+in automated mode.
+
 ## Required inputs
 
 Require:
@@ -80,6 +89,10 @@ fail instead of overwriting it.
 Use the model card, `config.json`, and current primary engine documentation to record:
 
 - architecture, modality, total and active parameter counts, dtype and quantization;
+- the VRAM footprint on the requested platform, following [`prompts/model-fit.md`](../../../prompts/model-fit.md) —
+  the shared fit contract `discover-models` also follows, so the platform a recipe proposes and the platform measured
+  here mean the same thing. Record the arithmetic it requires; when the weights cannot fit the requested GPU name and
+  count, report the failed fit gate with those numbers instead of deploying;
 - the immutable Hugging Face commit resolved for this run;
 - native context length and any documented practical cap;
 - current vLLM or SGLang support and the first pinned image version that supports it;
@@ -118,10 +131,12 @@ Start context testing at the model's native maximum. On an out-of-memory or inva
 retry from a clean deployment. Do not claim a context length from startup alone. Search current upstream issues for
 an unfamiliar error before changing engine or flags, and make one evidence-backed change per retry.
 
-When useful, delegate up to three independent read-only investigations to the caller-provided onboarding subagent.
-Good tasks are model protocol research, official engine/image compatibility research, and diagnosis of one unfamiliar
-failure from already captured logs. The parent agent owns all commands, edits, measurements, and final conclusions;
-never let subagent work consume the time reserved for artifacts and cleanup.
+When useful, delegate up to three independent read-only investigations to the caller-provided onboarding subagent,
+giving each exactly one question and the complete contents of
+[`prompts/onboard-model/investigate.md`](../../../prompts/onboard-model/investigate.md). Good questions are model
+protocol research, official engine/image compatibility research, and diagnosis of one unfamiliar failure from already
+captured logs. The parent agent owns all commands, edits,
+measurements, and final conclusions; never let subagent work consume the time reserved for artifacts and cleanup.
 
 You may implement a small, model-agnostic compatibility fix when it is necessary to qualify the exact requested
 checkpoint and platform. Keep it within `emmy/` plus focused tests and the nearest `ARCHITECTURE.md` updates, prefer an

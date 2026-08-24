@@ -17,29 +17,29 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
 from emmy.compiler.pipeline.search.prior.fit.catboost import CatBoostTrainer
-from emmy.compiler.pipeline.search.prior.fit.group import Group
 
 FEATURES = ("D_a", "D_b")
 
 
-def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[Group]:
+def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[GoldenGroup]:
     """Pools whose golden is the row maximizing ``D_a`` — a signal any working ranker recovers, and one
     that is invisible to ``D_b`` (pure noise), so a fitted model must have learned the right column."""
     rng = np.random.default_rng(0)
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
+    stamp = {"S_ext_n_symbolic_axis": 1.0 if dynamic else 0.0}
     out = []
     for gi in range(n_pools):
         rows = [{"D_a": float(i), "D_b": float(rng.integers(0, 5)), **stamp} for i in range(n_rows)]
-        out.append(Group.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi}", n_rows - 1, rows))
+        out.append(GoldenGroup.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi}", n_rows - 1, rows))
     return out
 
 
-def _fit(groups=None, **kw) -> CatBoostModel:
-    trainer = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=12, **kw)
+def _fit(groups=None, *, feature_names=FEATURES, **kw) -> CatBoostModel:
+    trainer = CatBoostTrainer(feature_names=feature_names, iterations=40, negatives=12, **kw)
     return trainer.fit(groups if groups is not None else _groups()).model
 
 
@@ -54,11 +54,50 @@ def test_fit_recovers_the_planted_signal():
     assert "not byte-reproducible" in fit.notes
 
 
+def test_the_tree_prices_the_two_regimes_from_the_routing_column():
+    """The capability the packed column restores. Static and dynamic pools here rank OPPOSITELY on ``D_a``,
+    which one model can only fit by splitting on the regime. While the column arrived all-NaN every row sat
+    in one bucket, the split was unavailable, and the fit had to compromise across the two regimes.
+
+    Guards the fix at the level it operates: not the column's name, its contents."""
+    rng = np.random.default_rng(0)
+
+    def pools(dynamic, offset):
+        out = []
+        for gi in range(8):
+            rows = [
+                {"D_a": float(i), "D_b": float(rng.integers(0, 5)), "S_ext_n_symbolic_axis": 1.0 if dynamic else 0.0} for i in range(30)
+            ]
+            pinned = 0 if dynamic else 29  # dynamic pools want the LOW D_a row, static the high one
+            out.append(
+                GoldenGroup.from_dicts(
+                    f"gpuA/p{gi + offset}", f"p{gi + offset}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi + offset}", pinned, rows
+                )
+            )
+        return out
+
+    groups = pools(False, 0) + pools(True, 8)
+    fit = CatBoostTrainer(feature_names=(*FEATURES, "S_ext_n_symbolic_axis"), iterations=60, negatives=12).fit(groups)
+    assert fit.ranks == [0] * 16
+    importance = dict(zip(fit.model.cols, fit.model.booster.get_feature_importance(type="PredictionValuesChange"), strict=True))
+    assert importance["S_ext_n_symbolic_axis"] > 0.0
+
+
 def test_routing_stamp_is_an_ordinary_column():
-    """The tree prices both regimes in ONE model: the stamp the dataset holds out of its matrix comes back
-    as a plain column, so there is no second weight set and no unfittable-dynamic-set fold to exclude."""
-    model = _fit(_groups() + _groups(dynamic=True))
-    assert model.cols == (*FEATURES, "S_ext_n_symbolic_axis")
+    """The tree prices both regimes in ONE model: the routing stamp is a plain packed column it reads like
+    any other, so there is no second weight set and no unfittable-dynamic-set fold to exclude.
+
+    The load-bearing assertion is that the column arrives with the STAMP in it. It used to arrive all-NaN:
+    the dataset withheld the name, the trainer appended it to ``cols`` anyway, and ``GoldenGroup.matrix`` filled
+    a column it could not find with ``ABSENT``. Every training row landed in one bucket while every live
+    candidate carried a real 0.0/1.0 — a train/serve skew that ``cols`` alone could never reveal."""
+    routing = ("S_ext_n_symbolic_axis",)
+    groups = _groups() + _groups(dynamic=True)
+    model = _fit(groups, feature_names=(*FEATURES, *routing))
+    assert model.cols == (*FEATURES, *routing)
+    static, dynamic = groups[0], groups[-1]
+    assert (dynamic.matrix(list(routing), fill=ABSENT) == 1.0).all()
+    assert (static.matrix(list(routing), fill=ABSENT) == 0.0).all()
 
 
 def test_trainer_declares_no_fittability_constraint():
@@ -74,6 +113,24 @@ def test_score_rows_covers_the_full_pool_not_the_sample():
     fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=12).fit(groups)
     assert fit.rows < sum(len(g.feats) for g in groups)
     assert fit.score_rows(groups[0]).shape == (30,)
+
+
+def test_score_rows_projects_onto_the_models_own_columns():
+    """A pool need not carry the columns the model was trained on, nor in its order — projecting it is the
+    MODEL's job now, and every other pool in this file stamps every column, so nothing else reaches this.
+
+    Column ORDER is the catchable half, and this pins it: the same pool read in the wrong order scores
+    differently. The FILL is deliberately not asserted through a score — CatBoost's ``nan_mode="Min"`` puts
+    NaN on the same side of every split as the training minimum, and ``0.0`` IS that minimum here, so a
+    mis-filled column would score identically. That is why the fill is pinned where it is decided
+    (:func:`test_absent_features_are_nan_not_zero`) rather than by its effect."""
+    model = _fit()  # trained on ("D_a", "D_b")
+    group = GoldenGroup.from_dicts("gpuA/p", "p", "warp", "gpuA", "s", 0, [{"D_a": float(i)} for i in range(6)])
+    assert group.feat_names == ("D_a",)  # the pool is missing a column the model wants
+
+    scores = model.score_rows(group)
+    assert np.array_equal(scores, model.quality_rows(group.matrix(list(model.cols), fill=ABSENT)))
+    assert not np.array_equal(replace(model, cols=("D_b", "D_a")).score_rows(group), scores)
 
 
 def test_hard_negative_mining_grows_the_training_set():
@@ -111,7 +168,10 @@ def test_row_accounting_covers_every_positive():
     """``rows`` is what the fit reports it trained on, so a pool with two pins must count two — otherwise the
     number silently understates the training set as the corpus grows siblings."""
     trainer = CatBoostTrainer(feature_names=FEATURES, negatives=4)
-    groups = [_groups(n_pools=1)[0], replace(_groups(n_pools=1)[0], key="gpuA/p1", pinned=(0, 1, 2))]
+    rows = [{"D_a": float(i), "D_b": 0.0, "S_ext_n_symbolic_axis": 0.0} for i in range(30)]
+    extra = GoldenGroup.from_dicts("gpuA/p1", "p1", "warp", "gpuA", "s1", (0, 1, 29), rows)
+    groups = [_groups(n_pools=1)[0], extra]
+    assert (len(groups[0].golden_ids), len(extra.golden_ids)) == (1, 3)
     assert trainer._n_rows([np.arange(4), np.arange(4)], groups) == (4 + 1) + (4 + 3)
 
 
@@ -120,14 +180,14 @@ def test_fit_treats_every_pin_as_a_positive():
     needs no reshaping: both pins ride into the training set at label 1.0 and both end up ahead of every
     unpinned row. A run that had drawn one of them as a negative would have pushed it back down."""
     rows = [{"D_a": float(i), "D_b": 0.0} for i in range(20)]
-    groups = [Group.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
+    groups = [GoldenGroup.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
     fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=8).fit(groups)
     assert fit.rows == 6 * (8 + 2)
     assert set(np.argsort(-fit.score_rows(groups[0]), kind="stable")[:2].tolist()) == {18, 19}
-    # Both pins land on one leaf, so they TIE — and the fit objective counts a tie against the golden, which
-    # is why two verified rows at the top score rank 1 rather than 0. Nothing to fix: deploy takes the
-    # earlier-emitted one, and it is verified too.
-    assert fit.ranks == [1] * 6
+    # Was [1] * 6 while the trainer appended a routing name the matrix could not fill: the resulting
+    # all-NaN column collapsed rows 18 and 19 onto one leaf, so the two pins tied and a tie counts against
+    # the golden. Without that junk column the tree separates them and each golden ranks first.
+    assert fit.ranks == [0] * 6
 
 
 # --- the model surface -------------------------------------------------------------

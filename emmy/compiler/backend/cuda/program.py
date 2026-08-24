@@ -34,6 +34,7 @@ from emmy.compiler.backend.cuda.dtype import cupy_dtype
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
+from emmy.compiler.dtype import encode_bf16
 from emmy.compiler.graph import Graph
 
 if TYPE_CHECKING:
@@ -85,6 +86,7 @@ class _Compiled:
     constants: dict[str, float]
     kernels: dict[str, cp.RawKernel]  # kernel_name → RawKernel
     launches: list[_Launch]
+    outputs: list[str]
     # Symbolic axis name → (input_buf_name, dim_index). Resolved from input
     # array shapes at run-time; empty when the graph has no symbolic dims.
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
@@ -141,6 +143,7 @@ def _load_plan(plan: ExecutionPlan) -> _Compiled:
         constants=dict(plan.constants),
         kernels=kernels,
         launches=list(plan.launches),
+        outputs=list(plan.outputs),
         symbolic_bindings=dict(plan.symbolic_bindings),
         symbolic_hints=dict(plan.symbolic_hints),
         symbolic_caps=dict(plan.symbolic_caps),
@@ -166,6 +169,14 @@ def _nvrtc_options(*, arch_specific: bool) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _numpy_storage(src, dtype) -> np.ndarray:
+    """Return a contiguous host array in one buffer's physical storage dtype."""
+    arr = np.asarray(src)
+    if getattr(dtype, "name", dtype) == "bf16":
+        return np.ascontiguousarray(arr) if arr.dtype == np.uint16 else encode_bf16(arr)
+    return np.ascontiguousarray(arr, dtype=dtype.np)
+
+
 def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
     """Build one device array for ``buf`` at ``shape`` — the single fill
     policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
@@ -177,15 +188,20 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
 
     cp_dtype = cupy_dtype(buf.dtype)
     np_dtype = buf.dtype.np
+    is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     if src is not None:
         if isinstance(src, cp.ndarray):
+            if is_bf16 and src.dtype != np.dtype(np.uint16):
+                values = src.astype(cp.float32, copy=False).view(cp.uint32)
+                values = values + cp.uint32(0x7FFF) + ((values >> cp.uint32(16)) & cp.uint32(1))
+                src = (values >> cp.uint32(16)).astype(cp.uint16)
             if src.dtype != np.dtype(np_dtype):
                 src = src.astype(np_dtype)
             return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
-        return cp.asarray(np.ascontiguousarray(src, dtype=np_dtype).reshape(shape))
+        return cp.asarray(_numpy_storage(src, buf.dtype).reshape(shape))
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])
-        if getattr(buf.dtype, "name", buf.dtype) == "bf16":
+        if is_bf16:
             # bf16 buffers ride as uint16 BITS (``BF16.np``) — casting the float would zero it;
             # encode the value to bf16 bits (round-to-nearest-even on the dropped mantissa half).
             bits = int(np.float32(v).view(np.uint32))
@@ -201,7 +217,8 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
         # → ``nan``). Compute in fp32 and cast the final values — always in
         # ``[-0.5, 0.5]``, so fp16-safe.
         idx = np.arange(n, dtype=np.int64)
-        vals = (0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)).astype(np_dtype)
+        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return cp.asarray(vals.reshape(shape))
     return cp.zeros(shape, dtype=cp_dtype)
 
@@ -1183,16 +1200,15 @@ class CompiledProgram:
         default) the whole buffer is returned (the uncaptured rebind path already
         sizes buffers to the request)."""
         out: dict[str, np.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].get().reshape(shape)
+                out[name] = arr.ravel()[:n].get().reshape(shape)
             else:
-                out[b.name] = arr.get()
+                out[name] = arr.get()
         return out
 
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict[str, cp.ndarray]:
@@ -1205,16 +1221,15 @@ class CompiledProgram:
         is returned. Caller must hold ``gpu_lock()`` (and read on the replay
         stream — see :meth:`upload_prefix_device`)."""
         out: dict[str, cp.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].reshape(shape)
+                out[name] = arr.ravel()[:n].reshape(shape)
             else:
-                out[b.name] = arr
+                out[name] = arr
         return out
 
     def snapshot(self) -> dict[str, np.ndarray]:
@@ -1909,6 +1924,7 @@ async def benchmark_compare_worker_async(
         "run_io": resp.get("run_io"),
         "greedy_error": resp.get("greedy_error"),
         "reference_run_us": resp.get("reference_run_us"),
+        "sym_env": resp.get("sym_env"),
         "correctness": resp.get("correctness"),
     }
 

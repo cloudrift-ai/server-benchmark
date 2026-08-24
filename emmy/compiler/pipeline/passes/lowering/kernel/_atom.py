@@ -50,12 +50,15 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
+    FRAG_COL,
+    FRAG_ROW,
     ROW,
     UNIFORM,
     EpilogueLoad,
     FragmentApply,
     FragmentPromote,
     FragmentRowReduce,
+    FragmentSelect,
     LdmatrixLoad,
     MmaSyncPtx,
     RegEpilogue,
@@ -138,6 +141,18 @@ def _wrap(side: Side, coord: Expr) -> Expr:
     return BinaryExpr("%", coord, side.ext) if side.mask else coord
 
 
+def _row_dim(index: tuple, m_name: str) -> int | None:
+    """The INNERMOST output-index position carrying the M (row) coordinate — read off the pre-σ
+    ``Write`` template, where the row is still the ``m`` axis Var. ``RegStore`` derives its auto
+    ``ldm`` (the fragment row stride) from this dim's trailing extents. The innermost occurrence
+    is the one whose stride IS ``∂addr/∂m``: a re-fused split store spells the row as
+    ``[…, m/P, m%P, …]``, and the recomposition that makes the flat address affine in ``m``
+    gives it exactly the ``m%P`` dim's stride as coefficient. An N-side split (``[…, m, n/Q,
+    n%Q]``) has one m dim either way, whose trailing extents span the whole fused N."""
+    dims = [d for d, e in enumerate(index) if m_name in e.free_vars()]
+    return dims[-1] if dims else None
+
+
 def _cells(mn: tuple, offset, i: int, j: int):
     """Yield ``(side, cell-base coord)`` for each present output axis of register cell ``(i, j)`` —
     ``(m, offset[0].base(i))`` then ``(n, offset[1].base(j))`` (``m`` skipped for a 1-D output)."""
@@ -148,12 +163,17 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
 def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
-    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for a dim varying with the output row /
-    col axis, else ``"fixed"`` (batch / grid literal — uniform across the fragment cell)."""
-    roles = []
-    for e in index:
-        fv = e.free_vars()
-        roles.append("m" if m_name in fv else "n" if n_name in fv else "fixed")
+    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for the dim the output row / col axis moves
+    within the fragment cell, else ``"fixed"`` (batch / grid literal — uniform across the cell).
+    Only the INNERMOST dim carrying an axis moves (the same reading as :func:`_row_dim`): a
+    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]``, and within an atom the
+    quotient dim is uniform — giving both dims the role would add the lane offset at two
+    strides."""
+    roles = ["fixed"] * len(index)
+    for role, name in (("n", n_name), ("m", m_name)):
+        dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+        if dims:
+            roles[dims[-1]] = role
     return tuple(roles)
 
 
@@ -167,12 +187,18 @@ def _warp_epilogue(
     The projection is the post-reduce ``tail`` stmts: the leaf ``Load``s + pointwise ``Assign``s +
     an optional causal ``Select``. Each leaf ``Load`` becomes an :class:`EpilogueLoad` at the
     cell-base coordinate (σ-applied; the render adds the per-element row/col motion on the
-    ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args)`` op; a coord-predicated
-    ``Select`` (causal mask) rewrites its ``m``/``n`` coordinate vars to the ``__M__`` / ``__N__``
-    placeholders the store substitutes with the element's own (row, col)."""
+    ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args, dtype)`` op; a coord-predicated
+    ``Select`` (causal mask) captures its σ-applied cell bases plus ``__M__`` / ``__N__``
+    placeholders; the store substitutes only the element's row/col offsets. This keeps semantic
+    source coordinates independent of a later store to a tile-local shared-memory slab. Keeping
+    the optional dtype makes the register epilogue obey the scalar Loop tail's promotion and
+    conversion rules."""
     loads, ops, selects = [], [], []
     write = None
-    ph = {m_name: Var("__M__"), n_name: Var("__N__")}
+    ph = {
+        m_name: BinaryExpr("+", sigma.apply(Var(m_name)), Var("__M__")),
+        n_name: BinaryExpr("+", sigma.apply(Var(n_name)), Var("__N__")),
+    }
     for s in tail:
         if isinstance(s, Load):
             loads.append(
@@ -184,7 +210,7 @@ def _warp_epilogue(
                 )
             )
         elif isinstance(s, Assign):
-            ops.append((s.name, s.op.name, tuple(s.args)))
+            ops.append((s.name, s.op.name, tuple(s.args), s.dtype))
         elif isinstance(s, Select):
             selects.append((s.name, tuple((br.select.substitute(ph), br.value) for br in s.branches)))
         elif isinstance(s, Write):
@@ -199,7 +225,7 @@ def _warp_epilogue(
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
     bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
-    for name, _op, args in ops:
+    for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
             raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")
@@ -810,10 +836,22 @@ def _score_block(
     return ops, cells, offset, tile.mn, [*decls, *region], frags
 
 
-def _frag_lift(body, frags: tuple[tuple[str, ...], ...], acc: str, cell_axes: tuple[str, ...] = ()) -> list[Stmt] | None:
+def _frag_lift(
+    body,
+    frags: tuple[tuple[str, ...], ...],
+    acc: str,
+    cell_axes: tuple[str, ...] = (),
+    cell_bases: tuple[tuple[tuple[Expr, Expr], ...], ...] | None = None,
+) -> list[Stmt] | None:
     """The score's own lift (its scale) re-expressed over the score FRAGMENTS — the fragment-tier
     sibling of the scalar ``Assign``, one :class:`FragmentApply` per fragment. The fragment operand
     is the score accumulator; every other argument is cell-uniform.
+
+    A coordinate-predicated :class:`Select` with uniform branch values is lifted to one
+    :class:`FragmentSelect` per physical fragment. Its predicates substitute ``cell_axes`` with
+    the fragment row / column placeholders, while ``cell_bases`` supplies the absolute tile
+    origins. The selected fragment may feed an ordinary ``FragmentApply`` but cannot become its
+    in-place carrier.
 
     ``None`` for a lift the fragment tier cannot express: a stmt that transforms something other
     than the accumulator, or one that is neither a fragment nor CELL-UNIFORM. The second is what
@@ -821,24 +859,54 @@ def _frag_lift(body, frags: tuple[tuple[str, ...], ...], acc: str, cell_axes: tu
     one (a per-key mask ``Load``) is per-ELEMENT and emitting it once for the whole block would
     silently broadcast one element's value across the tile."""
     out: list[Stmt] = []
+    whole = Body.coerce(tuple(body))
     frag_names = {acc}
+    selected: dict[str, tuple[tuple[str, ...], ...]] = {}
     for s in body:
-        if not (set(s.deps()) & frag_names):
-            if cell_axes and Body.coerce(tuple(body)).depends_on(s, cell_axes):
+        coordinate_select = isinstance(s, Select) and bool(
+            set(cell_axes) & {name for branch in s.branches for name in branch.select.free_vars()}
+        )
+        if coordinate_select:
+            if len(cell_axes) != 2 or cell_bases is None:
+                return None
+            if set(s.deps()) & frag_names or any(whole.depends_on(branch.value, cell_axes) for branch in s.branches):
+                return None  # fragment-valued / per-cell branches cannot be broadcast as uniform values
+            physical = tuple(tuple(f"{frag}__{s.name}" for frag in row) for row in frags)
+            sub = {cell_axes[0]: Var(FRAG_ROW), cell_axes[1]: Var(FRAG_COL)}
+            branches = tuple(SelectBranch(value=branch.value, select=branch.select.substitute(sub)) for branch in s.branches)
+            for i, row in enumerate(physical):
+                for j, value in enumerate(row):
+                    out.append(
+                        FragmentSelect(
+                            out=value,
+                            branches=branches,
+                            row_base=cell_bases[i][j][0],
+                            col_base=cell_bases[i][j][1],
+                        )
+                    )
+            selected[s.name] = physical
+            continue
+        fragment_deps = set(s.deps()) & (frag_names | set(selected))
+        if not fragment_deps:
+            if cell_axes and whole.depends_on(s, cell_axes):
                 return None  # per-element, not cell-uniform — the caller keeps the scalar sweep
             out.append(s)  # a cell-uniform stmt of the lift (the scale ``Load``) — scalar, once
             continue
         if not isinstance(s, Assign) or s.args[0] not in frag_names:
             return None  # a shape the fragment tier cannot express — the caller keeps the scalar sweep
         frag_names |= set(s.defines())
-        for row in frags:
-            for f in row:
+        for i, row in enumerate(frags):
+            for j, f in enumerate(row):
+                args = tuple(
+                    selected[a][i][j] if a in selected else (f if a in frag_names else (a if isinstance(a, str) else repr(a)))
+                    for a in s.args
+                )
                 out.append(
                     FragmentApply(
                         out=f,
                         op=s.op,
-                        args=tuple(f if a in frag_names else (a if isinstance(a, str) else repr(a)) for a in s.args),
-                        kinds=tuple(FRAG if a in frag_names else UNIFORM for a in s.args),
+                        args=args,
+                        kinds=tuple(FRAG if a in frag_names or a in selected else UNIFORM for a in s.args),
                         in_place=True,
                     )
                 )
@@ -925,10 +993,17 @@ def chain_stat_fill(
     if lay.rows_per_lane != 2:
         return None
     k0 = Var("_sb")
-    _ops, _cells, _off, _smn, stmts, frags = _score_block(
+    _ops, _cells, offset, _smn, stmts, frags = _score_block(
         n_axis=stat.axis, score=score, mn=mn, atom=atom, cols=cols, k0=k0, lead=lead, ns="_t", slabs=slabs
     )
-    lift = _frag_lift(stat.lift.body, frags, score.acc, (mn[0].axis.name, stat.axis.name))
+    bases = tuple(tuple((offset[0].base(i), offset[1].base(j)) for j in range(len(row))) for i, row in enumerate(frags))
+    lift = _frag_lift(
+        stat.lift.body,
+        frags,
+        score.acc,
+        (mn[0].axis.name, stat.axis.name),
+        bases,
+    )
     if lift is None:
         return None
     body = [*stmts, *lift]
@@ -1094,14 +1169,14 @@ def chain_stream_fill(
     if {a for s in prefix for a in s.deps()} & ({d for s in pro_dep for d in s.defines()} | set(names)):
         return None
     cell_axes = (m.axis.name, c.axis.name)
-    if _frag_lift(prefix, (("_probe",),), score.acc, cell_axes) is None:
+    row_base = _side_base(m)
+    if _frag_lift(prefix, (("_probe",),), score.acc, cell_axes, (((row_base, Literal(0, "int")),),)) is None:
         return None  # probe only: the emission below needs the real fragments
     state = [[tuple(f"_ss{i}_{r}_{x}" for x in range(2)) for r in range(2)] for i in range(m.reg)]
     # Only the free prologue is emitted ahead of the sweep. The carried state needs no explicit
     # seed: its ``Accum``\ s sit in the chunk loop's immediate body, so the ONE seed-placement path
     # (``Loop.render``, off each fold's ``op.identity``) declares them once before the loop.
     prologue: list[Stmt] = list(pro_free)
-    row_base = _side_base(m)
 
     def fill(k0):
         # The weight lands at the element's LOCAL slab ``(row, col)`` — σ folds the absolute cell
@@ -1111,7 +1186,8 @@ def chain_stream_fill(
         ops, cells, offset, smn, stmts, frags = _score_block(
             n_axis=c.axis, score=score, mn=mn, atom=atom, cols=bk_elems, k0=k0, lead=lead, ns="_s", epilogue=epilogue, slabs=slabs
         )
-        body: list[Stmt] = [*stmts, *_frag_lift(prefix, frags, score.acc, cell_axes)]
+        bases = tuple(tuple((offset[0].base(i), offset[1].base(j)) for j in range(len(row))) for i, row in enumerate(frags))
+        body: list[Stmt] = [*stmts, *_frag_lift(prefix, frags, score.acc, cell_axes, bases)]
         for i in range(m.reg):
             rmax, rsum, psi = (f"_rm{i}_0", f"_rm{i}_1"), (f"_rs{i}_0", f"_rs{i}_1"), (f"_psi{i}_0", f"_psi{i}_1")
             body.append(FragmentRowReduce(top=rmax[0], bot=rmax[1], frags=frags[i], op=ElementwiseImpl("maximum"), group=lay.reduce_group))
@@ -2130,6 +2206,7 @@ class _MmaOps(_AtomOps):
                     atomic=by_acc[acc].atomic,
                     swizzle=by_acc[acc].swizzle,
                     fragment_layout=atom.fragment_layout,
+                    row_dim=_row_dim(by_acc[acc].index, m.axis.name),
                 )
                 for acc, frag in zip(accs, frags, strict=True)
             ]
@@ -2149,6 +2226,7 @@ class _MmaOps(_AtomOps):
                 atomic=write.atomic,
                 swizzle=write.swizzle,
                 fragment_layout=atom.fragment_layout,
+                row_dim=_row_dim(write.index, m.axis.name),
             )
         ]
 

@@ -2,14 +2,15 @@
 second model class :class:`~emmy.compiler.pipeline.search.prior.offline.OfflinePrior` can rank with.
 
 Same contract as the linear model and the same two access shapes over one arithmetic: a feature-dict path (how a
-live candidate is scored) and a packed-matrix path (what ``emmy fit`` trains and evaluates on). What differs is
+live candidate is scored) and a packed-matrix path (what ``emmy fit`` trains and evaluates on, entered for a
+whole candidate pool through :meth:`CatBoostModel.score_rows`). What differs is
 everything the linear model needed *because* it is additive:
 
 - **No weight sets.** A linear model prices a symbolic-axis (masked-tile) kernel with a second weight vector
   because it cannot form a product; a tree splits on ``S_ext_n_symbolic_axis`` and prices both regimes inside one
-  model. The routing feature is therefore an ordinary COLUMN here (:data:`~.linear_model.ROUTING_FEATURES` is held
-  out of :class:`~.fit.group.Group`'s matrix, so the trainer re-adds it from ``Group.dynamic``), and a live
-  candidate already carries it in its own featurization.
+  model. The routing feature is therefore an ordinary COLUMN here — :class:`~..data.group.Group` packs it like any
+  other and the trainer reads it straight from the matrix, matching the live candidate, which already carries it
+  in its own featurization.
 - **No fitted scalar interaction.** The atomic-free split-K gate is a hand-built term in the linear model because
   the deployed quality cannot express it as a weight. A tree forms ``D_finalize_kernel × D_splitk`` from the two
   columns, so nothing here corresponds to it.
@@ -31,16 +32,21 @@ both model classes feed the shared score and policy wrappers unchanged.
 from __future__ import annotations
 
 import base64
-import math
 import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.prior.base import latency_proxy
+
+if TYPE_CHECKING:
+    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
+    # subprocess) onto the deploy path, which loads none of it today.
+    from emmy.compiler.pipeline.search.data.group import Group
 
 # The artifact's ``params`` block for this model class, in written order — the twin of the linear model's
 # ``PARAM_ORDER``. ``offline._load_artifact`` demands exactly the keys the writer emits, so a new scalar param is
@@ -135,9 +141,7 @@ class CatBoostModel:
         CatBoost's per-call overhead 78k times."""
         if not feats_list:
             return []
-        # Clip the exp ARGUMENT, never the quality: within ±700 the proxy stays strictly ordered, and beyond it
-        # exp would overflow or underflow anyway (the linear model's identical float-safety bound).
-        return [math.exp(max(min(-self.scale * q, 700.0), -700.0)) for q in self.quality_rows(self.matrix(feats_list))]
+        return [latency_proxy(q, self.scale) for q in self.quality_rows(self.matrix(feats_list))]
 
     def explain_features(self, feats: dict) -> dict[str, float]:
         """Per-term decomposition of one row's :meth:`quality_rows`, as TreeSHAP values.
@@ -158,6 +162,15 @@ class CatBoostModel:
     def matrix(self, feats_list: list[dict]) -> np.ndarray:
         """Feature dicts packed into this model's own column order, absent key = :data:`ABSENT`."""
         return np.array([[f.get(c, ABSENT) for c in self.cols] for f in feats_list], dtype=float)
+
+    def score_rows(self, group: Group) -> np.ndarray:
+        """:meth:`quality_rows` over a whole packed pool — the pool-shaped entry point :class:`~..linear_model.LinearModel`
+        also answers, and the ONE place the tree's column choice is made: :attr:`cols` in its own order,
+        absent filling to :data:`ABSENT`, which is what the booster was trained against.
+
+        Never ``None``: one model prices both regimes, so the linear model's "this fold fit no dynamic
+        weight set" case cannot arise here."""
+        return self.quality_rows(group.matrix(list(self.cols), fill=ABSENT))
 
     def quality_rows(self, mat: np.ndarray) -> np.ndarray:
         """Per-row ranking quality (higher = predicted faster) over a matrix already in :attr:`cols` order — the

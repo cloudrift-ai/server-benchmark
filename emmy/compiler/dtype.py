@@ -118,6 +118,25 @@ U64 = DataType("u64", np.dtype(np.uint64), 8)
 BOOL = DataType("bool", np.dtype(np.bool_), 1)
 
 
+def encode_bf16(values) -> np.ndarray:
+    """Encode numeric values as NumPy's raw ``uint16`` BF16 carrier.
+
+    NumPy has no first-class BF16 scalar. Runtime boundaries therefore carry
+    the round-to-nearest-even BF16 bit pattern, not a numeric ``uint16`` cast.
+    """
+    f32 = np.asarray(values, dtype=np.float32)
+    bits = f32.view(np.uint32)
+    rounded = bits + np.uint32(0x7FFF) + ((bits >> np.uint32(16)) & np.uint32(1))
+    return np.ascontiguousarray((rounded >> np.uint32(16)).astype(np.uint16))
+
+
+def decode_bf16(bits) -> np.ndarray:
+    """Decode NumPy's raw ``uint16`` BF16 carrier to float32 values."""
+    carrier = np.asarray(bits, dtype=np.uint16)
+    expanded = carrier.astype(np.uint32) << np.uint32(16)
+    return np.ascontiguousarray(expanded.view(np.float32))
+
+
 _BY_NAME: dict[str, DataType] = {
     dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F4E2M1x2, F16x2, I16, I32, I64, U16, U32, U64, BOOL)
 }

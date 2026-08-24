@@ -36,6 +36,11 @@ provisioning/
    * **CloudRift** → one candidate per base type.
    * **GCP** → one candidate per zone in `hardware.GPU_GCP_ZONES[gpu_name]` (falls back to `DEFAULT_GCP_ZONE`); all zones for the current base type before advancing to the next entry.
 
+A GPU missing from `GPU_INSTANCE_TYPES`, or mapped only to base types the provider no longer stocks, is
+unreachable: `iter_candidates()` raises or yields instance types with no nodes, and the recipe-query availability
+annotation quietly reports the deployment as unavailable rather than failing. Every GPU a recipe declares must
+therefore have a current entry, and the entries stay ordered with the stocked base type first.
+
 The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.
@@ -96,9 +101,9 @@ so every task's result reflects its host's stand-up cost. `vm_provision` is omit
 ## Command source staging
 
 Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
-while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging sends the
-selected files without computing or returning a manifest or content digest; the experiment record separately captures
-the repository revision and dirty flag.
+while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging returns
+the invoking worktree's revision and path-scoped dirty flag to the benchmark runner, which records that source instead
+of deriving provenance from the installed package or a reused remote source tree.
 
 ## Error contract
 
@@ -135,6 +140,19 @@ Both providers swallow termination errors and log them — the original failure 
 
 Mismatches leave the GPU unusable because the wrong kernel-module flavor is on disk. The proprietary-driver image
 mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `brand_short` matches `/\bV100|P100\b/`.
+
+## NVSwitch hosts need Fabric Manager
+
+On NVSwitch-connected baseboards — V100 SXM3 (DGX-2/HGX-2) and the SXM A100/H100 HGX boards — the switch fabric must
+be trained before CUDA will initialize. Until it is, `nvidia-smi` cheerfully lists every GPU while each process dies
+at `cudaGetDeviceCount()` with `error 802: system not yet initialized`, so the failure surfaces deep inside engine
+worker startup and reads like a model or engine bug rather than a missing host service.
+
+`remote._ensure_fabric_manager` closes that gap as the last `provision_remote` step. It detects an NVSwitch host from a
+non-empty `/proc/driver/nvidia-nvswitch/devices/` and is a no-op everywhere else, including when the service is already
+running. Fabric Manager refuses to run against a mismatched driver, so the package is pinned to the running driver's
+exact version, resolved out of `apt-cache madison` rather than guessed — Ubuntu's archive and NVIDIA's CUDA repo
+publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for the same driver.
 
 ## CloudRift API protocol version
 

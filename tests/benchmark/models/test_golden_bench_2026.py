@@ -37,8 +37,17 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
     assert {task.variant.params["model_ref"] for task in tasks} == {"Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"}
-    assert all(task.variant.params["budget"] == 12 for task in tasks)
-    assert all(task.variant.params["patience"] == 4 for task in tasks)
+    a100_tasks = [task for task in tasks if task.recipe.deploy.gpu == "NVIDIA A100 80GB"]
+    searched_tasks = [task for task in tasks if task.recipe.deploy.gpu != "NVIDIA A100 80GB"]
+    assert {task.variant.params["golden"] for task in a100_tasks} == {
+        "qwen3-06b-s1_a100",
+        "qwen3-06b-s512_a100",
+    }
+    assert all(task.variant.params["budget"] == 0 for task in a100_tasks)
+    assert all(task.variant.params["patience"] == 0 for task in a100_tasks)
+    assert all(task.variant.params["golden"] == "" for task in searched_tasks)
+    assert all(task.variant.params["budget"] == 12 for task in searched_tasks)
+    assert all(task.variant.params["patience"] == 4 for task in searched_tasks)
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
@@ -46,6 +55,10 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.yaml --bench --strict" in run
+    assert "--bench-backends eager,tcompile" in run
+    assert "--bench-backends eager,emmy" in run
+    assert "--bench-backends eager,tcompile,emmy" not in run
+    assert "torch-compile.status" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
         "emmy",
@@ -53,6 +66,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "requirements.txt",
         "Makefile",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
+        "experiments/golden-bench-2026/kernels/golden",
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
@@ -211,7 +225,8 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
         )
         assert "--loop-targets" not in command
         assert "--golden /task/working.yaml --bench --strict" in command
-        assert "--bench-backends eager,tcompile,emmy" in command
+        assert "--bench-backends eager,tcompile" in command
+        assert "--bench-backends eager,emmy" in command
 
 
 def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
@@ -368,20 +383,60 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert emmy_runner_path.stat().st_mode & 0o111
     emmy_runner = emmy_runner_path.read_text()
     assert "operators.sh" in emmy_runner
-    assert '"$emmy" run --golden "$golden" --bench --strict' in emmy_runner
+    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
+    assert 'run --golden "$golden" --bench --strict' not in emmy_runner
+    assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
     assert "emmy tune" not in emmy_runner
-    assert "--bench-backends eager,tcompile,emmy --warmup 1 --iters 15" in emmy_runner
     assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
     assert "setup-status.tsv" in emmy_runner
+    assert "replay_1\\treplay_2\\treference_1\\treference_2" in emmy_runner
+    assert emmy_runner.count("for repetition in 1 2") == 2
+    assert '"$results/json/$setup.replay-$repetition"' in emmy_runner
+    assert '"$results/json/$setup.reference-$repetition.json"' in emmy_runner
+    assert '"${replay_statuses[0]}" = ok' in emmy_runner
+    assert '"${replay_statuses[1]}" = ok' in emmy_runner
+    assert '"${reference_statuses[0]}" = ok' in emmy_runner
+    assert '"${reference_statuses[1]}" = ok' in emmy_runner
     assert 'test "$missing_goldens" -eq 0' in emmy_runner
-    assert 'test "$successful_setups" -gt 0' in emmy_runner
+    assert 'test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"' in emmy_runner
     assert "run_pytorch.py" in emmy_runner
-    assert 'status="pytorch-only:emmy-failed:$emmy_status"' in emmy_runner
+    assert 'reference_statuses+=("pytorch-only:emmy-failed:$reference_status")' in emmy_runner
 
     pytorch_runner = (Path(directory) / "run_pytorch.py").read_text()
     assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner
     assert "torch.testing.assert_close" in pytorch_runner
     assert '"captured_whole_forward"' in pytorch_runner
+
+
+def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
+    directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+    for sequence_length in (256, 512, 1024, 2048, 4096, 8192, 16384, 32768):
+        (golden_dir / f"prefill_global-b1-s{sequence_length}.golden.yaml").touch()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    emmy = fake_bin / "emmy"
+    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *" --golden "*"s32768.golden.yaml"* ]]; then\n  exit 1\nfi\n')
+    emmy.chmod(0o755)
+    python = fake_bin / "python"
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+
+    results = tmp_path / "results"
+    completed = subprocess.run(
+        [str(directory / "run_emmy.sh"), str(emmy), "prefill_global", str(results), str(golden_dir)],
+        cwd=directory,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    statuses = (results / "setup-status.tsv").read_text().splitlines()
+    assert statuses[-2] == "prefill_global\t16384\tok\tok\tok\tok"
+    assert statuses[-1] == "prefill_global\t32768\tfailed:1\tfailed:1\tok\tok"
 
 
 def test_every_command_variant_renders(project_root) -> None:

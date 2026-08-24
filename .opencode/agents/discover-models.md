@@ -13,6 +13,7 @@ permission:
   websearch: allow
   task:
     "*": deny
+    "discover-fit": allow
     "discover-huggingface": allow
     "discover-openrouter": allow
     "discover-reddit": allow

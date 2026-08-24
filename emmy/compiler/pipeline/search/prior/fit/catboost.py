@@ -1,15 +1,15 @@
 """The CatBoost trainer — the offline learning-to-rank fit of a :class:`CatBoostModel`.
 
 :class:`CatBoostTrainer` holds the hyperparameters and :meth:`~CatBoostTrainer.fit` turns a
-:class:`~.group.Group` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
+:class:`GoldenGroup` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
 trainer is immutable and one instance serves every cross-validation fold — with one contract the linear trainer
 keeps and this one does not: **a fit is not byte-reproducible**. CatBoost's histogram build is threaded, so two
 runs on identical inputs give models that differ in the last bits. Deliberate: the alternative is
 ``thread_count=1``, and the metrics file plus the rank tables are what a fit is compared by, not a checksum.
 
 This module owns what is specific to the model class; everything a different model class would also need lives
-elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in :mod:`.group`, the rank metrics in
-:mod:`.rank`, the fold harness in :mod:`.cv`).
+elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``search/data/group.py``, the rank
+metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
 sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
@@ -29,10 +29,9 @@ A further round instead mines **hard negatives** — the rows the current model 
 implemented and reachable (``--rounds 2``) but OFF by default, because the one measurement of it says it hurts;
 :data:`DEFAULT_ROUNDS` carries the numbers and the likely reason.
 
-The routing feature (``S_ext_n_symbolic_axis``) is an ordinary column here, re-added from ``Group.dynamic``,
-which :meth:`~.group.Group.from_dicts` holds out of the matrix so it can never become a linear descent
-coordinate. For a tree it is simply a feature to split on — one model prices both regimes, where the linear model
-needs a second weight set.
+The routing feature (``S_ext_n_symbolic_axis``) is an ordinary packed column here, read like any other.
+For a tree it is simply a feature to split on — one model prices both regimes, where the linear model needs a
+second weight set and therefore narrows the column out (:func:`~..linear_model.descent_cols`).
 """
 
 from __future__ import annotations
@@ -43,12 +42,47 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
-from emmy.compiler.pipeline.search.prior.fit.group import Group
-from emmy.compiler.pipeline.search.prior.fit.rank import best_rank, topk_table
-from emmy.compiler.pipeline.search.prior.linear_model import ROUTING_FEATURES
+from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 
 logger = logging.getLogger(__name__)
+
+# The tree view: the default view MINUS every feature that exists only because an additive model cannot
+# form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
+# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
+# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
+# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
+#
+# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
+#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
+#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
+# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
+#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
+#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
+#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
+#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
+# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
+#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
+#   ``D_bm_band``, ``D_tilen_clean``.
+# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
+#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
+#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
+#
+# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
+# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
+# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
+# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
+# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
+# candidate column at all, so no split on the pool can recover it.
+TREE_FEATURES = (
+    "D_*,MMA_tier,MMA_acc_bits,"
+    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
+    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
+    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
+    "-D_tma_*,-D_l2_cells_occ"
+)
 
 # Sampled negatives per pool per round. ~500 against a pool's handful of positives puts the softmax denominator in
 # the range the loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.
@@ -92,13 +126,7 @@ class CatBoostTrainer:
     random_state: int = 0
     scale: float = DEFAULT_SCALE
 
-    @property
-    def cols(self) -> tuple[str, ...]:
-        """The model's column order: the feature view plus the routing stamp the dataset holds out of its
-        matrix. Spelled once, so the training matrix and the deployed model's ``cols`` cannot disagree."""
-        return (*self.feature_names, *ROUTING_FEATURES)
-
-    def fit(self, groups: list[Group]) -> CatBoostFit:
+    def fit(self, groups: list[GoldenGroup]) -> CatBoostFit:
         """Fit over ``groups``, mining hard negatives across :attr:`rounds`.
 
         Each round rebuilds the training set (golden + the negatives sampled so far) and fits a FRESH model
@@ -106,11 +134,11 @@ class CatBoostTrainer:
         rounds they have survived, and the point of mining is to shift the distribution, not to accumulate
         emphasis on the first draw."""
         rng = np.random.default_rng(self.random_state)
-        cols = list(self.cols)
+        cols = list(self.feature_names)
         pools = [g.matrix(cols, fill=ABSENT) for g in groups]
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
-        sampled = [self._uniform(len(m), g.pinned, rng) for m, g in zip(pools, groups, strict=True)]
+        sampled = [self._uniform(len(m), g.golden_ids, rng) for m, g in zip(pools, groups, strict=True)]
         inert = sum(1 for s, m in zip(sampled, pools, strict=True) if len(s) >= len(m) - 1)
         if inert:
             logger.warning(
@@ -125,7 +153,9 @@ class CatBoostTrainer:
         ranks = self._ranks(model, pools, groups)
         logger.info("  round 0 uniform (%d rows): %s", self._n_rows(sampled, groups), topk_table(ranks))
         for r in range(1, max(1, self.rounds)):
-            sampled = [np.union1d(s, self._hard(model.quality_rows(m), g.pinned)) for s, m, g in zip(sampled, pools, groups, strict=True)]
+            sampled = [
+                np.union1d(s, self._hard(model.quality_rows(m), g.golden_ids)) for s, m, g in zip(sampled, pools, groups, strict=True)
+            ]
             model = self._fit_once(pools, groups, sampled)
             ranks = self._ranks(model, pools, groups)
             logger.info("  round %d mined (%d rows): %s", r, self._n_rows(sampled, groups), topk_table(ranks))
@@ -133,14 +163,14 @@ class CatBoostTrainer:
         return CatBoostFit(model, ranks, rows=self._n_rows(sampled, groups))
 
     @staticmethod
-    def _n_rows(sampled, groups: list[Group]) -> int:
-        return sum(len(s) + len(g.pinned) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
+    def _n_rows(sampled, groups: list[GoldenGroup]) -> int:
+        return sum(len(s) + len(g.golden_ids) for s, g in zip(sampled, groups, strict=True))  # each pool's pins ride along
 
     @staticmethod
-    def _ranks(model: CatBoostModel, pools, groups: list[Group]) -> list[int]:
+    def _ranks(model: CatBoostModel, pools, groups: list[GoldenGroup]) -> list[int]:
         """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
-        (:func:`~.rank.best_rank`), matching what the linear fit reports per round."""
-        return [best_rank(model.quality_rows(m), g.pinned) for m, g in zip(pools, groups, strict=True)]
+        (:func:`~..metrics.best_rank`), matching what the linear fit reports per round."""
+        return [best_rank(model.quality_rows(m), g.golden_ids) for m, g in zip(pools, groups, strict=True)]
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
         """A uniform draw of negative row indices from one pool, every pinned row excluded. Small pools
@@ -165,16 +195,17 @@ class CatBoostTrainer:
         order = np.argsort(-scores, kind="stable")
         return np.array([i for i in order[: self.negatives + len(pins)] if i not in pins][: self.negatives])
 
-    def _fit_once(self, pools, groups: list[Group], sampled) -> CatBoostModel:
+    def _fit_once(self, pools, groups: list[GoldenGroup], sampled) -> CatBoostModel:
         """One CatBoost fit over the assembled groups — the pinned rows first in each, then its sampled
         negatives."""
         from catboost import Pool  # noqa: PLC0415
 
         x, y, gid = [], [], []
         for i, (mat, g, neg) in enumerate(zip(pools, groups, sampled, strict=True)):
-            rows = np.concatenate((np.asarray(g.pinned, dtype=int), np.asarray(neg, dtype=int)))
+            pins = np.asarray(g.golden_ids, dtype=int)
+            rows = np.concatenate((pins, np.asarray(neg, dtype=int)))
             x.append(mat[rows])
-            y.append(np.concatenate((np.ones(len(g.pinned)), np.zeros(len(rows) - len(g.pinned)))))
+            y.append(np.concatenate((np.ones(len(pins)), np.zeros(len(rows) - len(pins)))))
             gid.append(np.full(len(rows), i))
         booster = new_ranker(
             loss_function="QuerySoftMax",
@@ -186,7 +217,7 @@ class CatBoostTrainer:
             nan_mode="Min",  # absent (NaN) features get their own split-off bucket — see catboost_model
         )
         booster.fit(Pool(np.concatenate(x), np.concatenate(y), group_id=np.concatenate(gid)))
-        return CatBoostModel(booster=booster, cols=self.cols, scale=self.scale)
+        return CatBoostModel(booster=booster, cols=self.feature_names, scale=self.scale)
 
 
 @dataclass(frozen=True)
@@ -201,10 +232,11 @@ class CatBoostFit:
     ranks: list[int]
     rows: int
 
-    def score_rows(self, group: Group) -> np.ndarray:
-        """The group's per-row quality (higher = predicted faster) over its FULL pool, scored exactly as the
-        shipped prior ranks. Training sampled negatives; the metric never does."""
-        return self.model.quality_rows(group.matrix(list(self.model.cols), fill=ABSENT))
+    def score_rows(self, group: GoldenGroup) -> np.ndarray:
+        """The trainer protocol's scoring entry point, answered by the fitted model itself — the column
+        choice is the model's, not a copy of it kept here. Over the group's FULL pool: training sampled
+        negatives, the metric never does."""
+        return self.model.score_rows(group)
 
     @property
     def notes(self) -> str:

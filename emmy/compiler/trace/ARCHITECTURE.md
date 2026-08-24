@@ -25,7 +25,9 @@ constant plus an explicit broadcast; the receiver's unrelated shape and values n
 chain rooted at a locally computed tensor additionally reassembles the updated base as a two-source `IndexMapOp`: the
 copied value supplies the written region and the previous base supplies the remainder. Rebinding the root's FX name
 versions sequential overlapping writes and later aliases built from that name; an empty write leaves that version
-unchanged. A write through an input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
+unchanged. The written-region predicate starts from a boolean literal, so coordinate ternaries and the source select
+retain a boolean condition in vectorized reference evaluation and after Loop IR lifting. A write through an
+input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
 before the write still fails closed; those forms need general alias versioning rather than this local functional
 update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
 instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over

@@ -299,6 +299,10 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
+Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source predicate is substituted unchanged,
+and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
+Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
+
 Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It never weighs shapes, hardware,
 downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
 deploy evidence hierarchy's decision (measured evidence or pins for a deployed model, the prior for a cold compile).

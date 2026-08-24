@@ -250,7 +250,8 @@ def test_indexmap_cat_with_select():
 def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
     # Insert a two-cell recurrence update into columns 1:3 of a larger carried state.
     column = placeholder(1)
-    in_patch = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    bounds = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    in_patch = BinaryExpr("&&", Literal(True, "bool"), bounds)
     patch_column = TernaryExpr(in_patch, column - Literal(1, "int"), Literal(0, "int"))
     sources = (
         IndexSource(input_idx=0, coord_map=(placeholder(0), patch_column), select=in_patch),

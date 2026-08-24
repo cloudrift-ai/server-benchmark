@@ -1844,7 +1844,10 @@ class EmmyGenRunner:
         dtype = ref.dtype if dtype is None else dtype
         d = dests.get((name, cols, dtype))
         if d is None:
-            if torch.cuda.is_current_stream_capturing():
+            # ``ref.is_cuda`` first: only a CUDA destination can be captured, and the capture
+            # probe is unavailable on a CPU-only torch build (which is what CI installs, and
+            # the host-path tests reach this line there).
+            if ref.is_cuda and torch.cuda.is_current_stream_capturing():
                 # A tensor allocated inside an active capture lives in the graph's private
                 # memory pool, whose blocks are recycled between replays — a "persistent"
                 # destination minted here would silently dangle. vLLM's uncaptured warmup

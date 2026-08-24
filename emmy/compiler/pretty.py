@@ -70,11 +70,10 @@ def _binders(op: IndexMapOp) -> list[str]:
     return [(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}") for d, n in enumerate(_DIM_NAMES[: len(op.out_shape)])]
 
 
-def _index_expr(op: IndexMapOp, names: list[str], arg_names: list[str], syms: dict[str, Var]) -> str:
-    src = op.sources[0]
+def _index_expr(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
+    """The coordinate vector one source reads, in the result's index variables."""
     rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n.lstrip("_")) for d, n in enumerate(names)} | syms
-    coords = ", ".join(e.substitute(rename).pretty() for e in src.coord_map)
-    return f"{arg_names[src.input_idx]}[{coords}]"
+    return "[" + ", ".join(e.substitute(rename).pretty() for e in op.sources[0].coord_map) + "]"
 
 
 def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
@@ -110,7 +109,8 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
             return args[0] if same_dtype else f"emmy::cast({args[0]})"
         if len(op.sources) == 1 and op.sources[0].select is None and len(op.out_shape) <= len(_DIM_NAMES):
             names = _binders(op)
-            return f"emmy::tensor_from_fn(|{', '.join(names)}| {_index_expr(op, names, args, syms)})"
+            operand = args[op.sources[0].input_idx]
+            return f"emmy::tensor_from_fn({operand}, |{', '.join(names)}| {_index_expr(op, names, syms)})"
         return _fmt_index_sources(op, args, syms)
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same

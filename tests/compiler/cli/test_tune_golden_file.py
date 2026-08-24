@@ -533,10 +533,15 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     root = LoopOp(body=original_loop.body, knobs=live_features)
     fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
     monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._verified_index", lambda _ctx: ({}, {}))
-    monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._priced_pick", lambda *_args: None)
+    priced_calls = []
+    monkeypatch.setattr(
+        "emmy.compiler.pipeline.search.policy.greedy._priced_pick",
+        lambda *_args: priced_calls.append(True) or leaves[0],
+    )
     selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
     assert selected is leaves[2]
     assert fork.score == pytest.approx(59.61)
+    assert priced_calls == []
     reloaded_db.close()
 
     def stats(us):
@@ -556,6 +561,12 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
     index = _db_measured_index(reloaded_db, ctx)
     assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
+    assert selected is leaves[0]
+    assert fork.score == pytest.approx(40.0)
+    assert priced_calls == []
     reloaded_db.close()
 
     place_db = SearchDB(tmp_path / "place.db")
@@ -598,8 +609,21 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
         ]
     )
     assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=reservoir, db=None)(fork)
+    assert selected is leaves[0]
+    assert fork.score == pytest.approx(40.0)
+    assert priced_calls == []
+
     reservoir.add_rows([({**ctx.features(), **live_features, "PLACE@a": "cut"}, 30.0)])
     assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    priced_calls.clear()
+    selected = greedy_decide(prior=reservoir, db=None)(fork)
+    assert selected is leaves[1]
+    assert fork.score == pytest.approx(30.0)
+    assert priced_calls == []
 
     nonstructural = {**route, "REDUCE": ""}
     active_route = nonstructural

@@ -593,11 +593,13 @@ the fused form plus one cut fragment per legal seam, so `tune` discovers cuts an
 prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
 whichever prior is loaded. That costing exists because a `Graph` leaf carries no knob row the ordinary ranking
 could score, not to defend the fused side: when some leaf cannot be priced the pricing decides nothing and every
-leaf, cuts included, goes on to the ordinary ranking. Exactly two computed seams whose runnable normalized Loop
-bodies are alpha-equivalent collapse to one cut fragment: one workspace producer replaces both contextual uses.
-Different external buffers or operations, and equivalence classes larger than two, remain independent seams. A
-chosen cut's
-parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut records and replays as the exact pin. A
+leaf, cuts included, goes on to the ordinary ranking. A measured whole-route row is direct evidence for the complete
+fused or cut candidate, so the reservoir and DB tiers consult it before estimating a route from its child kernels;
+only a placement fork without exact aggregate evidence reaches that structural cost estimate. Exactly two computed
+seams whose runnable normalized Loop bodies are alpha-equivalent collapse to one cut fragment: one workspace producer
+replaces both contextual uses. Different external buffers or operations, and equivalence classes larger than two,
+remain independent seams. A chosen cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut
+records and replays as the exact pin. A
 **routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
 schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
 unpinned compile.

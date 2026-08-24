@@ -56,6 +56,22 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+@pytest.mark.parametrize(("dtype_name", "torch_dtype"), [("f16", torch.float16), ("f32", torch.float32)])
+def test_zero_width_pad_is_runnable_identity(dtype_name, torch_dtype):
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 3), dtype_name), node_id="x")
+    g.add_node(ElementwiseOp(op="pad"), ["x"], Tensor("out", (2, 3), dtype_name), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    expected = torch.arange(6, dtype=torch_dtype).reshape(2, 3)
+
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {"x": expected})
+    actual = fn(*inputs)
+
+    assert actual.dtype == torch_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_where_preserves_bool_condition_dtype_and_broadcasts():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("condition", (2, 1), "bool"), node_id="condition")

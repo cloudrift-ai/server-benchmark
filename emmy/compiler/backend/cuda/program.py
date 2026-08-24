@@ -86,6 +86,7 @@ class _Compiled:
     constants: dict[str, float]
     kernels: dict[str, cp.RawKernel]  # kernel_name → RawKernel
     launches: list[_Launch]
+    outputs: list[str]
     # Symbolic axis name → (input_buf_name, dim_index). Resolved from input
     # array shapes at run-time; empty when the graph has no symbolic dims.
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
@@ -142,6 +143,7 @@ def _load_plan(plan: ExecutionPlan) -> _Compiled:
         constants=dict(plan.constants),
         kernels=kernels,
         launches=list(plan.launches),
+        outputs=list(plan.outputs),
         symbolic_bindings=dict(plan.symbolic_bindings),
         symbolic_hints=dict(plan.symbolic_hints),
         symbolic_caps=dict(plan.symbolic_caps),
@@ -1198,16 +1200,15 @@ class CompiledProgram:
         default) the whole buffer is returned (the uncaptured rebind path already
         sizes buffers to the request)."""
         out: dict[str, np.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].get().reshape(shape)
+                out[name] = arr.ravel()[:n].get().reshape(shape)
             else:
-                out[b.name] = arr.get()
+                out[name] = arr.get()
         return out
 
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict[str, cp.ndarray]:
@@ -1220,16 +1221,15 @@ class CompiledProgram:
         is returned. Caller must hold ``gpu_lock()`` (and read on the replay
         stream — see :meth:`upload_prefix_device`)."""
         out: dict[str, cp.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].reshape(shape)
+                out[name] = arr.ravel()[:n].reshape(shape)
             else:
-                out[b.name] = arr
+                out[name] = arr
         return out
 
     def snapshot(self) -> dict[str, np.ndarray]:

@@ -110,6 +110,8 @@ autotuning cache doesn't bust on cosmetic edits.
   size (default `DEFAULT_SEQ_HINT=512`, set automatically so reconstruction can't lose it; an explicit
   `Dim(name, hint=...)` overrides). The hint is pure metadata (excluded from `==`/`hash`/structural keys),
   read only by the tuner / partition planner to size tiles for a dynamic axis.
+  Graph JSON op fields use the same stable dimension wire mapping as Torch IR, so static, symbolic, and composite
+  `Dim` values round-trip instead of depending on the scalar-only `Dim.value` compatibility property.
 - **A symbolic free axis is tiled for its hint and emitted as a *masked* tile.** A symbolic M/N axis is treated as
   size `hint`, always-overhang: the block axis becomes a composite ceil-div over the symbolic extent
   (`(seq_len + bf - 1)//bf`), and a boundary `Cond(decoded_coord < seq_len)` wraps the body, so one cached kernel runs

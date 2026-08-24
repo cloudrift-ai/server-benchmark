@@ -504,13 +504,6 @@ global cache would require; the memo is discarded with the splicer.
 `extend` and `restrict` retain the applicable canonical entries from their parent, so dependency placement neither
 reformats deep coordinate trees nor retains duplicate canonical strings.
 
-Fusion may give the splicer the ordinary work-growth ceiling before construction. The splicer accumulates the exact
-static-extent arithmetic-leaf work at each inserted scope (using 128 for a symbolic extent, as the final fusion metric
-does) and refuses as soon as the monotonic partial work exceeds that ceiling. Untyped identity-copy aliases are
-excluded because normalization removes them from the finished body; a typed copy is a real conversion and counts as
-work. An admitted bounded splice constructs the same body bytes as an unbounded splice; the bound only terminates a
-candidate whose final ordinary work limit is already impossible.
-
 ### `loop/runner.py` — C++ JIT executor
 
 `execute_loop_op_cpp(loop, input_arrays, out_shape) → ndarray` renders the

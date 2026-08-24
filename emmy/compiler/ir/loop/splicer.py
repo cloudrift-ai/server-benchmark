@@ -144,7 +144,6 @@ def splice_loops(
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
     splice_dtypes: dict[tuple[str, str], DataType] | None = None,
-    max_work: int | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -163,10 +162,7 @@ def splice_loops(
     seed the traversal — is derived from ``splice_edges``: it's the
     unique tag in ``loops`` that never appears as a splice target.
     Returns ``None`` if the sink is ambiguous (cycle or multiple sinks)
-    or if any splice edge hits an unsupported pattern. ``max_work`` bounds
-    the arithmetic work accumulated while constructing the body; fusion uses
-    it to reject a merge as soon as its existing work-growth limit cannot be
-    met.
+    or if any splice edge hits an unsupported pattern.
     """
     target_tags = {tag for tag, _out in splice_edges.values()}
     candidates = [tag for tag in loops if tag not in target_tags]
@@ -179,7 +175,6 @@ def splice_loops(
             splice_edges=splice_edges,
             splice_dtypes=splice_dtypes or {},
             root=root,
-            max_work=max_work,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -190,7 +185,7 @@ def splice_loops(
         return None
 
 
-def splice_graph(graph, *, max_work: int | None = None) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -250,7 +245,6 @@ def splice_graph(graph, *, max_work: int | None = None) -> tuple[LoopOp, list[st
         loops={nid: n.op for nid, n in loop_nodes.items()},
         splice_edges=splice_edges,
         splice_dtypes=splice_dtypes,
-        max_work=max_work,
     )
     if merged is None:
         return None
@@ -294,7 +288,6 @@ class _Splicer(LoopBuilder):
         splice_edges: dict[tuple[str, str], tuple[str, str]],
         splice_dtypes: dict[tuple[str, str], DataType],
         root: str,
-        max_work: int | None,
     ) -> None:
         used: set[str] = set()
         for meta in loops.values():
@@ -304,8 +297,6 @@ class _Splicer(LoopBuilder):
         self.splice_edges = splice_edges
         self.splice_dtypes = splice_dtypes
         self.root = root
-        self._max_work = max_work
-        self._partial_work = 0
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
         # emit scope it lands at in the merged body, and the σ restricted
@@ -316,25 +307,6 @@ class _Splicer(LoopBuilder):
         # dependency placement does not recursively walk the same large coordinate tree, while
         # avoiding structural hashing (which would perform another recursive tree walk).
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
-
-    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
-        """Insert one statement while maintaining fusion's work lower bound.
-
-        Source LoopOps are normalized before splicing, so their arithmetic leaves already sit at
-        the shallowest valid scope. Coordinate substitution may only remove axes, which
-        ``_scope_for_axes`` does before insertion. Identity copies are omitted because
-        ``LoopOp`` normalization removes them from the final body. Every other inserted Assign
-        or Accum therefore contributes permanently to the final ``_total_work`` metric.
-        """
-        extent = 1
-        for axis in enclosure.enclosing:
-            extent *= axis.extent.as_static() if axis.extent.is_static else 128
-        is_copy = isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype is None
-        added = extent if isinstance(stmt, (Assign, Accum)) and not is_copy else 0
-        if self._max_work is not None and self._partial_work + added > self._max_work:
-            raise _NotSupported(f"partial work exceeds construction limit: {self._partial_work + added} > {self._max_work}")
-        self._partial_work += added
-        super().insert(stmt, enclosure)
 
     def run(self) -> LoopOp:
         self._seed()

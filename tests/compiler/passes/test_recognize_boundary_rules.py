@@ -20,11 +20,11 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
@@ -720,6 +720,31 @@ def test_composed_step_keeps_a_row_invariant_prologue_ahead_of_its_producer():
     assert fold is not None and _same_program(fold.loop.body, body)
 
 
+def test_composed_step_ignores_independent_statement_order():
+    """A coordinate mask may appear on either side of its independent score producer."""
+    score = _score_loop("kv", "d0", "s0", "0")
+    mask = Select(
+        name="mask",
+        branches=(
+            SelectBranch(value="zero", select=BinaryExpr("<=", Var("kv"), Var("m"))),
+            SelectBranch(value="fill", select=BinaryExpr(">", Var("kv"), Var("m"))),
+        ),
+    )
+    loop = Loop(
+        axis=Axis("kv", Dim(32)),
+        body=Body(
+            (
+                score,
+                mask,
+                Assign(name="scaled", op="multiply", args=("s0", 0.25)),
+                Assign(name="masked", op="add", args=("mask", "scaled")),
+                Accum(name="mx", value="masked", op="maximum", axes=("kv",)),
+            )
+        ),
+    )
+    assert fold_from_loop(loop) is not None
+
+
 def test_online_softmax_pairs_two_composed_passes():
     """The pairing compares the two passes' score cones by CONTENT, so two separately-traced copies
     of one score — different bound axis, different temps — pair and fuse into ONE twisted stream.
@@ -878,10 +903,7 @@ def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
 
 
 def _normed_sdpa_graph():
-    """Gemma-shaped attention, torch-traced: RMSNorm'd Q/K/V (computed operand cones), GQA
-    (16 q / 8 kv heads), causal, head_dim 256 — the fusion-boundary case where the flash unit
-    used to fragment (the V-norm fused into the P@V product first, the halves merge then
-    tripped the work-blowup guard, and the P@V materialized its full weight×V outer product)."""
+    """Gemma-shaped attention with computed Q/K/V operand cones, GQA, and a causal mask."""
     from emmy.commands.trace import graph_from_code
 
     norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
@@ -1103,8 +1125,8 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
     g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
-    scores = next(n for n in g.nodes.values() if isinstance(n.op, LoopOp) and n.id.endswith("_scaled"))
-    tile = recognized_tile(scores.op, name=scores.id)
+    (cell,) = (n for n in g.nodes.values() if isinstance(n.op, LoopOp))
+    tile = recognized_tile(cell.op, name=cell.id)
     pro = fused_view(tile)
     assert pro is not None, "the chained score column binds through the fused view"
     node = pro[0].operands[0]

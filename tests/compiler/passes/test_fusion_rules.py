@@ -852,20 +852,14 @@ def _make_projection_norm():
     return g
 
 
-def test_projection_feeding_rms_stays_a_readable_seam():
-    """RMSNorm reads its input for both x² and x. Splicing the upstream projection into the rms
-    statistic would nest the contraction's reduce loop inside the statistic reduce — a shape
-    recognition keeps only as the raw-loop escape (no schedule tier, no ``PLACE`` seam), so the
-    merge is refused. The rms cone itself must still fuse maximally into one kernel beside the
-    standalone contraction."""
+def test_projection_feeding_rms_fuses_despite_nested_reductions():
+    """Recognition coverage is not a fusion gate: projection and RMSNorm form one kernel."""
     result = _decompose_and_fuse(_make_projection_norm())
     kernels = _kernel_nodes(result)
-    assert [node.id for node in kernels] == ["projection", "out"], (
-        f"expected the contraction + one fused rms cone, got {[node.id for node in kernels]}"
-    )
+    assert [node.id for node in kernels] == ["out"]
 
 
-def test_projection_norm_materialization_is_correct():
+def test_projection_norm_nested_fusion_is_correct():
     inputs = {
         "x": rng.standard_normal((2, 8)).astype(np.float32),
         "w": rng.standard_normal((6, 8)).astype(np.float32),

@@ -399,9 +399,8 @@ def _cut_ops(root, stores: tuple, free: tuple, cut: CutSite, ws: str) -> tuple[L
 def reusable_cut_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
     """Return the two Loop-IR pieces for one unambiguous grouped computed-edge cut.
 
-    Fusion uses this as its boundedness witness: the recognized form has a concrete
-    materialization sibling whose producer runs once, so duplicated raw-loop work is not the
-    work the recognized tile must perform. No group, or more than one possible group, declines.
+    The recognized form has a concrete materialization sibling whose producer runs once.
+    No group, or more than one possible group, declines.
     """
     from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415

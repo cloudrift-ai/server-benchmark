@@ -1,36 +1,10 @@
-"""Merge adjacent ``LoopOp``s via graph splicing.
+"""Greedily fuse closed ``LoopOp`` regions to a fixed point.
 
-Every match is represented as a producer-to-sink region: one consumer is
-the degenerate two-node case, while a fan-out uses its nearest owned
-reconvergence. The complete region goes to the N-way splicer. Shared
-internal definitions remain SSA and are emitted once per equal
-scope/coordinate demand; no frontend treeification is needed. The splicer also
-handles multiple consumer loads and shared external inputs uniformly
-(first-seen slot assignment + splice-edge routing).
+Each match is one producer-to-consumer edge or a closed fan-out DAG. The
+single rule repeats until no legal region remains.
 
-Fusion is greedy-maximal and algebra-only: every legal merge is taken. Which form of a region is
-worth deploying — fused, or split into smaller kernels — is decided by the deploy evidence
-hierarchy (tuned goldens, measurements, the prior); this rule never weighs shapes, hardware, or
-downstream pattern knowledge. Its refusals are semantic — structural region ownership, a real
-splicer rejection, the fence around an already-realized ``__cut_`` workspace (which keeps a
-placement decision from being re-fused), and two readable-seam refusals judged on the MERGED
-form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, and must not
-entangle a multi-statistic compound (the online-softmax pair) beyond its readable tails — the
-flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
-expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
-one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
-``PLACE`` seam), so evidence could never price the split back. One exact exception is structural:
-recognition may prove two alpha-equivalent computed edges reconstruct one producer through a
-grouped placement cut; the fused cell and that materialized form remain priced siblings. The same
-witness makes the work bound count the child once plus its parent instead of the raw duplicated
-spelling. A later merge may preserve that witness, but never consume it and leave no placement
-inverse for evidence to price. Otherwise ``_total_work`` sums the enclosing free×reduce iteration count of every
-compute leaf, and a merge that grows it by more than ``_BLOWUP_FACTOR`` is refused. That bound is
-what keeps the downstream problem finite, not a
-performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest
-(measured: 57 nested loops with the row statistic replayed inside a ~10¹³-iteration nest) — a
-form no schedule can run and recognition cannot certify. Within the bound, every fused/split
-tradeoff belongs to measured evidence.
+Fusion has only correctness boundaries and the fence around an already-realized
+``__cut_`` workspace. Recognition and scheduling never gate fusion.
 """
 
 from __future__ import annotations
@@ -38,8 +12,9 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import build_merged_region as _build_merged_region
 from emmy.compiler.pipeline.passes.loop.fusion._helpers import closed_loop_consumer_region as _closed_loop_consumer_region
-from emmy.compiler.pipeline.passes.loop.fusion._merge import merge_region as _merge_region
+from emmy.compiler.pipeline.passes.loop.fusion._helpers import wrap_merge_fragment as _wrap_merge_fragment
 
 PATTERN = [Pattern("producer", LoopOp)]
 # Region discovery is dynamic. Watching immediate consumers preserves overlap
@@ -58,4 +33,13 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
             raise RuleSkipped("producer fan-out has no closed reconvergent Loop region")
         raise RuleSkipped("producer has no Loop consumer region")
     region, sink = found
-    return _merge_region(match, region, sink)
+    if any("__cut_" in node_id for node_id in region - {sink.id}):
+        raise RuleSkipped("region crosses a decided placement cut")
+
+    merged = _build_merged_region(graph, region, sink)
+    if merged is None:
+        raise RuleSkipped("N-way Loop splicer rejected the region")
+
+    match.consumed = region
+    match.output = sink.id
+    return _wrap_merge_fragment(graph, merged, sink)

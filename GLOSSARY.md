@@ -86,7 +86,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Runtime** — The code and state involved while a compiled program is executing. Emmy's CUDA runtime allocates
   buffers, resolves dynamic sizes, and launches kernels.
 - **Fusion** — Combining operations so that one GPU kernel performs work that would otherwise require several
-  kernels. Fusion can avoid writing temporary values to slower global memory.
+  kernels. Emmy fuses every structurally legal region before placement considers cuts; only correctness or termination
+  may retain an earlier kernel boundary.
 - **Static shape** — A tensor shape known when compiling, such as exactly 512 tokens.
 - **Dynamic or symbolic shape** — A shape containing a named value, such as `seq_len`, whose actual size is supplied
   when the program runs.

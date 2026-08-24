@@ -232,7 +232,7 @@ def test_grouped_cut_rejects_more_than_two_equivalent_uses() -> None:
     assert not [cut for cut in cuts if len(cut.members) > 1]
 
 
-def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides(monkeypatch) -> None:
+def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides() -> None:
     """The fused cell and its two-kernel inverse are structural siblings.
 
     The inverse materializes one score producer. Its two contextual uses retain distinct
@@ -242,28 +242,13 @@ def test_sdpa_offers_fused_and_one_shared_score_cut_without_overrides(monkeypatc
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES
-    from emmy.compiler.pipeline.passes.loop.fusion import _merge
 
-    grouped_over_limit: list[tuple[int, int]] = []
-    original = _merge._build_merged_region
-
-    def tracked(graph, region, sink, *, max_work=None):
-        merged = original(graph, region, sink, max_work=max_work)
-        if merged is not None and max_work is None and _merge._recognized_reuse_pieces(merged) is not None:
-            pre_work = sum(_merge._total_work(graph.nodes[node_id].op) for node_id in region)
-            raw_work = _merge._total_work(merged)
-            if raw_work > 8 * pre_work:
-                grouped_over_limit.append((pre_work, raw_work))
-        return merged
-
-    monkeypatch.setattr(_merge, "_build_merged_region", tracked)
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
     )["graph"]
     fused = Pipeline.build(LOOP_PASSES).run(graph)
     loop_nodes = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
-    assert len(loop_nodes) == 1, "recognized reuse must admit the whole fused Loop-IR cell"
-    assert grouped_over_limit, "the grouped score inverse must bypass the ordinary raw-work limit"
+    assert len(loop_nodes) == 1, "maximal fusion must produce one Loop-IR cell"
 
     captured: list = []
 
@@ -347,8 +332,8 @@ def test_synthetic_decode_row_requires_a_literal_unit_coordinate(index) -> None:
     assert _unit_output_row((write,), "n") is None
 
 
-def test_followup_fusion_preserves_the_sdpa_grouped_inverse() -> None:
-    """A producer merge cannot consume an attention target's recovered placement sibling."""
+def test_maximal_sdpa_with_fused_producer_recovers_grouped_inverse() -> None:
+    """Placement must recover the attention cut after an upstream producer joins the cell."""
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.pipeline import LOOP_PASSES
@@ -368,7 +353,8 @@ def test_followup_fusion_preserves_the_sdpa_grouped_inverse() -> None:
 
     fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph, ctx=Context.from_target((8, 0)))
     loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
-    assert len(loops) == 2, "the producer must stay outside the reusable attention cell"
+    assert len(loops) == 1, "maximal fusion must consume the upstream producer"
+    assert reusable_cut_pieces(loops[0].op) is not None, "placement must recover the grouped attention cut"
     attention = fused.nodes["scaled_dot_product_attention"]
     assert reusable_cut_pieces(attention.op) is not None
 

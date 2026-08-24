@@ -306,10 +306,9 @@ def _flash_feed(variant, B_or_Hq, H_or_Hkv, S, D):
 @pytest.mark.parametrize("variant", list(_FLASH_VARIANTS))
 def test_scalar_flash_matches_torch(monkeypatch, variant):
     """An SDPA variant (non-causal / causal / GQA / explicit additive mask) matches torch SDPA
-    across the variant's static configs. SDPA lowers through the generic path as a readable-seam
-    SPLIT (Q·K^T | softmax pieces | P·V, plus cut glue) — the softmax markers (``fmaxf`` +
-    ``expf``) live somewhere in the kernel SET, and every kernel of the set carries a schedule;
-    the exact kernel count is the fusion pass's business, not this test's."""
+    across the variant's static configs. Placement may leave a kernel set; the softmax markers
+    (``fmaxf`` + ``expf``) live somewhere in that set, and every kernel carries a schedule. The
+    exact kernel count is not this test's contract."""
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)

@@ -7,9 +7,8 @@ joins the SAME carrier as an expectation component, with any loop-invariant mult
 split off (``Σ c·x = c·Σ x``) and multiplied back in the projection body; a foreign fold
 declines; the fused-matmul spelling (channels inside a free output sweep) keeps the pair as the
 sweep's per-row statistic, bound by the fused computed-A view; and the built fold's derived loop
-re-lifts to the same node (the closure the cut/split pieces rely on). The fusion pass's
-readable-seam refusal is exercised in lockstep. Numeric equivalence of the merged region is
-pinned via ``NumpyBackend``.
+re-lifts to the same node (the closure the cut/split pieces rely on). Numeric equivalence of the
+merged region is pinned via ``NumpyBackend``.
 """
 
 import numpy as np
@@ -258,7 +257,7 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# The fusion pass in lockstep: the merged softmax·V region splices; other entanglements refuse.
+# The fusion pass in lockstep: the merged softmax·V region splices.
 # --------------------------------------------------------------------------------------------
 
 
@@ -363,35 +362,6 @@ def test_fill_decline_names_the_gate_it_actually_hit(monkeypatch) -> None:
     message = str(excinfo.value)
     assert "whole K chunks" in message, message
     assert "K=32" in message, message
-
-
-def test_multi_stat_entangled_with_expanding_tail_still_refuses() -> None:
-    # The readable-seam refusals live in ``_merge``, the splice both merge passes share; the rule
-    # modules are thin predicates over it, so a plain import reaches them (no digit-led module name).
-    from emmy.compiler.pipeline.passes.loop.fusion._merge import _entangled_multi_stat
-
-    # Pair + a free sweep whose nested fold is NOT flat-additive (a maximum) — still entangled.
-    bad = Loop(
-        axis=Axis(name="a2", extent=Dim(32)),
-        body=Body.coerce(
-            (
-                Loop(
-                    axis=Axis(name="a3", extent=Dim(128)),
-                    body=Body.coerce(
-                        (
-                            Load(name="in2", input="x", index=(Var("a0"), Var("a3"))),
-                            Accum(name="acc2", value="in2", op=ElementwiseImpl("maximum")),
-                        )
-                    ),
-                ),
-                Write(output="out", value="acc2", index=(Var("a0"), Var("a2"))),
-            )
-        ),
-    )
-    refused = LoopOp(body=Body.coerce((Loop(axis=Axis(name="a0", extent=Dim(8)), body=Body.coerce((*_pair(), bad))),)))
-    readable = LoopOp(body=_wrap_rows(_sweep_body()))
-    assert _entangled_multi_stat(refused)
-    assert not _entangled_multi_stat(readable)
 
 
 def _wrap_rows(body: Body) -> Body:

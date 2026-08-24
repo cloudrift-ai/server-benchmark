@@ -103,7 +103,7 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
     whole row — 21 ``S_*`` features describing a body it no longer had — and the finalize
     already-placed with no knobs at all: no fork, no identity, untunable.)"""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/prefusion", "loop/fusion", "loop/stamp"])
+    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "loop/stamp"])
     # Drive the tile pass by hand so the pieces are caught between the splice and the schedule.
     pieces: list[TileOp] = []
 

@@ -40,8 +40,8 @@ Concretely:
   regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
   replays exactly, and a `tune` turns it into evidence the hierarchy can use.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
-  boundedness reason (the compile must terminate with a tractable option set — fusion's work-growth cap and the
-  scheduler's `MAX_ROWS` are the canonical instances; both are raise-don't-truncate). "Measured slower",
+  boundedness reason (the compile must terminate with a tractable option set — the scheduler's `MAX_ROWS` is the
+  canonical instance and raises rather than truncates). "Measured slower",
   "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the tuner's and the
   prior's vocabulary, and a fix for a slow configuration is new evidence — a re-tune and a refreshed golden file —
   never a new compile-time condition.
@@ -319,47 +319,19 @@ Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source 
 and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
 Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
 
-Loop fusion is greedy-maximal and algebra-only: every legal merge is taken. It never weighs shapes, hardware,
-downstream pattern knowledge, or whether one kernel will be faster than two — which form of a region deploys is the
-deploy evidence hierarchy's decision (measured evidence or pins for a deployed model, the prior for a cold compile).
-Fusion's
-refusals are semantic (region ownership, a real splicer rejection, the fence around a decided `__cut_` workspace,
-and the two readable-seam refusals judged on the MERGED form — no reduce loop nested in a reduce loop, and no
-entangling a multi-statistic compound beyond its readable tails: the flat same-extent normalize sweep, or a free
-sweep of flat same-extent additive folds — the value folds of a fused softmax·V region, which read as one
-contraction over the pair; other shapes fall to the raw-loop
-escape with no schedule tier and no `PLACE` seam, so evidence could never price the split back) plus one
-boundedness cap on aggregate work growth: without it a whole transformer layer splices into a single loop
-nest that no schedule can run and recognition cannot certify. Ordinary merges enforce that same cap during splicer
-construction, stopping once their monotonic partial arithmetic work already exceeds the final 8× limit. The only
-uncapped construction shapes are structural candidates for the existing grouped-placement exception: one additive
-contraction at exactly two coordinate demands along otherwise linear paths, or a linear extension of an already
-recognized grouped inverse. The post-build recognizer and final work check remain authoritative; the preflight never
-admits a new exception.
+Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
+considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
+tier, or faster than its parts. Nested reductions, multi-statistic compounds, and the loss of a previously recognized
+cut shape are therefore not fusion gates. A downstream failure to recognize or cut a maximally fused body is a
+lowering or placement coverage gap; it must not be repaired by retaining an early graph boundary.
 
-**Merge ORDER is a decision, and `loop/prefusion` makes it.** A merge is directional — it makes the SINK the
-region's output, so the sink's width must then be written. Splice a compute producer into a still-open
-contraction product and that outer product lands in gmem, and the fold that would have collapsed it can only
-arrive afterwards as a reduce nested in a reduce, which fusion refuses as an unreadable seam. Nothing
-downstream undoes it: the buffer is there at every tile. Which order the fixpoint reached was previously
-decided by whichever match the enumeration hit first, and one order costs a 1-layer Qwen3-0.6B trunk at seq
-512 a 6.006 GiB scratch slab against 0.026 GiB for the other.
+Only three boundaries remain: the region must be closed and owned, the splicer must preserve semantics, and an already
+realized `__cut_` workspace must not be fused back. These are correctness or termination constraints. Fusion does not
+estimate arithmetic work and has no recognition-dependent exception.
 
-`loop/prefusion` runs the same splice through the same `_merge.merge_region` with the same refusals, and
-differs from `loop/fusion` in one predicate: it takes only merges whose sink is no wider than the producer.
-Those can only shrink what gets written, so draining them first means every contraction has CLOSED before
-anything is offered a chance to splice into its open product. A same-width pure index-map chain ending at a
-graph output is deferred with the widening merges: dissolving that output-coordinate change first can hide a
-grouped placement inverse which becomes exact only after the producer closes. Ordinary fusion then preserves
-the existing inverse or merges the layout normally when none exists; the graph-output identity rule may also
-retarget the producer's `Write` when the layout is a flat-memory identity. `loop/prefusion` **refuses nothing** —
-every deferred merge is offered again by `loop/fusion`, where the existing refusals decide. This remains an
-ordering rather than a gate: no legal form leaves the enumeration, so the doctrine above is intact.
-
-It must be a PASS, not another rule inside `loop/fusion`. The cursor advances rule-by-rule within a pass and
-re-enumerates, so two rules' batches interleave — measured, the same predicate as a `009_` rule left the trunk
-at 6.006 GiB because the compute producer still reached the open product first. A pass is left only once it is
-quiescent.
+There is one fusion pass and one fixpoint. Merge order may temporarily place a contraction inside another reduction;
+the later legal merge that closes the consumer is still taken. Every fused-versus-cut choice belongs to placement and
+the deploy evidence hierarchy.
 
 **Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's
@@ -721,9 +693,10 @@ sound cosmetic are therefore load-bearing. The partition axis is spelled with a 
 free-loop chain by axis NAME: sorted below the row / column axes it must dominate, `hoist_loop_invariants` sinks the
 partition between the column sweep and the K fold, where `fused_view` cannot parse it and the piece
 loses its computed-A binding. And the twisted extractors compare their regenerated `exp_merge` to the body
-**up to SSA temp names** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the generator's own temps
-the moment a term touches the loop dialect, so a raw byte compare would reject the α-equivalent program and lose
-every carrier that has been lowered and re-lifted.
+**up to SSA temp names and legal sibling order** (`_fromloop._same_program`) — `rename_ssa_sequential` rewrites the
+generator's own temps the moment a term touches the loop dialect, while fusion may place an independent pure statement
+on either side of a computed block. The comparison canonicalizes that dependency-equivalent spelling before its exact
+check, so neither incidental difference loses a carrier that has been lowered and re-lifted.
 
 The atomic arm produces ONE kernel and still splices a `Graph`. That is not a formality: a 1:1 op rebind is how the
 engine says *the same kernel, decided further*, so it merges the replaced op's knobs forward and does not restart the
@@ -775,10 +748,8 @@ non-terminating case) is refused. Exactly two computed contraction edges may sha
 normalized child Loop bodies are equal. That alpha-equivalence preserves external buffer names and exact operations,
 so same-shaped computations over different values never alias; a class with more than two uses stays ungrouped.
 The one producer writes a common workspace, while each replacement `Load` retains its member's contextual index axes.
-This grouped inverse is also fusion's boundedness witness: a nested-reduce or multi-statistic merge it recognizes is
-counted as child-once + parent rather than by the duplicated raw-loop spelling, and placement keeps that materialized
-form beside the fused form for evidence to price. A later merge must preserve that witness; destroying it would make
-the already-admissible materialized sibling disappear and leave evidence unable to recover the prior kernel boundary.
+This grouped inverse is a placement option over the maximally fused body; fusion does not consult it. Placement must
+recover useful boundaries from the final body.
 A piece is a RAW loop body: the tree's λ-local SSA names flatten
 into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused

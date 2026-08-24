@@ -822,21 +822,27 @@ def _frag_lift(
                 return None  # per-element, not cell-uniform — the caller keeps the scalar sweep
             out.append(s)  # a cell-uniform stmt of the lift (the scale ``Load``) — scalar, once
             continue
-        if not isinstance(s, Assign) or s.args[0] not in frag_names:
+        if not isinstance(s, Assign):
             return None  # a shape the fragment tier cannot express — the caller keeps the scalar sweep
+        ordered_args = s.args
+        if not ordered_args or ordered_args[0] not in frag_names:
+            if len(ordered_args) == 2 and ordered_args[1] in frag_names and s.op.commutative:
+                ordered_args = (ordered_args[1], ordered_args[0])
+            else:
+                return None  # only a commutative op may move its fragment operand into the in-place slot
         frag_names |= set(s.defines())
         for i, row in enumerate(frags):
             for j, f in enumerate(row):
                 args = tuple(
                     selected[a][i][j] if a in selected else (f if a in frag_names else (a if isinstance(a, str) else repr(a)))
-                    for a in s.args
+                    for a in ordered_args
                 )
                 out.append(
                     FragmentApply(
                         out=f,
                         op=s.op,
                         args=args,
-                        kinds=tuple(FRAG if a in frag_names or a in selected else UNIFORM for a in s.args),
+                        kinds=tuple(FRAG if a in frag_names or a in selected else UNIFORM for a in ordered_args),
                         in_place=True,
                     )
                 )

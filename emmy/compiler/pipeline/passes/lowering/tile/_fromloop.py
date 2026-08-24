@@ -23,8 +23,8 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.pure import Lambda, M, component_ops
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, is_contraction
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, Stmt
-from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, Stmt, Write
+from emmy.compiler.ir.stmt.normalize import _sibling_defs_uses, rename_ssa_sequential
 from emmy.compiler.ir.tile.ops import head, reduce_loop
 
 
@@ -50,8 +50,64 @@ def _same_program(a, b) -> bool:
     regenerating and comparing, loses every carrier that has been lowered and re-lifted. Comparing
     at the canonical spelling keeps the proof and drops the accidental dependence on which pass
     happened to name the temps."""
-    a, b = Body(_unannotated(a)), Body(_unannotated(b))
+    a, b = _canonical_program_order(Body(_unannotated(a))), _canonical_program_order(Body(_unannotated(b)))
     return a == b or rename_ssa_sequential(a) == rename_ssa_sequential(b)
+
+
+def _canonical_program_order(body: Body) -> Body:
+    """Canonicalize legal sibling reorderings before the byte-identity check.
+
+    Fusion may emit a ready pure statement before or after an independent computed block. Both
+    spell the same dependency DAG, but stable source-order topological sorting preserves that
+    incidental difference. Recurse, then choose ready pure statements before computed blocks;
+    preserve order within each class and never move anything across a ``Write``.
+    """
+    import heapq
+
+    items: list[Stmt] = []
+    for stmt in body:
+        nested = stmt.nested()
+        items.append(stmt.with_bodies(tuple(_canonical_program_order(b) for b in nested)) if nested else stmt)
+    n = len(items)
+    if n <= 1:
+        return Body(tuple(items))
+
+    defs_uses = [_sibling_defs_uses(s) for s in items]
+    def_idx: dict[str, int] = {}
+    for i, (defs, _) in enumerate(defs_uses):
+        for name in defs:
+            def_idx.setdefault(name, i)
+    incoming: list[set[int]] = [set() for _ in items]
+    outgoing: list[set[int]] = [set() for _ in items]
+
+    def edge(src: int, dst: int) -> None:
+        if src != dst and src not in incoming[dst]:
+            incoming[dst].add(src)
+            outgoing[src].add(dst)
+
+    for i, (_, uses) in enumerate(defs_uses):
+        for name in uses:
+            if (src := def_idx.get(name)) is not None:
+                edge(src, i)
+
+    writes = {i for i, stmt in enumerate(items) if any(isinstance(s, Write) for s in Body((stmt,)).iter())}
+    for at in writes:
+        for i in range(at):
+            edge(i, at)
+        for i in range(at + 1, n):
+            edge(at, i)
+
+    ready = [(0 if items[i].pure else 1, i) for i in range(n) if not incoming[i]]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        _, i = heapq.heappop(ready)
+        order.append(i)
+        for dst in outgoing[i]:
+            incoming[dst].discard(i)
+            if not incoming[dst]:
+                heapq.heappush(ready, (0 if items[dst].pure else 1, dst))
+    return Body(tuple(items[i] for i in order)) if len(order) == n else Body(tuple(items))
 
 
 def _stamp_axes(loop: Loop) -> Loop:

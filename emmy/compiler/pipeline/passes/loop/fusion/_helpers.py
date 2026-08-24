@@ -67,8 +67,8 @@ def closed_loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str],
     """Return the nearest closed producer-to-sink ``LoopOp`` region.
 
     One consumer is the degenerate two-node region. A fan-out must have a
-    common Loop descendant; policy checks (escapes, reductions, recognition
-    boundaries, and work growth) remain the merge rule's responsibility.
+    common Loop descendant; policy checks remain the merge rule's
+    responsibility.
     """
 
     def reachable(start: str) -> set[str]:
@@ -116,7 +116,7 @@ def closed_loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str],
     if any(nid in graph.outputs or graph.users(nid) - region for nid in interior):
         return None
     # Internal splice edges currently identify a Loop's primary buffer by its
-    # node id. Leave MIMO/secondary-buffer regions on their established path.
+    # node id. Leave MIMO/secondary-buffer regions unfused.
     for nid in region:
         node = graph.nodes[nid]
         if len(node.outputs) != 1:
@@ -128,7 +128,7 @@ def closed_loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str],
     return region, graph.nodes[sink_id]
 
 
-def build_merged_region(graph: Graph, region: set[str], sink: Node, *, max_work: int | None = None) -> LoopOp | None:
+def build_merged_region(graph: Graph, region: set[str], sink: Node) -> LoopOp | None:
     """Splice an owned DAG of ``LoopOp`` nodes into ``sink``.
 
     ``region`` may be the ordinary two-node case or fan out and reconverge.
@@ -175,7 +175,7 @@ def build_merged_region(graph: Graph, region: set[str], sink: Node, *, max_work:
         sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
     sub.outputs = [sink.id]
 
-    result = splice_graph(sub, max_work=max_work)
+    result = splice_graph(sub)
     if result is None:
         return None
     merged, _ = result

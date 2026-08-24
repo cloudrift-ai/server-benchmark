@@ -24,6 +24,7 @@ tests/compiler/passes/
 ├── test_optimization_rules.py      # optimization rules (structural + correctness)
 ├── test_fusion_rules.py            # fusion rules (structural — LoopOp not numpy-executable)
 ├── test_matcher.py                 # Pattern matcher unit tests
+├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
 ├── test_register_tile_rules.py     # register-tile lowering rules

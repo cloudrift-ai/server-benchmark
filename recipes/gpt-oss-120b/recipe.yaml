@@ -1,6 +1,7 @@
-# Compiler and task-local serving qualification target. The exact MXFP4 checkpoint traces and reaches the API on four
-# V100s, but its generated logits currently fail correctness and the diagnostic image is unpublished. This therefore
-# remains an onboarding shell. The routing experiment under experiments/gpt-oss-120b records the qualification.
+# Compiler and task-local serving qualification target. The exact MXFP4 checkpoint traces and passes generation
+# correctness on four V100s, but its task-local image is unpublished and no full-coverage canonical golden is
+# available. This therefore remains an onboarding shell. The routing experiment under experiments/gpt-oss-120b
+# records the qualification.
 tags:
   - onboarding
   - untested

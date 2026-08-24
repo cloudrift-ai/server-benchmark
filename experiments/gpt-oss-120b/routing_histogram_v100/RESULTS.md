@@ -2,31 +2,30 @@
 
 ## Result
 
-The routing distribution is skewed enough to continue toward an RTX 5090 + CPU DRAM prototype, but this experiment
-does not establish its end-to-end speedup and the refreshed serving path fails generation correctness. Within each
-workload window, the 40 most-selected input slices per layer cover 80.1–84.0% of routed-row selections while occupying
-17.75 GiB of packed expert storage. Forty-eight slices cover 85.4–88.6% and occupy 21.30 GiB. Code is the least
-concentrated workload.
+The corrected native-MXFP4 serving path shows substantial but workload-dependent routing skew. The best 40 input
+slices in each layer cover 81.08% of chat, 79.53% of math, and 76.72% of code selections while occupying 17.75 GiB
+of packed expert storage. K=48 covers 85.87%, 84.86%, and 82.32% at 21.30 GiB. The mean per-layer K=40 hot-set
+Jaccard overlap falls to 47.15% between chat and code.
 
-The hot sets also move with the workload. At K=40, mean per-layer Jaccard overlap is 69.2% for chat versus math, 54.0%
-for chat versus code, and 58.0% for math versus code. A single K=40 set selected over the combined trace covers only
-75.0% of code selections, versus 80.1% for the code-local set. This supports testing an online, per-layer top-K policy
-rather than assuming a fixed global placement.
+This supports building an adaptive K=40 prototype on the RTX 5090 with cold routed slices in CPU DRAM. K=40 leaves a
+10.29 GiB GPU budget after the other checkpoint tensors and needs 39.06 GiB of host memory for the cold routed
+slices. K=48 leaves only 6.73 GiB on the GPU. These are placement floors before workspaces, CUDA graphs, and KV cache,
+so K=40 is the safer first end-to-end configuration.
 
-These percentages are ideal frequency coverage, not measured cache hit rates. The counter records routed rows, not
-the ordered sequence of buffer references or PCIe transfers. The next experiment must retain reference order and run
-the actual cache on the RTX 5090 before making a latency claim.
+This run does not measure an actual cache hit rate or transfer cost. The counter records frequency but not reference
+order, and no weights moved between GPU and CPU during the experiment. The result justifies the prototype; it does
+not establish its latency or throughput.
 
 ## Protocol
 
 `emmy bench experiments/gpt-oss-120b/routing_histogram_v100` ran the exact native-MXFP4
 `openai/gpt-oss-120b` checkpoint at revision `b5c939de8f754692c1647ca79fbf85e8c1e70f8a`. This is the checkpoint
 intended for the hybrid deployment, not a separately requantized derivative. OpenAI describes gpt-oss-120b as a
-mixture-of-experts model whose weights use MXFP4 and fit on one 80 GB GPU
+mixture-of-experts model whose MXFP4 weights fit on one 80 GB GPU
 ([model announcement](https://openai.com/index/introducing-gpt-oss/)).
 
-The server used pipeline parallelism across four V100s. Emmy kept each routed matrix in its native uint8 blocks and
-uint8 E8M0 scales, decoded those values inside compiled programs, and updated one cumulative GPU counter for every
+The server used pipeline parallelism across four V100s. Emmy kept routed matrices in their native uint8 blocks and
+uint8 E8M0 scales, decoded them inside compiled programs, and updated one cumulative GPU counter for every
 `(layer, routed input slice)` selection. Counter snapshots were emitted before uncaptured forwards; CUDA-graph decode
 replays updated the same counters on-device.
 
@@ -38,26 +37,33 @@ After a delimiter probe, the client sent the first 16 rows from each fixed datas
 | Math | `openai/gsm8k`, `test` | 16 | 2,719 | 391,536 |
 | Code | `openai/openai_humaneval`, `test` | 16 | 3,236 | 465,984 |
 
-Every request allowed 32 completion tokens at temperature 0. The final probe caused the complete code-window snapshot
-to be logged. Snapshot subtraction matched `4 * (usage.total_tokens + 1)` at all 36 layers and all four workload
-boundaries; the full counts and validation offsets are in `v100x4_routing_histograms.json` inside the archive.
+Every request allowed 32 completion tokens at temperature 0 and returned token IDs. The final probe caused the
+complete code-window snapshot to be logged. Snapshot subtraction matched
+`4 * (response.usage.total_tokens + 1)` at all 36 layers and all four workload boundaries.
+
+The response audit found 50/50 HTTP 200 responses, 50 finite JSON records, and 1,600 token IDs matching reported
+completion usage exactly. The IDs contained 577 distinct values and no zero tokens. Every response reached the
+32-token cap and contained content, reasoning, or a tool call; this is a structural check, not a semantic evaluation
+of all 48 workload answers. The separate qualification probes below provide the generation-correctness gate.
+An independent raw recomputation matched every counter delta, histogram bin, distribution metric, top-K result,
+combined-static result, and Jaccard value in the derived JSON without discrepancy.
 
 ## Run and platform
 
-The successful refresh started at `2026-08-23T23:38:04Z`, completed at `2026-08-24T00:08:36Z`, and has run ID
-`20260823T233804Z`. The row `v100x4` / `611ccd6e5f6e` succeeded: 50/50 requests returned HTTP 200 and no workload
-process remained after the cleanup trap. The repository revision was `ce918dbc` after rebasing onto main revision
-`1ee50309`; the working tree held the refreshed image pin and onboarding recipe update.
+The successful run started at `2026-08-24T10:31:35Z`, completed at `2026-08-24T11:01:52Z`, and has run ID
+`20260824T103135Z`. The `v100x4` / `611ccd6e5f6e` row succeeded in 1,813.48 seconds. An initial attempt was excluded
+after its SSH transport timed out during the workload; the retained recipe emits a heartbeat, and the clean rerun
+completed without a transport, command, or cleanup error. The supplied host was left running.
 
-The supplied host ran Ubuntu 24.04.1 and kernel 6.8.0-124-generic with 334.4 GiB RAM, an Intel Xeon Platinum 8168,
-four Tesla V100-SXM3-32GB GPUs, driver 580.159.03, CUDA 12.9.86, and Docker 29.5.3. The task-local image was
-`sha256:9408e965af48ddafc76172945da356a7293510dd1ac44ae723b342ee947a9d98`; it contains Emmy on the supplied
+The experiment record names revision `fc62d470`, after the compiler and serving changes had been rebased onto main
+revision `bfb9150c`. Its dirty flag covers the retained recipe refresh, onboarding text, and explicit Boolean A/B pin
+fix that are committed with this result. The later main revision `d6a852ec` changes only Gemma documentation and a
+Gemma golden, so the final rebase does not change this model's trace, kernel boundaries, or histogram protocol.
+
+The host ran Ubuntu 24.04.1 and kernel 6.8.0-124-generic with 334.4 GiB RAM, an Intel Xeon Platinum 8168, four Tesla
+V100-SXM3-32GB GPUs, driver 580.159.03, CUDA 12.9.86, and Docker 29.5.3. The final task-local image was
+`sha256:d34833c60f2a0c757b260381564378b1b7ca2981bdef193ee6c8b06a6d29c9ac`; it contains Emmy on the supplied
 Volta-compatible 1Cat vLLM base, vLLM `1.2.3.dev87+gd76126608.d20260810`.
-
-The model loaded with 15.33 GiB per pipeline rank. During graph preparation the four processes used 28.6–29.7 GiB
-each; PP0 later reported 11.88 GiB available for KV cache. Startup took about ten minutes, including 441 seconds for
-model loading and cold Emmy compilation. gpt-oss attention sinks are not supported by the optimized Flash-V100 path,
-so this trace explicitly allowed its Triton fallback. Latency from this run is not a serving-performance result.
 
 ## Usage histograms
 
@@ -66,26 +72,25 @@ below 1× are colder than uniform routing for their layer. The first bin include
 
 | Multiple of layer mean | Chat buffers | Math buffers | Code buffers |
 | --- | ---: | ---: | ---: |
-| 0–0.1× | 28.23% | 32.23% | 27.17% |
-| 0.1–0.25× | 15.23% | 12.24% | 11.44% |
-| 0.25–0.5× | 14.93% | 12.59% | 13.91% |
-| 0.5–1× | 15.45% | 15.52% | 17.97% |
-| 1–2× | 12.93% | 13.35% | 15.02% |
-| 2–4× | 8.29% | 8.72% | 10.16% |
-| 4–8× | 3.60% | 3.99% | 3.47% |
-| ≥8× | 1.32% | 1.37% | 0.87% |
+| 0–0.1× | 22.63% | 25.02% | 21.59% |
+| 0.1–0.25× | 15.65% | 12.67% | 12.15% |
+| 0.25–0.5× | 17.10% | 14.41% | 14.97% |
+| 0.5–1× | 17.08% | 17.38% | 19.88% |
+| 1–2× | 14.15% | 16.62% | 18.19% |
+| 2–4× | 8.68% | 9.48% | 9.38% |
+| 4–8× | 3.45% | 3.32% | 3.02% |
+| ≥8× | 1.26% | 1.09% | 0.82% |
 
 | Distribution metric | Chat | Math | Code |
 | --- | ---: | ---: | ---: |
-| Buffers selected at least once | 86.57% | 81.75% | 86.63% |
-| Gini coefficient | 0.710 | 0.706 | 0.661 |
-| Mean effective slices per layer | 49.77 | 50.46 | 58.20 |
-| Mean slices needed for 80% of selections | 34.44 | 34.53 | 40.03 |
-| Mean slices needed for 90% of selections | 50.83 | 49.92 | 56.31 |
+| Buffers selected at least once | 92.49% | 89.95% | 93.38% |
+| Gini coefficient | 0.670 | 0.650 | 0.619 |
+| Mean effective slices per layer | 55.13 | 58.58 | 63.63 |
+| Mean slices needed for 80% of selections | 38.64 | 40.86 | 44.72 |
+| Mean slices needed for 90% of selections | 56.64 | 57.86 | 62.28 |
 
-The high Gini values and effective counts well below 128 reject the roughly-uniform-use hypothesis on these windows.
-The large nonzero coverage also rejects a simpler conclusion that most buffers can remain permanently absent: many
-slices are cold rather than unused.
+The effective counts are far below 128 and the Gini values reject roughly uniform use in these windows. The high
+nonzero coverage also rejects permanent removal of most slices: many are cold rather than unused.
 
 ### Ideal per-window top-K coverage
 
@@ -94,92 +99,141 @@ not an observed cache policy.
 
 | K per layer | Packed expert VRAM | GPU floor including other weights | Chat | Math | Code |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 7.10 GiB | 11.06 GiB | 59.44% | 58.29% | 52.97% |
-| 24 | 10.65 GiB | 14.61 GiB | 70.09% | 69.63% | 64.78% |
-| 32 | 14.20 GiB | 18.16 GiB | 77.89% | 77.85% | 73.50% |
-| 40 | 17.75 GiB | 21.71 GiB | 83.68% | 83.95% | 80.14% |
-| 48 | 21.30 GiB | 25.26 GiB | 88.14% | 88.64% | 85.36% |
-| 56 | 24.85 GiB | 28.81 GiB | 91.54% | 92.22% | 89.46% |
-| 64 | 28.40 GiB | 32.37 GiB | 94.09% | 94.87% | 92.66% |
+| 16 | 7.10 GiB | 11.06 GiB | 55.98% | 52.46% | 49.57% |
+| 24 | 10.65 GiB | 14.61 GiB | 67.04% | 64.06% | 60.90% |
+| 32 | 14.20 GiB | 18.16 GiB | 75.01% | 72.78% | 69.68% |
+| 40 | 17.75 GiB | 21.71 GiB | 81.08% | 79.53% | 76.72% |
+| 48 | 21.30 GiB | 25.27 GiB | 85.87% | 84.86% | 82.32% |
+| 56 | 24.85 GiB | 28.82 GiB | 89.58% | 89.04% | 86.90% |
+| 64 | 28.40 GiB | 32.37 GiB | 92.45% | 92.34% | 90.60% |
 
 One native-MXFP4 `(layer, input slice)` allocation is 13,236,480 bytes: gate/up and down blocks, their E8M0 scales,
-and both biases. All 4,608 routed allocations occupy 56.80 GiB; the remaining checkpoint tensors occupy 3.96 GiB,
+and both biases. All 4,608 routed allocations occupy 56.81 GiB; the remaining checkpoint tensors occupy 3.96 GiB,
 for 60.77 GiB total.
 
-On a 32 GiB RTX 5090, K=64 is impossible before runtime state because its 32.37 GiB floor already exceeds card
-capacity. K=48 leaves only 6.74 GiB for workspaces, CUDA graphs, and KV cache. K=40 leaves 10.29 GiB and is the safer
-first prototype. If hot allocations exist only in VRAM rather than being duplicated in host memory, K=40 leaves
-43.02 GiB of checkpoint storage in CPU DRAM; K=48 leaves 39.47 GiB. Both fit in 64 GiB with materially more headroom
-than retaining a complete 60.77 GiB host copy.
+K=64 is impossible on a 32 GiB RTX 5090 before runtime state because its 32.37 GiB floor exceeds card capacity. K=48
+leaves 6.73 GiB for workspaces, CUDA graphs, and KV cache; K=40 leaves 10.29 GiB. If hot slices are not duplicated in
+host memory, the cold routed store requires 39.06 GiB at K=40 or 35.51 GiB at K=48, leaving 24.94 or 28.49 GiB of the
+64 GiB host budget for the operating system, staging, metadata, and runtime allocations.
 
 ### Workload movement
 
 | K | Chat–math Jaccard | Chat–code Jaccard | Math–code Jaccard |
 | ---: | ---: | ---: | ---: |
-| 16 | 56.1% | 47.7% | 58.7% |
-| 32 | 65.7% | 51.5% | 57.1% |
-| 40 | 69.2% | 54.0% | 58.0% |
-| 48 | 71.6% | 57.4% | 61.2% |
+| 16 | 49.0% | 39.0% | 47.5% |
+| 32 | 57.9% | 43.6% | 50.2% |
+| 40 | 60.6% | 47.1% | 52.2% |
+| 48 | 64.1% | 50.9% | 54.5% |
 
-A static K=40 set chosen from all three windows covers 81.83% of chat, 81.85% of math, and 75.05% of code. At K=48
-the corresponding coverage is 86.18%, 86.55%, and 80.89%. The gap from the per-window bounds is direct evidence that
-the placement should adapt as the workload changes.
+A static K=40 set selected over all three windows covers 78.48% of chat, 76.16% of math, and only 69.84% of code,
+versus 81.08%, 79.53%, and 76.72% for the window-local sets. At K=48, the static set covers 83.35%, 81.67%, and
+75.78%, versus local coverage of 85.87%, 84.86%, and 82.32%. The movement supports an online per-layer placement
+policy rather than one fixed set.
 
 ## Trace and tuning qualification
 
-The exact checkpoint trace produced 18 frontend graphs and 24 distinct post-fusion Loop targets. Its SHA-256,
-`df9301d20bfd212d260f34cf27abdc84ffce832b2572eb08e57f5b79584b6924`, is byte-identical to the pre-rebase
-working golden, so the histogram protocol remained unchanged. M=1, M=16, and dynamic variants yielded 72 tuning
-targets.
+The exact checkpoint trace completed in 17 seconds and produced 18 frontend graphs, 24 distinct post-fusion Loop
+targets, and 72 M=1, M=16, and dynamic realizations. Its SHA-256 is
+`63d28a6b5cbbdd054fbfe48cabc8f2565eda48eb63e2b65cc72ecb411e08e151`, byte-identical to the trace taken before
+the final serving qualification.
 
-Both official arms started with empty DB, online-checkpoint, and compiled-kernel paths. They used four V100s, seed 17,
-three candidate slots per target, patience 3, the O1 ranking lane, and the same 7,200-second deadline. MCTS-only
-completed 72/72 targets in 651 seconds with 2,526 O1 benches and 64 clean searched winners. The corrected
-proposal-seeded arm completed 72/72 in 656 seconds with 1,896 O1 benches, 70 clean searched winners, 48 clean
-proposals, 20 unmatched proposals, and four ambiguous multi-kernel proposals. Candidate-specific failures were slow
-kernels, watchdogs, or unmatched input names rather than trace failures.
+Both official tuning arms started with empty DB, online-checkpoint, and compiled-kernel paths. Each used all four
+V100s, seed 0, at most 40 candidates per target, patience 12, and the O1 ranking lane:
 
-Representative finalists from each arm and the model proposal were then recompiled twice at deployable O3. Every
-pinned result had status `ok` and no integrity flags:
+| Arm | Completed targets | Wall time | Successful O1 rows | Failed candidate rows | Usable winner rows |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Proposal-seeded | 72/72 | 3,570 s | 2,436 | 51 | 67 |
+| MCTS-only | 72/72 | 3,472 s | 2,408 | 52 | 64 |
 
-| Routed target | MCTS-only | Seeded search | Model proposal | Result |
-| --- | ---: | ---: | ---: | --- |
-| M=1 gate/up | 491.01 µs | 813.57 µs | 164.95 µs | Greedy, about 134 µs |
-| M=1 down | 463.10 µs | 1,203.20 µs | 72.37 µs | Greedy, about 66–68 µs |
-| M=16 gate/up | 5,506.05 µs | 11,701.25 µs | 1,872.90 µs | Proposal is greedy `t128` family |
-| M=16 down | 3,912.70 µs | 3,914.24 µs | 859.65 µs | Proposal is greedy `t128` family |
+Candidate failures were bounded slow-kernel or benchmark failures; neither arm lost a target. The proposal-seeded
+working golden retained 135 ranked rows after its 72 inventory rows. Twenty proposals did not match a realized pin
+and four were ambiguous across multiple kernels, so they were not treated as winners.
 
-The O1 search ranking did not transfer reliably to O3, and the proposed M=16 pins reduced to the same fully realized
-`t128` family as greedy. No searched result was promoted to a canonical golden. The raw working goldens, databases,
-online checkpoints, logs, and 24 O3 JSON records are retained as qualification evidence.
+Deployable O3 replay expanded the two arms, proposals, and representable greedy schedules to 164 candidates over 72
+targets. Two independent 10-warmup, 100-iteration rounds found 63 targets with two valid greedy references, 142
+candidates correct and valid twice, and 74 no-regression rows across 47 targets. Candidate repeat delta had a 0.306%
+median and 5.07% p95; reference repeat delta had a 0.513% median and 14.94% p95. The slow dynamic reference was rerun
+with longer limits and repeated within 0.213%.
 
-## Onboarding status
+A conservative partial selection passed the two-round correctness, stability, and offer audit for 39 targets, but it
+did not pass the serving-coverage gate. The realized serving graph reported 24 verified matches, no drift, and 72
+reachable gaps. A partial golden would silently enter the verified tier without covering the deployed graph, so no
+canonical V100 golden was promoted. The two partial files remain evidence only inside the archive; the recipe has no
+`golden/` directory and makes no fresh-clone tuned-performance claim.
 
-Native MXFP4 loading, tracing, compilation, four-stage API startup, CUDA-graph-safe usage tracking, and a complete
-50-request experiment are qualified on the supplied V100 host. Generation correctness is not. With the GPT-OSS
-reasoning parser enabled, chat, tool-choice, and a 2,590-token context probe all exhausted their output limits with
-null content, reasoning, and tool calls. An eight-token diagnostic returned token ID 0 eight times, and requesting
-logprobs failed because the response contained NaNs. The long prompt executed but missed the decode twin at width 30
-and fell to a cold symbolic path; it did not demonstrate context recall.
+The O3 audit also exposed an A/B replay defect: registered Boolean pins such as `FAST_MATH=False` were discarded with
+render-only Boolean markers. Explicit A/B rows now keep Boolean input pins separate from schedule pins, preserve false
+values in JSON, and report the lane realized by the compiled graph. Focused tests cover ordinary and embedded-IR
+replay. This fix prevents a nominal standard-precision row from measuring a different input regime.
 
-This is not a maintained public serving recipe. The diagnostic image is local to the supplied host and was not
-published because registry publication requires separate approval. The onboarding shell now pins the immutable model
-revision and the measured 4× V100 target, but remains untested rather than claiming valid generation, a reproducible
-public image, or a canonical tuned golden.
+## Generation correctness
+
+The earlier image produced repeated token ID 0 and NaN logprobs. Layer-by-layer diagnosis found the fp16 residual
+stream reaching about 65,000 by layer 34 and overflowing at the next residual add. Native-MXFP4 gpt-oss now keeps the
+embedding and inter-layer residual in fp32 while retaining fp16 projection, router, and expert activations. The pack
+identity includes `gpt-oss-mxfp4-fp32-residual-v1`, so stale compiled programs cannot survive the precision change.
+
+The same investigation fixed an integer-dtype loss in readable expression inlining. An inlined shift feeding an
+MXFP4 bit mask could otherwise be rendered as a logical rather than integer operation. The regression test asserts
+the exact integer shift-and-mask spelling.
+
+The final image passed six independent API probes:
+
+- 6/6 HTTP 200 responses and no server-side OOM, NaN, or non-finite report;
+- nonzero raw token IDs `[200005, 35644, 200008, 976, 1825, 5003, 25, 392]`;
+- two deterministic plain responses whose decoded content was exactly `ready`;
+- finite token logprobs;
+- the exact tool call `get_weather({"location":"Paris, France"})`; and
+- exact recall of `ZEPHYR-48291` from a 2,695-token context.
+
+The corrected 50-request histogram run independently produced 1,600 nonzero token IDs and no runtime error. It
+therefore measures the corrected routing path rather than the old token-0 failure mode.
+
+## Serving performance and native vLLM boundary
+
+The model loaded 15.33 GiB of weights per pipeline rank. Peak process memory was about 29.76 GiB on each 32 GiB V100,
+and PP0 reported 11.88 GiB available for KV cache. Cold startup took about 10 minutes, including 450 seconds for model
+loading and fresh Emmy compilation. gpt-oss attention sinks are unsupported by the optimized Flash-V100 path, so the
+run explicitly used its Triton fallback. The expert programs remained on the measured greedy/task-local evidence path
+because no canonical golden passed the full-coverage gate.
+
+`vllm bench serve` used the OpenAI chat endpoint, a random 128-input/32-output-token dataset, 16 measured requests,
+two warmups, temperature 0, ignored EOS, and concurrency 1:
+
+| Metric | Corrected Emmy image |
+| --- | ---: |
+| Successful requests | 16/16 |
+| Request throughput | 0.0426 req/s |
+| Output-token throughput | 1.363 tok/s |
+| Total-token throughput | 9.670 tok/s |
+| Mean / median / p99 TTFT | 22.197 / 22.169 / 22.932 s |
+| Mean TPOT | 41.214 ms/token |
+| Mean ITL | 44.055 ms |
+
+Mean TPOT corresponds to about 24.26 decode tokens/s after the first token. The much lower end-to-end output rate is
+dominated by roughly 22-second TTFT. These are absolute task-local numbers, not a stock-vLLM speedup claim.
+
+The same exact checkpoint and revision were then started through the native vLLM codepath in the task-local custom
+SM70 base image. vLLM `1.2.3.dev87+gd76126608.d20260810` rejected `gpt_oss_mxfp4` during configuration because it
+requires compute capability 8.0 and V100 is 7.0. It did not start workers, load weights, or serve a request. The valid
+comparison on this hardware is therefore a support boundary: Emmy serves the checkpoint on 4× V100 while native
+vLLM rejects it. No stock-vLLM throughput, latency ratio, or output-parity result exists on V100.
 
 ## Archive and limitations
 
-`results_v100x4.tar.gz` contains the successful timestamped directory, including the system-only experiment record,
-server and client logs, exact prompts and responses, image inspection, full per-layer histogram JSON, byte-identical
-trace, both official tuning arms, O3 checks, and the generation-correctness probes.
+`results_v100x4.tar.gz` contains only the successful timestamped run. It includes the system-only experiment record,
+exact prompts and responses, image inspection, server logs, full per-layer histogram JSON, byte-identical trace,
+equal-budget tuning DBs and working goldens, both O3 replay rounds, failed partial-promotion audits, final image build,
+correctness probes, serving benchmark, and native-vLLM rejection evidence. Compiled cubins and exploratory scripts are
+excluded.
 
-The sample has 16 prompts per workload, one fixed ordering, greedy 32-token completions, and no concurrency. All 50
-responses reached the length cap with null content. The histogram therefore includes routed rows from a broken token-0
-decode path as well as the workload prompts; it is placement-frequency evidence, not answer-quality validation. The
-small math and code deltas from the previous run reinforce that the reported coverage is an empirical bound, not a
-fixed model property.
+The routing sample has 16 prompts per workload, one fixed ordering, greedy 32-token completions, no concurrency, and
+no repeated or randomized run. Category prompt lengths differ. The combined-static ranking weights each window by
+its routed-row volume rather than giving the three workloads equal weight. All responses reached the output cap, so
+their generated continuations influence the counters. Frequency aggregation loses temporal locality and cannot
+predict PCIe miss cost, overlap, prefetch efficiency, or churn. The next experiment must retain ordered references
+and run the actual K=40/K=48 cache on the RTX 5090 with 64 GiB host RAM.
 
-Histogram aggregation also loses temporal locality and cannot predict actual PCIe miss cost, overlap, prefetch
-efficiency, or cache churn. The V100 Triton attention fallback and untuned greedy expert programs make request latency
-non-representative. The next gate is to diagnose the NaN logits and rerun correct generation; ordered-reference cache
-replay and the actual K=40/K=48 hybrid implementation on the RTX 5090 + 64 GiB host follow that gate.
+This is still an onboarding recipe, not a maintained public serving recipe. The diagnostic image is local to the
+supplied host and was not published because registry publication requires separate approval. A full-coverage
+canonical V100 golden and an RTX 5090 hybrid deployment remain open work.

@@ -164,13 +164,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
   above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
 
-- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
-  quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
-  trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
-  (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
-  and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
-  same split at the trellis format's own shapes (`fmt == "exl3"`). Laguna EXL3 additionally stores routed up
+- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
+  quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
+  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
+  attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
+  program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
+  blocks with uint8 E8M0 scales; biases stay in the requested value dtype. An EXL3 checkpoint takes the same split at
+  the trellis format's own shapes (`fmt == "exl3"`). Laguna EXL3 additionally stores routed up
   projections with the architecture's `interm_div=128` scale; the loader folds the inverse and the model's base
   routed scale into selected routing weights and marks their combine for fp32 accumulation, matching the reference
   runtime without scaling expert partials in fp16. The architecture's residual stream is fp32 from embedding through

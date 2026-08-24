@@ -13,14 +13,25 @@ command:
     - workloads.json
   run: |
     set -euo pipefail
-    image=sha256:9408e965af48ddafc76172945da356a7293510dd1ac44ae723b342ee947a9d98
+    image=sha256:d34833c60f2a0c757b260381564378b1b7ca2981bdef193ee6c8b06a6d29c9ac
     compilation_config='{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
     container=emmy-gptoss-routing-$$RANDOM
+    heartbeat_pid=
     cleanup() {
+      if [ -n "$$heartbeat_pid" ]; then
+        kill "$$heartbeat_pid" >/dev/null 2>&1 || true
+      fi
       sudo docker logs "$$container" > $task_dir/server.log 2>&1 || true
       sudo docker rm -f "$$container" >/dev/null 2>&1 || true
     }
     trap cleanup EXIT
+
+    # Keep the SSH transport visibly active during the ten-minute model load and long sequential prompts.
+    while true; do
+      echo "[routing] heartbeat $$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      sleep 30
+    done &
+    heartbeat_pid=$$!
 
     sudo docker image inspect "$$image" > $task_dir/image.json
     sudo docker run -d --name "$$container" --gpus all --ipc host --network host \
@@ -29,6 +40,7 @@ command:
       -e EMMY_GEN_DECODE_BUCKET=16 \
       -e EMMY_GEN_PREFILL_BUCKET=0 \
       -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      -e EMMY_CUBIN_CACHE=/tmp/emmy-cubins-routing \
       -e VLLM_SM70_FLASH_ATTN_V100=1 \
       -e VLLM_FLASH_V100_ALLOW_TRITON_FALLBACK=1 \
       "$$image" openai/gpt-oss-120b \
@@ -97,6 +109,7 @@ command:
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 32,
                 "temperature": 0.0,
+                "return_token_ids": True,
             }
         ).encode()
         req = urllib.request.Request(

@@ -149,7 +149,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
   (`_rider_dest`, cached per column width for gemma-4's heterogeneous layers) instead of clone + `torch.cat`,
   halving the rider seam bytes and removing the per-layer allocation churn — the caller must consume rider
-  outputs before its next rider call (attention does, within the layer) — which is what lets
+  outputs before its next rider call (attention does, within the layer). Each destination uses its declared output
+  dtype, so an fp32 residual model's normalized MoE activation remains in the projection dtype. This is what lets
   `--max-num-batched-tokens` default to `capacity + bucket`: a full
   chunk step keeps carrying its decode riders and the previous prompt's 1-token BOS tail instead of freezing every
   decoding request for the whole chunk and deferring first-token sampling (the measured c=4/c=8 TTFT structure), and

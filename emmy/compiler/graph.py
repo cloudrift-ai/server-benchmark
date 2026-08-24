@@ -829,7 +829,18 @@ class Graph:
         # ``ElementwiseOp.infer_output_shape`` states the rule for every elementwise
         # op but no compile path calls it, and a shape-changing copy would reach the
         # loop stage as a silent broadcast.
-        from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415 — avoids a dialect import cycle at module load
+        # noqa: PLC0415 below — a module-level import of the dialect would cycle.
+        from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp  # noqa: PLC0415
+
+        # An index map moves values, it does not convert them, so several sources
+        # feeding one result must agree on the element type. A source that differed
+        # would be a conversion, which is what a dtype-changing copy is for.
+        for nid, node in self.nodes.items():
+            if not isinstance(node.op, IndexMapOp) or len(node.inputs) < 2:
+                continue
+            dtypes = {str(t.dtype) for inp in node.inputs if (t := self.buffer(inp)) is not None}
+            if len(dtypes) > 1:
+                raise ValueError(f"index map {nid!r} reads sources of differing dtypes: {sorted(dtypes)}")
 
         for nid, node in self.nodes.items():
             if not (isinstance(node.op, ElementwiseOp) and node.op.name == "copy"):

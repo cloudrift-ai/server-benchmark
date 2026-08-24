@@ -19,6 +19,7 @@ possible in Rust:
 - No I/O, no side effects. Whole program is `main` function that deterministically maps its arguments to its return value.
 - No control flow and no pattern matching: `if`, `for`, `while`, `match`.
 - No traits.
+- No ownership or borrow checker.
 - First-class typed tensors support. Example: `let x : f32[16,8,64] = ...` is a three-dimensional tensor.
 - Tensor's shape is given by its type. You may not omit the dimensions that go in `[]` of `f32[16,8,64]`.
 - Types (of a struct or a function) can be polymorphic over values. This is particularly useful to support `--dynamic`
@@ -422,9 +423,7 @@ position along `axis` that one output element reads; the other coordinates come 
 itself.
 
 Close to torch's `gather`, but stricter. Torch allows `idx` to be smaller than `data` on the axes it does not
-gather; `emmy::gather` requires them equal there. A node whose `idx` is smaller on such an axis is therefore
-not this operation at all — it prints as `emmy::gather_by_axis`, and that is what the graph computes, even
-though the same call in torch would have been a gather.
+gather; `emmy::gather` requires them equal there.
 
 ```rust
 fn emmy::gather<T, const rank: usize, const d: usize[rank], const e: usize[rank]>(
@@ -453,24 +452,43 @@ fn emmy::gather_by_axis<T, const rank: usize, const irank: usize, const d: usize
 
 #### `emmy::index_map`
 
-A reindexing `emmy::tensor_from_fn` cannot hold: no source, several sources, a selection deciding which source
-feeds which output position, or rank above six. A printed call lists the operand tensors; the coordinate map
-that pairs each one with the output index, and the condition under which it supplies a position, stay inside
-the node.
+Reads values from several tensors into one result, choosing per output position which tensor to read and where.
+A source is three things: an operand, a map from an output index to an index into that operand, and a condition
+selecting the output positions it supplies. Sources are ordered, and the first whose condition holds at a
+position supplies it.
 
 ```rust
-// A tensor whose rank and shape the type does not expose — an existential type,
-// https://en.wikipedia.org/wiki/Type_system#Existential_types
-struct Tensor<T> {
-  rank: usize,
-  d: usize[rank],
-  t: T[d],
+struct IndexSource<T, const rank: usize> {
+  operand_rank: usize,
+  operand_d: usize[operand_rank],
+  operand: T[operand_d],
+  coord: |usize[rank]| -> usize[operand_rank],
+  select: |usize[rank]| -> bool,
 }
 
-fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(operands: Tensor<T>[]) -> T[d]
+fn emmy::index_map<T, const rank: usize, const d: usize[rank]>(
+    sources: IndexSource<T, rank>[],
+) -> T[d]
+    // result[i] = s.operand[s.coord(i)]
+    //   where s is the first source with s.select(i)
 ```
 
-The operands need a container because they need not share a shape — the two halves of a `cat` do, the two
-constants of a mask do not. They do share the element type `T`, and only by convention: `IndexMapOp.forward`
-takes the result's dtype from the first operand and copies every other one into it, so a mixed-dtype node would
-silently follow operand zero rather than be rejected.
+`emmy::tensor_from_fn` is the printed form when there is one source and no condition; this is what prints
+otherwise. A `cat` is the everyday case — two sources filling different parts of the result:
+
+```
+emmy compile -c 'torch.cat([torch.randn(2,3), torch.randn(2,5)], dim=1)' --ir tensor
+```
+
+```rust
+let cat: f32[2,8] = emmy::index_map(inputs.x0, inputs.x1);
+```
+
+Here the first source reads `x0[i, j]` where `j < 3` and the second reads `x1[i, j - 3]` where `j >= 3`. The
+printed call carries neither: it lists the operands, and each source's `coord` and `select` stay inside the
+node. Reading a line like this one, you know which tensors feed the result and not which parts come from
+which.
+
+A source carries its operand's rank and shape as its own fields because the operands need not agree on either
+— `f32[2,3]` and `f32[2,5]` above, and a mask built from two `f16[1]` scalars. They do agree on the element
+type: `Graph.validate` rejects a node whose sources disagree on it, since converting is `emmy::cast`'s job.

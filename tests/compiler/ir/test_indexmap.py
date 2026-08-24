@@ -147,3 +147,69 @@ def test_indexmap_sources_round_trip_through_json():
     assert [s.input_idx for s in sources] == [0, 1]
     assert sources[0].coord_map == src0.coord_map and sources[1].coord_map == src1.coord_map
     assert sources[0].select == src0.select and sources[1].select is None
+
+
+# ---------- coordinates stay inside their operand ----------
+
+
+def _selected_coords_in_bounds(graph):
+    """Yield ``(node_id, axis, extent, coords)`` for every coordinate expression an
+    IndexMapOp evaluates at a position its source actually supplies.
+
+    ``IndexMapOp.forward`` evaluates each source over the whole output grid and
+    only then applies ``select``, so a coordinate matters exactly where that
+    source is selected. Reading outside the operand there would be a silent wrong
+    value, which is what this checks for.
+    """
+    import numpy as np
+
+    from emmy.compiler.ir.tensor.ir import IndexMapOp
+
+    for nid, node in graph.nodes.items():
+        if not isinstance(node.op, IndexMapOp):
+            continue
+        shape = tuple(d.as_static() for d in node.op.out_shape)
+        env = {f"{PLACEHOLDER_PREFIX}{i}": grid for i, grid in enumerate(np.ogrid[tuple(slice(0, e) for e in shape)])}
+        for src in node.op.sources:
+            operand = graph.buffer(node.inputs[src.input_idx])
+            selected = np.ones(shape, bool) if src.select is None else np.broadcast_to(src.select.eval(env), shape)
+            for axis, expr in enumerate(src.coord_map):
+                coords = np.broadcast_to(np.asarray(expr.eval(env), dtype=np.intp), shape)
+                yield nid, axis, int(operand.shape[axis].as_static()), coords[selected]
+
+
+def _tensor_graph(module, *example):
+    from emmy.compiler.pipeline import TENSOR_PASSES, Pipeline
+    from emmy.compiler.trace.torch import trace_module
+
+    traced = trace_module(module, example)
+    return Pipeline.build(TENSOR_PASSES).run(traced[0] if isinstance(traced, tuple) else traced)
+
+
+def test_index_map_coords_stay_in_bounds_where_selected():
+    torch = __import__("torch")
+
+    class Cat(torch.nn.Module):
+        def forward(self, a, b):
+            return torch.cat([a, b], dim=1)
+
+    class RotateHalf(torch.nn.Module):
+        def forward(self, x):
+            return torch.cat([-x[:, 2:], x[:, :2]], dim=1)
+
+    class Softmax(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.softmax(x, dim=-1)
+
+    graphs = [
+        _tensor_graph(Cat(), torch.randn(2, 3), torch.randn(2, 5)),
+        _tensor_graph(RotateHalf(), torch.randn(2, 4)),
+        _tensor_graph(Softmax(), torch.randn(2, 4, 8)),
+    ]
+    checked = 0
+    for graph in graphs:
+        for nid, axis, extent, coords in _selected_coords_in_bounds(graph):
+            checked += 1
+            assert coords.min() >= 0, f"{nid} axis {axis} reads a negative coordinate where selected"
+            assert coords.max() < extent, f"{nid} axis {axis} reads past extent {extent} where selected"
+    assert checked, "no index map coordinates were checked"

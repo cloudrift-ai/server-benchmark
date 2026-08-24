@@ -249,14 +249,14 @@ def test_canonical_nest_classifies_as_contraction():
     assert isinstance(node.b, Load) and node.b.input == "w"
 
 
-def _bilinear_fold(w_index: tuple, x_index: tuple):
+def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply"):
     loop = Loop(
         axis=Axis("k", Dim(K)),
         body=Body(
             (
                 Load(name="wv", input="w", index=w_index),
                 Load(name="xv", input="x", index=x_index),
-                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("wv", "xv")),
+                Assign(name="prod", op=ElementwiseImpl(product), args=("wv", "xv")),
                 Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
             )
         ),
@@ -286,6 +286,53 @@ def test_bind_bilinear_declines_composite_role_expr():
         con, _ = r
         for ch in con.channels:
             assert not isinstance(ch.b, Load), "the impure composite must not become a direct slab load"
+
+
+def test_bind_bilinear_accepts_grouped_computed_b_independent_of_product_order():
+    """A flattened GQA value row is a computed B cone when the query-head group and channel
+    share one index expression. The multiply's commutative argument order cannot decide whether
+    that cone is discovered: fusion emits the value load first in the deployed attention cell."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+    )
+
+    r = bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"}))
+
+    assert r is not None
+    con, epi = r
+    assert not epi
+    assert isinstance(con.a, Load) and con.a.input == "x"
+    assert all(not isinstance(channel.b, Load) for channel in con.channels), "the flattened grouped value must use a computed B cone"
+
+
+def test_bind_bilinear_rejects_grouped_b_that_changes_with_the_row():
+    """A grouped value address that also reads the output row is not one B slab per tile.
+    Trying the commutative product's other orientation must still fail closed."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
+    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+    )
+
+    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
+
+
+def test_bind_bilinear_does_not_reorder_a_noncommutative_product():
+    """Trying the opposite direct/computed role is licensed only for a commutative product."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    f = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+        product="subtract",
+    )
+
+    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
 
 
 # --- the warp tier's split-store addressability --------------------------------------------------- #

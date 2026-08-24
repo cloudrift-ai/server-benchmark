@@ -981,7 +981,12 @@ def bind_bilinear(
         if lift.args[0] == lift.args[1]:
             return None  # a square product (both args one value — Σ x·x) has no role split
         b_arg = next((a for a in lift.args if role_load(a, n_name, m_name) is not None), None)
-        a_arg = next(a for a in lift.args if a != b_arg)
+        if b_arg is None and lift.op.commutative:
+            # A composite B may need the computed-operand path. Pick the direct A by
+            # role, independent of the commutative product's SSA argument order.
+            a_arg = next((a for a in lift.args if role_load(a, m_name, n_name) is not None), lift.args[0])
+        else:
+            a_arg = next(a for a in lift.args if a != b_arg)
         reads.append((lift, loads.get(b_arg) if b_arg is not None else None, a_arg))
     if len({lift.op for lift, _, _ in reads}) != 1:
         return None  # the channels must share ONE ⊗ — a mixed-product body is not a bilinear form

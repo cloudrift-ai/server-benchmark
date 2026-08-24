@@ -136,6 +136,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "from_f8e4m3": from_f8(torch.float8_e4m3fn),
         "from_f8e5m2": from_f8(torch.float8_e5m2),
         "copy": lambda a: a[0],
+        "pad": lambda a: a[0],
     }
 
 

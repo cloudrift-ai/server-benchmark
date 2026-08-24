@@ -244,7 +244,12 @@ Two binding scopes share the protocol:
 
 The two discovered strategies: **`ProvenanceStrategy`** owns op provenance end to end (`seed` at run start,
 `propagate` from the splice receipt, mint for `frontend/decomposition`'s fragments, aggregate for everything else)
-— a pipeline built without it has no provenance anywhere, and `graph.py` imports none of it.
+and keeps the replaced result's ultimate `Op.source` object on its rewrite fragments. The pattern root may be an
+upstream producer while `Match.output` names the consumer result that the fragment replaces. A fragment may consume
+inputs from other origins without losing that result identity; those producer edges retain their own sources. The
+source identity lets semantic rewrites distinguish a frontend operation's private decomposition edges from tensor
+boundaries between operations. A pipeline built without the strategy has no provenance anywhere, and `graph.py`
+imports none of it.
 **`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
 `op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
 `loop/stamp`), minted pieces (a cut's fragments, a split's pieces) at the splice event, before the fragment even

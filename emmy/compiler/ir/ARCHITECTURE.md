@@ -488,6 +488,14 @@ splicer refuses that shape whether it is the merged root or a producer edge: dep
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. The standalone
 `LoopOp` remains the raw-loop escape, so the accumulator update and its `Write` stay in one serial loop.
 
+An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
+declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that
+boundary as a typed `copy` alias. Nodes created by decomposing and rewriting one frontend operation share the ultimate
+`Op.source` object and may reconstruct their private edge directly. A private output stays recognizable even when its
+consumer fragment already mixes origins: it is absent from the ultimate frontend source's declared outputs. Missing
+or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
+ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
+
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
 global cache would require; the memo is discarded with the splicer.
@@ -498,9 +506,10 @@ reformats deep coordinate trees nor retains duplicate canonical strings.
 
 Fusion may give the splicer the ordinary work-growth ceiling before construction. The splicer accumulates the exact
 static-extent arithmetic-leaf work at each inserted scope (using 128 for a symbolic extent, as the final fusion metric
-does) and refuses as soon as the monotonic partial work exceeds that ceiling. Identity-copy aliases are excluded
-because normalization removes them from the finished body. An admitted bounded splice constructs the same body bytes
-as an unbounded splice; the bound only terminates a candidate whose final ordinary work limit is already impossible.
+does) and refuses as soon as the monotonic partial work exceeds that ceiling. Untyped identity-copy aliases are
+excluded because normalization removes them from the finished body; a typed copy is a real conversion and counts as
+work. An admitted bounded splice constructs the same body bytes as an unbounded splice; the bound only terminates a
+candidate whose final ordinary work limit is already impossible.
 
 ### `loop/runner.py` — C++ JIT executor
 

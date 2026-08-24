@@ -398,7 +398,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"${reference_statuses[0]}" = ok' in emmy_runner
     assert '"${reference_statuses[1]}" = ok' in emmy_runner
     assert 'test "$missing_goldens" -eq 0' in emmy_runner
-    assert 'test "$successful_setups" -gt 0' in emmy_runner
+    assert 'test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"' in emmy_runner
     assert "run_pytorch.py" in emmy_runner
     assert 'reference_statuses+=("pytorch-only:emmy-failed:$reference_status")' in emmy_runner
 
@@ -406,6 +406,37 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert 'mode="max-autotune-no-cudagraphs"' in pytorch_runner
     assert "torch.testing.assert_close" in pytorch_runner
     assert '"captured_whole_forward"' in pytorch_runner
+
+
+def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
+    directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+    for sequence_length in (256, 512, 1024, 2048, 4096, 8192, 16384, 32768):
+        (golden_dir / f"prefill_global-b1-s{sequence_length}.golden.yaml").touch()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    emmy = fake_bin / "emmy"
+    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *" --golden "*"s32768.golden.yaml"* ]]; then\n  exit 1\nfi\n')
+    emmy.chmod(0o755)
+    python = fake_bin / "python"
+    python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python.chmod(0o755)
+
+    results = tmp_path / "results"
+    completed = subprocess.run(
+        [str(directory / "run_emmy.sh"), str(emmy), "prefill_global", str(results), str(golden_dir)],
+        cwd=directory,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    statuses = (results / "setup-status.tsv").read_text().splitlines()
+    assert statuses[-2] == "prefill_global\t16384\tok\tok\tok\tok"
+    assert statuses[-1] == "prefill_global\t32768\tfailed:1\tfailed:1\tok\tok"
 
 
 def test_every_command_variant_renders(project_root) -> None:

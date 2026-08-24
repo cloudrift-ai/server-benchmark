@@ -429,7 +429,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     assert operand_body(c.a) == tuple(cone.lower()) == (*pro, *cell)
 
 
-def _attention_cone_term() -> tuple[Fold, Fold]:
+def _attention_cone_term(kv_extent: int = 32, score_extent: int = 16) -> tuple[Fold, Fold]:
     """The attention shape of the computed-A cone, built directly: the ``softmax(Q·Kᵀ)·V``
     contraction over the KV axis whose A cone is ``exp(s − m)·(1/d)`` over a COMPUTED score — one
     edge for the row statistic (the twisted ``(m, d)`` pair) and one for the per-cell score
@@ -445,8 +445,8 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
 
     names, other = ("mx", "dn"), ("mx__o", "dn__o")
     stat = Fold(
-        axis=Axis("kv", Dim(32)),
-        operands=(score("kv", Axis("dd", Dim(16)), "s1"),),
+        axis=Axis("kv", Dim(kv_extent)),
+        operands=(score("kv", Axis("dd", Dim(score_extent)), "s1"),),
         lift=Lambda(params=("kv", "s1"), body=Body(()), results=("s1", 1.0)),
         init=(float("-inf"), 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
@@ -462,11 +462,94 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
                 Assign(name="pw", op="multiply", args=("rd", "ex1")),
             )
         ),
-        operands=(prologue, score("kvb", Axis("ddb", Dim(16)), "s2")),
+        operands=(prologue, score("kvb", Axis("ddb", Dim(score_extent)), "s2")),
     )
     v = Load(names=("vl",), input="v", index=(Var("kvb"), Var("n")))
-    pv = Fold.contraction(k_axis=Axis("kvb", Dim(32)), a=cone, channels=(Channel(b=v, acc="o"),))
+    pv = Fold.contraction(k_axis=Axis("kvb", Dim(kv_extent)), a=cone, channels=(Channel(b=v, acc="o"),))
     return Fold.projection(body=Body(()), operands=(pv,)), cone
+
+
+def _attention_schedule_term(kv_extent: int = 512, value_extent: int = 128):
+    """An A100 head128 paired-contraction term and its outer value fold."""
+    from emmy.compiler.ir.tile import Placement
+
+    root, _ = _attention_cone_term(kv_extent=kv_extent, score_extent=128)
+    pv = root.operands[0]
+    inputs = {name: Tensor(name, (Dim(1),), dtype=F16) for name in ("q", "k", "v")}
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", Dim(kv_extent)), Axis("n", Dim(value_extent)))), inputs=inputs)
+    return tile, pv
+
+
+def test_paired_fragment_register_bound_matches_emitted_lifetimes():
+    """The bound counts the peak live score/output ``RegFragment`` families."""
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+
+    _tile, pv = _attention_schedule_term()
+    bad = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k8", Workers.parse("w8x2"))
+    fixed = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k4", Workers.parse("w8x2"))
+    historical = TilePlan.parse("mma_m16n8k16_f16_f32/f1x16/k8", Workers.parse("w4x1"))
+    wide_k4 = TilePlan.parse("mma_m16n8k16_f16_f32/f1x16/k4", Workers.parse("w8x2"))
+
+    assert legal.paired_fragment_registers(pv, bad, Stage(depth=1, transport="smem", bk_elems=128)) == (132, 128)
+    assert legal.paired_fragment_registers(pv, fixed, Stage(depth=1, transport="smem", bk_elems=64)) == (84, 128)
+    assert legal.paired_fragment_registers(pv, historical, Stage(depth=1, transport="smem", bk_elems=128)) == (164, 255)
+    assert legal.paired_fragment_registers(pv, wide_k4, Stage(depth=1, transport="smem", bk_elems=64)) == (116, 128)
+
+
+def test_attention_schedule_refuses_only_the_over_budget_paired_row(monkeypatch):
+    """The real seq512 structure drops bad K8, retains K4, and accepts the historical K8 pin."""
+    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as schedule
+
+    tile, pv = _attention_schedule_term()
+    ctx = Context.from_target((8, 0), gpu_name="NVIDIA A100 80GB")
+    term = schedule._Term(tile, tile.place.on_grid(), ctx)
+    blocks = schedule._contraction_blocks(term, pv, Workers.parse("w8x2"))
+    unsplit = {block.values["TILE"].spell() for block in blocks if not block.values["REDUCE"].needs_split}
+    assert "mma_m16n8k16_f16_f32/f1x8/k8" not in unsplit
+    assert "mma_m16n8k16_f16_f32/f1x8/k4" in unsplit
+    split_tile, split_pv = _attention_schedule_term(kv_extent=1024)
+    split_term = schedule._Term(split_tile, split_tile.place.on_grid(), ctx)
+    split_blocks = schedule._contraction_blocks(split_term, split_pv, Workers.parse("w8x2"))
+    assert any(
+        block.values["TILE"].spell() == "mma_m16n8k16_f16_f32/f1x8/k8" and block.values["REDUCE"].spell() == "g8k" for block in split_blocks
+    ), "the split route reschedules its child kernels, so the unsafe unsplit parent's bound does not apply"
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x16/k8")
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    pinned = schedule._Term(tile, tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(pinned, pv, Workers.parse("w4x1"))
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x16/k4")
+    wide_tile, wide_pv = _attention_schedule_term(value_extent=256)
+    wide_k4 = schedule._Term(wide_tile, wide_tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(wide_k4, wide_pv, Workers.parse("w8x2"))
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x8/k8")
+    refused = schedule._Term(tile, tile.place.on_grid(), ctx)
+    with pytest.raises(ValueError, match="132 live fragment registers/thread.*128-register envelope"):
+        schedule._contraction_blocks(refused, pv, Workers.parse("w8x2"))
+
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    pinned_split = schedule._Term(split_tile, split_tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(pinned_split, split_pv, Workers.parse("w8x2"))
+
+
+def test_standalone_k8_contraction_has_no_paired_fragment_bound():
+    """A K8 tile without a chained score remains governed by the ordinary per-tile budget."""
+    from emmy.compiler.ir.pure.fold import Channel
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+
+    node = Fold.contraction(
+        k_axis=Axis("k", Dim(512)),
+        a=Load(name="a", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b", input="b", index=(Var("k"), Var("n"))), acc="o"),),
+    )
+    plan = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k8", Workers.parse("w8x2"))
+    assert legal.paired_fragment_register_budget(node, plan, Stage(depth=1, transport="smem", bk_elems=128)) is None
 
 
 def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():

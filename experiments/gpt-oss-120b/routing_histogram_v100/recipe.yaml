@@ -13,7 +13,7 @@ command:
     - workloads.json
   run: |
     set -euo pipefail
-    image=sha256:3db6adc6528fce02cb0bc24afd59353f90677b0fd753461de9d8390f65e1da9d
+    image=sha256:9408e965af48ddafc76172945da356a7293510dd1ac44ae723b342ee947a9d98
     compilation_config='{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
     container=emmy-gptoss-routing-$$RANDOM
     cleanup() {

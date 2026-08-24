@@ -1,3 +1,6 @@
+# Compiler and task-local serving qualification target. The exact MXFP4 checkpoint traces and reaches the API on four
+# V100s, but its generated logits currently fail correctness and the diagnostic image is unpublished. This therefore
+# remains an onboarding shell. The routing experiment under experiments/gpt-oss-120b records the qualification.
 tags:
   - onboarding
   - untested
@@ -5,9 +8,8 @@ model:
   huggingface: openai/gpt-oss-120b
   rationale: "Strong HF downloads and likes drive breakout attention."
   heat: 92
+  revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
   deploy.gpu_count: 4

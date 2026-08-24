@@ -144,10 +144,10 @@ up an array by given a function of its indices.  Let's look at its application m
 ```
 
 This produces an $$4\times8$$ tensor filled with the same constant `add_c1`.  The `emmy::tensor_from_fn`
-primitive is polymorphic over the shape of the tensor it produces, so its type signature is something like `fn
-emmy::tensor_from_fn<T, n: usize, m:usize>(...) -> T[n, m]` so it may be called by the same name `emmy::tensor_from_fn`
-to produce tensors of different shapes and dimensions. Since the result's type is always annotated, the shape is never
-unambiguous.
+primitive is polymorphic over the shape of the tensor it produces and over the shape of the tensor it reads, so
+its type signature is something like `fn emmy::tensor_from_fn<T, const n: usize, const m: usize, …>(operand, coord)
+-> T[n, m]` and the same name serves tensors of any shape and rank. Since the result's type is always annotated,
+the shape is never ambiguous.
 
 In practice, tensor IR can't express `emmy::tensor_from_fn` calls with arbitrary lambdas, only some specific restricted
 forms.  But it's not a problem for you, since you only read these lambdas and never write them.  For the precise
@@ -488,11 +488,11 @@ emmy compile -c 'torch.cat([torch.randn(2,3), torch.randn(2,5)], dim=1)' --ir te
 ```
 
 ```rust
-let cat: f32[2,8]
-    = emmy::index_map([
-    IndexSource { operand: inputs.x0, coord: |i, j| [i, ((j < 3) ? j : 0)], select: |_i, j| (j < 3) },
-    IndexSource { operand: inputs.x1, coord: |i, j| [i, ((j < 3) ? 0 : (j - 3))] },
-  ]);
+  let cat: f32[2,8]
+      = emmy::index_map([
+      IndexSource { operand: inputs.x0, coord: |i, j| [i, ((j < 3) ? j : 0)], select: |_i, j| (j < 3) },
+      IndexSource { operand: inputs.x1, coord: |i, j| [i, ((j < 3) ? 0 : (j - 3))] },
+    ]);
 ```
 
 The first source supplies the columns below 3 and reads `x0` there; the second has no condition, so it takes

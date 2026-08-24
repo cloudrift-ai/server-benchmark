@@ -1042,7 +1042,8 @@ def bind_bilinear(
             if cone is None:
                 return None  # a computed A that does not read cleanly — the fold stays PLANAR
             consumed.update(id(s) for s in cone)
-            a_edge = make_cone(cone, k_name, stat=stat, sweep=tuple(sweep)) if stat is not None else make_cone(cone, k_name)
+            source = stat if stat is not None else edge
+            a_edge = make_cone(cone, k_name, stat=source, sweep=tuple(sweep) if sweep is not None else ())
         b_edges: list = [b for _, b, _ in reads]
     elif stat is None and len(reads) == 1 and (a_edge := role_load(a_arg, m_name, n_name)) is not None:
         # B rides a computed value (A is the direct load). A storage decode × k-invariant factors

@@ -832,6 +832,8 @@ def _prologue_shape(*, b_layouts, cone_per_channel=False):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
+    from emmy.compiler.ir.tile.ops import cone_seam
+
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = _fused(node, free)
     assert bound is not None
@@ -840,6 +842,9 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
     assert product.role is AxisRole.CONTRACTION
     assert len(product.channels) == 2, "two channels over ONE shared edge — sharing is the node's arity"
     assert product.a is not None
+    prologue, _cell, stats = cone_seam(product.a, product.axis.name)
+    assert stats == ("rs",)
+    assert sum(isinstance(s, Load) and s.input == "x" for s in Body(prologue).iter()) == 1
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():

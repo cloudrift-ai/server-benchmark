@@ -23,6 +23,7 @@ from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, Tu
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
+    _ProposalLoopIdentity,
     load_working_targets,
     measure_proposals,
     persist_proposal_rankings,
@@ -263,6 +264,37 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
         "source": "tune",
         "tune_winner": True,
     }
+
+
+def test_place_proposal_records_only_the_fresh_fragment_cut(tmp_path):
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm")), path)
+    _, targets = load_working_targets(path)
+    loop_graph = Pipeline.build(LOOP_PASSES).run(targets[0].program.copy(), ctx=Context((8, 9)))
+    [original_loop] = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
+
+    identity = _ProposalLoopIdentity()
+    original = TileOp(knobs={"S_n_loop": 2.0})
+    cut_fragment = Graph()
+    cut_fragment.add_node(
+        LoopOp(body=original_loop.body, knobs={"PLACE@map": "cut"}),
+        [],
+        Tensor("cut", (1,)),
+        node_id="cut",
+    )
+    identity.on_splice(SimpleNamespace(root_op=original, fragment=cut_fragment))
+
+    propagated = TileOp(knobs={"S_n_loop": 1.0, "PLACE@map": "cut"})
+    later_fragment = Graph()
+    later_fragment.add_node(LoopOp(body=original_loop.body), [], Tensor("later", (1,)), node_id="later")
+    identity.on_splice(SimpleNamespace(root_op=propagated, fragment=later_fragment))
+
+    assert len(identity.structural_parents) == 1
+    route, key, knobs = identity.structural_parents[0]
+    assert route == {"PLACE@map": "cut"}
+    assert knobs == {"S_n_loop": 2.0, "PLACE@map": "cut"}
+    assert key == TileOp(knobs=knobs).cache_key()
+    assert identity.structural_parent(route) == (key, knobs)
 
 
 def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(tmp_path, monkeypatch):

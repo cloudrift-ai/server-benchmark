@@ -538,7 +538,10 @@ Three definitions the list leans on:
 - **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
-  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
+  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided. At
+  a placement fork, `PLACE` is the exception: each candidate's complete `PLACE` subset must exactly equal the measured
+  row's subset, including the fused candidate's empty subset. A cut measurement therefore vouches only for that cut,
+  while the same prefix rule continues to apply to every non-`PLACE` knob.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so

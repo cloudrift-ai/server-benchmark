@@ -469,7 +469,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert proposal["ranking"]["status"] == "ok"
     assert reloaded_targets[0].proposals == [((0, 1), route)]
 
-    place = {"PLACE@a7": "cut"}
+    place = {"PLACE@map": "cut"}
     active_route = place
     place_db = SearchDB(tmp_path / "place.db")
     [place_ranking] = asyncio.run(
@@ -492,6 +492,114 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert place_perf.knobs == {**ctx.features(), **live_features, **place}
     assert place_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
     place_db.close()
+
+    from emmy.compiler.pipeline.search.policy.greedy import (
+        _db_measured_index,
+        _db_measured_pick,
+        _placement_candidate_rows,
+    )
+    from emmy.compiler.pipeline.search.prior.online import OnlinePrior
+
+    fused = TileOp()
+
+    def cut(route):
+        graph = Graph()
+        graph.add_node(TileOp(knobs=route), [], Tensor("cut", (1,)), node_id="cut")
+        return graph
+
+    leaves = [fused, cut({"PLACE@a": "cut"}), cut({"PLACE@map": "cut"}), cut({"PLACE@a0": "cut"})]
+    placement_rows = _placement_candidate_rows(leaves)
+    assert placement_rows == [{}, {"PLACE@a": "cut"}, {"PLACE@map": "cut"}, {"PLACE@a0": "cut"}]
+    evidence_rows = [{**ctx.features(), **live_features, **row} for row in placement_rows]
+
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (2, 59.61)
+    reloaded_db.close()
+
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+
+    class NoEvidencePrior:
+        def evidence_pick(self, _rows, **_kwargs):
+            return None
+
+        def mean_scores(self, rows):
+            return [1_000_000.0] * len(rows)
+
+        def pick(self, _rows):
+            raise AssertionError("exact measured placement evidence was not selected")
+
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    root = LoopOp(body=original_loop.body, knobs=live_features)
+    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._verified_index", lambda _ctx: ({}, {}))
+    monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._priced_pick", lambda *_args: None)
+    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
+    assert selected is leaves[2]
+    assert fork.score == pytest.approx(59.61)
+    reloaded_db.close()
+
+    def stats(us):
+        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
+
+    place_db = SearchDB(tmp_path / "place.db")
+    place_db.record_perf(
+        ctx.structural_key(),
+        "fused",
+        backend="cuda",
+        status="ok",
+        stats=stats(40.0),
+        knobs={**ctx.features(), **live_features},
+        captured=True,
+    )
+    place_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    reloaded_db.close()
+
+    place_db = SearchDB(tmp_path / "place.db")
+    place_db.record_perf(
+        ctx.structural_key(),
+        "other-cut",
+        backend="cuda",
+        status="ok",
+        stats=stats(30.0),
+        knobs={**ctx.features(), **live_features, "PLACE@a": "cut"},
+        captured=True,
+    )
+    place_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
+    index = _db_measured_index(reloaded_db, ctx)
+    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
+    reloaded_db.close()
+
+    unmatched_db = SearchDB(tmp_path / "unmatched-place.db")
+    unmatched_db.record_perf(
+        ctx.structural_key(),
+        "unmatched-cut",
+        backend="cuda",
+        status="ok",
+        stats=stats(1.0),
+        knobs={**ctx.features(), **live_features, "PLACE@foreign": "cut"},
+        captured=True,
+    )
+    unmatched_db.close()
+    reloaded_db = SearchDB.open_readonly(tmp_path / "unmatched-place.db")
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), evidence_rows, exact_families=frozenset({"PLACE"})) is None
+    reloaded_db.close()
+
+    reservoir = OnlinePrior()
+    reservoir.add_rows(
+        [
+            ({**ctx.features(), **live_features, **place}, 59.61),
+            ({**ctx.features(), **live_features}, 40.0),
+            ({**ctx.features(), **live_features, "PLACE@foreign": "cut"}, 1.0),
+        ]
+    )
+    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
+    reservoir.add_rows([({**ctx.features(), **live_features, "PLACE@a": "cut"}, 30.0)])
+    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
 
     nonstructural = {**route, "REDUCE": ""}
     active_route = nonstructural

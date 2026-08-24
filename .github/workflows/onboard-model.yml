@@ -470,6 +470,7 @@ jobs:
             --agent onboard-model \
             --model cloudrift/agent \
             --format json \
+            --file "$WORKFLOW_SOURCE/README.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md" \
             --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/prompts/onboard-model/qualify.md" \

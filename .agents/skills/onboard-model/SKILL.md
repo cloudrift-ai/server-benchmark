@@ -42,6 +42,13 @@ to rescue a failed run.
 
 ## Step 0 — Choose the run mode
 
+Read [`README.md`](../../../README.md) completely before task work. Its **Related Projects** map identifies the
+platform, runtime, provisioning, and serving repositories that may own relevant compatibility behavior. Consult every
+relevant mapped project before concluding that the requested model, engine, or GPU is unsupported. Mapped runtime
+repositories are approved research and source-build candidates for qualification; this does not authorize writes to
+those repositories or image publication. Inspect an available sibling checkout at the path described by the map, and
+verify its remote source when compatibility may have changed.
+
 Use **interactive mode** when a developer drives the run from a checkout: ask for the missing inputs below and report
 in conversation. For a non-interactive **automated run**, read
 [`prompts/onboard-model/qualify.md`](../../../prompts/onboard-model/qualify.md) completely before doing task work.
@@ -103,8 +110,8 @@ Prefer vLLM when both engines support the checkpoint. If a configured image cann
 missing tag. Check the official registry, release notes, engine documentation, and upstream repository for a renamed
 image repository or a current compatible tag. A registry manifest check or short clean deployment may establish the
 replacement. Use a moving image tag only for diagnosis, then pin the exact working tag or digest. Never substitute an
-unofficial image without explicit caller authorization. Read `emmy/recipe/ARCHITECTURE.md` before authoring YAML;
-named recipe fields must not be duplicated in `extra_args`.
+unofficial image whose source is outside the README **Related Projects** map without explicit caller authorization.
+Read `emmy/recipe/ARCHITECTURE.md` before authoring YAML; named recipe fields must not be duplicated in `extra_args`.
 
 ## 2. Create and validate a conservative baseline
 

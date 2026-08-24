@@ -91,7 +91,9 @@ EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
     "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
     "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
     "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
-    "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3541, "4d3f19fcca6a294d9651ea9bc7ddba4b")],
+    # Over-budget paired score + value rows are intentionally absent; other fixture pools do not
+    # carry concurrently-live contraction fragments and remain byte-identical.
+    "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3457, "b3ecfbf96e98237f7e1fe8ee258d6dec")],
 }
 
 

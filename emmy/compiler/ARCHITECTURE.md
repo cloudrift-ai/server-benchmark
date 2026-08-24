@@ -2,6 +2,8 @@
 
 Three layers over a shared `Graph` container.
 
+Reading a `--ir torch` / `--ir tensor` dump: [IR-PSEUDOCODE-TORCH.md](IR-PSEUDOCODE-TORCH.md).
+
 ```
 PyTorch module
    │  trace/              ── PyTorch → Graph IR capture

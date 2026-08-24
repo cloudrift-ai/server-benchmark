@@ -32,10 +32,11 @@ def _bench_fail_leaf(*, realized_knobs: dict | None) -> SearchNode:
     return node
 
 
-def _ok_leaf(us: float, *, realized_knobs: dict | None, cuda_ops: int) -> SearchNode:
+def _ok_leaf(us: float, *, realized_knobs: dict | None, cuda_ops: int, cuda_knobs: list[dict] | None = None) -> SearchNode:
     node = SearchNode(candidate=object())
     node.realized_knobs = realized_knobs
     node.realized_cuda_ops = cuda_ops
+    node.realized_cuda_knobs = cuda_knobs
     node.bench_status = "ok"
     node.bench_stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
     return node
@@ -98,7 +99,15 @@ def test_validated_structural_input_records_the_original_parent_linked_edge() ->
         "RASTER": "",
     }
     tree = SearchTree()
-    leaf = _ok_leaf(59.61, realized_knobs=None, cuda_ops=2)
+    leaf = _ok_leaf(
+        59.61,
+        realized_knobs=None,
+        cuda_ops=2,
+        cuda_knobs=[
+            {**route, "REDUCE": ""},
+            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+        ],
+    )
     leaf.visits = 1
     leaf.best_reward = 1.0 / 59.61
     tree.root.children = [leaf]
@@ -133,7 +142,15 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
     tree = SearchTree()
     row = {"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "REDUCE": "g8k", "STAGE": "d1/smem"}
     route = SearchNode(candidate=SimpleNamespace(resolved_knobs=row), parent=tree.root)
-    fast = _ok_leaf(6.0, realized_knobs=None, cuda_ops=2)
+    fast = _ok_leaf(
+        6.0,
+        realized_knobs=None,
+        cuda_ops=2,
+        cuda_knobs=[
+            {**row, "REDUCE": ""},
+            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+        ],
+    )
     fast.parent = route
     route.children = [fast]
     tree.root.children = [_ok_leaf(18.0, realized_knobs={"WORK": "t64"}, cuda_ops=1), route]
@@ -142,6 +159,29 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
     search.tree = tree
 
     assert search.best_realized() == (stamp_schedule_families(row), 6.0, 2, True)
+
+
+def test_best_realized_rejects_a_structural_parent_that_names_a_different_child_schedule() -> None:
+    tree = SearchTree()
+    row = {"WORK": "w4x2", "TILE": "mma_m16n8k16_f16_f32/f1x2/k8", "REDUCE": "g8k", "STAGE": "d1/smem"}
+    route = SearchNode(candidate=SimpleNamespace(resolved_knobs=row), parent=tree.root)
+    fast = _ok_leaf(
+        6.0,
+        realized_knobs=None,
+        cuda_ops=2,
+        cuda_knobs=[
+            {**row, "WORK": "w1x2", "REDUCE": ""},
+            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+        ],
+    )
+    fast.parent = route
+    route.children = [fast]
+    tree.root.children = [_ok_leaf(18.0, realized_knobs={"WORK": "t64"}, cuda_ops=1), route]
+
+    search = TuningSearch.__new__(TuningSearch)
+    search.tree = tree
+
+    assert search.best_realized() is None
 
 
 def test_best_realized_uses_a_compatible_multi_cuda_terminal_placement_route() -> None:

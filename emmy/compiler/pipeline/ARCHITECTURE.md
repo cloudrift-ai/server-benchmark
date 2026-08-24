@@ -967,8 +967,11 @@ and the final tune winner is annotated or appended as another proposal only when
 provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its first
 exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule row for
 a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their heterogeneous
-schedules into one row or falls back to a slower monolithic sibling. A later greedy deploy replay can select different
-golden/DB evidence and is never paired with that search reward. These `-O1` ranking numbers never populate
+schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune winner only
+when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a parent whose pins
+name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
+claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
+with that search reward. These `-O1` ranking numbers never populate
 `emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either

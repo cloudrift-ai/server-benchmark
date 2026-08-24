@@ -21,11 +21,11 @@ import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
@@ -35,12 +35,20 @@ from emmy.compiler.pipeline.pipeline import Run
 _CTX = Context.from_target((12, 0))
 
 
-def _matmul(m: int = 128, k: int = 512, n: int = 128) -> Graph:
+def _matmul(m: int = 128, k: int = 512, n: int = 128, *, out_dtype=F16) -> Graph:
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=F16), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (Dim(k), Dim(n)), dtype=F16), node_id="b")
-    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=F16), node_id="o")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=out_dtype), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
+    return g
+
+
+def _sum(*, dtype=F16) -> Graph:
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (Dim(4), Dim(512)), dtype=dtype), node_id="x")
+    g.add_node(ReduceOp(axis=1), ["x"], Tensor("s", (Dim(4), Dim(1)), dtype=dtype), node_id="s")
+    g.inputs, g.outputs = ["x"], ["s"]
     return g
 
 
@@ -62,7 +70,16 @@ def test_the_split_returns_two_kernels(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o", "o__partial"}
     monkeypatch.setenv("EMMY_REDUCE", "g2a")
-    assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o"}
+    assert set(_kernels(_resolve(CUDA_PASSES, _matmul(out_dtype=F32))[0])) == {"o"}
+
+
+@pytest.mark.parametrize("dtype", [F16, BF16])
+def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) -> None:
+    """F16/BF16 outputs would round every CTA partial; contraction and plain reduce fail closed."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    for graph in (_matmul(out_dtype=dtype), _sum(dtype=dtype)):
+        with pytest.raises(ValueError, match="direct atomic REDUCE.*output storage"):
+            _resolve(TILE_PASSES, graph)
 
 
 def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
@@ -205,7 +222,8 @@ def test_the_split_is_consumed_by_the_kernel_that_realizes_it(monkeypatch, pin) 
     records the partition already happened. Without that reading the partial re-splits its own
     slice on every sweep: K=512 → 256 → … → 1, ending in a raise."""
     monkeypatch.setenv("EMMY_REDUCE", pin)
-    kernels = _kernels(_resolve(CUDA_PASSES)[0])
+    graph = _matmul(out_dtype=F32) if pin.endswith("a") else _matmul()
+    kernels = _kernels(_resolve(CUDA_PASSES, graph)[0])
     assert len(kernels) <= 2, f"{pin}: the split must not cascade — {sorted(kernels)}"
     assert not [v for row in kernels.values() for k, v in row.items() if family_of(k) == "REDUCE" and str(v).startswith("g")]
 

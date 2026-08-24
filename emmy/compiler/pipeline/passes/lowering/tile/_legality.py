@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.pure.fold import Fold, operand_name
@@ -67,6 +68,21 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     if pinned:
         raise ValueError(reason)
     return False
+
+
+def direct_atomic_output(outputs) -> str | None:
+    """Whether direct cross-CTA partials avoid another low-precision rounding step.
+
+    F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
+    carrier state and rounds once at the output boundary.
+    """
+    lowp = sorted({str(t.dtype) for t in outputs.values() if t.dtype in (F16, BF16)})
+    if not lowp:
+        return None
+    return (
+        f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
+        "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
+    )
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #

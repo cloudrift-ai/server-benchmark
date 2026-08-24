@@ -810,6 +810,8 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
     if pin is not None:
         plan = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
         band_legal(plan, pinned=True)
+        if plan.needs_split and plan.finalize == "atomic":
+            legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
         return [plan]
     extent = _hint_extent(node.axis)
     cands = [ReducePlan()]
@@ -817,6 +819,8 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
         if p.needs_split and not _splittable_axis(term, node):
             continue  # the axis is already a slice — its cross-CTA partition was consumed
         if not band_legal(p, pinned=False):
+            continue
+        if p.finalize == "atomic" and not legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False):
             continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
@@ -994,6 +998,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
         # A pin meets the transposed band's geometry as a refusal, not an emitter crash.
         legal.enforce(legal.coop_band_geometry(pinned, ext.as_static() if ext.is_static else None, _inner_free(term.place)), pinned=True)
         if pinned.needs_split:
+            if pinned.finalize == "atomic":
+                legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -1021,10 +1027,14 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
         tail = tuple(projection_tail(term.tile))
-        atomic_ok = len(node.channels) == 1 and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+        atomic_ok = (
+            len(node.channels) == 1
+            and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
+            and legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False)
+        )
         for sp in splitk_moves():
             if sp.finalize == "atomic" and not atomic_ok:
-                continue  # a non-distributive projection would raise at 030_split_reduce
+                continue  # the carrier, projection, or destination cannot realize a direct atomic finalize
             if k % sp.cta == 0 and (k // sp.cta) % step == 0:
                 out.append(sp)
     return out

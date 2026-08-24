@@ -641,7 +641,9 @@ grammar it read).
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
-  accumulates in place). It runs AFTER its decision — the `g` row was chosen FOR the split form.
+  accumulates in place). Direct atomic finalization is legal only when it does not write each partial into f16/bf16
+  output storage; low-precision output takes the deferred f32 workspace and rounds once after the combine. It runs
+  AFTER its decision — the `g` row was chosen FOR the split form.
 
 **Every piece is a BRAND-NEW kernel.** A rewrite that returns DIFFERENT NODES is a kernel-set change, and the
 minting rule states it by consuming the replaced kernel's row on the pieces it builds

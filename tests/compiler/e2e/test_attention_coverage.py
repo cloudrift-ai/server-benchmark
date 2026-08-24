@@ -361,10 +361,10 @@ def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
     axis (every partition divides by the whole denominator), so one pass cannot serve both — the
     single-pass sweep declines and the two-pass pair stands, bridging through the stat smem rows.
 
-    The decline is a correctness gate, not a preference: sweeping only the partition's keys would
+    The deferred split is a correctness gate, not a preference: sweeping only the partition's keys would
     normalize each partial by its own denominator and the atomic sum of those is not softmax."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "g2a")  # two cross-CTA partitions of the KV axis, atomic-summed
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -391,7 +391,7 @@ def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(
     coordinates; deriving them from that local write index admits future keys in every chunk after the first.
     """
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     torch.manual_seed(0)

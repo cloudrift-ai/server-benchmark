@@ -17,6 +17,10 @@ from those two files, not run.
 
 Branch observations come from an RTX 5090 (sm_120, CUDA 13.0) unless noted. The `--ir` rows cite a six-file layer-0
 dump set under `tmp-claude/ir-dumps/`, produced by earlier IR-explainer work and inspected directly for this table.
+Sync #5 with main brought #634, which reprints the torch and tensor stages as Rust-like pseudocode, so the token
+counts the `--ir torch` and `--ir tensor` rows cite are spelled differently now; what those rows expect is unchanged,
+and rendering the NVFP4 decode cone through the new printer confirmed it. The `loop`, `tile`, `kernel` and `cuda`
+citations are untouched.
 `emmy compile -c "<torch expr>"` cannot express these rows: an inline expression has no checkpoint, and NVFP4 operands
 exist only because the birth-time speller rewrites checkpoint constants — so the narrow rows sharpen through `--layer`
 and `--seq-len` instead.

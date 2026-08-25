@@ -46,7 +46,7 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     )
 
     assert len(fold.init) == 3
-    assert len(fold.operands) == 1 and isinstance(fold.operands[0], Load)
+    assert sum(isinstance(edge, Load) for edge in fold.operands) == 1
     assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
 
 

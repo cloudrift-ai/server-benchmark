@@ -67,6 +67,62 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     assert contraction.a.input == "x"
 
 
+def _computed_matmul(*, computed_a: bool, computed_b: bool) -> TileOp:
+    axis = Axis("k", Dim(32))
+    body = []
+    body.append(Load(name="left", input="x", index=(Var("m"), Var("k"))))
+    left = "left"
+    if computed_a:
+        body.extend(
+            (
+                Load(name="left_scale", input="xs", index=(Var("k"),)),
+                Assign(name="computed_left", op="multiply", args=(left, "left_scale")),
+            )
+        )
+        left = "computed_left"
+    body.append(Load(name="right", input="w", index=(Var("k"), Var("n"))))
+    right = "right"
+    if computed_b:
+        body.extend(
+            (
+                Load(name="right_scale", input="ws", index=(Var("k"),)),
+                Assign(name="computed_right", op="multiply", args=(right, "right_scale")),
+            )
+        )
+        right = "computed_right"
+    body.append(Assign(name="product", op="multiply", args=(left, right)))
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=Body(body), results=("product",)), init=init, combine=combine)
+    return TileOp(
+        op=Fold.projection(body=Body((planar,))),
+        place=Placement(free=(Axis("m", 8), Axis("n", 16))),
+    )
+
+
+def test_contraction_factors_a_computed_operand_cone() -> None:
+    tile = _computed_matmul(computed_a=True, computed_b=False)
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert isinstance(tile.op.a, Fold) and tile.op.a.axis is None and tile.op.a.out == "computed_left"
+    assert isinstance(tile.op.b, Load) and tile.op.b.input == "w"
+
+
+def test_contraction_factors_b_computed_operand_cone() -> None:
+    tile = _computed_matmul(computed_a=False, computed_b=True)
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert isinstance(tile.op.a, Load) and tile.op.a.input == "x"
+    assert isinstance(tile.op.b, Fold) and tile.op.b.axis is None and tile.op.b.out == "computed_right"
+
+
+def test_contraction_factors_both_computed_operand_cones_idempotently() -> None:
+    tile = _computed_matmul(computed_a=True, computed_b=True)
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert isinstance(tile.op.a, Fold) and isinstance(tile.op.b, Fold)
+    assert TileOp(op=tile.op, place=tile.place).op is tile.op
+
+
 def test_lambda_equivalent_clusters_include_captured_axes() -> None:
     first = Lambda(
         params=("k",),

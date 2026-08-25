@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, component_ops
-from emmy.compiler.ir.pure.fold import _operand_result_names
+from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
+from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -143,6 +143,167 @@ def _rewrite_axis(stmt, old: str, new: str):
         return stmt
     sigma = Sigma({old: Var(new)})
     return stmt.rewrite(lambda name: new if name == old else name, sigma)
+
+
+def _projection_members(node: Fold) -> Body:
+    """Flatten zero-axis grouping while retaining every iterating Fold as an algebraic node."""
+    assert node.axis is None
+    members = list(node.body)
+    for edge in reversed(node.operands):
+        names = set(_operand_result_names(edge))
+        position = next((i for i, stmt in enumerate(members) if names & set(_member_reads(stmt))), len(members))
+        expanded = _projection_members(edge) if isinstance(edge, Fold) and edge.axis is None else Body((edge,))
+        members[position:position] = expanded
+    out = []
+    for member in members:
+        if isinstance(member, Fold) and member.axis is None:
+            out.extend(_projection_members(member))
+        else:
+            out.append(member)
+    return Body(out)
+
+
+def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[_ScopedLambda, Body] | None:
+    """The part of a score cone that varies with its fold axis; invariant providers stay captured."""
+    cone = body.backward_cone((result,))
+    varying = {axis}
+    members = []
+    for stmt in cone.members:
+        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and edge_refs_axis(stmt, axis))
+        if direct or varying & set(_member_reads(stmt)):
+            members.append(stmt)
+            varying.update(stmt.defines())
+    if not members:
+        return None
+    fn = Lambda(params=(axis,), body=Body(members), results=(result,))
+    return _ScopedLambda(fn=fn, axes=(*axes, axis)), Body(members)
+
+
+def _mul_leaves(defs: dict[str, object], name: str) -> tuple[str, ...] | None:
+    stmt = defs.get(name)
+    if not isinstance(stmt, Assign) or stmt.op.name != "multiply":
+        return (name,)
+    if len(stmt.args) != 2:
+        return None
+    left, right = (_mul_leaves(defs, arg) for arg in stmt.args)
+    return None if left is None or right is None else (*left, *right)
+
+
+def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> frozenset[int]:
+    """Assignment-only expression cone, stopping at the algebraic values supplied by the new Fold."""
+    found: set[int] = set()
+
+    def visit(name: str) -> None:
+        if name in stops:
+            return
+        stmt = defs.get(name)
+        if not isinstance(stmt, Assign) or id(stmt) in found:
+            return
+        found.add(id(stmt))
+        for arg in stmt.args:
+            visit(arg)
+
+    visit(root)
+    return frozenset(found)
+
+
+def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | None:
+    """Extend an exp-family statistic with ``sum(normalized_exp(score) * value)``.
+
+    Contraction canonicalization turns the expectation into an outer contraction and places the
+    statistic inside its computed probability edge. This rule reads that canonical composition
+    directly and rebuilds the equivalent three-component twisted Fold.
+    """
+    if not is_contraction(fold) or len(fold.channels) != 1:
+        return None
+    product, plus = fold.semiring
+    if product.name != "multiply" or plus.reduce_canon != "add" or not isinstance(fold.a, Fold) or fold.a.axis is not None:
+        return None
+
+    members = _projection_members(fold.a)
+    statistics = [
+        stmt
+        for stmt in members
+        if isinstance(stmt, Fold)
+        and stmt.axis is not None
+        and component_ops(stmt.combine) is None
+        and len(stmt.init) == 2
+        and stmt.lift.results[1:] == (1.0,)
+    ]
+    if len(statistics) != 1:
+        return None
+    statistic = statistics[0]
+    if not _same_axis(statistic, fold):
+        return None
+
+    maximum, denominator = statistic.combine.results
+    pivots = {maximum}
+    for stmt in members:
+        if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.args[0] in pivots:
+            pivots.add(stmt.name)
+
+    body = Body(members)
+    defs = body.definitions
+    probability = operand_name(fold.a)
+    leaves = _mul_leaves(defs, probability)
+    if leaves is None or len(leaves) != 2:
+        return None
+    weighted = [(leaf, _exp_score(defs, leaf, frozenset(pivots))) for leaf in leaves]
+    weights = [(leaf, score) for leaf, score in weighted if score is not None]
+    inverses = [
+        leaf
+        for leaf in leaves
+        if isinstance((stmt := defs.get(leaf)), Assign) and stmt.op.name == "reciprocal" and stmt.args == (denominator,)
+    ]
+    if len(weights) != 1 or len(inverses) != 1:
+        return None
+    _, score_name = weights[0]
+    current = _varying_score(body, score_name, fold.axis.name, axes)
+    reference = _score_lambda(statistic, statistic.lift.results[0], axes)
+    if current is None or reference is None or not _equivalent(reference, current[0]):
+        return None
+
+    captures = tuple(name for name in statistic.lift.free_names() if name not in {*axes, statistic.axis.name})
+    provider_cone = body.backward_cone(captures)
+    provider_defs = {name for stmt in provider_cone.members for name in stmt.defines()}
+    if set(captures) - provider_defs:
+        return None
+    provider = Fold.projection(body=Body(provider_cone.members), results=captures) if captures else None
+
+    expression = _assign_cone(defs, probability, frozenset({score_name, maximum, denominator}))
+    consumed = {id(statistic), *expression, *(id(stmt) for stmt in current[1]), *(id(stmt) for stmt in provider_cone.members)}
+    if any(id(stmt) not in consumed for stmt in members):
+        return None
+
+    value = _rewrite_axis(fold.b, fold.axis.name, statistic.axis.name)
+    operands = (*((provider,) if provider is not None else ()), *statistic.operands, value)
+    state = f"{fold.acc}__sum"
+    names = (*statistic.combine.results, state)
+    other = tuple(f"{name}__o" for name in names)
+    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
+
+    lift = Lambda(
+        params=(statistic.axis.name, *(name for edge in operands for name in _operand_result_names(edge))),
+        body=statistic.lift.body,
+        results=(*statistic.lift.results, operand_name(value)),
+    )
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    merged = Fold(
+        axis=statistic.axis,
+        unroll=statistic.unroll,
+        operands=operands,
+        lift=lift,
+        init=(*statistic.init, plus.identity),
+        combine=combine,
+    )
+    inverse = inverses[0]
+    epilogue = Body(
+        (
+            Assign(name=inverse, op="reciprocal", args=(denominator,)),
+            Assign(name=fold.acc, op="multiply", args=(state, inverse)),
+        )
+    )
+    return Fold.projection(operands=(merged,), body=epilogue, results=(fold.acc,))
 
 
 def _value_term(
@@ -293,11 +454,17 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
             return fold
         return Fold.projection(operands=new_operands, body=new_body, results=fold.lift.results)
 
-    items = _pair_members([_Member("body", stmt) for stmt in body], body_axes)
-    new_body = Body(item.value for item in items)
     node = fold
     if operands != fold.operands:
         node = replace(node, operands=operands)
+    if body != node.lift.body:
+        node = node.with_bodies((body,))
+    absorbed = _absorb_normalized_expectation(node, axes)
+    if absorbed is not None:
+        return absorbed
+
+    items = _pair_members([_Member("body", stmt) for stmt in node.lift.body], body_axes)
+    new_body = Body(item.value for item in items)
     return node.with_bodies((new_body,)) if new_body != node.lift.body else node
 
 

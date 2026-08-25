@@ -45,8 +45,10 @@ contraction operand position carries the A/B role.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
-contraction rule requires enclosing free-axis order, direct indexed operands, and the registered distributive
-product/commutative-monoid laws; a Fold that does not prove those conditions remains planar.
+contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
+cone into a zero-axis Fold edge. Enclosing free-axis order determines A/B position; overlapping cones or an unproved
+registered semiring leave the Fold planar. Canonicalization runs entirely in `TileOp.__post_init__`, including the
+output-sweep-to-free-axis adjustment exposed when factoring makes a contraction the root compute node.
 
 Scoped lambda equivalence uses the same dependency-respecting body order as structural identity and canonicalizes
 commutative argument order. It therefore ignores SSA spelling and harmless interleaving without weakening buffer or
@@ -64,7 +66,9 @@ one exp-family twisted carrier `(maximum, denominator, expectations…)`. Pure s
 expectation components, and a causal mask is simply part of the shared score lambda. The pass has no operation-family
 matcher. Ordinary `copy` aliases of the carried maximum are followed before the exp-weighted components are compared.
 
-The rewrite reuses the registered monoid generator, invariant-factor splitting, and contraction canonicalization.
+The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,
+and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in
+which contraction normalization has placed those statistics inside a computed normalized-exponential operand.
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
 operand; the generic twisted Fold derivation then exposes the corresponding contraction to scheduling.
 

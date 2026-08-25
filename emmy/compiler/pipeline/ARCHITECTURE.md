@@ -1448,12 +1448,14 @@ comparing two fits is running the same eval against two files and diffing the re
 
 ## Part 9: Tile lowering at the pipeline level
 
-`lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer
-parallel axes and mechanically lifts every inner reduction as a nested `Fold`; no Tile IR recognizer or classifier
-runs. Root stores and output sweeps live at the `TileOp` boundary.
+`lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
+axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
+complete tree, including maximal pure operand-cone factoring for semiring contractions. No Tile IR classifier runs.
+Root stores and output sweeps live at the `TileOp` boundary.
 
-`020_schedule` enumerates schedules over that stored Fold tree only. `030_split_reduce` realizes a selected
-cross-CTA reduction partition. There is no placement-cut phase or alternate fused view.
+`015_twisted` rewrites the exp-family composition over that canonical tree. `020_schedule` then enumerates schedules
+over the stored Fold tree only, and `030_split_reduce` realizes a selected cross-CTA reduction partition. There is no
+placement-cut phase or alternate fused view.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in
@@ -1660,7 +1662,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/recognize/`         | Empty (retired). |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a Fold tree; `020_schedule` schedules that stored tree; `030_split_reduce` realizes cross-CTA partitions. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `015_twisted` rewrites the exp family; `020_schedule` schedules that stored tree; `030_split_reduce` realizes cross-CTA partitions. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

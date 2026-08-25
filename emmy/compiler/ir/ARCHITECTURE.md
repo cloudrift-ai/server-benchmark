@@ -545,13 +545,14 @@ A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, s
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to
 the corresponding nested Loop IR.
 
-The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general local
-contextual canonicalization, including semiring contractions and closed-child extraction. Scoped lambda equivalence
-is an analysis over the already locally canonical Folds. A separate pre-scheduling rewrite
+The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general contextual
+canonicalization, including maximal pure operand-cone factoring into semiring contractions and closed-child
+extraction. Scoped lambda equivalence is an analysis over the canonical Folds. A separate pre-scheduling rewrite
 joins equivalent maximum and exp-weighted sibling Folds into the general `(maximum, denominator, expectations…)`
-twisted carrier; softmax and masked or unmasked SDPA are arity variants, not separate matchers. There is no Tile IR
-classification or placement-cut phase. Scheduling annotates the rewritten Fold sites through `TileOp.schedule`;
-unsupported shapes remain unmapped.
+twisted carrier, including when contraction canonicalization has nested the statistics inside a computed probability
+edge; softmax and masked or unmasked SDPA are arity variants, not separate matchers. There is no Tile IR classification
+or placement-cut phase. Scheduling annotates the rewritten Fold sites through `TileOp.schedule`; unsupported shapes
+remain unmapped.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.
 

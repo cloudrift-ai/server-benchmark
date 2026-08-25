@@ -189,7 +189,8 @@ The Tile IR boundary is one structural operation:
 3. move the root `Write` or output sweep to `TileOp.stores`;
 4. reject any raw inner loop that remains;
 5. rely on each `Lambda.__post_init__` to canonicalize its local pure body;
-6. let `TileOp.__post_init__` apply contextual contraction and closed-child rules over the complete tree.
+6. let `TileOp.__post_init__` factor maximal pure product-operand cones into canonical contractions, close their
+   dependencies, and apply the closed-child rules over the complete tree.
 
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
@@ -198,9 +199,11 @@ without a placement or value-cut analysis.
 
 `015_twisted` is a separate algebraic rewrite over the canonical tree. It clusters equivalent score lambdas and joins
 a maximum with additive exp-weighted components into the one `(maximum, denominator, expectations…)` twisted monoid.
-Softmax, SDPA, and causal SDPA differ only in carrier arity and score/value lambdas; there is no operation-family
-matcher. `020_schedule` enumerates the rewritten stored tree. Unsupported scheduling shapes remain unmapped; this is
-the intentional recovery boundary while schedule support is rebuilt over the complete tree.
+It reads both equivalent canonical spellings: sibling planar folds, and the contraction composition produced when
+canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
+in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the rewritten
+stored tree. Unsupported scheduling shapes remain unmapped; this is the intentional recovery boundary while schedule
+support is rebuilt over the complete tree.
 
 ## The divide rule: `split` an iteration axis
 

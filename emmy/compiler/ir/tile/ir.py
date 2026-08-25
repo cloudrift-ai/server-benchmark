@@ -32,7 +32,7 @@ structure the tile IR already holds.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
@@ -159,7 +159,9 @@ class TileOp(Op):
     work: object = None
 
     def __post_init__(self) -> None:
+        from emmy.compiler.ir.pure.fold import edge_refs_axis, is_contraction  # noqa: PLC0415
         from emmy.compiler.ir.tile.normalize import normalize_fold_tree  # noqa: PLC0415
+        from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
 
         axes = [axis.name for axis in self.place.free]
         axes.extend(store.sweep.name for store in self.stores if store.sweep is not None)
@@ -167,6 +169,24 @@ class TileOp(Op):
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
         self.op = normalized
+        if self.place.is_mapped:
+            return
+
+        node = head(normalized)
+        promoted = {
+            store.sweep.name
+            for store in self.stores
+            if store.sweep is not None and is_contraction(node) and any(edge_refs_axis(edge, store.sweep.name) for edge in node.operands)
+        }
+        if not promoted:
+            return
+        free_names = {axis.name for axis in self.place.free}
+        extra = tuple(store.sweep for store in self.stores if store.sweep is not None and store.sweep.name in promoted - free_names)
+        if extra:
+            self.place = Placement(free=(*self.place.free, *extra))
+        self.stores = tuple(
+            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.stores
+        )
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns

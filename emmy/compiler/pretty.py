@@ -84,6 +84,21 @@ def _index_expr(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
     return "[" + ", ".join(e.substitute(rename).pretty() for e in op.sources[0].coord_map) + "]"
 
 
+def _convert_fn(src_t) -> str:
+    """Spelling for a dtype-changing identity: ``emmy::to_bits`` when the source
+    is a bits-carrier dtype (float-family name stored on an integer carrier —
+    fp8, packed fp4), ``emmy::cast`` otherwise. The identity moves the carrier
+    value; for a bits carrier that is the stored bits, not the logical values."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler import dtype as dtypes  # noqa: PLC0415
+
+    d = dtypes.get(str(src_t.dtype)) if src_t is not None else None
+    if d is not None and d.name.startswith("f") and np.issubdtype(d.np, np.integer):
+        return "emmy::to_bits"
+    return "emmy::cast"
+
+
 def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
     """The right-hand side of one ``let``."""
     op = node.op
@@ -94,8 +109,11 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
 
     if isinstance(op, ElementwiseOp) and op.name == "copy" and len(args) == 1:
         # The identity. Elementwise preserves shape (``Graph.validate`` enforces it),
-        # so a copy either changes the declared dtype — a conversion — or nothing.
-        return args[0] if same_dtype else f"emmy::cast({args[0]})"
+        # so a copy either changes the declared dtype or nothing. A dtype-changing
+        # copy converts the CARRIER value, never the logical one — so from a
+        # bits-carrier dtype (fp8 / packed fp4 stored on integer bytes) it reads
+        # the stored bits, which ``to_bits`` says and ``cast`` would misstate.
+        return args[0] if same_dtype else f"{_convert_fn(src_t)}({args[0]})"
     if isinstance(op, ElementwiseOp):
         prefix = "emmy::scalar::" if op.name in _NAME_TO_FN and op.name not in _BORROWED_ELEMENTWISE else ""
         return f"{prefix}{op.name}({', '.join(args)})"
@@ -114,7 +132,7 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         return f"emmy::bitcast({args[0]})"
     if isinstance(op, IndexMapOp):
         if src_t is not None and op.is_identity(tuple(src_t.shape)):
-            return args[0] if same_dtype else f"emmy::cast({args[0]})"
+            return args[0] if same_dtype else f"{_convert_fn(src_t)}({args[0]})"
         if len(op.sources) == 1 and op.sources[0].select is None:
             names = _binders(op)
             operand = args[op.sources[0].input_idx]

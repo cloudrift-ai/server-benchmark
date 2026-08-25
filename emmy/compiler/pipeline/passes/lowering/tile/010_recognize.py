@@ -140,7 +140,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     if verdict == "cut":
         return realize_cut(match, root, route_tree, route_free, route_stores, seam)
     value_sites = value_cut_sites(loop)
-    value_verdict, value_site = route_value_cut(loop, value_sites)
+    value_verdict, value_site = route_value_cut(value_sites)
     if value_verdict == "cut":
         return realize_value_cut(match, root, value_site)
     if verdict == "fuse" or value_verdict == "fuse":

@@ -202,9 +202,8 @@ def value_cut_sites(loop: LoopOp) -> tuple[ValueCut, ...]:
     return tuple(sites)
 
 
-def route_value_cut(loop: LoopOp, cut_sites: tuple[ValueCut, ...] | None = None) -> tuple[str | None, ValueCut | None]:
+def route_value_cut(candidates: tuple[ValueCut, ...]) -> tuple[str | None, ValueCut | None]:
     """Resolve a ``PLACE@=<value>`` pin, or a bare pin when no tree seam handled it."""
-    candidates = value_cut_sites(loop) if cut_sites is None else cut_sites
     if not candidates:
         return None, None
     by_key = {spell_value_cut(site): site for site in candidates}
@@ -314,7 +313,7 @@ def _pieces(loop: LoopOp, site: ValueCut, materialized: str, child_outputs: dict
             raise RuleSkipped("a reduction-derived value cut cannot move an effect into its child")
         child = LoopOp(body=rename_ssa_sequential(child_body))
     else:
-        child_stmts = list(dict.fromkeys(site.producer.dependencies))
+        child_stmts = list(site.producer.dependencies)
         if site.ports:
             child_stmts.extend(
                 Write(

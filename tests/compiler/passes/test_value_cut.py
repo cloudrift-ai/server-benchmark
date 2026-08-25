@@ -256,4 +256,4 @@ def test_value_name_pin_routes_the_exact_materialization() -> None:
     wanted = next(site for site in sites if "x_f8" in site.outputs)
     assert spell_value_cut(wanted) == "PLACE@=x_f8"
     with pinned_knobs({"PLACE@=x_f8": "cut"}):
-        assert route_value_cut(loop, sites) == ("cut", wanted)
+        assert route_value_cut(sites) == ("cut", wanted)

@@ -354,11 +354,11 @@ under differently named loops join one value class while buffer identity, operat
 significant. Each occurrence records its consumer execution scope and the axes its producer coordinates actually
 depend on. A consumer-only axis proves replication even with symbolic extents; for fully static affine indices,
 `index_set_size` gives a conservative coordinate-count upper bound, so a larger execution domain is a second proof.
-Equal demand maps collapse without enumerating tensor elements. Cyclic, effectful, unbound, or unsupported
-expressions produce no value class. A reduction is supported when its axes are bound in the value and its accumulator
-operation, base, dtype, and closed input expression are exact; an unbound or recursive reduction still declines. This
-analysis exposes facts to placement; it never inserts a fusion boundary or chooses between inline and materialized
-execution.
+Alpha-equivalent occurrences join one value class without enumerating tensor elements. Cyclic, effectful, unbound,
+or unsupported expressions produce no value class. A reduction is supported when its axes are bound in the value and
+its accumulator operation, base, dtype, and closed input expression are exact; an unbound or recursive reduction
+still declines. This analysis exposes facts to placement; it never inserts a fusion boundary or chooses between
+inline and materialized execution.
 
 A closed fused-value cut is the exact inverse over one such class. Its child evaluates one dependency-closed pure
 spelling over the producer coordinates and writes either an existing live output port or a typed workspace. Its

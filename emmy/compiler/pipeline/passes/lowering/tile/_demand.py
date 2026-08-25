@@ -42,45 +42,17 @@ class ValueOccurrence:
     axes: tuple[Axis, ...]
     coordinate_axes: tuple[str, ...]
     repeated_axes: tuple[Axis, ...]
-    evaluations: int | None
-    coordinate_upper_bound: int | None
+    repeated: bool
     uses: tuple[ValueUse, ...]
     dependencies: tuple[Stmt, ...]
-
-    @property
-    def replication_lower_bound(self) -> int | None:
-        """Minimum replication proven by the static affine coordinate upper bound."""
-        if self.evaluations is None or self.coordinate_upper_bound in (None, 0):
-            return None
-        return math.ceil(self.evaluations / self.coordinate_upper_bound)
-
-    @property
-    def repeated(self) -> bool:
-        """Whether this spelling provably evaluates a coordinate more than once."""
-        return bool(self.repeated_axes) or (
-            self.evaluations is not None and self.coordinate_upper_bound is not None and self.evaluations > self.coordinate_upper_bound
-        )
-
-
-@dataclass(frozen=True)
-class ValueDemand:
-    """Alpha-equivalent occurrences with one canonical execution-demand map."""
-
-    signature: tuple
-    occurrences: tuple[ValueOccurrence, ...]
 
 
 @dataclass(frozen=True)
 class ValueClass:
     """All alpha-equivalent spellings of one exact pure computation."""
 
-    key: tuple
-    demands: tuple[ValueDemand, ...]
+    occurrences: tuple[ValueOccurrence, ...]
     live_outputs: tuple[str, ...]
-
-    @property
-    def occurrences(self) -> tuple[ValueOccurrence, ...]:
-        return tuple(o for demand in self.demands for o in demand.occurrences)
 
     @property
     def repeated(self) -> bool:
@@ -120,7 +92,6 @@ def _axis_extent(axis: Axis) -> str:
 
 class _Analysis:
     def __init__(self, loop: LoopOp):
-        self.loop = loop
         self.definitions: dict[str, _Definition] = {}
         self.uses: dict[str, list[ValueUse]] = {}
         self.order: dict[str, int] = {}
@@ -244,7 +215,7 @@ class _Analysis:
         finally:
             pending.remove(name)
 
-    def _occurrence(self, definition: _Definition) -> tuple[tuple, tuple, ValueOccurrence] | None:
+    def _occurrence(self, definition: _Definition) -> tuple[tuple, ValueOccurrence] | None:
         # A load is already materialized data, not a computed value placement may extract.
         if isinstance(definition.stmt, Load):
             return None
@@ -257,53 +228,49 @@ class _Analysis:
             return None
         coordinate_axes = tuple(expansion.axes)
         repeated_axes = tuple(axis for axis in definition.axes if axis.name not in expansion.axes)
-        evaluations = None
-        distinct = None
+        repeated = bool(repeated_axes)
         static = all(axis.extent.is_static for axis in definition.axes)
         if static:
             extents = {axis.name: axis.extent.as_static() for axis in definition.axes}
             evaluations = math.prod(extents.values())
             if all(expr.free_vars() <= set(extents) for expr in expansion.coordinate_exprs):
                 distinct = index_set_size(tuple(expansion.coordinate_exprs), extents) if expansion.coordinate_exprs else 1
-        signature = tuple(
-            ("coord", expansion.axes[axis.name], _axis_extent(axis)) if axis.name in expansion.axes else ("demand", _axis_extent(axis))
-            for axis in definition.axes
-        )
+                repeated = repeated or (distinct is not None and evaluations > distinct)
         occurrence = ValueOccurrence(
             name=definition.name,
             definition=definition.stmt,
             axes=definition.axes,
             coordinate_axes=coordinate_axes,
             repeated_axes=repeated_axes,
-            evaluations=evaluations,
-            coordinate_upper_bound=distinct,
+            repeated=repeated,
             uses=tuple(self.uses.get(definition.name, ())),
             dependencies=tuple(
-                item.stmt
-                for item in sorted(self.definitions.values(), key=lambda item: self.order[item.name])
-                if item.name in expansion.values
+                dict.fromkeys(
+                    item.stmt
+                    for item in sorted(self.definitions.values(), key=lambda item: self.order[item.name])
+                    if item.name in expansion.values
+                )
             ),
         )
-        return key, signature, occurrence
+        return key, occurrence
 
     def run(self) -> tuple[ValueClass, ...]:
-        grouped: dict[tuple, dict[tuple, list[ValueOccurrence]]] = {}
+        grouped: dict[tuple, list[ValueOccurrence]] = {}
         live: dict[tuple, list[str]] = {}
         first: dict[tuple, int] = {}
         for definition in sorted(self.definitions.values(), key=lambda item: self.order[item.name]):
             got = self._occurrence(definition)
             if got is None:
                 continue
-            key, signature, occurrence = got
+            key, occurrence = got
             first.setdefault(key, self.order[definition.name])
-            grouped.setdefault(key, {}).setdefault(signature, []).append(occurrence)
+            grouped.setdefault(key, []).append(occurrence)
             for use in occurrence.uses:
                 if use.output is not None:
                     live.setdefault(key, []).append(use.output)
         classes = []
         for key in sorted(grouped, key=first.__getitem__):
-            demands = tuple(ValueDemand(signature=sig, occurrences=tuple(items)) for sig, items in grouped[key].items())
-            classes.append(ValueClass(key=key, demands=demands, live_outputs=tuple(dict.fromkeys(live.get(key, ())))))
+            classes.append(ValueClass(occurrences=tuple(grouped[key]), live_outputs=tuple(dict.fromkeys(live.get(key, ())))))
         return tuple(classes)
 
 
@@ -312,4 +279,4 @@ def value_demands(loop: LoopOp) -> tuple[ValueClass, ...]:
     return _Analysis(loop).run()
 
 
-__all__ = ["ValueClass", "ValueDemand", "ValueOccurrence", "ValueUse", "value_demands"]
+__all__ = ["ValueClass", "ValueOccurrence", "ValueUse", "value_demands"]

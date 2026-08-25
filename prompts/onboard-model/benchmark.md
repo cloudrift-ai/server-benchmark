@@ -1,15 +1,15 @@
 # Practical Model Benchmarking
 
-Use this guidance when onboarding or verification reproduces, compares, or substantiates model performance. Apply
-only the parts that fit the model, target hardware, serving path, and available time. A smaller representative matrix
-with explained omissions is better than a nominally complete run that cannot finish or does not answer the decision
-at hand. The onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requirements remain
-authoritative.
+Use this guidance when onboarding or verification reproduces, compares, or substantiates model performance. For
+generative text serving, start with the canonical workload matrix below so results stay comparable across recipes and
+platforms. Apply the capacity adjustment instead of inventing a different grid. Omit a row only when the model's
+validated context, modality, or serving path makes that workload inapplicable, and explain the omission. The
+onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requirements remain authoritative.
 
 ## Make the comparison interpretable
 
 - Record the exact model revision, GPU name and count, driver, CUDA and framework versions, engine images, dtype,
-  quantization, KV-cache dtype, context limit, and important serving flags.
+  quantization, KV cache dtype, context limit, and important serving flags.
 - Prefer a paired comparison between the stock serving engine and the candidate configuration using the same engine
   version, model, tokenizer, request client, capacity settings, and workload. Add another engine only when it provides
   a useful sanity check or represents a realistic alternative.
@@ -18,24 +18,42 @@ authoritative.
 - Warm each lane before recording it and repeat measurements when time permits. Preserve failures and variability
   instead of reporting only the best attempt.
 
-## Cover useful serving regimes
+## Run the canonical serving matrix
 
-Choose a compact set of workloads that represents the ways the model is expected to be used. Useful regimes include:
+Use exact random-token input and output lengths, and begin with these target concurrency, request-count, and repeat
+values:
 
-- single-stream latency with a substantial prompt and output;
-- moderate concurrency to show batch and throughput scaling;
-- a long-input, short-output case that emphasizes prefill and retrieval-style use;
-- high-concurrency short requests for API, agent, classification, or extraction traffic.
+| Input tokens | Output tokens | Target concurrency | Requests | Repeats | Purpose |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 4096 | 4096 | 1 | 8 | 3 | Single-stream long-context latency and decode. |
+| 4096 | 4096 | 4 | 32 | 1 | Moderate batch scaling. |
+| 4096 | 4096 | 8 | 64 | 1 | Higher batch scaling. |
+| 8192 | 256 | 4 | 16 | 1 | Long-input, short-output prefill and retrieval-style serving. |
+| 256 | 256 | 64 | 256 | 1 | Saturated short-turn API, agent, classification, or extraction traffic. |
 
-These are examples, not a required grid. Adjust token lengths, concurrency, and request count to the model's context,
-modality, memory limits, and intended task. When practical, use unique seeded inputs, deterministic decoding, fixed
-input and output work, the same client and seed across lanes, and no prefix-cache reuse. If the engine cannot match a
-control, record the difference.
+Use seed `0`, temperature `0`, ignore EOS, unique seeded prompts, and no prefix-cache reuse. Use the same generated
+inputs, client, and benchmark controls across every lane. Configure the server for at least 8,448 total tokens before
+running this matrix; if the model's validated context is smaller, retain the rows it can serve and record the others
+as inapplicable rather than shortening them. Embedding and materially different multimodal workloads need an analogous
+task-specific matrix instead of pretending that token generation measures them.
+
+### Adjust concurrency for capacity
+
+Treat the concurrency values as targets. If any compared lane cannot admit or complete a row because of VRAM, KV cache
+capacity, or an out-of-memory failure, halve that row's concurrency until every compared lane succeeds. Starting with
+the row's target, follow `64 → 32 → 16 → 8 → 4 → 2 → 1` from that point. Keep input and output lengths
+unchanged. Use the same reduced concurrency for all lanes on that platform. Record both the target and actual
+concurrency plus the first capacity failure. If concurrency `1` cannot run, preserve the failure and omit the row.
+
+After reducing concurrency, keep the original number of steady-state waves: use `requests = concurrency × 8` for
+the 4,096-input / 4,096-output rows and `requests = concurrency × 4` for the other two rows. Use three repeats for a
+single-stream 4,096 / 4,096 row and one repeat otherwise.
 
 Report output throughput together with time to first token (TTFT), time per output token (TPOT) or inter-token
 latency, failure count, and useful latency percentiles. Separate prefill-dominated and decode-dominated conclusions.
-For saturated workloads, distinguish first-wave service latency from later requests that include queue drain; do not
-present queued latency as pure prefill time.
+For the short-turn saturation row, use the table's four-wave run for throughput and TPOT. Measure TTFT separately with
+`requests = concurrency` so every request belongs to the first admitted wave; do not present later queued requests as
+pure prefill time.
 
 ## Measure kernels when they inform the serving result
 

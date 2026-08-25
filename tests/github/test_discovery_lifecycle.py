@@ -479,6 +479,14 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     assert benchmark.strip()
     assert "http://" not in benchmark
     assert "https://" not in benchmark
+    for row in (
+        "| 4096 | 4096 | 1 | 8 | 3 |",
+        "| 4096 | 4096 | 4 | 32 | 1 |",
+        "| 4096 | 4096 | 8 | 64 | 1 |",
+        "| 8192 | 256 | 4 | 16 | 1 |",
+        "| 256 | 256 | 64 | 256 | 1 |",
+    ):
+        assert row in benchmark
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
         assert f"{field}:" in script
         assert f"`{field}`" in qualify

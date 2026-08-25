@@ -720,6 +720,52 @@ def test_composed_step_keeps_a_row_invariant_prologue_ahead_of_its_producer():
     assert fold is not None and _same_program(fold.loop.body, body)
 
 
+def test_composed_producer_closes_over_an_earlier_statistic():
+    """A producer nested in another reduce receives its pure statistic cone through an operand.
+
+    The two sibling reductions deliberately reuse one axis name. Once the statistic becomes the
+    producer's child, that inner binding shadows the producer axis and remains loop-invariant.
+    """
+    stat = Loop(
+        axis=Axis("d", Dim(16)),
+        body=Body(
+            (
+                Load(names=("xs",), input="x", index=(Var("kv"), Var("d"))),
+                Assign(name="sq", op="multiply", args=("xs", "xs")),
+                Accum(name="ss", value="sq", op="add", axes=("d",)),
+            )
+        ),
+    )
+    producer = Loop(
+        axis=Axis("d", Dim(16)),
+        body=Body(
+            (
+                Load(names=("q",), input="q", index=(Var("m"), Var("d"))),
+                Assign(name="term", op="multiply", args=("q", "scale")),
+                Accum(name="score", value="term", op="add", axes=("d",)),
+            )
+        ),
+    )
+    loop = Loop(
+        axis=Axis("kv", Dim(32)),
+        body=Body(
+            (
+                stat,
+                Assign(name="scale", op="rsqrt", args=("ss",)),
+                producer,
+                Accum(name="total", value="score", op="add", axes=("kv",)),
+            )
+        ),
+    )
+
+    fold = fold_from_loop(loop)
+    assert fold is not None and _same_program(fold.loop.body, loop.body)
+    (score,) = fold.operands
+    (source,) = score.operands
+    assert source.axis is None and source.operands[0].axis.name == "d"
+    assert source.lift.results == ("scale",), "the statistic cone is a positional producer input"
+
+
 def test_composed_step_ignores_independent_statement_order():
     """A coordinate mask may appear on either side of its independent score producer."""
     score = _score_loop("kv", "d0", "s0", "0")

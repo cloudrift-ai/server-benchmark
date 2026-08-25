@@ -26,6 +26,7 @@ from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, is_contracti
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.stmt.normalize import _sibling_defs_uses, rename_ssa_sequential
 from emmy.compiler.ir.tile.ops import head, reduce_loop
+from emmy.compiler.pipeline.passes.lowering.tile._closure import close_folds
 
 
 def _unannotated(body) -> tuple:
@@ -97,16 +98,19 @@ def _canonical_program_order(body: Body) -> Body:
         for i in range(at + 1, n):
             edge(at, i)
 
-    ready = [(0 if items[i].pure else 1, i) for i in range(n) if not incoming[i]]
+    def ready_key(index: int) -> tuple:
+        return 0 if items[index].pure else 1, repr(items[index]), index
+
+    ready = [ready_key(i) for i in range(n) if not incoming[i]]
     heapq.heapify(ready)
     order: list[int] = []
     while ready:
-        _, i = heapq.heappop(ready)
+        _, _, i = heapq.heappop(ready)
         order.append(i)
         for dst in outgoing[i]:
             incoming[dst].discard(i)
             if not incoming[dst]:
-                heapq.heappush(ready, (0 if items[dst].pure else 1, dst))
+                heapq.heappush(ready, ready_key(dst))
     return Body(tuple(items[i] for i in order)) if len(order) == n else Body(tuple(items))
 
 
@@ -141,20 +145,22 @@ def _hoist_step_nodes(prefix: list[Stmt]) -> tuple[tuple, list[Stmt]] | None:
     escape. Nothing here has to prove the placement: the derived step re-splices every edge ahead
     of the first read of its bound name (``splice_operands``) and flattens it back to its own loop
     nest, so :func:`fold_from_loop`'s byte-identity gate validates the whole reading."""
-    edges: list[Fold] = []
-    pure: list[Stmt] = []
+    items: list = []
     for s in prefix:
         if isinstance(s, Fold):
-            edges.append(s)  # already a node (a step the pairing composed) — an edge as it stands
+            items.append(s)  # already a node (a step the pairing composed) — an edge as it stands
             continue
         if isinstance(s, Loop) and s.is_reduce:
             node = fold_from_loop(s)
             if node is None:
                 return None
-            edges.append(node)
+            items.append(node)
             continue
-        pure.append(s)
-    return tuple(edges), pure
+        items.append(s)
+    closed = close_folds(items)
+    edges = tuple(stmt for stmt in closed if isinstance(stmt, Fold))
+    pure = [stmt for stmt in closed if not isinstance(stmt, Fold)]
+    return edges, pure
 
 
 def _extract_lift(loop: Loop, like: Fold | None = None) -> tuple[Lambda, tuple, Lambda, tuple] | None:

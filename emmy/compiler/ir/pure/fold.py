@@ -612,7 +612,7 @@ class Fold:
         the loop. A gmem ``Load`` edge always rides the step (its index is the operand slab)."""
         if self.axis is None:
             return ()
-        return tuple(e for e in self._splice_edges() if isinstance(e, Fold) and self.axis.name not in deep_reads(list(e.lower())))
+        return tuple(e for e in self._splice_edges() if isinstance(e, Fold) and not edge_refs_axis(e, self.axis.name))
 
     def _step_edges(self) -> tuple:
         hoisted = {id(e) for e in self._hoisted_edges()}

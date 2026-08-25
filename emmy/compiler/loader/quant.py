@@ -830,7 +830,7 @@ def _spell_fp4_one(
         inputs=[vlow, vhigh],
         output=Tensor("pairs", (256, 2), "f32"),
     )
-    if out.dtype != "f32":
+    if out.dtype.name != "f32":
         pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), out.dtype))
     tg.outputs = [pairs_t]
     table = frag.add_node(
@@ -867,7 +867,7 @@ def _spell_fp4_one(
     )
     # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
     fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{out.name}_fused", scale_shape, "f16"))
-    if out.dtype != "f16":
+    if out.dtype.name != "f16":
         fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{out.name}_fused_cast", scale_shape, out.dtype))
 
     interleaved = shape[:-1] + (k // 16, 16)

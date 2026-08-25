@@ -1087,6 +1087,33 @@ def test_spell_nvfp4_respects_ignore(tmp_path):
     assert spell_quantized_constants(g, str(tmp_path)) == 0
 
 
+def test_spell_nvfp4_casts_only_where_the_dtype_changes(tmp_path):
+    """Every ``copy`` the cone spells must change its dtype. The cone's two cast arms (the
+    pair table's cast off f32, the fused scale's cast off f16) fire only when the promised
+    dtype differs; an arm firing without a dtype change is a redundant identity node the
+    packed-B reading then has to look through. (The arms once compared a ``DataType``
+    against a string — never equal — so both always fired.)"""
+
+    def all_graphs(root):
+        yield root
+        for _nid, op in root.loadable_constants():
+            if op.source_graph is not None:
+                yield from all_graphs(op.source_graph)
+
+    for dtype in ("f32", "f16"):
+        d = tmp_path / dtype
+        d.mkdir()
+        _nvfp4_checkpoint(d)
+        g = _weight_graph(shape=(8, 32), dtype=dtype, source_path="layer.weight")
+        assert spell_quantized_constants(g, str(d)) == 1
+        for sub in all_graphs(g):
+            for node in sub.nodes.values():
+                if isinstance(node.op, ElementwiseOp) and node.op.name == "copy":
+                    (src,) = node.inputs
+                    if node.output.dtype == sub.nodes[src].output.dtype:
+                        raise AssertionError(f"identity copy {node.output.name!r} in the {dtype} cone")
+
+
 def _nvfp4_matmul_graph(tmp_path):
     """x [4, 32] @ dequant(w).T — the spelled cone feeding a matmul consumer."""
     from emmy.compiler.ir.base import InputOp

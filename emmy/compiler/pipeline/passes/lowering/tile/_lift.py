@@ -220,11 +220,19 @@ def _chain(cell: list) -> list:
             if any(k2 not in members and k2 != i and n in _reads_of(u) for k2, u in enumerate(out))
         }
         # Renaming one member re-spells the whole pure cone: the kept cell copies read each
-        # other, so every pure member stays live in the cell once any does.
-        rename = {n: f"{n}__e{i}" for j in members if not isinstance(out[j], Fold) for n in out[j].defines()} if shared else {}
+        # other, so every pure member stays live in the cell once any does. The FOLD members'
+        # names — their carried state and internal defs — rename with it: a shared pure member
+        # keeps its reader-fold in the cell too, so the edge's fold copy would otherwise define
+        # the cell fold's accumulator a second time in the same rendered scope.
+        rename = (
+            {n: f"{n}__e{i}" for j in members for n in (names_of(out[j]) if isinstance(out[j], Fold) else set(out[j].defines()))}
+            if shared
+            else {}
+        )
         ren = _renamer(rename)
         results = tuple(ren(n) for n in (*sorted(needed), *passthrough))
         if rename:
+            operands = tuple(o.rewrite(ren) for o in operands)
             body = tuple(s.rewrite(ren) for s in body)
             lift = Lambda(
                 params=(*f.lift.params, *results),

@@ -22,6 +22,13 @@ relevant `ARCHITECTURE.md` before answering.
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
   in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
+- `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze the prior is evaluated
+  against (`emmy eval prior --dataset nodes`, and `emmy fit`'s measured cells). Defaults to the repo-checked
+  `emmy/compiler/pipeline/search/freezes/` — a digest-pinned, version-stamped snapshot that is identical on every
+  machine, which is what makes a reported prior number reproducible. The tune DB and the online reservoir are
+  machine-local and mutable; reach them with `--db` when you want one machine's data, not as the default.
+  The freeze's payload YAML is tracked in **git LFS**; its manifest is plain git so provenance stays diffable.
+  Re-freeze with `scripts/freeze_node_store.py`.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
   resolve forks through the deploy evidence hierarchy — the live card's recorded goldens first (the repo-shipped

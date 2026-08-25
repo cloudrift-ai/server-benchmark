@@ -187,7 +187,7 @@ def _shape_ints(shape, sym_env: dict[str, int]) -> tuple[int, ...]:
     return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in shape)
 
 
-def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
+def _eval(node, ins: list, sym_env: dict[str, int] | None = None, default_device=None):
     import torch  # noqa: PLC0415
     import torch.nn.functional as F  # noqa: PLC0415
 
@@ -285,7 +285,7 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
         dim = next((int(i) for i in ins if not isinstance(i, torch.Tensor)), -1)
         return torch.cat(tensors, dim=dim)
     if name == "IndexMapOp":
-        return _index_map(op, ins, sym_env)
+        return _index_map(op, ins, sym_env, default_device)
     raise NotImplementedError(f"torch_ref: op {name!r} unmapped")
 
 
@@ -337,7 +337,7 @@ def _idx_expr(e, env: dict):
     return e.eval(env)
 
 
-def _index_map(op, ins: list, sym_env: dict[str, int] | None = None):
+def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, default_device=None):
     """Run an ``IndexMapOp`` as a vectorized gather over output coordinates.
 
     For every output cell, the first source whose ``select`` predicate holds
@@ -352,7 +352,7 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None):
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)
-    dev = base.device if base is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = base.device if base is not None else torch.device(default_device or "cpu")
     dtype = base.dtype if base is not None else torch.float32
     # Coord / select exprs may reference symbolic extents (e.g. ``coord < seq_len``)
     # besides the output-coordinate placeholders — resolve both from one env.
@@ -438,6 +438,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     # to fp16) into the declared dtype, and the CUDA backend honors it via typed
     # buffers — the torch ref must cast too, or torch's promotion silently runs
     # everything downstream of a mixed-dtype op at fp32.
+    first_input = next(iter(input_tensors.values()), None)
+    default_device = first_input.device if first_input is not None else torch.device("cpu")
     compute_steps: list[tuple[str, Callable, list[str], torch.dtype | None]] = []
     for nid in order:
         node = graph.nodes[nid]
@@ -446,8 +448,6 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         if type(node.op).__name__ == "ElementwiseOp":
             op_callable = _elementwise_callable(node.op.op.name)
         elif type(node.op).__name__ == "RangeOp":
-            first_input = next(iter(input_tensors.values()), None)
-            device = first_input.device if first_input is not None else torch.device("cpu")
             op_callable = (
                 lambda n, d: (
                     lambda _ins: torch.arange(
@@ -458,9 +458,9 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
                         device=d,
                     )
                 )
-            )(node, device)
+            )(node, default_device)
         else:
-            op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env))(node)
+            op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env, default_device))(node)
         compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))
     out_ids = tuple(graph.outputs)
 

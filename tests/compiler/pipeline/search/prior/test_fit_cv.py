@@ -1,8 +1,8 @@
 """The ``emmy fit`` cross-validation harness (``search/prior/fit/cv``) and run harness
 (``search/prior/fit/run``): shape-grouped fold partitioning, the fittability-exclusion
 guard, dual-rank tie semantics, several positives per candidate pool, metrics-file
-determinism, the golden case builder's pool merge, and the trainer-callable seam
-— all on synthetic cases, no tracing, no GPU."""
+determinism, the golden group builder's pool merge, and the trainer-callable seam
+— all on synthetic groups, no tracing, no GPU."""
 
 import argparse
 import json
@@ -60,26 +60,26 @@ def test_feature_view_globs_and_names():
 
 
 def test_a_merged_case_reports_its_positive_count():
-    """A case is a candidate pool, so a merged one is one row in ``per_golden`` where two goldens used to be
-    two. ``positives`` is what makes that visible: without it a metrics file with fewer cases looks like lost
+    """A group is a candidate pool, so a merged one is one row in ``per_golden`` where two goldens used to be
+    two. ``positives`` is what makes that visible: without it a metrics file with fewer groups looks like lost
     data rather than a pool that gained a second verified answer."""
-    cases = [_case("m.512", "warp", "gpuA", pinned=1), _case("m.1024", "warp", "gpuA", pinned=(0, 2))]
+    groups = [_case("m.512", "warp", "gpuA", pinned=1), _case("m.1024", "warp", "gpuA", pinned=(0, 2))]
     model = LinearFit(LinearModel(weights={"D_a": -1.0}, weights_dynamic=None, scale=0.1, **SEED_PARAMS), [0], None)
-    rows = fit_cv.evaluate_full_train(cases, model)["per_golden"]
+    rows = fit_cv.evaluate_full_train(groups, model)["per_golden"]
     assert rows["gpuA/m.512"]["positives"] == 1
     assert rows["gpuA/m.1024"]["positives"] == 2
-    # The merged case scores on its BEST positive: D_a descends, so row 0 wins and the pool ranks top-1.
+    # The merged group scores on its BEST positive: D_a descends, so row 0 wins and the pool ranks top-1.
     assert rows["gpuA/m.1024"]["rank"] == 0 and rows["gpuA/m.512"]["rank"] == 1
-    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=2)
+    out = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=2)
     assert out["holdout_per_golden"]["gpuA/m.1024"]["positives"] == 2
     assert out["train_per_golden"]["gpuA/m.1024"]["positives"] == 2
 
 
-# --- the golden case builder's pool merge ------------------------------------------
+# --- the golden group builder's pool merge ------------------------------------------
 
 
 class _StubRecord:
-    """The slice of a ``GoldenRecord`` the case builder reads, with the candidate pool handed in directly
+    """The slice of a ``GoldenRecord`` the group builder reads, with the candidate pool handed in directly
     instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads.
 
     The builder groups on ``GoldenRecord.pool_key``, so a stub that hands its pool in must answer that
@@ -142,26 +142,26 @@ def test_builder_merges_goldens_that_share_a_recorded_program_and_only_those(mon
     agree merge."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
     fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
-    cases, skipped = _build(
+    groups, skipped = _build(
         [
             _StubRecord("m.512", {"TILE": "b"}, std),
             _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name, same provenance: merges
-            # Same name AND same program, but pinned differently — so a different enumeration, its own case.
+            # Same name AND same program, but pinned differently — so a different enumeration, its own group.
             _StubRecord("m.512", {"TILE": "f"}, fastmath, program=std, pins=(("FAST_MATH", True),)),
             _StubRecord("m.512.absent", {"TILE": "zz"}, std),  # matches no row: skipped, as before
         ],
         monkeypatch,
     )
-    assert [(c.key, c.golden_ids, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
+    assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
     assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
-    # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
+    # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged group keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
-    assert len({c.key for c in cases}) == len(cases)
+    assert len({c.key for c in groups}) == len(groups)
 
 
 def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     """Sampling must not break the merge, and the merge is what makes two verified answers to one
-    question one training case instead of two.
+    question one training group instead of two.
 
     The two are one group before the draw happens — they share a program, so they share an enumeration and
     the builder runs it once. What sampling must not break is the PINS: both recorded rows have to survive
@@ -169,7 +169,7 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last rows are
     exactly the positions a 4-of-26 draw is least likely to reach."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
-    cases, skipped = _build(
+    groups, skipped = _build(
         [
             _StubRecord("m.512", {"TILE": "a"}, list(pool)),  # the FIRST row
             _StubRecord("m.512.alias", {"TILE": "z"}, list(pool)),  # and the LAST
@@ -178,21 +178,21 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
         sample=4,
     )
     assert skipped == []
-    assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
-    (case,) = cases
-    assert len(case.golden_ids) == 2, "both recorded rows survive the draw and land in the case"
-    assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
-    kept = {chr(int(v)) for v in case.feats[:, 0]}
+    assert len(groups) == 1, "one pool, one group - the draw must not fracture it into two"
+    (group,) = groups
+    assert len(group.golden_ids) == 2, "both recorded rows survive the draw and land in the group"
+    assert group.total == 26 and len(group.feats) < 26, "the true pool size travels beside the sample"
+    kept = {chr(int(v)) for v in group.feats[:, 0]}
     assert {"a", "z"} <= kept
 
 
 def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
     """Two recordings of the same config over the same pool are ONE fact. They verify the same row, so the
-    label set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
+    label set does not grow — where the ``#2`` group they used to become counted that one fact twice in every
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
-    cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
-    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1,))]
+    groups, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512", (1,))]
 
 
 def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch):
@@ -201,9 +201,9 @@ def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch)
     A program recorded in two sessions carries two different wires — different node ids, same graph — so it
     reads as two enumerations and is enumerated twice. The pools they produce are identical, and the second
     stage folds them. Without it the V100 corpus, where the same shapes are recorded many times over, reports
-    306 cases where there are 108 pools, each one counting a single fact on its own."""
+    306 groups where there are 108 pools, each one counting a single fact on its own."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
-    cases, _ = _build(
+    groups, _ = _build(
         [
             _StubRecord("m.512", {"TILE": "b"}, std),
             # Same pool, but recorded as a different program — the recorded key cannot see they are one.
@@ -211,27 +211,27 @@ def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch)
         ],
         monkeypatch,
     )
-    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1, 2))]
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512", (1, 2))]
 
 
 def test_a_pool_is_named_after_a_golden_that_is_actually_in_it(monkeypatch):
-    """A record can be grouped onto a pool and then fail to find its own row in it. Naming the case after
+    """A record can be grouped onto a pool and then fail to find its own row in it. Naming the group after
     that record would put a rank in ``metrics.json`` under a name the same run reports as skipped — and the
     golden whose row IS pinned would appear nowhere."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
-    cases, skipped = _build(
+    groups, skipped = _build(
         [_StubRecord("m.512.absent", {"TILE": "zz"}, std), _StubRecord("m.512", {"TILE": "b"}, std)],
         monkeypatch,
     )
-    assert [(c.key, c.name) for c in cases] == [("gpuA/m.512", "m.512")]
+    assert [(c.key, c.name) for c in groups] == [("gpuA/m.512", "m.512")]
     assert [s[1] for s in skipped] == ["m.512.absent"]
 
 
-# --- synthetic cases ---------------------------------------------------------------
+# --- synthetic groups ---------------------------------------------------------------
 
 
 def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
-    """A tiny case whose rows carry a monotone D_a so a samples=0 descent has signal. EVERY case
+    """A tiny group whose rows carry a monotone D_a so a samples=0 descent has signal. EVERY group
     carries the routing stamp on every row, as the featurizer writes it (``passes/identity._extents``
     emits the key unconditionally, 0.0 when no axis is symbolic) — that stamp's VALUE, not the tier
     label, is what puts the group on the dynamic weight set.
@@ -277,9 +277,9 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
     # than 1.0 is the train/serve skew this replaced: live candidates always carry the value.
     assert "S_ext_n_symbolic_axis" in dyn.feat_names
     assert (dyn.matrix(["S_ext_n_symbolic_axis"], fill=np.nan) == 1.0).all()
-    for case in (static, dyn):
-        assert case.feats.shape[1] == len(case.feat_names)
-        assert "S_ext_n_symbolic_axis" not in descent_cols(case.feat_names)
+    for group in (static, dyn):
+        assert group.feats.shape[1] == len(group.feat_names)
+        assert "S_ext_n_symbolic_axis" not in descent_cols(group.feat_names)
     # The tier decides nothing, but it still has to AGREE: it and the stamp are the same fact arriving
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
     # under the wrong weight set with nothing reporting it.
@@ -347,7 +347,7 @@ def test_matrix_is_memoized_and_read_only():
 def test_no_feature_view_can_drop_the_routing_stamp():
     """Routing is not a view choice. A spec that names neither the stamp nor a prefix covering it still
     keeps it — otherwise every pool would route to the static weight set and the run would report a
-    dataset with zero dynamic cases rather than an error."""
+    dataset with zero dynamic groups rather than an error."""
     for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, "D_waves"):
         assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
     assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
@@ -404,15 +404,15 @@ def test_folds_hold_out_every_golden_exactly_once():
     for row in out["holdout_per_golden"].values():
         assert isinstance(row["rank"], int) and isinstance(row["rank_optimistic"], int)
         assert row["rank"] >= row["rank_optimistic"]  # pessimistic can only add ties
-    # Train side: same keys (every case was in the other folds' training slices).
+    # Train side: same keys (every group was in the other folds' training slices).
     assert set(out["train_per_golden"]) == {c.key for c in _cases()}
     # Aggregates are per card only — a REPORT axis, independent of what the folds group by — and the
     # gap is their arithmetic difference.
     for gpu in ("gpuA", "gpuB"):
-        cells = {(c["axes"]["split"], c["axes"]["gpu"]): c for c in out["cells"]}
-        assert ("holdout", gpu) in cells and ("train", gpu) in cells
+        summaries = {(c["axes"]["cv_split"], c["axes"]["gpu"]): c for c in out["summaries"]}
+        assert ("holdout", gpu) in summaries and ("train", gpu) in summaries
         assert out["gap"][gpu] == round(
-            cells[("holdout", gpu)]["metrics"]["rank"]["median"] - cells[("train", gpu)]["metrics"]["rank"]["median"], 2
+            summaries[("holdout", gpu)]["metrics"]["rank"]["median"] - summaries[("train", gpu)]["metrics"]["rank"]["median"], 2
         )
     assert out["fold_detail"]["excluded"] == {}
 
@@ -425,57 +425,57 @@ def test_a_shape_group_is_never_split_across_folds():
     holdout rank. The retired ``op_family`` axis keyed on the golden's NAME and missed exactly this:
     on the real corpus, 178 shape groups spanned more than one family, covering 695 of 1385 goldens.
 
-    The cases below are that situation in miniature — one shape under three unrelated names, on two
+    The groups below are that situation in miniature — one shape under three unrelated names, on two
     different cards, which must still land in ONE fold."""
-    cases = [
+    groups = [
         _case("rms_norm.k2048", "reduce", "gpuA", shape="S(free=2048,red=2048)"),
         _case("gemma4_12b.rms_norm", "reduce", "gpuA", shape="S(free=2048,red=2048)"),
         _case("olmoe_1b7b.rms_norm.k2048.m1", "reduce", "gpuB", shape="S(free=2048,red=2048)"),
         _case("matmul.square.512", "thread", "gpuA", shape="S(free=512,red=512)"),
         _case("matmul.square.1024", "thread", "gpuB", shape="S(free=1024,red=1024)"),
     ]
-    by_shape = fit_cv.assign_folds(cases, 3)
-    folds = {c.key: by_shape[c.shape] for c in cases}
+    by_shape = fit_cv.assign_folds(groups, 3)
+    folds = {c.key: by_shape[c.shape] for c in groups}
     shared = [k for k in folds if "rms_norm" in k]
     assert len({folds[k] for k in shared}) == 1, "one shape, one fold — on every card"
 
-    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)
+    out = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=3)
     held = out["holdout_per_golden"]
     assert len({held[k]["fold"] for k in shared}) == 1
 
 
 def test_folds_are_balanced_and_deterministic():
-    """Groups are very uneven on the real corpus (largest 122 cases, 162 singletons), so assignment is
+    """Groups are very uneven on the real corpus (largest 122 groups, 162 singletons), so assignment is
     largest-first onto the currently-smallest fold; a thin fold's median would be noise. Assignment is
-    a pure function of the case list, so a re-run reproduces it."""
-    cases = [_case(f"m.{i}", "thread", "gpuA", shape=f"s{i // 2}") for i in range(12)]  # 6 groups of 2
-    a = fit_cv.assign_folds(cases, 3)
-    assert a == fit_cv.assign_folds(list(reversed(cases)), 3)
-    counts = {f: sum(1 for c in cases if a[c.shape] == f) for f in set(a.values())}
+    a pure function of the group list, so a re-run reproduces it."""
+    groups = [_case(f"m.{i}", "thread", "gpuA", shape=f"s{i // 2}") for i in range(12)]  # 6 groups of 2
+    a = fit_cv.assign_folds(groups, 3)
+    assert a == fit_cv.assign_folds(list(reversed(groups)), 3)
+    counts = {f: sum(1 for c in groups if a[c.shape] == f) for f in set(a.values())}
     assert set(counts) == {0, 1, 2} and max(counts.values()) - min(counts.values()) <= 1
 
 
 def test_more_folds_than_groups_leaves_no_empty_fold_scored():
     """k above the group count is not an error — the surplus folds simply hold nothing and are
     skipped, rather than being scored as empty holdouts."""
-    cases = [_case("m.1", "thread", "gpuA", shape="s1"), _case("m.2", "thread", "gpuA", shape="s2")]
-    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=5)
-    assert set(out["holdout_per_golden"]) == {c.key for c in cases}
+    groups = [_case("m.1", "thread", "gpuA", shape="s1"), _case("m.2", "thread", "gpuA", shape="s2")]
+    out = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=5)
+    assert set(out["holdout_per_golden"]) == {c.key for c in groups}
     assert all(d["n"] > 0 for d in out["fold_detail"]["holdout_medians"].values())
 
 
 def test_fittability_guard_excludes_fold_loudly():
     """A fold whose holdout needs the dynamic set while its training slice has no dyn
-    cases is excluded with a reason — never scored with a stale/empty vector — and its
+    groups is excluded with a reason — never scored with a stale/empty vector — and its
     goldens are visibly missing from the pooled holdout."""
-    cases = [
+    groups = [
         _case("matmul.square.512", "thread", "gpuA"),
         _case("matmul.qkv.h4096", "warp", "gpuA", pinned=0),
-        _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", pinned=3),  # the ONLY dyn case
+        _case("matmul.mlp_down.h4096.dynM", "dyn", "gpuA", pinned=3),  # the ONLY dyn group
         _case("matmul.square.512", "thread", "gpuB"),
     ]
-    out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=4)
-    assert list(out["fold_detail"]["excluded"].values()) == ["dynamic weight set unfittable (0 dyn cases in training)"]
+    out = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=4)
+    assert list(out["fold_detail"]["excluded"].values()) == ["dynamic weight set unfittable (0 dyn groups in training)"]
     assert "gpuA/matmul.mlp_down.h4096.dynM" not in out["holdout_per_golden"]
     # The healthy folds still pool.
     assert "gpuA/matmul.square.512" in out["holdout_per_golden"]
@@ -485,16 +485,16 @@ def test_fittability_guard_excludes_fold_loudly():
 
 
 def _metrics():
-    cases = _cases()
+    groups = _cases()
     model = LinearFit(LinearModel(weights={"D_a": -1.0, "D_b": 0.25}, weights_dynamic={"D_a": -0.5}, scale=0.1, **SEED_PARAMS), [0], [0])
-    cv = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)
+    cv = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=3)
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),
         ("gpuA", "matmul.o_proj.h4096", "golden not in 12 candidates"),
-        ("gpuC", "softmax.k2048", fit_cv.OUT_OF_SCOPE),  # a card with no ranked case at all
+        ("gpuC", "softmax.k2048", fit_cv.OUT_OF_SCOPE),  # a card with no ranked group at all
     ]
     header = {"trainer": "linear", "data": "golden", "seed": 0}
-    return fit_cv.build_metrics(header, cases, skipped, model, cv)
+    return fit_cv.build_metrics(header, groups, skipped, model, cv)
 
 
 def test_metrics_json_is_deterministic():
@@ -505,15 +505,15 @@ def test_metrics_json_is_deterministic():
 
 def test_metrics_counts_every_skipped_golden():
     m = _metrics()
-    assert all(c["axes"]["split"] == "full_train" for c in m["full_train"]["cells"])
-    # Skipped goldens sit BESIDE the cells: they have no pool, so they are a fact about the corpus rather
-    # than about a scored card — and a fit cell stays the same four-key shape an eval report emits.
-    assert set(m["full_train"]["cells"][0]) == {"axes", "groups", "unscored", "metrics"}
+    assert all(c["axes"]["cv_split"] == "full_train" for c in m["full_train"]["summaries"])
+    # Skipped goldens sit BESIDE the summaries: they have no pool, so they are a fact about the corpus rather
+    # than about a scored card — and a fit summary stays the same four-key shape an eval report emits.
+    assert set(m["full_train"]["summaries"][0]) == {"axes", "groups", "unscored", "metrics"}
     assert m["full_train"]["skipped"]["gpuA"] == {"unranked": 1, "out_of_scope": 1}
     assert m["full_train"]["skipped"]["gpuB"] == {"unranked": 0, "out_of_scope": 0}
-    # A card whose every golden was skipped still appears — as a skipped entry with no cell.
+    # A card whose every golden was skipped still appears — as a skipped entry with no summary.
     assert m["full_train"]["skipped"]["gpuC"]["out_of_scope"] == 1
-    assert "gpuC" not in {c["axes"]["gpu"] for c in m["full_train"]["cells"]}
+    assert "gpuC" not in {c["axes"]["gpu"] for c in m["full_train"]["summaries"]}
     # full_train per-golden rows carry the pool size; ranks respect the tie ordering.
     row = m["full_train"]["per_golden"]["gpuA/matmul.square.512"]
     assert row["pool"] == 6 and row["rank"] >= row["rank_optimistic"]
@@ -606,12 +606,12 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     assert metrics["header"]["trainer_params"]["objective"] == "mean_log_rank"
     # The two seeding policies stay recorded: without them two fits are not comparable.
     assert metrics["header"]["trainer_params"]["fold_seed_weights"] == "zeros"
-    assert metrics["cv"]["cells"]
+    assert metrics["cv"]["summaries"]
     # Cases are candidate pools now, so the header carries how many verified rows they hold between them —
-    # otherwise a case count that fell because two goldens shared a pool reads as lost data.
-    assert metrics["header"]["cases"] == {"groups": 8, "positives": 8, "merged": 0}
+    # otherwise a group count that fell because two goldens shared a pool reads as lost data.
+    assert metrics["header"]["groups"] == {"total": 8, "positives": 8, "merged": 0}
 
     artifact = json.loads((tmp_path / "run" / "weights.json").read_text())
     assert artifact["kind"] == "linear" and artifact["weights"] and artifact["weights_dynamic"]
-    assert artifact["provenance"]["cases"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
+    assert artifact["provenance"]["groups"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "static top1=" in artifact["provenance"]["notes"]

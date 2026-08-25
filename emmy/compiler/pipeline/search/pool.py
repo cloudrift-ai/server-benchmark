@@ -9,7 +9,7 @@ than to build everything and throw most of it away.
 
 **The index set is a pure function of** ``(n, size, seed)``. It never looks at a row, so two
 byte-identical pools draw byte-identical samples — which is what keeps the fit reproducible and
-keeps two goldens over one pool mergeable into one training case.
+keeps two goldens over one pool mergeable into one training group.
 
 **Membership survives the draw exactly.** ``keep`` is the set of :func:`~.features.tile_signature`
 values that must be retained whatever the draw picks. With one, :meth:`PoolSample.take` VISITS every

@@ -8,8 +8,8 @@ Five subcommands:
   (``--dataset nodes``: Spearman + regret, what a wrong pick costs) or over the golden
   corpus (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
   golden). BOTH prior halves are reported, labelled — they fail for different reasons.
-  The cells are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
-  writes the same cells into its ``metrics.json``, so a fit and an eval state the golden
+  The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
+  writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
 - ``eval golden``    — validate one canonical golden YAML against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
@@ -249,7 +249,7 @@ def _measured_report(args, halves):
     keeps or drops a whole op atomically — a pool is never split against its own siblings."""
     from emmy.compiler.pipeline.search.data import load_node_rows, op_label  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
@@ -267,7 +267,7 @@ def _measured_report(args, halves):
         "groups": len(groups),
         "dropped": dropped,
     }
-    return EvalReport(header, [c for half, prior in halves for c in measured_cells(half, groups, prior.score_rows)])
+    return EvalReport(header, [c for half, prior in halves for c in measured_summaries(half, groups, prior.score_rows)])
 
 
 def _golden_report(args, halves):
@@ -278,7 +278,7 @@ def _golden_report(args, halves):
     only its own weight names, so its ranks are identical either way, while the online half regresses on the
     ``S_*`` / ``H_*`` columns a narrow view drops and would otherwise be asked about a kernel with no shape."""
     from emmy.commands.fit import build_golden_groups  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_cells  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
 
     logger.info("Building golden pools (each golden under its own card's context) ...")
     groups, skipped = build_golden_groups("*", sample=args.pool_sample, kernel=args.kernel)
@@ -291,7 +291,7 @@ def _golden_report(args, halves):
         "positives": sum(len(g.golden_ids) for g in groups),
         "skipped": len(skipped),
     }
-    return EvalReport(header, [c for half, prior in halves for c in golden_cells(half, groups, prior.score_rows)])
+    return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
 
 def handle_eval_prior(args) -> None:
@@ -323,18 +323,18 @@ def handle_eval_prior(args) -> None:
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
-    """One metric value with the pools it was computed over, or ``—`` when nothing in the cell qualified.
+    """One metric value with the pools it was computed over, or ``—`` when nothing in the summary qualified.
 
     The count is appended only where the block carries one, which is where the metric has a size minimum and so
-    can cover fewer pools than the cell holds."""
+    can cover fewer pools than the summary holds."""
     value = block.get(key)
     if value is None:
         return "—"
     return f"{fmt.format(value)} ({block['groups']})" if "groups" in block else fmt.format(value)
 
 
-# Per dataset: the axis columns, then ``(header, cells(cell))`` for each metric column. The axes are the ones the
-# report keyed its cells on — the renderer names them rather than discovering them, so a column order is a
+# Per dataset: the axis columns, then ``(header, summaries(summary))`` for each metric column. The axes are the ones the
+# report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
     "nodes": (
@@ -369,10 +369,10 @@ _REPORT_CAPTIONS = {
 
 
 def _emit_report(report) -> None:
-    """Print an :class:`EvalReport` — the provenance header, then one table of cells.
+    """Print an :class:`EvalReport` — the provenance header, then one table of summaries.
 
-    Which columns appear follows the report's dataset, since that is what decided which metrics the cells carry.
-    The ``pools`` column is the cell's own total, annotated when the model could not score some of them: an
+    Which columns appear follows the report's dataset, since that is what decided which metrics the summaries carry.
+    The ``pools`` column is the summary's own total, annotated when the model could not score some of them: an
     unscored pool is not a small one, and a report that dropped it silently would show a healthy corpus with no
     sign that part of the deploy surface is unmeasured."""
     head = report.header
@@ -386,17 +386,17 @@ def _emit_report(report) -> None:
         logger.info("  %s", provenance)
     if dropped := head.get("dropped"):
         logger.info("  rows dropped before grouping: %s", ", ".join(f"{n} {why}" for why, n in sorted(dropped.items())))
-    if not report.cells:
+    if not report.summaries:
         logger.info("  no candidate pools to score")
         return
 
     axes, metrics = _REPORT_TABLES[head["dataset"]]
     columns = [Col(a) for a in (*axes, "pools")] + [Col(name) for name, _ in metrics]
     rows = [
-        [cell.axes.get(a, "") for a in axes]
-        + [str(cell.groups) + (f" ({cell.unscored} unscored)" if cell.unscored else "")]
-        + [render(cell) for _, render in metrics]
-        for cell in report.cells
+        [summary.axes.get(a, "") for a in axes]
+        + [str(summary.groups) + (f" ({summary.unscored} unscored)" if summary.unscored else "")]
+        + [render(summary) for _, render in metrics]
+        for summary in report.summaries
     ]
     logger.info("")
     for line in _REPORT_CAPTIONS[head["dataset"]]:
@@ -791,7 +791,7 @@ def _knob_cells(entry: tuple) -> dict[str, tuple[str, bool]]:
     :func:`~emmy.commands.table.knob_columns` puts the name in the column header).
     A ``("row", lead, gold, got)`` entry renders ``found/golden`` per knob, red where the
     two differ (``knob.values_equal`` — so a legacy golden spelling compares equal to the
-    site-form pick it realizes as); a ``("total", lead, cells)`` entry carries its cells
+    site-form pick it realizes as); a ``("total", lead, summaries)`` entry carries its summaries
     pre-built."""
     if entry[0] == "total":
         return entry[2]
@@ -810,7 +810,7 @@ def _knob_eq(k: str, gv, got: dict) -> bool:
 
 def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str) -> None:
     """Stream a golden table via ``logger``: ``lead_cols`` (kernel, m/t, …) plus the aligned
-    ``found/golden`` knob columns (knob name in the header, value-only cells). ``entries``
+    ``found/golden`` knob columns (knob name in the header, value-only summaries). ``entries``
     preserves config order — each is ``("row", lead_cells, gold, got)``,
     ``("total", lead_cells, knob_cells)`` (a pre-built aggregate row), or
     ``("err", kernel_name, message)``; an error row prints its kernel name (aligned to the
@@ -906,7 +906,7 @@ def _perf_color(ratio: float) -> str:
 
 
 def _perf_cell(perf: dict | None, name: str) -> tuple[str, str] | None:
-    """The ``vs gold`` lead cell for one shape: ``pick_us/golden_us`` as ``N.NNx``
+    """The ``vs gold`` lead summary for one shape: ``pick_us/golden_us`` as ``N.NNx``
     (green >3% faster, white within 3%, yellow/red slower), ``—`` when the shape has no
     -O3 measurement. ``None`` when ``perf`` wasn't supplied (column absent — e.g.
     ``eval golden``)."""

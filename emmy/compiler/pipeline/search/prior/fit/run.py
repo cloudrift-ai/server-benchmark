@@ -9,9 +9,9 @@ pre-rendered inside ``header``. No I/O, no clock, no argparse: the same inputs p
 ``(metrics, fit)`` pair, so the harness is testable on synthetic groups with a stub trainer.
 
 It returns the FIT, not an artifact. Assembling one is shipping policy — which dynamic weight set a
-fit with no dynamic cases goes out with, what provenance it carries — and that belongs with the
+fit with no dynamic groups goes out with, what provenance it carries — and that belongs with the
 command layer (:mod:`emmy.commands.fit`), which also keeps what ``pipeline/`` must not import: the
-snippet-tracing case builder, the CLI, and the file writing.
+snippet-tracing group builder, the CLI, and the file writing.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, t
     (shape) and there has only ever been one, so the key was a wrapper a reader had to step through."""
     full = trainer.fit(groups)
 
-    # Each fold re-fits — silence the fit package's per-case rank logging for that stage
+    # Each fold re-fits — silence the fit package's per-group rank logging for that stage
     # (the full-train fit above already reported it).
     pkg_logger = logging.getLogger(__package__)
     level = pkg_logger.level

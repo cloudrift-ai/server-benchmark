@@ -583,7 +583,7 @@ def test_prior_rejects_the_leaf_only_db_dataset(run_cli, tmp_path):
 
 
 def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
-    """``eval prior --dataset nodes`` renders the shared report over the node store: one cell per card and
+    """``eval prior --dataset nodes`` renders the shared report over the node store: one summary per card and
     compile regime, labelled by prior half. With no fitted checkpoint the online half is named as absent
     rather than answered for — a cold model scores every row the same constant, which in a table is
     indistinguishable from a trained model that collapsed."""
@@ -610,10 +610,10 @@ def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
 
 def test_report_renders_both_dataset_kinds_with_their_own_columns():
     """The renderer picks its columns from the report's dataset, since that is what decided which metrics the
-    cells carry. Both branches are exercised here rather than through a corpus build, which costs minutes."""
+    summaries carry. Both branches are exercised here rather than through a corpus build, which costs minutes."""
     import emmy.commands.eval as eval_cmd
     from emmy.compiler.pipeline.search.data.group import GoldenGroup, MeasuredGroup
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_cells, measured_cells
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries, measured_summaries
 
     feats = [{"D_a": float(i)} for i in range(3)]
     by_d_a = lambda g: g.matrix(["D_a"])[:, 0]  # noqa: E731 — a one-line scorer stub
@@ -622,8 +622,8 @@ def test_report_renders_both_dataset_kinds_with_their_own_columns():
 
     lines: list[str] = []
     with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
-        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, measured_cells("offline", [measured], by_d_a)))
-        eval_cmd._emit_report(EvalReport({"dataset": "golden", "source": "corpus"}, golden_cells("online", [golden], by_d_a)))
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, measured_summaries("offline", [measured], by_d_a)))
+        eval_cmd._emit_report(EvalReport({"dataset": "golden", "source": "corpus"}, golden_summaries("online", [golden], by_d_a)))
     text = "\n".join(lines)
 
     assert "rho" in text and "regret@1" in text and "1.00x (1)" in text
@@ -633,24 +633,24 @@ def test_report_renders_both_dataset_kinds_with_their_own_columns():
 
 
 def test_an_unmeasurable_metric_renders_a_dash_rather_than_a_number():
-    """Nothing in the cell qualified — which must not read as a value of zero."""
+    """Nothing in the summary qualified — which must not read as a value of zero."""
     import emmy.commands.eval as eval_cmd
     from emmy.compiler.pipeline.search.data.group import MeasuredGroup
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries
 
     one_row = MeasuredGroup.from_measured("g/op@O3", "g", "op", 3.0, [10.0], [{"D_a": 1.0}])
-    cells = measured_cells("offline", [one_row], lambda g: g.matrix(["D_a"])[:, 0])
+    summaries = measured_summaries("offline", [one_row], lambda g: g.matrix(["D_a"])[:, 0])
 
     lines: list[str] = []
     with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
-        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, cells))
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, summaries))
 
-    assert cells[0].metrics["regret1"]["median"] is None
+    assert summaries[0].metrics["regret1"]["median"] is None
     assert "—" in "\n".join(lines)
 
 
 def test_prior_writes_the_report_as_json(run_cli, tmp_path):
-    """``--json`` writes the cells, so two runs are compared with ``diff`` instead of by eye.
+    """``--json`` writes the summaries, so two runs are compared with ``diff`` instead of by eye.
 
     Also pins the pre-rename ``--prior`` spelling of ``--online-file``: it lives in shell profiles and scripts."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
@@ -672,10 +672,10 @@ def test_prior_writes_the_report_as_json(run_cli, tmp_path):
     assert rc == 0, f"stderr: {stderr}"
     obj = json.loads(out.read_text())
     assert obj["header"]["dataset"] == "nodes" and obj["header"]["groups"] == 1
-    (cell,) = obj["cells"]
-    assert cell["axes"] == {"half": "offline", "gpu": _GPU, "H_opt": "O3"}
-    assert set(cell["metrics"]) == {"spearman", "regret1", "regret10"}
-    assert cell["metrics"]["regret1"]["groups"] == 1
+    (summary,) = obj["summaries"]
+    assert summary["axes"] == {"half": "offline", "gpu": _GPU, "H_opt": "O3"}
+    assert set(summary["metrics"]) == {"spearman", "regret1", "regret10"}
+    assert summary["metrics"]["regret1"]["groups"] == 1
 
 
 def test_nodes_dataset_rejected_by_db_only_subcommand(run_cli, tmp_path):
@@ -753,18 +753,18 @@ def test_emit_variant_table_o3_column_and_deterministic_pick(caplog):
 
 def test_knob_columns_names_in_header_values_in_cells():
     """``knob_columns`` puts the knob name in the column header (canonical knob_sort_key
-    order) and value-only cells (no ``NAME=`` prefix), blank where a row lacks a knob;
-    ``render_table`` aligns the columns to the widest of header + cells."""
+    order) and value-only summaries (no ``NAME=`` prefix), blank where a row lacks a knob;
+    ``render_table`` aligns the columns to the widest of header + summaries."""
     from emmy.commands.table import knob_columns, render_table
 
-    cols, cells = knob_columns(
+    cols, summaries = knob_columns(
         [
             {"TILE": ("n16", False), "REDUCE": ("b32", False)},
             {"TILE": ("n32", False), "STAGE": ("d2/smem-async", False)},
         ]
     )
     assert [c.name for c in cols] == ["TILE", "REDUCE", "STAGE"]  # canonical KNOB_ORDER
-    lines = render_table(cols, cells)
+    lines = render_table(cols, summaries)
     assert lines[0].split() == ["TILE", "REDUCE", "STAGE"]  # header row carries the names
     assert lines[1].split() == ["n16", "b32"]  # values only, no "TILE=" prefix; trailing STAGE blank stripped
     assert "TILE=" not in lines[1]
@@ -772,7 +772,7 @@ def test_knob_columns_names_in_header_values_in_cells():
 
 
 def test_render_table_ansi_aware_width():
-    """A coloured cell is padded by its *visible* length, so embedded ANSI codes never
+    """A coloured summary is padded by its *visible* length, so embedded ANSI codes never
     throw off column alignment (right- and left-aligned columns both line up)."""
     import re  # noqa: PLC0415
 
@@ -787,7 +787,7 @@ def test_render_table_ansi_aware_width():
 def test_bare_families_canonicalizes_axis_suffixed_knobs():
     """The golden-reproduction table compares the greedy pick against golden YAML rows,
     whose knobs are spelled bare — but resolved ops carry axis-suffixed codec keys
-    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found cell
+    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found summary
     rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
     from emmy.commands.eval import _bare_families
 

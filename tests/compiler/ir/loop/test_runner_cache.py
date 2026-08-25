@@ -77,7 +77,7 @@ def test_float_precision_boundaries_use_host_cpp_spelling():
     backend = LoopBackend()
     compiled = backend.compile(graph)
     loop = next(node.op for node in compiled.nodes.values() if isinstance(node.op, LoopOp))
-    source = render_loopop_cpp(loop, "precision_copy", {"x": (8,)}, (8,))
+    source = render_loopop_cpp(loop, "precision_copy", {"x": (8,)}, {"wide": (8,)})
     assert "__half" not in source
     assert "__float2half" not in source
 

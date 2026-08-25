@@ -218,10 +218,6 @@ class LoopOp(BodyOp):
         out_shapes = loop._infer_write_shapes()
         return execute_loop_op_cpp(loop, input_arrays, out_shapes)
 
-    def _infer_write_shape(self) -> tuple[int, ...]:
-        """Derive the first output's shape; convenience for single-output callers."""
-        return next(iter(self._infer_write_shapes().values()))
-
     def _infer_write_shapes(self) -> dict[str, tuple[int, ...]]:
         """Derive every output buffer shape from its own ``Write`` scope.
 

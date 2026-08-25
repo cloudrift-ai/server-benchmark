@@ -75,19 +75,14 @@ def render_loopop_cpp(
     loop: LoopOp,
     fn_name: str,
     input_shapes: dict[str, tuple[int, ...]],
-    output_shapes: dict[str, tuple[int, ...]] | tuple[int, ...],
+    output_shapes: dict[str, tuple[int, ...]],
 ) -> str:
     """Emit a complete ``extern "C" void <fn_name>(...)`` definition.
 
     Inputs become ``const float*`` params in ``loop.inputs`` order; outputs
-    become trailing ``float*`` params in ``loop.outputs`` order. A bare tuple
-    remains the single-output convenience form.
+    become trailing ``float*`` params in ``loop.outputs`` order.
     """
     output_names = tuple(loop.outputs)
-    if not isinstance(output_shapes, dict):
-        if len(output_names) != 1:
-            raise ValueError("render_loopop_cpp: multi-output LoopOp needs a shape map")
-        output_shapes = {output_names[0]: output_shapes}
     shapes: dict[str, tuple[int, ...]] = {**input_shapes, **output_shapes}
     ctx = RenderCtx(target=LoopRenderTarget(), shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
 
@@ -122,7 +117,7 @@ def _ensure_prelude() -> None:
 def execute_loop_op_cpp(
     loop: LoopOp,
     input_arrays: dict[str, np.ndarray],
-    out_shapes: dict[str, tuple[int, ...]] | tuple[int, ...],
+    out_shapes: dict[str, tuple[int, ...]],
 ) -> np.ndarray | tuple[np.ndarray, ...]:
     """JIT-compile ``loop`` to C++ if needed, then run it on ``input_arrays``.
 
@@ -138,10 +133,6 @@ def execute_loop_op_cpp(
 
     bufs = tuple(loop.inputs)
     output_names = tuple(loop.outputs)
-    if not isinstance(out_shapes, dict):
-        if len(output_names) != 1:
-            raise ValueError("execute_loop_op_cpp: multi-output LoopOp needs a shape map")
-        out_shapes = {output_names[0]: out_shapes}
     input_shapes = {name: tuple(int(d) for d in input_arrays[name].shape) for name in bufs}
     # Key on the rendered source, NOT ``id(loop)``: a LoopOp plus its runtime
     # shapes uniquely determine the C++ string (see module docstring), and the

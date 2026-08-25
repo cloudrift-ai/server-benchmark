@@ -315,6 +315,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
+  A **hyper-connection** architecture (DeepSeek V4) changes what the seam carries, and the runner
+  follows it end to end. `carrier_size` is `hc_mult * hidden`, not `hidden`: every `pre` / `post`
+  example, the activation arenas and every pipeline boundary are sized on it. `embed_device` opens
+  the carrier by copying the gathered row into each residual stream (the model's own `expand`), and
+  `final_norm_device` closes it through the model's learned `hc_head` collapse before the final norm
+  — a module held beside the norm, not a mean. The `post` program returns THREE tensors of three
+  different widths (`mixed[T, hc·H]`, `xn[T, H]`, `mix[T, hc]`), so the rider path sizes each
+  destination on its own width; the routed combine runs on `xn`, is reduced across the expert shards,
+  and lands on the streams through `place_routed_streams`. Verified on an sm_70 V100: the compiled
+  seam reproduces the eager `DeepseekV4DecoderLayer`, and per-shard expert partials sum to the
+  unsharded combine (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
+
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
   `from_model` interns it into a group index, compiles that group's whole tier set on first sight

@@ -194,15 +194,6 @@ class Prior(ABC):
         the gate is a tripwire for measured failure, not a proof-of-quality demand."""
         return self.fitted and (self.calibration is None or self.calibration >= CALIBRATION_MIN)
 
-    @property
-    def masking_exact(self) -> bool:
-        """Whether deleting a key from a featurized row removes that feature's contribution
-        EXACTLY, which the ablation diagnostics need to know before quoting a Δ. False by
-        default — true only for the linear offline model, where a deleted key is exact term
-        removal. A tree re-routes the splits reading that column, and a model trained without
-        feature dropout has never seen a masked row at all."""
-        return False
-
     @abstractmethod
     def fit(self) -> None:
         """Refit the model on the current :attr:`_dataset`."""
@@ -236,13 +227,14 @@ class Prior(ABC):
         its per-call overhead once per fork rather than once per candidate."""
         return normalize_policy(self.mean_scores(knobs_list))
 
-    # --- scoring already-featurized rows (attribution / ablation / offline fitting) ----------
+    # --- scoring already-featurized rows (the model classes' own seam) ------------------------
 
     def mean_score_features(self, feats: dict) -> float:
         """:meth:`mean_score` on an ALREADY-featurized row (``features.knob_features``
-        output). The entry point the attribution diagnostics and the offline fitter
-        score through: they featurize once, then mask / perturb individual features —
-        which no knob value maps back to — before scoring. Contract:
+        output). The seam each model class implements: :meth:`mean_score` featurizes and
+        delegates here, so a model never has to know how a knob dict becomes features. A pool is
+        scored through :meth:`score_rows` instead — the dict form does not survive that size.
+        Contract:
         ``mean_score_features(knob_features(knobs)) == mean_score(knobs)``, and a
         DELETED key carries each model's own absent-feature semantics (``0.0`` term
         for the linear offline prior, ``NaN`` routing for CatBoost)."""
@@ -276,16 +268,6 @@ class Prior(ABC):
         while the online model's ``S_*`` / ``H_*`` columns would all fill absent and its predictions would be
         about a kernel with no shape. Which columns a group carries is the BUILDER's decision, so an evaluation
         that scores both halves builds its pools over the full featurization."""
-
-    def explain_features(self, feats: dict) -> dict[str, float] | None:
-        """Signed per-term decomposition of this model's opinion on a featurized row,
-        in the model's own ranking-quality units (HIGHER = predicted faster) — the
-        attribution report diffs two rows' terms to attribute a misranking to features.
-        ``None`` when the model has no decomposition (the default; the offline
-        prior returns an exact one, a tree model may return SHAP values). Exactness
-        contract, when implemented: the terms sum to the model's full quality score
-        for the row, so ``Σ (term(a) − term(b))`` IS the model's preference gap."""
-        return None
 
     # --- deployable-evidence pick ------------------------------------------
 

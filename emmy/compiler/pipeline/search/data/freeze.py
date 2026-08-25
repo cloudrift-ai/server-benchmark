@@ -30,11 +30,10 @@ NO load-time ``feat_ver`` gate (the v1 rule): features are re-derived by live co
 stored ``feat_ver`` / ``knob_ver`` / ``encoding_ver`` are provenance, not a contract.
 :func:`load_node_rows` is the interchange seam: it sniffs a path and yields ``NodeRow``s
 from either a live sqlite DB (file) or a freeze (directory), so the nodes-dataset
-consumers (``eval prior --dataset nodes``, ``Dataset.from_node_rows`` /
-``fold_node_rows``) accept both. Loaded rows carry ``parent_key=None`` / ``depth=0`` /
-``visits=0``: the fork diagnostics skip parentless rows and the golden-anchored descent
-treats them as tree-less, so a freeze degrades to the leaf-level metrics. A v1 JSONL
-freeze is refused with a re-freeze pointer — freezes are regenerable from the DB.
+consumers (``eval prior --dataset nodes``, ``Dataset.fold_node_rows``) accept both. Loaded rows
+carry ``parent_key=None`` / ``depth=0`` / ``visits=0``, which costs the consumers nothing: they read
+benched leaves and a freeze is leaf-only by construction. A v1 JSONL freeze is refused with a
+re-freeze pointer — freezes are regenerable from the DB.
 
 Produced by ``scripts/freeze_node_store.py``.
 """

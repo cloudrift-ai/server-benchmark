@@ -465,6 +465,7 @@
  "tests/serving/generation/test_generate_loop.py::test_slice_last_logits_wrapper_matches_full_logits": 5.0,
  "tests/serving/generation/test_runner_batched_gpu.py::test_runner_batched_matches_eager@cuda": 8.4,
  "tests/serving/generation/test_runner_batched_gpu.py::test_runner_batched_symbolic_matches_eager@cuda": 13.1,
+ "tests/serving/test_attention_split.py::test_split_matches_eager_block[gemma3]": 5.3,
  "tests/serving/test_moe_split.py::test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals": 0.1,
  "tests/serving/test_moe_split.py::test_serving_trunk_constants_retarget_to_checkpoint_keys": 0.06,
  "tests/serving/test_twins_coded.py::test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile": 0.58,

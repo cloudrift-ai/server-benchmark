@@ -285,16 +285,22 @@ class SdpaOp(Op):
         d_k = q.shape[-1]
         scale = self.scale if self.scale is not None else 1.0 / np.sqrt(d_k)
         scores = q @ np.swapaxes(k, -2, -1) * scale
+        # Masked positions fill with -inf via ``where`` rather than ``scores - mask * 1e9``:
+        # under NumPy 2 promotion a python-float 1e9 casts to the SCORES dtype first, which is
+        # inf in f16, and ``0 * inf`` then poisons every VISIBLE position with NaN. Every
+        # causal/banded row keeps at least one visible entry, so the -inf fill never yields an
+        # all--inf row and the softmax below stays finite.
+        neg_inf = np.asarray(-np.inf, dtype=scores.dtype)
         if self.is_causal:
             seq_len = scores.shape[-2]
             kv_len = scores.shape[-1]
-            causal_mask = np.triu(np.ones((seq_len, kv_len), dtype=scores.dtype), k=1)
-            scores = scores - causal_mask * 1e9
+            causal_mask = np.triu(np.ones((seq_len, kv_len), dtype=bool), k=1)
+            scores = np.where(causal_mask, neg_inf, scores)
         if self.sliding_window is not None:
             seq_len = scores.shape[-2]
             kv_len = scores.shape[-1]
-            band_mask = np.tril(np.ones((seq_len, kv_len), dtype=scores.dtype), k=-self.sliding_window)
-            scores = scores - band_mask * 1e9
+            band_mask = np.tril(np.ones((seq_len, kv_len), dtype=bool), k=-self.sliding_window)
+            scores = np.where(band_mask, neg_inf, scores)
         scores_max = np.max(scores, axis=-1, keepdims=True)
         exp_scores = np.exp(scores - scores_max)
         attn = exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)

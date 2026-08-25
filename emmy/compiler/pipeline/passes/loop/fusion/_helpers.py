@@ -1,23 +1,14 @@
 """Shared graph assembly for the ``loop/fusion`` rules.
 
 Lives in a ``_``-prefixed module so the pass loader skips it. Maximal fusion
-uses the region/splice helpers; the output-reshape fold shares the small
-single-output fragment wrapper and pure-indexmap predicate.
+uses these region and multi-output fragment helpers.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write, splice_graph
-
-
-def is_pure_indexmap(loop_op: LoopOp) -> bool:
-    """Whether the body is layout-only: Loops / Loads / Writes / Selects."""
-    for s in loop_op.body.iter():
-        if isinstance(s, (Assign, Accum)):
-            return False
-    return True
+from emmy.compiler.ir.loop import LoopOp, Write, splice_graph
 
 
 def loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
@@ -131,30 +122,3 @@ def wrap_multi_output_fragment(
     frag.add_node(merged, list(merged.inputs), outputs=tensors, node_id=node_id)
     frag.outputs = list(new_buffers)
     return frag, rename
-
-
-def wrap_merge_fragment(graph: Graph, merged: LoopOp, consumer: Node) -> Graph:
-    """Wrap a merged ``LoopOp`` in the single-node output fragment the rule
-    returns. The fragment node's ``inputs`` list must be in the SAME order
-    as ``merged``'s body Loads seed them (first-use order) so the
-    interpreter — which positionally zips ``node.inputs`` against
-    ``input_bufs`` — keys arrays by the right buf name."""
-    merged_inputs = list(merged.inputs)
-    frag = Graph()
-    for inp_id in merged_inputs:
-        ext_t = graph.buffer(inp_id)
-        shape = ext_t.shape if ext_t is not None else ()
-        dtype = ext_t.dtype if ext_t is not None else "f32"
-        frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
-    out_id = frag.add_node(
-        merged,
-        merged_inputs,
-        Tensor(
-            consumer.output.name,
-            consumer.output.shape,
-            consumer.output.dtype,
-        ),
-        node_id=f"merged_{consumer.id}",
-    )
-    frag.outputs = [out_id]
-    return frag

@@ -74,7 +74,8 @@ Lifting wraps each surviving tensor primitive (elementwise / reduce / scan / ind
 single-op `LoopOp`. Fusion takes a maximal downstream region; separate terminal branches become output ports, and
 one splicer worklist inlines common producers once across all roots. `test_fusion_rules.py` runs lifting followed by
 fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
-directly, while the pass tests exercise the resulting graph through Loop and CUDA lowering.
+and output equivalence clusters directly, while the pass tests exercise the resulting graph through Loop and CUDA
+lowering.
 
 | Rule file                              | Op                         | Tested via                                                                         |
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|

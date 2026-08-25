@@ -484,6 +484,13 @@ inlining a shared producer per consumer. The single-sink convenience form still 
 selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
 
+Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
+at a terminal graph output, with the same dtype and element count and an exact finite proof that every source and
+destination flat address is equal. Equal element count alone is insufficient; transposes, permutations, slices,
+broadcasts, and conversions remain ordinary edges. When a cluster has one live output, the splicer retargets the
+`Write` to that output shape with bounded affine indices and removes the copy roots from reconstruction. This handles
+a terminal reshape after a reduction without inlining that reduction independently at every reshaped load coordinate.
+
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. The standalone

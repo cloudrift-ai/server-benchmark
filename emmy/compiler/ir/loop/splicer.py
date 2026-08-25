@@ -10,6 +10,11 @@ Three public entry points wrap the same underlying ``_Splicer``:
   classifies each Load by its node.inputs edge (LoopOp → splice,
   otherwise → external slot in first-seen order).
 
+Before seeding roots, ``splice_graph`` collapses each output equivalence
+cluster: a single-owner chain of same-dtype copies proven to preserve every
+flat address. The computed source's Write retargets to the live output shape,
+so a terminal reshape does not force reduction reconstruction at its loads.
+
 Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
 Resolution dispatches on stmt kind:
@@ -55,12 +60,15 @@ need its own ordering pass; constructing the ``LoopOp`` is enough.
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import numpy as np
 
 from emmy.compiler.dtype import F32, DataType
-from emmy.compiler.ir.expr import Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
     Accum,
@@ -95,6 +103,22 @@ class _NotSupported(Exception):
 # restricted to the stmt's own enclosing axis names — the only bindings that
 # affect its rewrite (Load.index / Select.select) or its dep resolution.
 _BindKey = tuple[str, str, Scope, Sigma]
+
+# Exact flat-address comparison is finite. This covers the largest intended
+# output reshape while bounding temporary numpy grids during graph analysis.
+_OUTPUT_EQUIVALENCE_VERIFY_CAP = 1 << 25
+
+
+@dataclass(frozen=True)
+class _OutputEquivalenceCluster:
+    """A single-owner chain of flat-address-identical output copies.
+
+    ``buffers`` runs from the computed source to the live graph output;
+    ``copy_nodes`` are the intervening LoopOp nodes in the same order.
+    """
+
+    buffers: tuple[str, ...]
+    copy_nodes: tuple[str, ...]
 
 
 @dataclass
@@ -199,19 +223,42 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     an external read, assigned a slot in first-seen order.
 
     Every graph output is a root, so separate terminal branches become one
-    multi-output LoopOp. Returns ``(merged_op, external_buffer_ids)`` where
-    the ids are the non-``LoopOp`` inputs in merged first-use order. Returns
-    ``None`` if an output is not produced by a ``LoopOp`` or any splice edge
-    hits an unsupported pattern.
+    multi-output LoopOp. A single-owner chain of flat-address-identical copies
+    ending at a root is an output equivalence cluster: its source Write is
+    retargeted to the root shape before ordinary dependency reconstruction.
+    Returns ``(merged_op, external_buffer_ids)`` where the ids are the
+    non-``LoopOp`` inputs in merged first-use order. Returns ``None`` if an
+    output is not produced by a ``LoopOp`` or any splice edge hits an
+    unsupported pattern.
     """
     if not graph.outputs:
         return None
 
     loop_nodes = {n.id: n for n in graph.nodes.values() if isinstance(n.op, LoopOp)}
+    loops = {nid: node.op for nid, node in loop_nodes.items()}
+    root_overrides: dict[str, tuple[str, str]] = {}
+    collapsed: set[str] = set()
+    for cluster in _output_equivalence_clusters(graph, loop_nodes):
+        source, output = cluster.buffers[0], cluster.buffers[-1]
+        source_node = graph.producer(source)
+        if source_node is None:
+            continue
+        retargeted = _retarget_equivalent_output(graph, loops[source_node.id], source, output)
+        if retargeted is None:
+            continue
+        loops[source_node.id] = retargeted
+        collapsed.update(cluster.copy_nodes)
+        root_overrides[output] = (source_node.id, output)
+    for nid in collapsed:
+        loops.pop(nid, None)
+
     roots: list[tuple[str, str]] = []
     for output in graph.outputs:
+        if output in root_overrides:
+            roots.append(root_overrides[output])
+            continue
         root_node = graph.producer(output)
-        if root_node is None or root_node.id not in loop_nodes:
+        if root_node is None or root_node.id not in loops:
             return None
         roots.append((root_node.id, output))
     splice_edges: dict[tuple[str, str], tuple[str, str]] = {}
@@ -219,8 +266,8 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     external_order: list[str] = []
     seen_external: set[str] = set()
 
-    for node in loop_nodes.values():
-        for ld in node.op.body.loads:
+    for node_id, op in loops.items():
+        for ld in op.body.loads:
             inp = ld.input
             # A Load is a splice edge if its source buf names another LoopOp node;
             # otherwise it's an external input. We key edges off the buf name
@@ -228,17 +275,17 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
             # index — so a single edge entry covers every Load that reads the
             # same producer.
             input_producer = graph.producer(inp)
-            if input_producer is not None and input_producer.id in loop_nodes:
+            if input_producer is not None and input_producer.id in loops:
                 producer_id = input_producer.id
-                splice_edges[(node.id, inp)] = (producer_id, inp)
+                splice_edges[(node_id, inp)] = (producer_id, inp)
                 producer = graph.buffer(inp)
-                producer_meta = loop_nodes[producer_id].op.analyze()
+                producer_meta = loops[producer_id].analyze()
                 producer_write = next((write for write, _ in producer_meta.writes if write.output == inp), None)
                 producer_value = producer_meta.defs.get(producer_write.value) if producer_write is not None else None
-                producer_origin = _ultimate_source(loop_nodes[producer_id].op)
-                same_origin = producer_origin is _ultimate_source(node.op)
+                producer_origin = _ultimate_source(loops[producer_id])
+                same_origin = producer_origin is _ultimate_source(op)
                 origin_outputs = getattr(producer_origin, "outputs", {})
-                private_output = producer_origin is not loop_nodes[producer_id].op and bool(origin_outputs) and inp not in origin_outputs
+                private_output = producer_origin is not loops[producer_id] and bool(origin_outputs) and inp not in origin_outputs
                 if (
                     not same_origin
                     and not private_output
@@ -246,13 +293,13 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
                     and producer is not None
                     and producer.dtype != (producer_value.dtype or F32)
                 ):
-                    splice_dtypes[(node.id, inp)] = producer.dtype
+                    splice_dtypes[(node_id, inp)] = producer.dtype
             elif inp not in seen_external:
                 seen_external.add(inp)
                 external_order.append(inp)
 
     merged = splice_loops(
-        loops={nid: n.op for nid, n in loop_nodes.items()},
+        loops=loops,
         splice_edges=splice_edges,
         splice_dtypes=splice_dtypes,
         roots=tuple(roots),
@@ -260,6 +307,198 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     if merged is None:
         return None
     return merged, external_order
+
+
+def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[_OutputEquivalenceCluster, ...]:
+    """Find single-owner flat-address-copy chains ending at graph outputs."""
+    clusters: list[_OutputEquivalenceCluster] = []
+    for output in graph.outputs:
+        if graph.buffer_users(output):
+            continue
+        buffers = [output]
+        copy_nodes: list[str] = []
+        current = output
+        while True:
+            copy = graph.producer(current)
+            if copy is None or copy.id not in loop_nodes:
+                break
+            source = _flat_address_identity_source(graph, copy, current)
+            if source is None or source in graph.outputs or graph.buffer_users(source) != {copy.id}:
+                break
+            source_node = graph.producer(source)
+            if source_node is None or source_node.id not in loop_nodes:
+                break
+            buffers.append(source)
+            copy_nodes.append(copy.id)
+            current = source
+        if copy_nodes:
+            clusters.append(
+                _OutputEquivalenceCluster(
+                    buffers=tuple(reversed(buffers)),
+                    copy_nodes=tuple(reversed(copy_nodes)),
+                )
+            )
+    return tuple(clusters)
+
+
+def _flat_address_identity_source(graph, node, output: str) -> str | None:
+    """Return the source buffer when ``node`` is an exact flat-address copy to ``output``."""
+    if not isinstance(node.op, LoopOp) or node.buffer_names() != (output,):
+        return None
+    if any(not isinstance(stmt, (Loop, Load, Write)) for stmt in node.op.body.iter()):
+        return None
+    loads = node.op.body.loads
+    writes = node.op.body.writes
+    if len(loads) != 1 or len(writes) != 1:
+        return None
+    load, write = loads[0], writes[0]
+    if not load.is_scalar or not write.is_scalar or write.value != load.name or write.output != output:
+        return None
+    if write.atomic or write.swizzle != "NONE":
+        return None
+
+    source = graph.buffer(load.input)
+    destination = graph.buffer(output)
+    if source is None or destination is None or source.dtype != destination.dtype:
+        return None
+    source_strides = _static_strides(source.shape)
+    destination_strides = _static_strides(destination.shape)
+    if source_strides is None or destination_strides is None:
+        return None
+    source_numel = math.prod(dim.as_static() for dim in source.shape)
+    destination_numel = math.prod(dim.as_static() for dim in destination.shape)
+    if source_numel != destination_numel or destination_numel > _OUTPUT_EQUIVALENCE_VERIFY_CAP:
+        return None
+    extents = _loop_extents(node.op)
+    if extents is None or math.prod(extents.values()) != destination_numel:
+        return None
+    if len(load.index) != len(source_strides) or len(write.index) != len(destination_strides):
+        return None
+
+    axes = tuple(extents)
+    grids = np.meshgrid(*(np.arange(extents[name]) for name in axes), indexing="ij", sparse=True)
+    env = dict(zip(axes, grids, strict=True))
+    try:
+        source_flat = sum(np.asarray(expr.eval(env)) * stride for expr, stride in zip(load.index, source_strides, strict=True))
+        destination_flat = sum(np.asarray(expr.eval(env)) * stride for expr, stride in zip(write.index, destination_strides, strict=True))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return load.input if bool(np.all(source_flat == destination_flat)) else None
+
+
+def _retarget_equivalent_output(graph, op: LoopOp, source: str, output: str) -> LoopOp | None:
+    """Retarget ``source`` Writes to an equivalent output without rebuilding their computation."""
+    source_tensor = graph.buffer(source)
+    output_tensor = graph.buffer(output)
+    if source_tensor is None or output_tensor is None:
+        return None
+    source_strides = _static_strides(source_tensor.shape)
+    if source_strides is None or _static_strides(output_tensor.shape) is None:
+        return None
+    extents = _loop_extents(op)
+    if extents is None or any(isinstance(stmt, Load) and stmt.input == source for stmt in op.body.iter()):
+        return None
+    source_writes = [write for write in op.body.writes if write.output == source]
+    if not source_writes or any(not write.is_scalar or len(write.index) != len(source_strides) for write in source_writes):
+        return None
+
+    replacement: dict[int, Write] = {}
+    for write in source_writes:
+        terms: dict[str, int] = {}
+        constant = 0
+        for expr, stride in zip(write.index, source_strides, strict=True):
+            affine = affine_form(expr, set(extents))
+            if affine is None:
+                return None
+            anchor = affine[0].simplify(SimplifyCtx.empty())
+            if not isinstance(anchor, Literal) or not isinstance(anchor.value, int):
+                return None
+            for name, coefficient in affine[1].items():
+                terms[name] = terms.get(name, 0) + coefficient * stride
+            constant += anchor.value * stride
+        new_index = _decompose_flat(terms, constant, output_tensor.shape, extents)
+        if new_index is None:
+            return None
+        replacement[id(write)] = replace(write, output=output, index=tuple(new_index))
+
+    retargeted = LoopOp(
+        body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),
+        name=op.name,
+        source=op.source,
+        knobs=dict(op.knobs),
+    )
+    return retargeted
+
+
+def _static_strides(shape) -> list[int] | None:
+    """Return row-major element strides, or ``None`` for a symbolic shape."""
+    strides: list[int] = []
+    step = 1
+    for dim in reversed(tuple(shape)):
+        if not dim.is_static:
+            return None
+        strides.append(step)
+        step *= dim.as_static()
+    return list(reversed(strides))
+
+
+def _loop_extents(op: LoopOp) -> dict[str, int] | None:
+    """Return each distinct static loop-axis extent, declining conflicting reuse."""
+    extents: dict[str, int] = {}
+    for stmt in op.body.iter():
+        if not isinstance(stmt, Loop):
+            continue
+        if not stmt.axis.extent.is_static:
+            return None
+        extent = stmt.axis.extent.as_static()
+        if stmt.axis.name in extents and extents[stmt.axis.name] != extent:
+            return None
+        extents[stmt.axis.name] = extent
+    return extents
+
+
+def _decompose_flat(terms: dict[str, int], constant: int, output_shape, extents: dict[str, int]) -> list[Expr] | None:
+    """Partition an affine flat address into bounded row-major output indices."""
+    strides = _static_strides(output_shape)
+    if strides is None:
+        return None
+    dimensions: list[list[tuple[int, str | None]]] = [[] for _ in strides]
+    for name, coefficient in terms.items():
+        if coefficient < 0 or name not in extents:
+            return None
+        if coefficient == 0:
+            continue
+        for index, stride in enumerate(strides):
+            if coefficient % stride == 0:
+                dimensions[index].append((coefficient // stride, name))
+                break
+        else:
+            return None
+    if constant < 0:
+        return None
+    for index, stride in enumerate(strides):
+        quotient = constant // stride
+        if quotient:
+            dimensions[index].append((quotient, None))
+            constant -= quotient * stride
+    if constant:
+        return None
+
+    result: list[Expr] = []
+    for slot, dim in zip(dimensions, output_shape, strict=True):
+        high = sum(coefficient * (extents[name] - 1 if name is not None else 1) for coefficient, name in slot)
+        if high >= dim.as_static():
+            return None
+        expression: Expr = Literal(0, "int")
+        for coefficient, name in slot:
+            term: Expr = (
+                Literal(coefficient, "int")
+                if name is None
+                else (Var(name) if coefficient == 1 else BinaryExpr("*", Var(name), Literal(coefficient, "int")))
+            )
+            expression = term if isinstance(expression, Literal) and expression.value == 0 else BinaryExpr("+", expression, term)
+        result.append(expression)
+    return result
 
 
 def _ultimate_source(op):

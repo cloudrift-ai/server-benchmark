@@ -13,7 +13,7 @@ import pytest
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import (
     Accum,
@@ -756,6 +756,142 @@ def test_separate_roots_share_upstream_definition():
     assert external == ["X"]
     assert {write.output for write in merged.writes} == {"LEFT", "RIGHT"}
     assert _elementwise_fns(merged).count("exp") == 1
+
+
+def test_output_equivalence_cluster_retargets_reduce_through_copy_chain():
+    """Flat-address-identical output copies collapse without inlining the reduction at their loads."""
+    i, j, k = Var("i"), Var("j"), Var("k")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("k", 3),
+                        body=(
+                            Load(name="xk", input="x", index=(i, k)),
+                            Accum(name="total", value="xk", op="add", axes=("k",)),
+                        ),
+                    ),
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="xj", input="x", index=(i, j)),
+                            Assign(name="scaled", op="multiply", args=("xj", "total")),
+                            Write(output="y", index=(i, j), value="scaled"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    first_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(
+                                name="mid_value",
+                                input="y",
+                                index=(
+                                    BinaryExpr("/", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                    BinaryExpr("%", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                ),
+                            ),
+                            Write(output="mid", index=(p, q), value="mid_value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    r = Var("r")
+    second_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("r", 6),
+                body=(
+                    Load(
+                        name="out_value",
+                        input="mid",
+                        index=(BinaryExpr("/", r, Literal(2, "int")), BinaryExpr("%", r, Literal(2, "int"))),
+                    ),
+                    Write(output="out", index=(r,), value="out_value"),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
+    graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
+    graph.outputs = ["out"]
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, external = result
+    assert external == ["x"]
+    assert _count_kind(merged, Accum) == 1
+    assert [write.output for write in merged.writes] == ["out"]
+    assert len(merged.writes[0].index) == 1
+    assert "/" not in merged.writes[0].index[0].pretty() and "%" not in merged.writes[0].index[0].pretty()
+
+
+def test_same_numel_transpose_is_not_output_equivalent():
+    """Equal element count alone does not erase a permutation."""
+    i, j = Var("i"), Var("j")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="value", input="x", index=(i, j)),
+                            Write(output="y", index=(i, j), value="value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    transpose = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(name="transposed", input="y", index=(q, p)),
+                            Write(output="out", index=(p, q), value="transposed"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(transpose, ["y"], Tensor("out", (3, 2)), node_id="out")
+    graph.outputs = ["out"]
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, _ = result
+    load = next(load for load in merged.loads if load.input == "x")
+    write = next(write for write in merged.writes if write.output == "out")
+    assert load.index == tuple(reversed(write.index))
 
 
 def test_multi_output_root_preserves_all_writes():

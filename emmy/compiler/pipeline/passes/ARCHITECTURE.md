@@ -337,6 +337,12 @@ a shared producer or change the recognized computation. Merge order may temporar
 another reduction; the later legal merge is still taken. Every fused-versus-cut choice belongs to placement and the
 deploy evidence hierarchy.
 
+Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
+single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
+flat addresses agree over the finite domain. The splicer retargets the computed source's `Write` to the live output
+shape; equal element count without address equality does not qualify. This preserves a reduction's existing loop
+structure through a terminal flatten instead of reconstructing the reduction at div/mod-indexed copy loads.
+
 **Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's
 `view(batch, seq, heads, head_dim)` carves N into heads × head_dim), leaving the operand loads addressing the

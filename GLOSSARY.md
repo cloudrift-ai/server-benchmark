@@ -52,6 +52,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   the producing node's ID), one or more output tensors, and optional hints.
 - **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal
   branches may fuse into one MIMO kernel while retaining one output port per observable value.
+- **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
+  address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
+  `Write` across the cluster instead of reconstructing its computation at the copies' loads.
 - **Intermediate representation (IR)** — A compiler's internal description of a program. Emmy uses several IR
   stages. Early stages resemble PyTorch; later stages explicitly describe loops, GPU threads, memory, and CUDA
   source.

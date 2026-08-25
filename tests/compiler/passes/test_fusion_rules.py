@@ -896,12 +896,11 @@ def test_shared_broadcast_chain_correctness():
 
 
 def test_output_reshape_folds_into_reduce_producer():
-    """``030_fold_output_reshape``: a graph-output memcpy-identity flatten of a reduce-bearing
-    producer folds by retargeting the producer's ``Write`` to the output buffer at the same flat
-    address (clean affine per-dim index — no div/mod), dropping the copy kernel. The normal merge
-    rule can't take this pair (inlining the producer at the consumer's load would re-run the
-    reduce per element; the flatten's div/mod reader σ defeats the splicer anyway) — the gemma-4
-    decode pre twin's q/k/v head-layout flattens after the per-head qk norms."""
+    """A graph-output flat-address identity joins its producer's output equivalence cluster.
+
+    The splicer retargets the producer's ``Write`` to the output shape with clean affine indices
+    instead of reconstructing its reduction at the flatten's div/mod-indexed loads.
+    """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var

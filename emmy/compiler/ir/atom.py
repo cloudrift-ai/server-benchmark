@@ -215,7 +215,10 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     # values in 32 bytes a row, and the instruction applies one ue4m3 scale per 16 of them
     # itself — scales the fragment loaders supply as two extra registers, which is why this atom
     # cannot share the plain mma's three-operand call. Both operands must therefore reach it
-    # already quantized; a f16 activation has to be encoded first.
+    # already quantized; a f16 activation has to be encoded first. The accumulate is f32-only:
+    # ptxas refuses an ``.f16 … .f16`` spelling of the block-scaled form (measured on sm_120a,
+    # CUDA 12.9 — "Unexpected instruction types"), so the ``F16_MMA_F32_ACC`` precision knob has
+    # no sibling of this atom to offer.
     "mma_m16n8k64_e2m1_f32": AtomKind(
         "mma_m16n8k64_e2m1_f32",
         (16, 8, 64),

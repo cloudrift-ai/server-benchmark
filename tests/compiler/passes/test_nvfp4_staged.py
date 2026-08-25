@@ -486,6 +486,50 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
 
 
 @requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_the_packed_drain_composes_with_the_f16_accumulate_atom(tmp_path):
+    """The byte slab under the f16-accumulate atom (``FAST_MATH``'s ``F16_MMA_F32_ACC`` member):
+    the kernel carries the packed drain, the f16-fragment mma chain and its chunk promote
+    together, matches the decoded oracle, and stays close to its f32-accumulate sibling (the same
+    schedule with only the atom swapped) — the bound the oracle tolerance alone cannot see. The
+    drain's contract names the fragment dtype, not the accumulate, so the composition needs no
+    code of its own; this pins that it stays true. Bounds are roughly 4x the measured error on an
+    RTX 5090 (oracle 5.0e-4, sibling 7.8e-4)."""
+    import torch  # noqa: F401  — the CUDA backend needs it loaded
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import dequantize_nvfp4
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m, n, k = 4, 2048, 2048
+    g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k, dtype="f16")
+    rng = np.random.default_rng(11)
+    x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
+
+    backend = CudaBackend()
+    outs: dict[str, np.ndarray] = {}
+    for atom in ("mma_m16n8k16_f16_f16", K16):
+        with pinned_knobs({**PACKED_PINS, "TILE": f"{atom}/f2x2/k2"}):
+            compiled = backend.compile(g)
+        src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
+        assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, f"{atom}: the packed pins did not reach the byte-slab drain"
+        if atom == K16:
+            assert "_ch0_0" not in src, "the f32-accumulate sibling must not declare f16 mma fragments"
+        else:
+            assert "emmy_mma_m16n8k16_f16_f16(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
+            assert "emmy_mma_promote_f16acc" in src, "the chunk promote into the f32 shadow must be emitted"
+        data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
+        result, _ = backend.run(compiled, input_data={**data, "x": x})
+        outs[atom] = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
+
+    ref = x.astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
+    denom = max(float(np.abs(ref).max()), 1e-9)
+    assert float(np.abs(outs["mma_m16n8k16_f16_f16"] - ref).max()) / denom < 2e-3
+    assert float(np.abs(outs["mma_m16n8k16_f16_f16"] - outs[K16]).max()) / denom < 3e-3
+
+
+@requires_cuda
 @pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma"])
 @pytest.mark.xdist_group("cuda")
 def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):

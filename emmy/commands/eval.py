@@ -123,18 +123,6 @@ def register_eval_command(subparsers) -> None:
         action="store_true",
         help="--dataset golden: also print the exact feature vector the prior regresses on per golden config (features.knob_features).",
     )
-    pp.add_argument(
-        "--blame",
-        action="store_true",
-        help="With --dataset nodes: per-feature blame table — which features' terms pushed each missed fork's wrong "
-        "pick, regret-weighted per fork family (diagnostic, not a gate metric).",
-    )
-    pp.add_argument(
-        "--ablate",
-        action="store_true",
-        help="With --dataset nodes: ablation Δ table — each family's median regret change with one feature masked "
-        "(<0 = actively misleading), with per-feature fork support.",
-    )
     pp.set_defaults(func=handle_eval_prior)
 
     pg = sub.add_parser(
@@ -248,31 +236,27 @@ def _prior_halves():
     return halves
 
 
-def _node_rows(args):
-    """The search-tree rows both node-dataset views read, loaded ONCE. ``--db`` takes a live tune DB or a
-    measurement-freeze directory; ``load_node_rows`` sniffs which.
+def _measured_report(args, halves):
+    """``eval prior --dataset nodes`` — the report over benched pools.
+
+    ``--db`` takes a live tune DB or a measurement-freeze directory; ``load_node_rows`` sniffs which. The
+    grouping, its key and every admission rule are :func:`group_measured`'s, so this reads the same pools the
+    training-data work will.
 
     ``--kernel`` matches the op LABEL, since the store's own op identity is a digest with nothing readable in
     it. The label is a function of the row's ``S_*`` features, which every node of one op shares, so a filter
     keeps or drops a whole op atomically — a pool is never split against its own siblings."""
     from emmy.compiler.pipeline.search.data import load_node_rows, op_label  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
         logger.error("no tune DB or measurement freeze at %s — pass --db or run `emmy tune` first.", db_path)
         sys.exit(2)
     rows = load_node_rows(db_path)
-    return db_path, [r for r in rows if args.kernel in op_label(r.features)] if args.kernel else rows
-
-
-def _measured_report(db_path, rows, args, halves):
-    """``eval prior --dataset nodes`` — the report over benched pools.
-
-    The grouping, its key and every admission rule are :func:`group_measured`'s, so this reads the same pools
-    the training-data work will."""
-    from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells  # noqa: PLC0415
-
+    if args.kernel:
+        rows = [r for r in rows if args.kernel in op_label(r.features)]
     groups, dropped = group_measured(rows)
     header = {
         "dataset": "nodes",
@@ -326,20 +310,15 @@ def handle_eval_prior(args) -> None:
         "or a measurement freeze). --dataset db reads only fully-decided leaf rows, with no op identity or compile "
         "regime to group them by — pass the same DB with --dataset nodes.",
     )
-    if (args.blame or args.ablate) and args.dataset != "nodes":
-        logger.error("--blame/--ablate attribute fork records — they need --dataset nodes.")
-        sys.exit(2)
     halves = _prior_halves()
-    nodes = None if args.dataset == "golden" else _node_rows(args)
-    report = _golden_report(args, halves) if nodes is None else _measured_report(*nodes, args, halves)
+    golden = args.dataset == "golden"
+    report = _golden_report(args, halves) if golden else _measured_report(args, halves)
     _emit_report(report)
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
-    if nodes is None:
+    if golden:
         _emit_golden_deploy_check(args)
-    else:
-        _emit_fork_blocks(nodes[1], args, halves)
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
@@ -423,24 +402,6 @@ def _emit_report(report) -> None:
         logger.info("  %s", line)
     for line in render_table(columns, rows, rule=True, indent="  "):
         logger.info("%s", line)
-
-
-def _emit_fork_blocks(nodes, args, halves) -> None:
-    """The per-fork view over the search tree: what following the prior's pick at each FORK costs, bucketed by the
-    knob family the fork decides, plus the golden-anchored descent.
-
-    It answers something the cells above structurally cannot. They score pools of benched leaves, while a search is
-    a sequence of partial-knob decisions most of whose subtrees were never explored — a golden sitting in a subtree
-    nothing measured is silence that reads as health."""
-    from emmy.compiler.pipeline.search.prior import diagnostics  # noqa: PLC0415
-
-    for half, prior in halves:
-        logger.info("")
-        logger.info("=== %s prior — per-fork view ===", half)
-        logger.info("%s", diagnostics.node_report(prior, nodes))
-        if args.blame or args.ablate:
-            logger.info("")
-            logger.info("%s", diagnostics.attribution_report(prior, nodes, blame=args.blame, ablate=args.ablate))
 
 
 def _emit_golden_deploy_check(args) -> None:
@@ -732,8 +693,8 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, o3: dic
     """One kernel's leaderboard: measured leaf configs sorted by tune-ranking
     latency, the prior's pick marked, knobs in the canonical aligned columns
     (``tuning_knob_items`` — the same filtered view the ``run --bench`` kernel
-    table renders). Non-leaf rows (partial-knob fork nodes) are dropped,
-    mirroring ``diagnostics.reachability``; the ``-O3 us`` column appears only
+    table renders). Non-leaf rows (partial-knob fork nodes) are dropped —
+    a partial config is not a variant; the ``-O3 us`` column appears only
     when the reservoir holds any -O3 row at all."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 

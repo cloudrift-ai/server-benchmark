@@ -5,8 +5,10 @@ and the two grouping axes the consumers need.
 The two groupings are deliberately distinct and do **not** collapse:
 
 - :meth:`group_by_op` keys on the full ``S_*`` structural signature — two different
-  shapes are different groups. This is what the prior diagnostics
-  (reachability / calibration / coverage) need.
+  shapes are different groups. The golden joins in ``prior/diagnostics.py`` index on it.
+  It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
+  measured on different hardware or under different nvcc settings land in one group.
+  Anything ranking measured latencies wants ``data/group.group_measured`` instead.
 - :meth:`group_by_kernel_name` keys on the kernel C identifier (parsed from
   ``cuda_op.pretty``) — which *merges* shapes of the same kernel, by design, so the
   per-knob regret analysis measures relative knob impact across shapes.
@@ -92,15 +94,6 @@ class Dataset:
         """The online prior's bounded reservoir as samples. Works through
         ``FallbackPrior`` (it delegates ``_dataset`` to the online half)."""
         return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])
-
-    @classmethod
-    def from_node_rows(cls, rows) -> Dataset:
-        """Search-tree ``node`` rows (:meth:`SearchDB.iter_nodes`) as samples — each
-        node's full feature dict + value-of-position latency, split into
-        tunable/``H_*``/``S_*`` exactly like a reservoir row. Pure transform (no
-        I/O), so the caller reads the rows once and can also group them by
-        ``parent_key`` for the fork-ranking diagnostic."""
-        return cls([Sample.from_prior_row(r.features, r.value_us) for r in rows])
 
     # --- grouping ----------------------------------------------------------
 

@@ -171,11 +171,11 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert all(r.parent_key is None and r.depth == 0 and r.visits == 0 and r.is_leaf is True for r in rows)
     assert a3.op_sig == a1.op_sig == "mm1"
     assert a3.op_sig != fail.op_sig and a3.node_key != a1.node_key
-    # The Dataset seams read freeze rows unchanged. ``from_node_rows`` has one caller today;
-    # ``fold_node_rows`` has none yet and is the grouping the measured-metric work builds on.
-    assert len(Dataset.from_node_rows(rows)) == _N_KEPT
+    # The fold seam reads freeze rows unchanged — the split unit for out-of-sample evaluation. It has no
+    # production caller yet: ``group_measured`` keys its own comparison sets and does not fold.
     assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 4, _GPU2: 1}
     assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 3, fail.op_sig: 2}
+    assert len(rows) == _N_KEPT
 
 
 def test_freeze_twice_same_digest(tmp_path) -> None:

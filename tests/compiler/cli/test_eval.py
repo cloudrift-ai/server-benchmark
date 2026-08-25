@@ -605,9 +605,6 @@ def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
     assert "No fitted online prior" in stdout  # the online half is named absent, not reported as flat
     assert "ranking quality over benched pools" in stdout
     assert "offline" in stdout and "O3" in stdout
-    # The per-fork view still runs beside the cells: it answers what a pool of benched leaves cannot, and it is
-    # retired with the rest of the fork machinery rather than by the report landing.
-    assert "per-fork view" in stdout and "node store: 3 nodes" in stdout
     assert "traceback" not in (stdout + stderr).lower()
 
 

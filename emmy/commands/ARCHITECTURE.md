@@ -171,11 +171,8 @@ enough that re-reading it per target dominates the replay: the 279-target DeepSe
 15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
 read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
 
-The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
-dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
-per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
-This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
-and the file-scoped audit rejects a serving matrix the fixed full-layer provider cannot represent.
+The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
+attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
 
 `emmy tune --golden-file PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
 specialized from their named bindings and grouped by target, bindings, and input pins. Knob-bearing

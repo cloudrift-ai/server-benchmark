@@ -120,14 +120,19 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
   plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four), and
   native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales).
-  Query-head discovery validates the classic `q_proj` signature and can identify DeepSeek's complete low-rank
-  `q_a_proj` / `q_b_proj` plus shared-`kv_proj` layout, but executable split capture rejects the latter.
-  The in-model audit selects a different config-only provider for DeepSeek V4: one exact full-layer trace per distinct
-  attention/MLP pairing at sequence length 512. Its HCA/CSA compressors and hyper-connection residual streams cannot
-  be represented by the classic `(q, k, v)` serving seam, so claiming split twins would omit deployed operations.
-  Additional serving widths are rejected rather than ignored: the fixed full-layer provider cannot claim those shapes
-  were audited. The provider also requires confirmed representative routed-expert replacement, carries DeepSeek's
-  clamp-10 SwiGLU, and supplies the static sliding causal mask so HCA/CSA compressor bias remains in the graph.
+  Query-head discovery validates the classic `q_proj` signature and DeepSeek's complete low-rank `q_a_proj` /
+  `q_b_proj` plus shared-`kv_proj` layout. A DeepSeek V4 layer is captured through the attention-sublayer seam
+  (`hyper_connection_seam` in `compiler/trace/huggingface.py`): the carrier is the `hc_mult` hyper-connection residual
+  streams flattened to `[num_tokens, hc_mult * hidden]`, `pre` emits the normalized `[num_tokens, hidden]` input of the
+  1Cat fork's paged MLA attention and `post` takes that sublayer's output back, with the routed experts on the
+  ordinary third seam. The pinned checkpoint pairs its layers four ways (hash/top-k router × sliding/HCA/CSA
+  attention), but none of that reaches the twins — the attention sublayer is the fork's and the router runs outside
+  the programs — so `_layer_signatures` folds every hyper-connection layer into ONE profile (`pre-sym`, `post-sym`,
+  `expert-sym`) and the post twin is lowered once, not once per pairing. The checked-in V100 golden was traced as full
+  layers (`emmy trace --layer`), so the first release gate on the host must record these serving forms before the
+  image can warm; on that host the `pre`/`expert` forms realize in minutes while the `post` twin's lowering sits in
+  the Loop splicer's merge-region dependency resolution for hours — the fresh-trace stall the recipe's RESULTS.md
+  already records for full DeepSeek V4 layers.
   For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
@@ -597,6 +602,15 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
+- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) is captured but not yet served.** The attention-sublayer seam
+  above is the compiler side; `EmmyGenRunner` / `EmmyGenModel` still assume the q/k/v seam and a replicated trunk.
+  Serving it on the 16× V100 recipe (TP8 × PP2, the 1Cat sm_70 fork image) additionally needs: the fork's
+  `DeepseekV4Attention` constructed per layer inside the plugin (its weights load through the fork's own mapper from the
+  checkpoint's native `layers.N.attn.*` names); a loader lane for that native naming with its `.scale` ue8m0 block
+  scales and **MXFP4 routed experts** (`expert_dtype: fp4` — the compiler has no fp4 input format; decoded to fp16 the
+  experts are ~554 GB); and tensor-parallel expert sharding with an all-reduce in the runner, because one pipeline
+  rank's experts (~69 GB at fp4) do not fit a 32 GB card replicated per TP rank. The embedding broadcasts to
+  `hc_mult` streams before layer 0 and the final norm follows the `hc_head` collapse.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

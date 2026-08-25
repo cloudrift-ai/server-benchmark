@@ -470,7 +470,7 @@ def handle_eval_golden(args) -> None:
     )
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
-    from emmy.serving.twins import capture_in_model_graphs, capture_twin_graphs  # noqa: PLC0415
+    from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
 
     try:
         serving = load_serving_config(args.serving_config)
@@ -528,16 +528,13 @@ def handle_eval_golden(args) -> None:
         if serving.static_only:
             graphs = capture_twin_graphs(source, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
         else:
-            try:
-                graphs = capture_twin_graphs(
-                    source,
-                    decode_bucket=0,
-                    prefill_bucket=0,
-                    extra_widths=serving.static_widths,
-                    symbolic=True,
-                )
-            except NotImplementedError:
-                graphs = capture_in_model_graphs(source)
+            graphs = capture_twin_graphs(
+                source,
+                decode_bucket=0,
+                prefill_bucket=0,
+                extra_widths=serving.static_widths,
+                symbolic=True,
+            )
     except (NotImplementedError, ValueError) as exc:
         logger.error("in-model audit cannot represent %s: %s", source, exc)
         sys.exit(1)

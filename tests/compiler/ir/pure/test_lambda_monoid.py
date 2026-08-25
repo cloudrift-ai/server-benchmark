@@ -73,6 +73,17 @@ def test_lambda_accepts_pure_stmts_and_defines_results() -> None:
     assert lam.free_names() == frozenset()
 
 
+def test_lambda_post_init_canonicalizes_body_order() -> None:
+    left = Load(name="left", input="x", index=(Var("m"), Var("k")))
+    right = Load(name="right", input="w", index=(Var("n"), Var("k")))
+    product = Assign(name="product", op="multiply", args=("left", "right"))
+
+    first = Lambda(params=("k",), body=Body((left, right, product)), results=("product",))
+    second = Lambda(params=("k",), body=Body((right, left, product)), results=("product",))
+
+    assert first == second
+
+
 @pytest.mark.parametrize(
     "stmt",
     [

@@ -38,11 +38,15 @@ fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
 
 ## Canonicalization
 
-`normalize.py` owns the idempotent, bottom-up Fold-tree normalization invoked by `TileOp.__post_init__`. It contains
-only reusable local rules: scoped lambda alpha-canonicalization and clustering, semiring contraction
-canonicalization, and closed child-Fold extraction from a root projection. The contraction rule requires direct
-indexed operands and the registered distributive product/commutative-monoid laws; a Fold that does not prove those
-conditions remains planar.
+`Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
+pure body receives a dependency-safe order before it reaches a Fold. Structural identity therefore reads the stored
+order directly. Commutative argument sorting remains part of α-equivalence rather than stored normalization because
+contraction operand position carries the A/B role.
+
+`normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
+clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
+contraction rule requires enclosing free-axis order, direct indexed operands, and the registered distributive
+product/commutative-monoid laws; a Fold that does not prove those conditions remains planar.
 
 Scoped lambda equivalence uses the same dependency-respecting body order as structural identity and canonicalizes
 commutative argument order. It therefore ignores SSA spelling and harmless interleaving without weakening buffer or

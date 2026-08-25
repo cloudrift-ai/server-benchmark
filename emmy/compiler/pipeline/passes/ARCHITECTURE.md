@@ -188,7 +188,8 @@ The Tile IR boundary is one structural operation:
 2. recursively replace every remaining reduction `Loop` with a `Fold`, in the same statement position;
 3. move the root `Write` or output sweep to `TileOp.stores`;
 4. reject any raw inner loop that remains;
-5. let `TileOp.__post_init__` canonicalize the Fold tree through general local algebra and α-equivalence rules.
+5. rely on each `Lambda.__post_init__` to canonicalize its local pure body;
+6. let `TileOp.__post_init__` apply contextual contraction and closed-child rules over the complete tree.
 
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed

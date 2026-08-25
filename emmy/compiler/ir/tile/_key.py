@@ -31,7 +31,6 @@ from emmy.compiler.ir.pure.algebra import rename_combine
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile.normalize import canonical_body_order
 from emmy.compiler.structural import digest
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the
@@ -98,11 +97,7 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
                 assert not isinstance(c, Fold), "a Fold below a non-Fold stmt is not a stored form"
                 note_stmt(c)
 
-    body = tuple(node.lift.body)
-    if node._contraction is None:
-        # The bilinear reading's lift is generated, so only the EDGES canonicalize (reordering a
-        # contraction's multiply stmts would be meaningless and would move the key).
-        body = tuple(canonical_body_order(Body(body)))
+    body = tuple(node.lift.body)  # Fold construction already canonicalized this local lambda.
     if node.axis is None:
         # The zero-axis reading names its binder first, then walks the sources — the order the
         # projection wrapper always used.

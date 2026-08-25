@@ -42,10 +42,13 @@ class Lambda:
     results: tuple[str | float, ...]
 
     def __post_init__(self) -> None:
+        from emmy.compiler.ir.pure.normalize import normalize_lambda_body  # noqa: PLC0415
+
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
-        if not isinstance(self.body, Body):
-            object.__setattr__(self, "body", Body.coerce(self.body))
+        body = normalize_lambda_body(Body.coerce(self.body))
+        if not isinstance(self.body, Body) or body != self.body:
+            object.__setattr__(self, "body", body)
         if not isinstance(self.results, tuple):
             object.__setattr__(self, "results", tuple(self.results))
         impure = [type(s).__name__ for s in self.body if not s.pure]
@@ -79,6 +82,8 @@ class Lambda:
         walk order; free names (and float results) pass through unchanged. Deterministic, so two
         lambdas equal up to bound-name choice have EQUAL canonical forms — the α-invariant
         equality/hash substrate (:meth:`alpha_eq`)."""
+        from emmy.compiler.ir.pure.normalize import canonical_lambda_body  # noqa: PLC0415
+
         mapping = {p: f"_p{i}" for i, p in enumerate(self.params)}
         n = 0
         for s in self.body.iter():
@@ -92,7 +97,7 @@ class Lambda:
 
         return Lambda(
             params=tuple(mapping[p] for p in self.params),
-            body=Body(tuple(s.rewrite(rn) for s in self.body)),
+            body=canonical_lambda_body(Body(tuple(s.rewrite(rn) for s in self.body))),
             results=tuple(rn(r) if isinstance(r, str) else r for r in self.results),
         )
 

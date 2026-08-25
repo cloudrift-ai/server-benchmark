@@ -315,10 +315,8 @@ class Fold:
 
         names = self.combine.results
         other = tuple(f"{nm}__o" for nm in names)
-        expected = exp_combine_states(names, other)
-        assert self.combine.params == names + other and tuple(self.combine.body) == tuple(expected), (
-            "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
-        )
+        expected = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+        assert self.combine == expected, "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
 
     @property

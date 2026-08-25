@@ -326,7 +326,10 @@ binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
 `Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
-(`Lambda.canonical` — free names never renumbered). Formation is STRICT everywhere since 1q (the interim
+(`Lambda.canonical` — free names never renumbered). `Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
+dependency-safe body order, so this context-independent storage invariant does not belong to `Fold`, `TileOp`, or the
+structural-key path. Commutative argument sorting remains an α-equivalence operation: operand position is structural
+for contractions and is not rewritten in stored Lambda bodies. Formation is STRICT everywhere since 1q (the interim
 `effectful_lambda` is deleted; a kernel's root stores ride `TileOp.stores`, and only the tile layer's raw-loop-IR
 arm — `tile/ir._loop_ir_fn`, for split-reduce finalization — may hold an impure body). A result may be a bare
 `float` literal — ι is spelled in the lift (softmax's singleton
@@ -543,7 +546,8 @@ folds may consume its result without hoisting it to an operand edge. `Fold.loop`
 the corresponding nested Loop IR.
 
 The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general local
-canonicalization, including semiring contractions and scoped lambda equivalence. A separate pre-scheduling rewrite
+contextual canonicalization, including semiring contractions and closed-child extraction. Scoped lambda equivalence
+is an analysis over the already locally canonical Folds. A separate pre-scheduling rewrite
 joins equivalent maximum and exp-weighted sibling Folds into the general `(maximum, denominator, expectations…)`
 twisted carrier; softmax and masked or unmasked SDPA are arity variants, not separate matchers. There is no Tile IR
 classification or placement-cut phase. Scheduling annotates the rewritten Fold sites through `TileOp.schedule`;

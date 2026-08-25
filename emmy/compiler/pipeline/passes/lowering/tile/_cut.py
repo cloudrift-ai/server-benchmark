@@ -77,7 +77,7 @@ class CutSite:
         return min(s.depth for s in self.members)
 
 
-def _place_pins() -> dict[str, str]:
+def placement_pins() -> dict[str, str]:
     """The live ``PLACE`` pins — authoritative over routing entries. ``PLACE@…`` keys ride the
     ``EMMY_KNOBS`` aggregate (an ``@`` key is not a shell-var name); a bare ``EMMY_PLACE`` pin
     rides its own var and resolves like any bare family key (the primary seam)."""
@@ -211,7 +211,7 @@ def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> t
     choice). A key that names no seam (or an uncuttable one) on this tree is skipped (a
     whole-model pin targets one kernel shape). A bare ``PLACE=cut`` pin takes the shallowest
     CUTTABLE seam."""
-    pins = _place_pins()
+    pins = placement_pins()
     if not pins:
         return None, None
     all_sites = sites(root)
@@ -505,4 +505,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Cu
     return frag
 
 
-__all__ = ["CutSite", "cuttable_seams", "realize_cut", "reusable_cut_pieces", "route_cut"]
+__all__ = ["CutSite", "cuttable_seams", "placement_pins", "realize_cut", "reusable_cut_pieces", "route_cut"]

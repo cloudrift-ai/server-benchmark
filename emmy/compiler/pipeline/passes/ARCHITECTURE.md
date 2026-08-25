@@ -354,17 +354,21 @@ under differently named loops join one value class while buffer identity, operat
 significant. Each occurrence records its consumer execution scope and the axes its producer coordinates actually
 depend on. A consumer-only axis proves replication even with symbolic extents; for fully static affine indices,
 `index_set_size` gives a conservative coordinate-count upper bound, so a larger execution domain is a second proof.
-Equal demand maps collapse without enumerating tensor elements. Cyclic, effectful, reduction-derived, or unsupported
-expressions produce no value class. This analysis exposes facts to placement; it never inserts a fusion boundary or
-chooses between inline and materialized execution.
+Equal demand maps collapse without enumerating tensor elements. Cyclic, effectful, unbound, or unsupported
+expressions produce no value class. A reduction is supported when its axes are bound in the value and its accumulator
+operation, base, dtype, and closed input expression are exact; an unbound or recursive reduction still declines. This
+analysis exposes facts to placement; it never inserts a fusion boundary or chooses between inline and materialized
+execution.
 
 A closed fused-value cut is the exact inverse over one such class. Its child evaluates one dependency-closed pure
 spelling over the producer coordinates and writes either an existing live output port or a typed workspace. Its
 parent replaces every equivalent spelling with a `Load`, retains every other output port with its original shape and
-dtype, and removes only definitions made dead by that replacement. Construction declines when effects or unresolved
-captures enter the cone, an output has multiple or scope-mismatched writes, coordinates cannot represent the output
-shape, or the cut would transfer every output and leave no parent. The fragment is ordinary multi-output graph
-structure; it carries no schedule choice and does not alter fusion.
+dtype, and removes only definitions made dead by that replacement. When that dependency closure already contains an
+exact occurrence of another live output, the child transfers that port too and the parent loads it instead of
+recomputing the shared dependency. Construction declines when effects or unresolved captures enter the cone, an
+output has multiple or scope-mismatched writes, coordinates cannot represent the output shape, or the cut would
+transfer every output and leave no parent. The fragment is ordinary multi-output graph structure; it carries no
+schedule choice and does not alter fusion.
 
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
@@ -766,8 +770,10 @@ tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔chi
 spelled/resolved by the same tree-path codec as the schedule families. Resolution is
 decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
 bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
-STRUCTURAL fork — the fused form beside one cut fragment per legal seam, so tune discovers cuts and a compile
-prices them like any kernel-set choice. Nothing holds the fused side ahead of the cuts. A chosen
+STRUCTURAL fork — the fused form beside one cut fragment per legal seam and one closed fused-value fragment per
+proven repeated or live value. A value is pinned as `PLACE@=<value> = cut | fuse`; the leading `=` keeps graph SSA
+names separate from tree paths. Tune discovers every cut, and a compile prices them like any kernel-set choice.
+Nothing holds the fused side ahead of the cuts. A chosen
 cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, recording the decision as the exact pin that
 replays it; the realizer itself consults no deploy evidence. The
 realizer (`lowering/tile/_cut.py`) splits the tree there: the child
@@ -795,6 +801,13 @@ The one producer writes a common workspace, while each replacement `Load` retain
 This grouped inverse is a placement option over the maximally fused body; fusion does not consult it. Placement must
 recover useful boundaries from the final body. A multi-output parent keeps every live port across the cut; the splice
 restores both primary and secondary buffer identities after inserting the workspace producer.
+
+A live schedule pin can constrain which placement siblings survive only as a realizability check. `010_recognize`
+applies each fragment to a detached single-kernel graph, enumerates its direct schedule rows without ranking them, and
+keeps the siblings that realize every schedule pin realized anywhere in that fork. If no sibling realizes a pin, the
+whole fork remains so normal scheduling retains its pin diagnostics; with no schedule pins this check does not run.
+Placement ranking remains exclusively in the deploy evidence hierarchy.
+
 A piece is a RAW loop body: the tree's λ-local SSA names flatten
 into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused

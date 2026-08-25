@@ -29,8 +29,8 @@ already canonical and the corpus needs zero migration):
   collisions — two sites with identical full path AND axis; current kernels never need it.
 
 RESERVED (reject cleanly, never reuse): the graph-level placement grammar — the ``in.<operand>``
-path prefix and the leading-``=`` value-name pin form. Whoever restores graph-level placement owns
-that namespace; this parser only refuses to let a tile key squat on it.
+path prefix and the leading-``=`` value-name pin form. Closed fused-value placement owns the latter;
+this tree parser only refuses to let a tile path squat on either namespace.
 
 Ambiguity failures are LOUD by design: a stored short key broken by a future structural change must
 fail and be re-spelled by hand (``test_golden_spelling_canonical`` is the tripwire) — never

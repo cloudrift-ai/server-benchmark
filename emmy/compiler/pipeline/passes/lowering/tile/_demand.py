@@ -20,7 +20,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var, affine_form, index_set_size
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 
 
@@ -100,6 +100,7 @@ class _Definition:
 @dataclass
 class _Expansion:
     axes: dict[str, int]
+    bound_axes: dict[str, tuple]
     coordinate_exprs: list[Expr]
     loads: set[tuple[int, int]]
     values: set[str]
@@ -147,6 +148,8 @@ class _Analysis:
         axis = self._axis(scope, name)
         if axis is None:
             return ("free", name)
+        if name in expansion.bound_axes:
+            return expansion.bound_axes[name]
         ordinal = expansion.axes.setdefault(name, len(expansion.axes))
         return ("axis", ordinal, _axis_extent(axis))
 
@@ -212,6 +215,31 @@ class _Analysis:
                         return None
                     branches.append((value, self._expr_key(branch.select, definition.axes, expansion, pending)))
                 return ("select", tuple(branches))
+            if isinstance(stmt, Accum):
+                reduce_names = stmt.axes or ((definition.axes[-1].name,) if definition.axes else ())
+                if not reduce_names or any(name in expansion.axes for name in reduce_names):
+                    return None
+                previous = {axis_name: expansion.bound_axes.get(axis_name) for axis_name in reduce_names}
+                tokens = []
+                for axis_name in reduce_names:
+                    axis = self._axis(definition.axes, axis_name)
+                    if axis is None:
+                        return None
+                    token = ("bound", len(expansion.bound_axes), _axis_extent(axis))
+                    expansion.bound_axes[axis_name] = token
+                    tokens.append(token)
+                try:
+                    value = self._value_key(stmt.value, expansion, pending)
+                    base = None if stmt.base is None else self._value_key(stmt.base, expansion, pending)
+                finally:
+                    for axis_name, old in previous.items():
+                        if old is None:
+                            expansion.bound_axes.pop(axis_name, None)
+                        else:
+                            expansion.bound_axes[axis_name] = old
+                if value is None or (stmt.base is not None and base is None):
+                    return None
+                return ("accum", stmt.op.name, tuple(tokens), value, base, _dtype_key(stmt.dtype))
             return None
         finally:
             pending.remove(name)
@@ -220,7 +248,7 @@ class _Analysis:
         # A load is already materialized data, not a computed value placement may extract.
         if isinstance(definition.stmt, Load):
             return None
-        expansion = _Expansion(axes={}, coordinate_exprs=[], loads=set(), values=set())
+        expansion = _Expansion(axes={}, bound_axes={}, coordinate_exprs=[], loads=set(), values=set())
         try:
             key = self._value_key(definition.name, expansion, set())
         except _Unsupported:

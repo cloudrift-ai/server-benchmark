@@ -124,7 +124,7 @@ def test_equal_fanout_demands_canonicalize_to_one_map() -> None:
     assert group.repeated
 
 
-def test_reduction_derived_value_fails_closed() -> None:
+def test_reduction_axis_is_bound_inside_the_canonical_value() -> None:
     k = Axis("k", Dim(8))
     op = LoopOp(
         body=Body(
@@ -143,4 +143,7 @@ def test_reduction_derived_value_fails_closed() -> None:
             )
         )
     )
-    assert not any(group.live_outputs for group in value_demands(op))
+    group = next(group for group in value_demands(op) if group.live_outputs == ("out",))
+    assert len(group.occurrences) == 1
+    assert group.occurrences[0].coordinate_axes == ()
+    assert not group.occurrences[0].repeated

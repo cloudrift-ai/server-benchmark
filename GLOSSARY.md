@@ -232,6 +232,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Blend** — How Emmy's two priors are combined into one answer: which of them decides a compile's schedule, and how
   the two are weighed against each other when the tuner chooses what to try next. Emmy has several, selected by
   `EMMY_PRIOR_BLEND`, including single-prior ones used to measure one prior on its own.
+- **Candidate pool** — Every way one kernel could be scheduled. The members all compute the same result and differ
+  only in speed, so they are the alternatives a tuning choice picks between. Ranking is always asked *within* a
+  pool — the model puts one pool's candidates in order, and the question is where a good one landed. Candidates
+  from two different pools are not comparable, because they are different kernels. A pool may hold more than one
+  verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
@@ -246,6 +251,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
+- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, carrying a
+  checksum and a record of which vocabulary version its rows are written in. The tuning database and the reservoir
+  are local to one machine and are rewritten as tuning continues, so a number computed over either cannot be
+  checked by anyone else. A freeze is identical wherever it is read, which is what makes two models' scores a fair
+  comparison and a reported score something a reader can reproduce. One is kept with the repository and is what the
+  prior is evaluated against by default.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the
   verified golden configurations for that GPU first (joined by exact structural identity and decoded by exact row
   equality), then measurements recorded on the machine, then the prior's prediction, and last the rule's own first

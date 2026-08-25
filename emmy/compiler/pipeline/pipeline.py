@@ -111,17 +111,12 @@ class Rule:
     * ``pass_`` — backref to the owning ``Pass``. Stamped by ``Pass``
       at construction time; ``None`` only on stray ``Rule`` instances
       built outside a pipeline (none exist in production paths).
-    * ``watch_consumers`` — include the root's immediate consumers in the
-      match identity snapshot without consuming them. A graph-aware rewrite
-      such as Loop region fusion can then discover its dynamic region while
-      retaining the same overlap invalidation a static two-node pattern had.
     """
 
     name: str
     pattern: list[Pattern]
     rewrite: Callable[..., Graph | Op | None] | None = None
     param_names: tuple[str, ...] = field(default_factory=tuple)
-    watch_consumers: bool = False
     pass_: Pass | None = field(default=None, repr=False, compare=False)
 
 
@@ -208,7 +203,6 @@ class Pass:
             spec.loader.exec_module(module)
             pattern = getattr(module, "PATTERN", None)
             rewrite_fn = getattr(module, "rewrite", None)
-            watch_consumers = bool(getattr(module, "WATCH_CONSUMERS", False))
             if pattern is None:
                 raise ValueError(f"Rule {path} missing PATTERN")
             if rewrite_fn is None:
@@ -220,7 +214,6 @@ class Pass:
                     pattern=pattern,
                     rewrite=rewrite_fn,
                     param_names=param_names,
-                    watch_consumers=watch_consumers,
                 )
             )
             # Collect the knobs this rule module declares OR imports (e.g. the
@@ -267,10 +260,10 @@ class Match:
     # splice — see ``Graph.splice``). ``None`` defaults to ``root_node_id``.
     output: str | dict[str, str] | None = None
     is_last: bool = False
-    # Strong snapshot of every consumed or explicitly watched node. The
-    # ``is_alive`` check uses object identity to detect removal followed by a
-    # different node at the same graph id. Holding the object itself prevents
-    # CPython from recycling its integer ``id()`` before the check.
+    # Strong snapshot of every consumed node. The ``is_alive`` check uses
+    # object identity to detect removal followed by a different node at the
+    # same graph id. Holding the object itself prevents CPython from recycling
+    # its integer ``id()`` before the check.
     _identities: dict[str, Node] = field(default_factory=dict, repr=False)
 
     @property
@@ -443,7 +436,7 @@ class Pipeline:
         (cursor advance flows through ``Candidate.try_rewrite`` /
         ``Candidate.apply``). Drops matches that fail
         :meth:`Match.is_alive` — an earlier match in the same batch
-        may have removed a consumed or explicitly watched node."""
+        may have removed a consumed node."""
         results: list[Match] = []
         for nid in graph.topological_order():
             m = _match_at(graph, nid, rule)
@@ -1008,11 +1001,6 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     # straight off the op without re-querying the graph.
     for node in matched_nodes:
         node.op.populate_io(graph, node)
-    if rule.watch_consumers:
-        for consumer_id in graph.users(start):
-            consumer = graph.nodes.get(consumer_id)
-            if consumer is not None:
-                identities[consumer_id] = consumer
     return Match(
         graph=graph,
         root_node_id=start,

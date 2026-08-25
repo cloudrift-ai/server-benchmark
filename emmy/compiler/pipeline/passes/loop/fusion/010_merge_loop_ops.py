@@ -15,9 +15,6 @@ from emmy.compiler.ir.loop import LoopOp, Write, splice_graph
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
 PATTERN = [Pattern("producer", LoopOp)]
-# Region discovery is dynamic. Watching immediate consumers preserves overlap
-# invalidation when matches are enumerated in batches.
-WATCH_CONSUMERS = True
 
 
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:

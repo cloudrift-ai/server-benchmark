@@ -524,14 +524,12 @@ def consume_kernel_row(knobs: dict) -> dict:
     """``knobs`` with everything that described the kernel it came from removed — every SCHEDULE
     family and every FEATURE (``S_*`` / ``H_*``).
 
-    A rule that splits or cuts a kernel calls this on the pieces it mints. What it takes out is
+    A rule that splits a kernel calls this on the pieces it mints. What it takes out is
     exactly what belongs to the kernel being replaced: the row it was scheduled with, and the
     structural identity of the body it had. A piece is a brand-new kernel and must arrive with
     neither — it is stamped and scheduled on its own, from its own body.
 
-    What it LEAVES is the rule's own decision stamp (``PLACE@<seam>: cut``), which is not
-    something inherited but the record of the choice being made, and any knob outside those
-    families that the rewrite computed for the piece itself."""
+    It leaves any knob outside those families that the rewrite computed for the piece itself."""
     return {k: v for k, v in knobs.items() if family_of(k) not in SCHEDULE_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
 
 

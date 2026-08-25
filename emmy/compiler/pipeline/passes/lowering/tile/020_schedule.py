@@ -1,15 +1,14 @@
-"""Schedule a recognized (UNMAPPED) ``TileOp``: map its free axes onto the grid and offer the
+"""Schedule a lifted (UNMAPPED) ``TileOp``: map its free axes onto the grid and offer the
 scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 
-``010_recognize`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
+``010_lift`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
 :class:`~emmy.compiler.ir.tile.ir.TileOp` (its ``op`` set, ``place`` carrying just the free axes).
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families — through the ``_schedule``
 helper's ONE recursive row enumerator over the term's own site tree.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
-several routes — the ordinary lift, flash's graph rewrite, a placement cut's re-recognized pieces,
-a cross-CTA split's partial and finalize — and all of them converge here. The engine restarts its
+several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its
 rule scan after every functional rewrite, so a ``TileOp`` this pass's ``010`` just emitted is
 matched here on the next sweep, and so is every unmapped ``TileOp`` a structural rewrite minted.
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,

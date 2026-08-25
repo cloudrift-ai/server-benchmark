@@ -77,8 +77,7 @@ class _Ctx:
 
     def captures(self, lam) -> tuple[str, ...]:
         """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
-        space — the same reading the cut's closure predicate applies
-        (``_cut._captured_values``). Non-empty means the λ is NOT closed, which is exactly what
+        space. Non-empty means the λ is NOT closed, which is exactly what
         makes a subtree unhoistable to an operand edge; no stored term prints one (the computed-A
         cone binds the statistic's ``m`` positionally — ``ops.make_cone``), so an annotation marks
         a hand-built tree. Empty when the iteration space is unknown (no owning ``TileOp``) — an

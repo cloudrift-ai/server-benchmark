@@ -655,11 +655,9 @@ class Fold:
     # a term has no scope to seed, no effect to order and no ``render``; it becomes statements
     # once, through :meth:`lower`. ---------- #
     def defines(self) -> tuple[str, ...]:
-        """The names this node BINDS. The block-stmt default for a plain fold — its names are
-        bound by the derived serial step's ``Accum``\\ s, exactly as for a plain reduce ``Loop``
-        — but the bilinear reading binds its channel accumulators directly, which is what the
-        retired ``Contraction`` kind did and what ``_operand_result_names`` reads."""
-        return tuple(ch.acc for ch in self.channels) if self._contraction is not None else ()
+        """The result names this node exposes to its containing lambda."""
+        results = self.lift.results if self.axis is None else self.combine.results
+        return tuple(result for result in results if isinstance(result, str))
 
     def nested(self) -> tuple[Body, ...]:
         """The one nested body is the lift's — EXCEPT under the bilinear reading, whose lift is
@@ -830,16 +828,7 @@ class Channel:
 
 
 def _loop_ir_fn(params, body, results) -> Lambda:
-    """The RAW-LOOP-IR formation arm — the ONE impure ``lift`` builder left after 1q, for the
-    kernels that are loop IR rather than recognized algebra: ``010_recognize``'s un-recognized
-    flat escape cells (multi/nested reduces), ``030_split_reduce``'s finalize kernels (the
-    annotated cross-partition merge ``Loop``), the prologue'd split partial, and
-    the coop norm→linear/geglu sibling's composed contraction tail. A PURE body goes through
-    strict :class:`Lambda` formation — every ROOT STORE left the term (``TileOp.stores``),
-    so impurity here is only iteration/seed structure, never an effect on the output. Reached
-    exclusively through zero-axis ``Fold``'s legacy ``body=`` construction / ``with_body`` / the rewrite
-    handler — never build one by hand; the escape spelling dies when recognition becomes total
-    (the "ONE algorithmic algebra recognizer" direction)."""
+    """Build a lambda, retaining the impure compatibility arm used by split-reduce finalization."""
     body = Body.coerce(body)
     if all(s.pure for s in body):
         return Lambda(params=tuple(params), body=body, results=tuple(results))

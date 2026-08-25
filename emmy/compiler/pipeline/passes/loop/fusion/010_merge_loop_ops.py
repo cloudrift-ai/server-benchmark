@@ -3,8 +3,7 @@
 Separate consumers become output ports of one kernel. All roots enter the
 same worklist, so shared upstream statements remain one SSA definition.
 
-Fusion has only correctness boundaries and the fence around an already-realized
-``__cut_`` workspace. Recognition and scheduling never gate fusion.
+Fusion has only correctness boundaries. Tile lifting and scheduling never gate fusion.
 """
 
 from __future__ import annotations
@@ -19,9 +18,6 @@ PATTERN = [Pattern("producer", LoopOp)]
 
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
     """Return the maximal downstream ``LoopOp`` region and its live buffers."""
-    if "__cut_" in producer.id:
-        return None
-
     region: set[str] = set()
     pending = [producer.id]
     while pending:
@@ -29,8 +25,6 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
         if nid in region:
             continue
         region.add(nid)
-        if "__cut_" in nid:
-            continue
         pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
     if len(region) < 2:
         return None

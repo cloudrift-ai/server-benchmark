@@ -1,4 +1,4 @@
-r"""Schedule a recognized (UNMAPPED) ``TileOp`` — the generic row enumerator.
+r"""Schedule a lifted (UNMAPPED) ``TileOp`` — the generic row enumerator.
 
 **Every role emits rows through ONE recursive walk of the site tree; no role builds ``TileOp``\ s
 directly, and no term shape gets its own path.** A row is a joint assignment across every scheduling
@@ -108,7 +108,6 @@ from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view, unit_contraction_view
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -450,68 +449,9 @@ class _Term:
         return grouped
 
 
-# ---- the derived VIEWS: the one mechanism above the product ------------------------------------- #
-
-
-def _view(tile: TileOp, op, ctx, *, free=None, stores=None, ref: Sched | None = None) -> _Term:
-    """One derived view as a ``_Term`` — the derived ``op`` over its own placement / boundary stores,
-    on the grid. A view is never a mutation: each is its own term, with its own ``structural_key`` and
-    ``Op.cache_key``."""
-    place = Placement(free=tuple(tile.place.free if free is None else free))
-    alt = TileOp(op=op, name=tile.name, place=place, inputs=dict(tile.inputs), stores=tile.stores if stores is None else stores)
-    return _Term(alt, place.on_grid(), ctx, ref=ref)
-
-
 def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
-    """The stored term's derived VIEWS, in enumeration order, plus the index of the CONTRACTION
-    view — the one whose rows ride the warp tier. The stored ``TileOp`` is the ONE canonical tree;
-    a view is a pure, deterministic derivation of it, and which view a row decodes through is a
-    function of the row's ``WORK`` tier alone (:func:`schedule`), never a carried identity. At
-    most two views, mutually exclusive by shape:
-
-    - the MONOID-producer composition (``_classify.fused_view``) — the stored map form plus
-      the derived fused contraction. The contraction's tree is the REFERENCE namespace: bare
-      ``REDUCE`` must mean its K fold, so the map view spells its statistic at ``REDUCE@<axis>``;
-    - the direct unit-row contraction (``_classify.unit_contraction_view``) — the stored one-axis
-      term reclassified with its proven synthetic M axis, exposing the ordinary contraction
-      schedule without changing the canonical tree;
-    - the COLLAPSE (:meth:`Fold.demoted`) — a stored computed-A contraction plus the derived
-      per-cell splice, which carries the cone on the reduce tiers.
-
-    (The mixed-A promotion is NOT a view: a materialized edge the atom cannot bind directly takes
-    the converting smem compute fill on the one tree — a stage resolution, no derivation.)
-
-    No view's rows depend on whether its sibling produced any: each gate is a local predicate on
-    its own term (a 16-bit atom, a resolvable fill, an inventory a value can spell against)."""
-    # The per-cell reading of a CHAINED root is itself a derivation (``demoted_chain`` — the
-    # statistic back at the root, the column as its captured loop): the reduce tiers partition
-    # the root node, so that is the tree they schedule and materialize.
-    cell_op = demoted_chain(tile.op)
-    cell = replace(tile, op=cell_op) if cell_op is not tile.op else tile
-    base = _Term(cell, tile.place.on_grid(), ctx)
-    pro = fused_view(tile)
-    if pro is not None:
-        fused = _view(tile, pro[0], ctx, free=(*tile.place.free, *pro[1]), stores=pro[2])
-        return [_Term(cell, tile.place.on_grid(), ctx, ref=fused.sched), fused], 1
-    unit = unit_contraction_view(tile)
-    if unit is not None:
-        contraction = _view(tile, unit[0], ctx, free=unit[1])
-        unit_node = head(unit[0])
-        if unit_node is not None and _requires_sync_fill(unit_node):
-            return [_Term(cell, tile.place.on_grid(), ctx, ref=contraction.sched), contraction], 1
-        return [contraction], 0
-    node = head(tile.op)
-    if node is None or not is_contraction(node):
-        return [base], 0
-    if _requires_sync_fill(node):
-        return [base, _view(tile, _rewrap(tile.op, node.demoted()), ctx, ref=base.sched)], 0
-    return [base], 0
-
-
-def _rewrap(op, node):
-    """``op`` with its compute node replaced — the projection wrapper preserved when the term has
-    one (a projection has ONE home, and a view never moves it)."""
-    return replace(op, operands=(node,)) if op is not head(op) else node
+    """Schedule only the Fold tree stored by total lift."""
+    return [_Term(tile, tile.place.on_grid(), ctx)], 0
 
 
 def _has_computed_operand(node) -> bool:
@@ -1893,7 +1833,7 @@ def deploy_identity(tile: TileOp) -> str:
     (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint and the
     axis-extent fingerprint the term deliberately omits (:func:`_extent_fingerprint` — static
     sizes and symbolic markers, never hints). A golden record derives the SAME key from its own
-    persisted program through the shared recognition core (``_lift.recognized_tile``), so the
+    persisted program through the shared total lift (``_lift.lift_tile``), so the
     join is exact structural identity — no classified shape, no matching heuristic. Unlike
     :func:`pool_key` it excludes knobs, symbolic hints and live pins: identity is what the
     kernel IS; the strict row decode (exact spelled-row equality) is what guarantees a record

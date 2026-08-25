@@ -27,8 +27,8 @@ the kernel's annotated reduce ``Loop`` (``loop.axis`` / position) and the ALGEBR
 ``LoopOp`` (:func:`_piece`) — the term lowered to per-cell stmts with its boundary stores put back,
 re-nested under its free axes — carrying nothing of the kernel it replaces, not even its name. It
 re-enters at the door a freshly fused kernel comes through: the ``IdentityStrategy`` stamps it
-at the splice event, ``010_recognize`` lifts it, ``020_schedule`` offers it a fork. The same
-path that handles a placement cut's fragments. No pass can tell a piece from a fresh
+at the splice event, ``010_lift`` lifts it, ``020_schedule`` offers it a fork. The same
+path that handles fresh Loop IR. No pass can tell a piece from a fresh
 kernel, and none tries — the dialect is not a special case either.
 
 The pre-split row decided THAT the split happens; it decides nothing about how either piece runs,
@@ -194,14 +194,10 @@ def _piece(op, free, *, stores: tuple = ()) -> LoopOp:
 
     The term is lowered to its per-cell stmts with the boundary stores put back
     (:func:`effect_tail`) and re-nested under the piece's free axes, which is exactly the body a
-    ``LoopOp`` holds. The ``IdentityStrategy`` stamps it at the splice event, ``010_recognize`` lifts it
-    and ``020_schedule`` schedules it — the same three rules, in the same order, that handle a
-    placement cut's fragments and every kernel the fusion end produced. Nothing about this piece is
-    a special case, including its dialect.
+    ``LoopOp`` holds. The ``IdentityStrategy`` stamps it at the splice event, ``010_lift`` lifts it,
+    and ``020_schedule`` schedules it. Nothing about this piece is a special case, including its dialect.
 
-    It carries no name either: a kernel's name comes from its node id, the way ``_cut``'s pieces
-    get theirs. Handing it the pre-split kernel's name was one more thing inherited from a kernel
-    it is not."""
+    It carries no name either: a kernel's name comes from its node id."""
     stmts = tuple(effect_tail(op.lower(), stores))
     for axis in reversed(tuple(free)):
         stmts = (Loop(axis=axis, body=Body(stmts)),)
@@ -289,14 +285,14 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # 1-component additive fold, or the N-component per-channel sums), then the original
     # projection epilogue (the multi-channel ⊗-combine applies HERE, once, after the sums) or a
     # bare store — the same finalize shape the residual path uses. The merge loop is raw loop IR
-    # (the finalize is not a recognized term); its root store rides ``TileOp.stores``. The state
+    # (the finalize is not a lifted term); its root store rides ``TileOp.stores``. The state
     # seeds are NOT emitted here: the combine renders to ``Accum``\ s, so ``Loop.render``'s one
     # identity placement declares them at the loop — an explicit ``Init`` would be a second
     # seeding path, and ``_lift`` strips those anyway when it re-lifts this cell into a ``Fold``.
     other = tuple(f"{nm}__p" for nm in states)
     combine = alg.merge_stmts(other)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
-    # PLANAR, stated rather than inferred: ``010_recognize`` annotates every reduce loop it lifts,
+    # PLANAR, stated rather than inferred: ``010_lift`` annotates every reduce loop it lifts,
     # and a kernel minted here has to arrive the same way or it cannot featurize like the kernel
     # it is — the structural ``Accum`` fallback agrees, but a stated role does not depend on it.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the finalize

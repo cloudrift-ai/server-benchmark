@@ -138,11 +138,7 @@ class TileOp(Op):
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
     across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
     write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is
-    untouched. The contraction operand→role binding is not a
-    ``TileOp`` field either — a tiled contraction carries its A operand / channels on
-    its stored fold (``op``), the single source of truth, resolved recognize-side
-    (``_lift._nodify_contraction``); the placed reading only PLACES that node."""
+    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is untouched."""
 
     op: object = None
     name: str = ""

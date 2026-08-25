@@ -42,17 +42,12 @@ from dataclasses import dataclass
 
 from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
 
-#: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
-#: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
-#: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
-#: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.
 #: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
 SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
-#: What a tree path may address: the slice families plus ``PLACE``, the placement seam, which keys
-#: no slice of its own.
-PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
+#: What a tree path may address.
+PATH_FAMILIES = SLICE_FAMILIES
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
@@ -75,11 +70,9 @@ class Site:
     1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
     the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
     living in a λ-spelled fold's DERIVED evaluation (flash's synthesized PV contraction) — a real
-    schedule site (``TILE@pj``) but combine material BELOW the seam lattice, never a ``PLACE``
-    target. ``inline`` is the mirror: a node the enclosing cell EVALUATES INLINE (a cone's
+    schedule site (``TILE@pj``). ``inline`` is the mirror: a node the enclosing cell EVALUATES INLINE (a cone's
     per-cell producer edge — the attention score contraction the compute fill evaluates per slab
-    cell, from lowered loop IR), so no schedule slice can address it, but it is still a ``PLACE``
-    seam — cutting it materializes the value into its own kernel."""
+    cell, from lowered loop IR), so no schedule slice can address it."""
 
     node: object
     axis: str | None
@@ -122,8 +115,7 @@ def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = Fals
     if is_contraction(node):
         # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
         # rides the stored operand order, so the labels are as stable as the term. This branch
-        # must precede the generic operand walk: the stored corpus keys ``PLACE@a`` against it,
-        # and a contraction falling through to ``_seg`` would silently re-spell those rows.
+        # must precede the generic operand walk so a contraction cannot silently re-spell its schedule keys.
         # The K axis travels one level down: a computed edge is a CONE, and which of the cone's
         # own edges the fill evaluates per cell is that same K-seam question (``ops.cone_seam``).
         for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
@@ -158,8 +150,8 @@ def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = Fals
 
 def sites(root) -> tuple[Site, ...]:
     """Every structural node in ``root``'s tree as a :class:`Site`, root first — the ONE node walk
-    in the layer, shared by the resolver, the stampers, the seam enumerator and every plain
-    "walk the nodes" reader (``.node`` off each site; ``_cut``'s axis scan). An inline operand
+    in the layer, shared by the resolver, the stampers and every plain "walk the nodes" reader.
+    An inline operand
     subtree has exactly one home (its edge), so the tree stays a tree and no visited set is
     needed. Ordinals are assigned in traversal order among sites with identical
     ``(segments, axis)``."""
@@ -193,18 +185,13 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     CONTRACTION folds (:func:`~emmy.compiler.ir.pure.fold.is_contraction` — the same question
     :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
     the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
-    zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR
-    escape); ``PLACE`` every NON-ROOT node (the child names its parent↔child seam — cut legality is
-    structural, edge-iff-closed by construction).
+    zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR escape).
 
     An ``inline`` site carries NO slice: the enclosing cell evaluates it from lowered loop IR, so a
     ``TILE`` / ``REDUCE`` / ``STAGE`` value there could never be realized, and offering one would
-    widen the row product with rows that emit the identical kernel. It stays a ``PLACE`` seam — the
-    cut is exactly how such a value becomes a kernel of its own, with a schedule of its own."""
+    widen the row product with rows that emit the identical kernel."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
-    if family == "PLACE":
-        return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
         return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None and not s.inline)
     out = []

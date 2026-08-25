@@ -1,153 +1,49 @@
-# Tile IR — one stored node kind, and everything else derived
+# Tile IR — a complete Fold tree
 
-`LoopOp → TileOp`: a map/reduce kernel with its *schedule* made explicit. The layer's rule is that the moveset is
-**purely algebraic — no shape specializations**, and the way that is enforced is storage: there is exactly one node
-kind, and every question a pass wants to ask is answered by deriving from it rather than by adding a field.
+`LoopOp → TileOp` is a structural lift. The boundary peels the outer parallel loop chain into
+`Placement.free`, then converts every remaining reduction loop into a `Fold`. It performs no algebra or kernel-shape
+recognition.
 
-For the schedule VALUE types (`TilePlan` / `ReducePlan` / `Stage` / `Workers` / `Placement` / `WarpSpec`) and their
-codecs see [`../ARCHITECTURE.md`](../ARCHITECTURE.md); for the row enumerator that fills them, see
-[`../../pipeline/passes/ARCHITECTURE.md`](../../pipeline/passes/ARCHITECTURE.md).
+The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
+reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
+preserved. A non-reduction output sweep becomes a boundary `Store.sweep`; any other surviving loop is a formation
+error.
 
-## The one kind
+## Fold storage
 
-`ir.py`'s **`Fold`** is `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
+`Fold` stores `reduce(⊕) ∘ map(f)` directly:
 
-| field | what |
+| field | meaning |
 | --- | --- |
-| `axis` | the OPTIONAL iteration axis — `None` is the zero-axis node |
-| `lift` | a pure `Lambda` `λ(k, v₁…vₙ) → S`: the element's SINGLETON state (ι is spelled here; softmax's is `(x, 1)`) |
-| `init` / `combine` | the TRUE monoid, flat — ONE program whose results are the fold's real accumulator names (helpers in `ir/pure/algebra`) |
-| `operands` | a symmetric tuple of CLOSED inputs, each an edge, bound POSITIONALLY to the lift params |
+| `axis` | reduction axis; `None` for the root pointwise projection |
+| `lift` | pure per-element `Lambda`; nested reductions are nested `Fold` statements here |
+| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
+| `operands` | explicit materialized or computed inputs used by later transforms |
 
-**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a `Fold`, plus a
-PREDICATE that answers the reading — `axis is None` for the projection, `is_contraction(x)` for the bilinear one. A
-predicate cannot be constructed, subclassed or annotated, which is the point: there is no type to dispatch on and no
-second place for the fact to live.
+`Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
+cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
 
-- A **ZERO-AXIS** fold is what `Map` was: no monoid, its `lift` IS the per-cell projection. So softmax's normalize
-  and RMSNorm's are one kind composed at two depths.
-- The **BILINEAR** shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive combine — is
-  what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`.
+`Fold.loop` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
 
-**Sharing is arity.** "These two matmuls read the same A" is ONE node whose output is a tuple: one `a` edge plus N
-`Channel`s `(bᵢ, accᵢ)` folding the componentwise `(+, ×)`. The fused gate⊗up edge is that at N=2. No privileged
-operand slot, no let table, no reference arm — the one in-tree relation that had several consumers is a single edge,
-so a shared subtree has exactly one home by construction.
+## Total lift
 
-## Roles derive from arity
+`pipeline/passes/lowering/tile/_fromloop.py` implements the only loop conversion:
 
-`Fold.role` is computed, never stored: `FREE` with no axis; `TWISTED` off the combine's twist family; `CONTRACTION`
-off the bilinear reading alone; `PLANAR` otherwise.
+1. recursively lift nested reductions in place;
+2. remove the current loop's `Accum` statements from its step body;
+3. build the `lift`, `init`, and `combine` directly from those accumulators.
 
-Two consequences worth stating, because both used to be rewrites:
+There is no classification pass, byte-identity recognition gate, softmax pairing, contraction binding, fused view,
+placement cut, or raw-loop fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
 
-- **Split-K's outer reduce is not a contraction.** It tiles nothing and has no operand pair, so it derives `PLANAR`
-  like any other additive fold. `Fold.composed` recognizes the reassociation — a structural probe, not a role.
-- **The PLANAR demotion is a FORMATION fact.** An unbindable matvec-shaped contraction has its loads kept inline in
-  the lift by recognition, so there are no edges for the bilinear reading to bind, and the derivation answers `PLANAR`
-  by itself. Moving edges inline (`Fold.demoted()`, the schedule's COLLAPSE reading) is the whole operation; no role
-  is rewritten anywhere.
+`pipeline/passes/lowering/tile/_lift.py` peels the outer free axes, invokes that conversion, separates root stores,
+checks the no-inner-loop invariant, and creates one zero-axis root `Fold` over the lifted cell.
 
-Loops carry NO algebra — `Loop` / `StridedLoop` hold only their `AxisRole`. The lowering-side reads of the retired
-`Algebra` bundle live in `passes/lowering/_reduction.Reduction` (the materializer's and `030_split_reduce`'s view).
+## TileOp and scheduling
 
-## Nothing composed is stored
+`TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and boundary
+stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 
-There is no `step` sequence. The composed evaluations DERIVE:
-
-- a twisted fold with a `Load`-bound expectation operand derives its blocked evaluation with the expectation
-  contraction synthesized and memoized (`_twisted_derived_step`) — `Fold.step_stmts()` is the one consumer read; no
-  recognizer builds the operand-edge form today (the online-softmax pairing's `(m, d, o…)` expectation channels keep
-  their value loads inline in the lift body, and a fused `softmax·V` region reaches the contraction catalog as a
-  computed-A contraction over the pair instead — `_classify.fused_view`);
-- split-K's outer reduce is the identity-lift composition — `Fold.composed` is the one read.
-
-`Fold.from_loop` reconstructs the algebra from the loop BODY alone (degenerate facts off its `Accum`s; a twisted merge
-regenerated-and-byte-compared, or extracted against a `like` fold for a split partial). It returns `None` for a
-non-λ-representable loop, and callers keep the raw-loop-IR escape.
-
-`Fold.loop` splices each operand's body before the first read of its bound param and flattens nested nodes in place,
-so the derived loop depends only on the stored params. That is what makes kernel identity the α-INVARIANT **term hash**
-(`Fold.structural_key()`, the `Structural` protocol: per-node canonical renumbering plus hash-time ANF body-order
-canonicalization, digested BOTTOM-UP — each node folds its own canonical content with its children's cached keys, so a
-subtree keys once and a reading that rewrites one level re-keys that level only; buffer identity canonicalizes
-positionally per scope with the cross-scope aliasing pattern kept). Consumed by `TileOp.cache_key` and
-`Graph.structural_key`'s op field — never the lowered nest.
-
-## An operand edge has two inhabitants
-
-MATERIALIZED (a gmem `Load`) or COMPUTED (the node itself, stored INLINE; the cone built by `ops.make_cone`). The
-structural dump puts each bound result directly in the edge label (`operand[result]:`) before the load or subtree; a
-product-valued edge lists every bound result. This keeps the lift's positional substitutions visible when a derived
-reading presents the edges in role order instead of stored operand order.
-
-**Edge iff closed** holds BY CONSTRUCTION — operands bind positionally, so a subtree that reads a name from its
-enclosing body cannot be one. The closure SCAN survives only as the validation reading, living with its one consumer
-in `passes/lowering/tile/_cut.py`, where it decides cut legality: closed subtrees may hoist to edges, while combine's
-derived material — a synthesized node reading the carrier's running state — sits BELOW the seam lattice as a derived
-schedule site excluded from PLACE (`Site.derived`). A hoisted operand edge IS a PLACE site.
-
-A cone's SOURCE is the row-invariant prologue (the per-row statistic) and its body the per-cell normalize, so the K
-seam is the node boundary (`ops.cone_seam`). The seam splits the cone's EDGES by the same rule it splits its stmts: an
-edge that never reads the contraction axis is prologue (run once per tile row, and it carries its own schedule
-families — the statistic's `REDUCE`), while a k-VARYING producer edge — attention's score contraction, which the
-cone's `exp(s − m)` reads — is per-cell, splices into the cell ahead of its first use, and is evaluated INLINE by the
-fill from lowered loop IR. An inline-evaluated node carries no schedule slice (`Site.inline`: no value there could be
-realized, and rows carrying one would emit the identical kernel) but stays a PLACE seam — cutting it is how such a
-value becomes a kernel of its own. The A/B asymmetry that is real — A M-resident and compute-fillable, B streamed — is
-a SCHEDULE fact read off the node (`isinstance(c.b, Load)` eligibility gates), not a storage fact.
-
-## The node carries no placement and no schedule
-
-The node is pure algebra, so its identity (`==` / `hash` / `structural_key`) is its algebra alone and the term is IMMUTABLE
-across the whole schedule search. The placed reading the tensor-core and staged tiers need — the `(m, n)` `Side`
-geometry — belongs to the SCHEDULE SLICE: `TilePlan.at(m, n)` binds the caller's placement axes onto it, and the slice
-then derives `mn` / `m` / `n` / `launch_threads`. `axes` is `compare=False`, so placement never reaches `spell()`, a
-stamped knob row, a golden or a prior key.
-
-The A/B split rides the stored operand ORDER, not the accesses: node-locally `A[m,k]` and `B[k,n]` are symmetric (each
-carries K plus one free axis), so telling M from N needs the PLACEMENT — a caller fact. Node and slice travel as a
-`(node, tile)` PAIR; there is no fused view type.
-
-The slice reads the TILED CELL. What lies OUTSIDE it — the kernel's leading batch / ksplit grid axes, the per-cell
-rename's shared coordinates — is the grid's fact, threaded to `kernel/_atom` by `_factor`.
-
-A projection has ONE home, the wrapping zero-axis fold's `lift` — never a node field. Since 1q that lift is a STRICT
-pure `Lambda`: the root-store `Write`s (and the rms/softmax output-sweep `Loop` around them) ride `TileOp.stores` as
-`Store` decorations at the kernel boundary, reconstituted on demand by `effect_tail`. The raw-loop-IR kernels that are
-not recognized algebra — the un-recognized escape cell, `030`'s finalize, the coop fused-tail sibling — keep an impure
-lift through the one `_loop_ir_fn` arm.
-
-## What each frontend shape stores
-
-| shape | term |
-| --- | --- |
-| a bare reduce | a root `Fold` |
-| softmax / RMSNorm | `Fold.projection(body=<per-cell normalize>, operands=(<the stat fold>,))` + a sweep `Store` |
-| fused norm→linear / gate⊗up | a zero-axis fold over the product contraction (a fork sibling of its coop-reduce form) |
-| a pure pointwise cell | `Fold.projection(body=…)` with no operands + its root `Store`s |
-| SDPA | plain contractions + the softmax term — the online-softmax fusion stores its two reduces as one `TWISTED` fold |
-
-A twisted monoid is a monoid, selected structurally rather than as a distinct kind.
-
-## `TileOp` and the tree-path codec
-
-`TileOp` keeps `op` + `place` + `work` + `workers` + `knobs` + `schedule` + `stores`. `work` is the ONE worker
-inventory, derived loudly from the TILE slices (`ops.seal_workers` — a cross-site disagreement raises).
-
-Every schedule slice lives in **`TileOp.schedule`**, a dict keyed by the tree-path codec's canonical key. `path.py` is
-ONE walker plus one resolver, short-path-canonical: bare for the primary node, axis-suffixed where a kernel holds
-several sites of one family. Read
-and written through `ops.Sched`, which is also the one home of the `(m, n)` binding rule (`Sched.placed` /
-`Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings. A computed-A
-cone accepts the explicit `PLACE@a` spelling; when it is the root contraction's shallowest seam, short-path
-canonicalization spells it as bare `PLACE`. A sliced axis's window is the one `Axis.window`.
-
-Since step 7 the wire forms are SITE-LOCAL: the worker inventory is spelled once in `WORK`
-(`w<M>x<N>[+p<np>]` / `t<N>[x<M>]`, the producer band riding `+p`), and `TILE` / `REDUCE` values shed their worker
-tokens, so the stamped row IS the stored and golden spelling. The retired embedded-worker spellings raise.
-
-Dispatch reads the role and algebra off the node: `ops.head` reaches it through the projection wrapper, and every
-scheduling FACT (`Fold.role`, the reduce `Axis`, the operand edges) is a stored param on what it returns — so no
-scheduling decision has to synthesize a nest. `reduce_loop` and `Fold.lower` are for callers that consume a body, and
-both flatten any node back to the same loop nest. There is no stored `Monoid` / `Semiring` kind.
+Scheduling sees only the stored Fold tree. It does not derive alternate classified views. A shape for which the
+current scheduler has no row remains unmapped; that is an expected red-state limitation while recovery proceeds by
+fold-tree shape.

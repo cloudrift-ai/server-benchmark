@@ -14,16 +14,15 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 + `ir/tile` `Fold.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
 
-- **OUTPUT-tiled** (a contraction — warp / register tile) — a `Fold` that reads as bilinear (`ir/tile/ir.py`; since
-  the collapse `Contraction` is that READING, not a stored kind), its operand→role binding resolved recognize-side
-  (`_classify.bind_bilinear` / `_classify.fused_view` — the ONLY nodification sites; the
-  schedule just places), so
+- **OUTPUT-tiled** (a contraction — warp / register tile) — a prebuilt `Fold` that reads as bilinear. Total lift does
+  not construct this shape; recovery must introduce it through a structural Fold-tree transform before this tier is
+  reachable. When it is present,
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
   degenerate arm here. (This build was a separate `005_contract` pass, then folded into materialize, and now lives
-  recognize-side so the node exists before scheduling; the schedule only PLACES it, and declines with
-  `LoweringError` when there is no `(m, n)` grid pair to place onto.)
+  on the node so it exists before scheduling; the schedule only PLACES it, and declines with `LoweringError` when
+  there is no `(m, n)` grid pair to place onto.)
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
@@ -202,9 +201,7 @@ per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialize
 `(bk × tile_n)` slab; a transposed B (the serving `F.linear` layout) uses the N-major `(tile_n × bk)` slab in its own
 gmem orientation (`Operand.trans`). When a two-slot ring also fits the smem budget, the stage resolves at `depth=2`
 and copied peer chunks can stay in flight across the current chunk's drain. A
-**reduce-bearing (MONOID) cone** — the fused norm→linear edge — is the schedule's fused term READING
-(`_classify.fused_view`; real fork rows unioned with the map form's, not a pin rescue): the A cone is an
-inline node tree whose
+**reduce-bearing (MONOID) cone** — when explicitly stored as a computed operand — is an inline node tree whose
 SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
 IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
 transport prologue

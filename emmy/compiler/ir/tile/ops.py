@@ -334,9 +334,8 @@ def axis_names(root) -> set[str]:
     is never capturing a value.
 
     The ONE reading that separates the two kinds of free name a λ body can carry: an iteration var
-    (bound by the nest, free by construction) and a captured VALUE. The cut's closure predicate
-    (``_cut._captured_values``) subtracts this set, and the structural dump shows what remains as
-    the λ's capture set."""
+    (bound by the nest, free by construction) and a captured VALUE. The structural dump shows
+    what remains as the λ's capture set."""
     from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
 
     out: set[str] = set()

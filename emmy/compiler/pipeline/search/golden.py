@@ -660,17 +660,16 @@ def _target_kernel_nodes(record: GoldenRecord):
     return lowered, nodes
 
 
-def _recognized_target(record: GoldenRecord):
-    """The record's ONE recognized tile (loud): the target must select exactly one kernel, and the
-    shared recognition core must lift it. Returns the ``TileOp``."""
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
+def _lifted_target(record: GoldenRecord):
+    """Lift the record's single selected kernel to Tile IR."""
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, name=node.id)
+    tile = lift_tile(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}
@@ -680,47 +679,17 @@ def _recognized_target(record: GoldenRecord):
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; a ROUTING record's ``PLACE`` keys resolve to legal cut
-    seams on the recognized tree; a SCHEDULE record's spelled row equals EXACTLY ONE enumerated
+    program selects exactly one kernel; routing records are obsolete; a SCHEDULE record's spelled row equals one enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
     any-of, no classified shape."""
-    from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
 
     try:
-        tile = _recognized_target(record)
+        tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
     if record.is_routing:
-        verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
-        store = _identity_store()
-        verdicts = store.setdefault("verdicts", {})
-        if verdict_key in verdicts:
-            return verdicts[verdict_key]
-        pro = fused_view(tile)
-        route_tree, route_free, route_stores = (
-            (pro[0], (*tile.place.free, *pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
-        )
-        seams = cuttable_seams(route_tree, route_stores, route_free)
-        all_sites = sites(route_tree)
-        for key, value in record.knobs.items():
-            if str(value) != "cut":
-                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
-            if str(key) == "PLACE":
-                # The bare family key IS the codec's "shallowest cuttable seam" spelling
-                # (``route_cut``'s pin semantics) — it decodes iff any seam is legal.
-                if not seams:
-                    return _remember_verdict(verdict_key, "bare PLACE=cut recorded, but the recognized tree has no legal cut seam")
-                continue
-            try:
-                site = resolve(route_tree, str(key), all_sites=all_sites)
-            except ValueError as exc:
-                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or not any(site in cut.members for cut in seams):
-                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
-        return _remember_verdict(verdict_key, None)
+        return "placement routing is not part of structural total lift"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
@@ -733,13 +702,6 @@ def decode_record(record: GoldenRecord) -> str | None:
         reason = f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
-    _IDENTITY_STORE_DIRTY = True
-    return reason
-
-
-def _remember_verdict(key: str, reason: str | None) -> str | None:
-    global _IDENTITY_STORE_DIRTY
-    _identity_store().setdefault("verdicts", {})[key] = reason
     _IDENTITY_STORE_DIRTY = True
     return reason
 
@@ -788,10 +750,10 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``) of the recognized tile of the record's ONE target kernel,
-    derived through the exact recognition core the live compile uses (``_lift.recognized_tile``).
+    (``_schedule.deploy_identity``) of the lifted tile of the record's ONE target kernel,
+    derived through the exact total lift the live compile uses (``_lift.lift_tile``).
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
-    (a schedule row decorates exactly one), or the selector/recognition fails — best-effort here
+    (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
     (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
     global _IDENTITY_STORE_DIRTY
     key = _record_cache_key(record)
@@ -806,7 +768,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     try:
         from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
 
-        identity = deploy_identity(_recognized_target(record))
+        identity = deploy_identity(_lifted_target(record))
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity

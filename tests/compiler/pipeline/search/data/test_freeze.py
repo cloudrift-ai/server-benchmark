@@ -337,3 +337,32 @@ def test_load_node_rows_sniffs_db_and_freeze_dir(tmp_path) -> None:
     garbage.write_text("hello\n")
     with pytest.raises(RuntimeError, match="neither a sqlite node DB nor"):
         load_node_rows(garbage)
+
+
+def test_the_checked_in_freeze_is_the_default_evaluation_corpus() -> None:
+    """The repo ships one measurement freeze, and ``config.freeze_path()`` resolves to it.
+
+    This is what makes an evaluation number reproducible: the tune DB and the online prior's
+    reservoir are machine-local and rewritten as tuning continues (the reservoir is additionally a
+    bounded random sample that churns), so a number computed over either is not one a second
+    machine — or the same machine tomorrow — can check. A freeze is digest-pinned and identical
+    row-for-row wherever it is read.
+
+    Loading it costs a few seconds because every row's features are RE-DERIVED by live code rather
+    than trusted from the file, which is the property that lets a freeze outlive a featurizer
+    change. That is worth paying once here: if this breaks, every reported prior number is
+    uncomparable and nothing else in the suite would say so."""
+    from emmy import config
+
+    freeze = config.freeze_path()
+    manifest = json.loads((freeze / "manifest.json").read_text())
+    assert manifest["kind"] == "emmy-node-freeze"
+    # The versions its rows are spelled in — a freeze from another featurizer generation reports
+    # itself rather than being silently re-read under today's vocabulary.
+    assert manifest["feat_ver"] == FEATURIZER_VERSION
+    assert len(manifest["sha256"]) == 64
+
+    rows = load_node_rows(freeze)
+    assert len(rows) == manifest["counts"]["rows"]
+    # Leaf-only by construction: a freeze holds benched configs, never a search tree's interior.
+    assert all(r.is_leaf and r.parent_key is None and r.depth == 0 for r in rows)

@@ -582,6 +582,20 @@ def test_prior_rejects_the_leaf_only_db_dataset(run_cli, tmp_path):
     assert "--dataset nodes" in stdout + stderr
 
 
+def test_prior_defaults_to_the_checked_in_freeze(monkeypatch, tmp_path):
+    """No ``--db`` means the repo's freeze, not the machine's tune DB.
+
+    The default decides what a reported number MEANS. A tune DB is machine-local and rewritten by
+    every tune; the freeze is digest-pinned and the same everywhere. This asserts the resolution
+    and the override, without loading the freeze — that costs seconds and ``test_freeze.py`` owns it."""
+    from emmy import config
+
+    assert config.freeze_path() == Path(config.__file__).resolve().parent / "compiler/pipeline/search/freezes"
+    assert (config.freeze_path() / "manifest.json").is_file()
+    monkeypatch.setenv(config.FREEZE_DIR, str(tmp_path / "elsewhere"))
+    assert config.freeze_path() == tmp_path / "elsewhere"
+
+
 def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
     """``eval prior --dataset nodes`` renders the shared report over the node store: one summary per card and
     compile regime, labelled by prior half. With no fitted checkpoint the online half is named as absent

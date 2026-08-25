@@ -193,23 +193,21 @@ def _matmul_chain(shapes: list[tuple[str, tuple[int, int]]], mms: list[tuple[str
     return g
 
 
-def test_triple_matmul_features_consistent_and_per_kernel_reduce():
-    """A chained triple-matmul ``((a@b)@d)`` fuses to ≥2 matmul LoopOps; each
-    carries stamped ``S_*`` features equal to :func:`structure_features`, has a
-    K-reduce loop, and the distinct per-matmul K extents both show up."""
+def test_triple_matmul_features_include_both_nested_reductions():
+    """A chained triple-matmul ``((a@b)@d)`` fuses into one LoopOp whose stamped
+    ``S_*`` features describe both nested K reductions."""
     g = _matmul_chain(
         [("a", (64, 128)), ("b", (128, 48)), ("d", (48, 80))],
         [("c", "a", "b", (64, 48)), ("e", "c", "d", (64, 80))],
     )
     fused, loops = _fused_loops(g)
-    assert len(loops) >= 2, "two chained matmuls should not fuse into one kernel"
-    reduce_maxes = set()
-    for op in loops:
-        struct = {k: v for k, v in op.knobs.items() if k.startswith(STRUCT_PREFIX)}
-        assert struct == structure_features(op.body, fused), "stamped S_* must match structure_features"
-        assert struct["S_n_reduce_loop"] >= 1.0, "each matmul kernel has a K reduce"
-        reduce_maxes.add(struct["S_ext_reduce_max"])
-    assert {128.0, 48.0} <= reduce_maxes, f"both matmul K extents should appear, got {reduce_maxes}"
+    assert len(loops) == 1
+    struct = {k: v for k, v in loops[0].knobs.items() if k.startswith(STRUCT_PREFIX)}
+    assert struct == structure_features(loops[0].body, fused), "stamped S_* must match structure_features"
+    assert struct["S_n_reduce_loop"] == 2.0
+    assert struct["S_ext_n_reduce_axis"] == 2.0
+    assert struct["S_ext_reduce_prod"] == 128.0 * 48.0
+    assert struct["S_ext_reduce_max"] == 128.0
 
 
 def test_uncommon_shape_extents_land_in_features():

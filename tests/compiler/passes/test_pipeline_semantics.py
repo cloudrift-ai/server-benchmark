@@ -204,7 +204,7 @@ def test_matmul():
     assert has_sum
 
 
-def test_no_matmul_when_mul_fans_out():
+def test_mul_fanout_fuses_into_one_multi_output_loop():
     g = Graph()
     _input(g, "a", (4, 8))
     _input(g, "b", (4, 8))
@@ -216,7 +216,10 @@ def test_no_matmul_when_mul_fans_out():
 
     result = _compile(g)
     launches = _loop_nodes(result)
-    assert len(launches) == 3
+    assert len(launches) == 1
+    assert {output.name for output in launches[0].outputs} == {"d", "n"}
+    assert _has_update(launches[0].op.body)
+    assert "negative" in _elementwise_fns(launches[0].op.body)
 
 
 def test_matmul_op_decomposes_and_fuses():

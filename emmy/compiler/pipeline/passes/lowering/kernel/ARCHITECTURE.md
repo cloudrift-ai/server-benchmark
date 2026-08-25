@@ -8,21 +8,18 @@ afterwards.
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to
 `_factor.factorize(tile, root)`, the entry to the recursive emitter. `factorize` builds the ambient `Ctx` and dispatches
-`tile.op` through `_factorize`, which peels the projecting `Map`s and binds the leaf via the ONE root binder
+`tile.op` through `_factorize`, which peels projecting zero-axis `Fold`s and binds the leaf via the ONE root binder
 (`_factor._bind`) — a single pipeline whose form is read off the node's SCHEDULE (which axes are tiled), never a kernel
 kind, sealed through the one `grid_tile` finalizer (the article's "schedule separate from combine" thesis — the op tree
 + `ir/tile` `Fold.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
 
-- **OUTPUT-tiled** (a contraction — warp / register tile) — a prebuilt `Fold` that reads as bilinear. Total lift does
-  not construct this shape; recovery must introduce it through a structural Fold-tree transform before this tier is
-  reachable. When it is present,
+- **OUTPUT-tiled** (a contraction — warp / register tile) — a `Fold` whose canonical algebra has a bilinear reading.
+  Tile canonicalization establishes this shape before scheduling. When it is present,
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
-  (mma / scalar). An unbindable contraction (a non-`Load` operand) keeps the `Map` form and falls through to the
-  degenerate arm here. (This build was a separate `005_contract` pass, then folded into materialize, and now lives
-  on the node so it exists before scheduling; the schedule only PLACES it, and declines with `LoweringError` when
-  there is no `(m, n)` grid pair to place onto.)
+  (mma / scalar). A contraction without an applicable output tile takes the ordinary Fold path. The schedule only
+  places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto.
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
@@ -33,10 +30,10 @@ kind, sealed through the one `grid_tile` finalizer (the article's "schedule sepa
 
 ### The recursive node walk (`_emit`) — one hierarchical emitter
 
-Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a `Map`
-with a `source` recurses (projection → `tail`), the leaf binds via the one `_bind` pipeline. The **body**
-recursion `_emit(op, ctx) -> Frag` builds the per-cell loop-IR — over the `Map` / `Fold` tree,
-through **`source` AND `partial`** — threading a `Ctx` **down** (the ambient cell environment: the grid axes, operand
+Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a
+zero-axis `Fold` with an operand recurses (projection → `tail`), and the leaf binds via the one `_bind` pipeline. The
+**body** recursion `_emit(op, ctx) -> Frag` builds the per-cell Loop IR over the Fold tree, threading a `Ctx` **down**
+(the ambient cell environment: the grid axes, operand
 `inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
 `Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
 build its per-cell reduce loop, so a **nested** contraction (a composed fold's inner contraction) is reached AS A
@@ -56,9 +53,9 @@ binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
 grid's fact and reach the per-cell rename from `_factor` as its own `lead`) from the **algebra the node owns** (what to
-contract: the reduce `axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem `Load` (materialized) or the
-computed node itself, stored inline (the fused cone); a projection
-is NEVER a node field, its one home is the wrapping `Map.body`. The edges share ONE type: the A/B asymmetry that is real
+contract: the reduce `axis`, the shared `a` operand edge plus the product `channels` `(b_i, acc_i)` — every edge a gmem
+`Load` (materialized) or the computed node itself, stored inline (the fused cone); a projection is NEVER a contraction
+field, its one home is the wrapping zero-axis `Fold.lift`. The edges share ONE type: the A/B asymmetry that is real
 — A is M-resident and compute-fillable, B is the K×N operand the loop streams — is a SCHEDULE fact, so each staged /
 mma tier states `isinstance(c.b, Load)` as an eligibility precondition and declines a computed B to gmem-direct)
 from the **schedule** (the `TilePlan` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
@@ -70,11 +67,12 @@ slice is what lets the same operand/`acc` params be tiled by a *different* `Tile
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.
 
-### The one factorizer — the single binder + reduce-axis tiling (`_factor.py`), atom strategies (`_atom.py`), axis realization (`_tiling.py`)
+### The one factorizer
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
-dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a `Map`
-with a `source` **recurses** (its projection `body` walked, via `_emit_body`, into the `tail`), and the leaf binds to
+dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
+zero-axis `Fold` with an operand recurses (its projection body is walked via `_emit_body` into the `tail`), and the leaf
+binds to
 the grid via the **ONE** root binder, `_bind` — a single pipeline that reads WHICH AXES the schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
@@ -88,7 +86,7 @@ output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** sepa
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
 kernel-boundary `TileOp.stores` (1q — the root `Write`s / output sweep that left the term) are reconstituted into the
-projection `tail` at the `Map` peel (`effect_tail`; plain stores append at a flat/bare root), so everything below the
+projection `tail` at the zero-axis Fold peel (`effect_tail`; plain stores append at a flat/bare root), so everything below the
 peel — the sinks, the sweep's coop `StridedLoop` distribution, the split realizers — consumes the identical stmt
 stream the stored-`Write` era carried. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling

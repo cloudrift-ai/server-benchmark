@@ -20,7 +20,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
-    """The canonical recognized shape — ``acc += x²`` with the lifting pass's ``axes`` stamp."""
+    """The canonical lifted shape — ``acc += x²`` with the lifting pass's ``axes`` stamp."""
     acc = Accum(name="acc0", value="v1", op="add", axes=("k",) if axes_stamped else ())
     body = Body(
         (
@@ -64,7 +64,7 @@ def _view(arity: int = 2) -> Fold:
 
 
 def _softmax_loop() -> Loop:
-    """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
+    """The canonical online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
     exp-family state, exactly as the Tile twisted rewrite builds it."""
     from emmy.compiler.ir.pure.carrier import exp_merge
 

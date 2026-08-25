@@ -16,7 +16,6 @@ from emmy.compiler.ir.pure import (
     Channel,
     Fold,
     Lambda,
-    canonical_lambda_body,
     component_ops,
     is_contraction,
 )
@@ -82,10 +81,9 @@ def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
         return replace(axis, name=name) if name is not None else axis
 
     renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in body)
-    canonical = canonical_lambda_body(renamed)
     return Lambda(
         params=tuple(rename(name) for name in fn.params),
-        body=canonical,
+        body=renamed,
         results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
     )
 

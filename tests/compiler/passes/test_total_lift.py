@@ -13,11 +13,13 @@ from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile
 
 
 def _tile(body: Body):
-    return lift_tile(LoopOp(body=body))
+    graph = Graph()
+    graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
+    graph.outputs = ["out"]
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _matmul_body(epilogue=(), k_extent: int = 128) -> Body:

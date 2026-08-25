@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
+from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
@@ -97,8 +98,6 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: _Score, axes: tuple[
 
 
 def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
-    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
-
     states = (maximum.combine.results[0], denominator.combine.results[0])
     other = tuple(f"{name}__o" for name in states)
     lift = replace(maximum.lift, results=(maximum.lift.results[0], 1.0))
@@ -268,8 +267,6 @@ def _rewrite_axis(stmt, old: str, new: str):
 
 def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     """Add every channel of ``sum(normalized_exp(score) * value)`` to its statistic."""
-    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
-
     statistic = view.statistic
     values = tuple(_rewrite_axis(channel.b, fold.axis.name, statistic.axis.name) for channel in fold.channels)
     operands = (*((view.provider,) if view.provider is not None else ()), *statistic.operands, *values)

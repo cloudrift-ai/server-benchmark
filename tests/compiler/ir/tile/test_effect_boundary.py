@@ -1,11 +1,11 @@
 """The 1q effect boundary — ``Store`` decorations + the ``split_effects`` / ``effect_tail``
 round-trip.
 
-Projection ``Write``\\ s (and the rms/softmax output-sweep ``Loop``) leave ``Map.fn`` for
+Projection ``Write``\\ s (and the rms/softmax output-sweep ``Loop``) leave the root Fold lambda for
 ``TileOp.stores``; every consumer reconstitutes the effectful stmt stream via ``effect_tail``.
 The conversion gate is byte-identity: ``split_effects`` returns a spelling ONLY when
 ``effect_tail`` reproduces the captured stream exactly (the 1o construction-gate pattern), so
-these tests pin the round-trip on each recognized shape and the ``None`` declines.
+these tests pin the round-trip on each supported shape and the ``None`` declines.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def test_sweep_unroll_flag_survives() -> None:
     assert effect_tail(pure, stores) == [loop]
 
 
-# --- declines (the caller keeps the raw-loop-IR spelling) ----------------------------------------- #
+# --- declines (the caller keeps the computation in Loop IR) -------------------------------------- #
 
 
 def test_reduce_loop_declines() -> None:

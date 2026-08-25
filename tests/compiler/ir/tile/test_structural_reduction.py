@@ -1,14 +1,4 @@
-"""The :class:`Fold` / a bilinear ``Fold`` / :class:`Map` structural tile-IR nodes — their
-algebra/structure split and the round-trip invariant the materializer relies on.
-
-A ``Fold`` is the typed successor of the bare annotated reduce ``Loop`` (holding no projection);
-a projected reduce (softmax / RMSNorm) is a ``Map`` whose body IS the projection over a ``Fold``
-``source``. A bilinear ``Fold`` is the tiled matmul node (built recognize-side at fork-emit), holding
-its ``a`` edge + product channels + ``tile``; it synthesizes the canonical mul-add ``CONTRACTION``
-loop on demand so ``Fold.lower`` / ``reduce_loop`` flatten it back to the loop nest the materializer
-expands (via ``_factor.factorize``). These pin that contract plus the structural reads (``axis_role`` /
-``reduce_loop`` / ``out``) dispatching on the nodes.
-"""
+"""Fold algebra, structural readings, and lowering back to Loop IR."""
 
 from __future__ import annotations
 
@@ -20,8 +10,8 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import ReducePlan, TileOp
-from emmy.compiler.ir.tile.ops import axis_role, reduce_loop, reduce_plan
+from emmy.compiler.ir.tile import ReducePlan, Store, TileOp, effect_tail
+from emmy.compiler.ir.tile.ops import reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -41,8 +31,6 @@ def test_from_loop_reconstructs_the_loop_exactly() -> None:
     assert red is not None
     # The synthesized loop is byte-identical to the captured one (axis / role / body).
     assert red.loop == loop
-    assert reduce_loop(red) == loop
-    assert axis_role(red) is AxisRole.PLANAR
 
 
 def test_bare_reduction_lowers_to_just_the_loop() -> None:
@@ -54,35 +42,18 @@ def test_bare_reduction_lowers_to_just_the_loop() -> None:
     assert red.out == "acc"
 
 
-def test_projected_reduce_is_a_map_over_the_reduction() -> None:
+def test_projected_reduce_is_a_zero_axis_fold_over_the_reduction() -> None:
     loop = _sum_loop()
     proj = (Assign(name="rms", op="sqrt", args=("acc",)),)
     node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
-    # lower flattens the source's loop then the projection body — the bare-loop ``Map`` body.
+    # Lower flattens the source's loop, then the zero-axis projection body.
     assert node.lower() == [loop, *proj]
     assert node.out == "rms"  # the projection's last def
-    # The structural reads see straight through to the source's reduce.
-    assert reduce_loop(node) == loop
-    assert axis_role(node) is AxisRole.PLANAR
 
 
-def test_map_over_reduction_matches_the_legacy_loop_in_body_form() -> None:
-    """``Fold.projection(source=Fold).lower()`` equals the bare-loop ``Fold.projection(body=(loop, *proj))`` — the parity
-    guarantee that keeps ``Op.cache_key`` stable across the lift."""
-    loop = _sum_loop()
-    proj = (Write(output="out", index=(Var("m"),), value="acc"),)
-    node = Fold.projection(body=Body(proj), operands=(fold_from_loop(loop),))
-    legacy = Fold.projection(body=(loop, *proj))
-    assert node.lower() == legacy.lower()
-    assert reduce_loop(node) == reduce_loop(legacy)
-    assert axis_role(node) == axis_role(legacy)
-
-
-def test_pure_pointwise_map_has_no_reduce() -> None:
+def test_pure_pointwise_projection_has_no_reduce() -> None:
     node = Fold.projection(body=(Load(name="x_e", input="x", index=(Var("m"),)), Assign(name="y", op="relu", args=("x_e",))))
     assert node.operands == ()
-    assert reduce_loop(node) is None
-    assert axis_role(node) is AxisRole.FREE
     assert node.out == "y"
 
 
@@ -98,7 +69,7 @@ def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
     plan = ReducePlan.of(coop=128)
     red = fold_from_loop(_sum_loop())
     assert red is not None
-    # A bare reduce root and a projecting Map both surface the partition keyed on the fold.
+    # A bare reduce root and a zero-axis projection both surface the partition keyed on the fold.
     bare = _tile(red)
     sched_of(bare).put("REDUCE", red, plan)
     assert reduce_plan(bare) is plan
@@ -107,12 +78,7 @@ def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
     assert reduce_plan(wrapped) is plan
 
 
-def test_reduce_plan_is_none_for_a_flat_map_without_a_reduction_node() -> None:
-    """A flat ``Map`` (pointwise, or a scalar per-cell contraction holding a loop-in-body with no
-    ``Fold`` source) has NO partition — ``reduce_plan`` reads ``None``, not a residual field.
-    Every partitioned reduce is nodified (``nodify_reduce``), so the fallback is gone."""
-    legacy = Fold.projection(body=(_sum_loop(),))  # loop in the body, no Fold source
-    assert reduce_plan(_tile(legacy)) is None
+def test_reduce_plan_is_none_for_a_pointwise_projection() -> None:
     pointwise = Fold.projection(body=(Load(name="x_e", input="x", index=(Var("m"),)),))
     assert reduce_plan(_tile(pointwise)) is None
 
@@ -141,9 +107,8 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
     assert red.role is AxisRole.TWISTED
-    assert red.loop == loop  # the derivation reproduces the recognizer's annotation exactly
-    assert axis_role(red) is AxisRole.TWISTED
-    assert axis_role(Fold.projection(body=Body(()), operands=(red,))) is AxisRole.TWISTED
+    assert red.loop == loop  # the derivation reproduces the input annotation exactly
+    assert Fold.projection(body=Body(()), operands=(red,)).operands[0].role is AxisRole.TWISTED
 
 
 def _contraction() -> Fold:
@@ -169,22 +134,23 @@ def test_contraction_synthesizes_the_mul_add_loop() -> None:
 
 def test_contraction_dispatches_through_ops() -> None:
     c = _contraction()
-    assert axis_role(c) is AxisRole.CONTRACTION
-    assert reduce_loop(c) == c.loop
+    assert c.role is AxisRole.CONTRACTION
     assert c.lower() == [c.loop]  # bare: just the synthesized loop (the grid Write is materialize glue)
     assert c.out == "acc"
 
 
-def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
-    """ONE home for a projection: the wrapping ``Map``'s body. A bilinear ``Fold`` lowers to just its
-    synthesized loop, and the projected form is the same ``project ∘ contract`` spelling the
-    ``Fold`` tiers use — so the future cut realizer sees a single seam shape."""
-    proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"), Var("n")), value="y"))
+def test_a_projection_rides_the_zero_axis_wrapper_not_the_node() -> None:
+    """ONE home for a projection: the zero-axis Fold's body. A bilinear ``Fold`` lowers to just its
+    synthesized loop, and the projected form is the same ``project ∘ contract`` spelling the Fold
+    tiers use."""
+    proj = (Assign(name="y", op="relu", args=("acc",)),)
+    write = Write(output="out", index=(Var("m"), Var("n")), value="y")
     c = _contraction()
     node = Fold.projection(body=Body(proj), operands=(c,))  # the STORED form under the wrapper
     assert c.lower() == [c.loop]
     assert node.lower() == [c.loop, *proj]
-    assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
+    assert effect_tail(node.lower(), (Store(write=write),)) == [c.loop, *proj, write]
+    assert node.operands[0].role is AxisRole.CONTRACTION
 
 
 # --- split-K: Fold ⊃ bilinear fold (E1) --------------------------------------------------- #
@@ -229,7 +195,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     # The outer fold is an ordinary additive reduce — it tiles nothing and has no operand pair, so
     # it derives PLANAR like any other. The reassociation it carries is a STRUCTURAL probe
     # (``Fold.composed``, what ``030_split_reduce`` consumes), never a role.
-    assert axis_role(red) is AxisRole.PLANAR
+    assert red.role is AxisRole.PLANAR
     assert red.composed is inner
     t = _tile(red)
     sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
@@ -298,8 +264,6 @@ def test_contraction_computed_a_operand_exposes_its_body() -> None:
     c = _pv_contraction()
     assert (not isinstance(c.a, Load)) and operand_name(c.a) == "p"
     assert isinstance(operand_body(c.a)[0], Load) and operand_body(c.a)[0].input == "S" and operand_body(c.a)[-1].op.name == "exp"
-    # external reads are the A body's LOADED buffers + B — the computed ``p`` is an internal temp, not a read.
-    assert set(c.external_reads()) == {"S", "V"}
 
 
 def test_contraction_computed_a_lowers_into_the_k_loop() -> None:
@@ -329,7 +293,7 @@ def test_contraction_computed_a_factorizes_at_the_scalar_tier() -> None:
     assert exps, "the computed A operand (exp of the score) must survive into the scalar kernel body"
 
 
-# --- composed steps: every structural node is a Stmt, so a body can hold one ---------------------- #
+# --- term identity ------------------------------------------------------------------------------- #
 
 
 def test_there_is_exactly_one_stored_node_kind_and_it_is_a_term() -> None:
@@ -402,7 +366,6 @@ def test_computed_b_exposes_the_same_accessors_as_a() -> None:
     assert operand_name(c.b) == "wn"
     assert isinstance(operand_body(c.b)[0], Load) and operand_body(c.b)[-1].op.name == "exp"
     # Both edges' loaded buffers are external reads; the computed ``wn`` is an internal temp.
-    assert set(c.external_reads()) == {"A", "W"}
 
 
 def test_a_computed_b_has_no_gmem_layout() -> None:

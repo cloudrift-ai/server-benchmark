@@ -1,12 +1,11 @@
 r"""The geometry-free compute layer — node lowering and the structural reads.
 
-A kernel's compute is a stored :class:`~emmy.compiler.ir.pure.fold.Fold` (a bare reduce), a
-:class:`~emmy.compiler.ir.pure.fold.Fold` (a pure pointwise cell, or the projection wrapper over its
-source node). :func:`head` is the ONE accessor reaching that node through the projection (zero-axis) fold,
-and every structural fact a pass dispatches on — :func:`axis_role`, the reduce ``Axis``, the
-operand edges — is a STORED param on it (a fold's role is derived from those params, never
-stored). Reading a node fact off a SYNTHESIZED nest is the inversion this module exists to
-prevent: :func:`reduce_loop` and :meth:`Fold.lower` are for callers that consume a body.
+A kernel's compute is one stored :class:`~emmy.compiler.ir.pure.fold.Fold`: a bare reduction, a
+pure pointwise cell, or the zero-axis projection over another Fold. :func:`head` reaches the
+iterating node through that projection, and every structural fact a pass dispatches on — its
+derived role, reduce ``Axis``, and operand edges — comes directly from the tree. Reading those
+facts off a synthesized nest is the inversion this module exists to prevent; :meth:`Fold.lower`
+is for callers that consume a body.
 
 This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the tree-path schedule accessor (:class:`Sched`),
@@ -18,7 +17,6 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import AxisRole
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -32,10 +30,12 @@ from emmy.compiler.ir.pure.fold import (
     splice_operands,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import ReducePlan
-from emmy.compiler.ir.stmt import Assign, Body, Loop, StridedLoop
+from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
+from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.tile.ir import effect_tail
+from emmy.compiler.ir.tile.ir import TileOp, effect_tail
+from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters
+from emmy.compiler.ir.tile.path import sites, spell
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -72,8 +72,6 @@ def chain_edge(cone, k_name: str):
     A node-boundary read like :func:`cone_seam`, and asked by both sides of the seam: the scheduler
     sizes the score's key slab into the sync stage's smem budget, and the materializer realizes the
     score on the tensor core (``lowering/kernel/_atom``'s chained fills)."""
-    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415 — leaf import, kept off the module head
-
     if not isinstance(cone, Fold) or cone.axis is not None:
         return None
     kv = [e for e in cone.operands if isinstance(e, Fold) and e.axis is not None and edge_refs_axis(e, k_name)]
@@ -130,8 +128,6 @@ def same_score_cone(a, b, a_axis: str, b_axis: str) -> bool:
     streams — asked of two nodes that reached lowering separately (a split-K partition re-indexes
     the weight's keys while the statistic keeps spanning the whole axis, and a lowering that folds
     the two passes into one sweep may only do so while they still read the same keys)."""
-    from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters  # noqa: PLC0415
-
     left = Lambda(params=(a_axis,), body=Body((a,)), results=(operand_name(a),))
     right = Lambda(params=(b_axis,), body=Body((b,)), results=(operand_name(b),))
     return lambda_equivalent_clusters(((left, (a_axis,)), (right, (b_axis,)))) == ((0, 1),)
@@ -193,8 +189,6 @@ class Sched:
         self._sites = None
 
     def _all_sites(self):
-        from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
-
         if self._sites is None:
             self._sites = sites(self.root)
         return self._sites
@@ -202,8 +196,6 @@ class Sched:
     def key(self, family: str, node) -> str | None:
         """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
         is not a site of that family on this tree (nothing to key)."""
-        from emmy.compiler.ir.tile.path import spell  # noqa: PLC0415
-
         try:
             return spell(self.root, family, node, all_sites=self._all_sites())
         except ValueError:
@@ -291,8 +283,6 @@ def scheduled(op, *, name: str, place, knobs: dict, stores: tuple = (), slices=(
     ``slices`` are ``(family, node, value)`` triples keyed on the way in; ``schedule`` is an
     ALREADY-KEYED dict (``030_split_reduce`` re-keys against the partial's own tree before it gets
     here). ``None`` slice values are skipped, so a resolver that declined needs no guard."""
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415 — ir.py defines the op this builds
-
     out = TileOp(op=op, name=name, place=place, workers=workers, knobs=knobs, schedule=dict(schedule or {}), stores=tuple(stores))
     sched = sched_of(out)
     for family, node, value in slices:
@@ -311,8 +301,6 @@ def axis_names(root) -> set[str]:
     The ONE reading that separates the two kinds of free name a λ body can carry: an iteration var
     (bound by the nest, free by construction) and a captured VALUE. The structural dump shows
     what remains as the λ's capture set."""
-    from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
-
     out: set[str] = set()
     for site in sites(root):
         node = site.node
@@ -329,10 +317,9 @@ def axis_names(root) -> set[str]:
 def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.stores`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.effect_tail`).
-    The ONE read every scheduler gate that inspects "the tail" goes through, so a converted
-    kernel (stores at the boundary) and a raw-loop-IR one (effects still in-body, empty ``stores``)
-    answer identically — e.g. the ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding
-    rms/softmax rows after their sweep moved to a ``Store`` decoration."""
+    The ONE read every scheduler gate that inspects "the tail" goes through, so the
+    ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
+    sweep moved to a ``Store`` decoration."""
     op = tile.op
     body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
     return effect_tail(body, tile.stores)
@@ -347,8 +334,6 @@ def seal_workers(tile) -> None:
     inventory (a bare register strip) keeps ``None`` — the per-cell forms' launch geometry stays
     derived. Called by every option builder / split realizer after the schedule dict is
     assembled."""
-    from emmy.compiler.ir.schedule import derive_inventory  # noqa: PLC0415
-
     coop = max(
         (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE"),
         default=1,
@@ -364,14 +349,12 @@ def seal_workers(tile) -> None:
 
 def head(op):
     """The kernel's compute NODE — a :class:`~emmy.compiler.ir.pure.fold.Fold` at any role, bare or
-    under its projection (zero-axis) fold — or
-    ``None`` for a pure pointwise cell / the raw-loop-IR escape (a zero-axis fold with no operands).
+    under its projection (zero-axis) fold — or ``None`` for a pure pointwise cell.
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
     ``op.operands[0] if op.axis is None and op.operands else op`` ternary at every reader. Every
     node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
-    reduce ``Axis``, the operand edges — is a STORED param on what this returns, so a scheduling
-    read never needs :func:`reduce_loop` (which synthesizes a whole nest) to reach it."""
+    reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
     if isinstance(op, Fold) and op.axis is None:
         if op.operands:
@@ -382,29 +365,6 @@ def head(op):
             members = [s for s in op.body if isinstance(s, Fold)]
             node = members[0] if len(members) == 1 else op
     return node if isinstance(node, Fold) and node.axis is not None else None
-
-
-def reduce_loop(op):
-    """The kernel's outermost **annotated** reduce ``Loop`` (its ``role`` stamped by recognition),
-    or ``None`` for a pure pointwise / flat-fallback zero-axis ``Fold`` (no annotated reduce). A
-    :class:`~emmy.compiler.ir.pure.fold.Fold` with an axis synthesizes its loop
-    directly (a multi-channel contraction derives the ONE fused product loop — see
-    :attr:`Fold.loop`); a zero-axis ``Fold``
-    is read off the top-level body — the annotated reduce loop is a top-level stmt (a
-    single-flat-reduce cell); a nested / multi reduce stays un-annotated (``role=FREE`` — flat
-    fallback) and is invisible here, so it materializes on the scalar tier.
-
-    For the LOOP NEST itself — a caller that consumes a body. A node-level FACT (the role, the
-    reduce axis, the operand edges) is a stored param on :func:`head`'s node: read it there, not
-    off a nest synthesized to be thrown away."""
-    if isinstance(op, Fold) and op.axis is not None:
-        return op.loop
-    if isinstance(op, Fold) and op.operands:
-        return reduce_loop(op.operands[0])  # the zero-axis node projecting over its source
-    for s in op.body:
-        if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
-            return s
-    return None
 
 
 def reduce_plan(tile):
@@ -421,30 +381,6 @@ def reduce_plan(tile):
     return plan if plan is not None else ReducePlan()
 
 
-def axis_role(op) -> AxisRole:
-    """The reduce :class:`~emmy.compiler.ir.axis.AxisRole` of a kernel's outermost reduction: a
-    ``CONTRACTION`` contraction, a ``TWISTED`` (online-softmax / flash) or ``PLANAR`` (plain
-    ``sum`` / ``max`` / ``mean``) reduce, or ``FREE`` for a pure pointwise / flat-fallback
-    zero-axis ``Fold``.
-
-    NOT the scheduler's dispatch — that reads ``Fold.role`` off the node directly, through
-    :func:`head`, and this accessor has no caller in the passes. What it is FOR is the one reading
-    the node cannot give: the RAW-LOOP-IR escape (an un-recognized cell, ``030``'s finalize, the
-    coop fused-tail sibling) has no node to ask, so the recognition-stamped ``Loop.role`` is the
-    only statement of the fact. That makes this the one place the lifted term and the bare-loop
-    form it was lifted from can be compared, which is what the recognition-boundary tests assert.
-
-    Never synthesize a nest to answer this — :attr:`Fold.loop` splices every operand edge and
-    flattens nested nodes, and hands back the same property it was given."""
-    node = head(op)
-    if node is not None:
-        return node.role
-    for s in op.body:  # the escape: a flat zero-axis fold whose recognition-stamped reduce Loop is a top-level stmt
-        if isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce:
-            return s.role
-    return AxisRole.FREE
-
-
 # Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
 # ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
 # (``Op.cache_key`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
@@ -453,12 +389,10 @@ def axis_role(op) -> AxisRole:
 __all__ = [
     "Sched",
     "axis_names",
-    "axis_role",
     "cone_seam",
     "head",
     "make_cone",
     "projection_tail",
-    "reduce_loop",
     "reduce_plan",
     "same_score_cone",
     "sched_of",

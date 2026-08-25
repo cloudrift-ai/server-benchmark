@@ -502,7 +502,7 @@ prior, never a preference written into a pass or into this policy.
    `deploy_identity` — the lifted term's α/buffer-invariant algebra digest folded with the operand/output dtype
    fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
    digest canonicalizes sizes away, and without extents every same-algebra cone on a card would share one key),
-   derived record-side through the shared total lift (`_lift.lift_tile`) — equals the
+   derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
    but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). Legacy routing records are rejected.
@@ -610,7 +610,7 @@ and regression reference points.
 
 The tier's join is exact by construction. The record side lowers the record's OWN persisted program through the
 loop passes, selects its one target kernel, and lifts it through the SAME core the live pass uses
-(`_lift.lift_tile`) — so record-side and fork-side identity cannot drift, and there is no classified shape
+(`_fromloop.lift_loop_op`) — so record-side and fork-side identity cannot drift, and there is no classified shape
 anywhere (the old `ShapeKey.kind` classifier and its offer-signal special cases are gone for good). The row decode
 is exact equality of the schedule-family view after the one recording canonicalizer; a record that stops equaling
 any enumerated row warns and decides nothing at deploy. The nightly `onboard-model` workflow strictly decodes and
@@ -1660,7 +1660,6 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
 | `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
-| `loop/recognize/`         | Empty (retired). |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
 | `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `015_twisted` rewrites the exp family; `020_schedule` schedules that stored tree; `030_split_reduce` realizes cross-CTA partitions. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |

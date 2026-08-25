@@ -4,7 +4,7 @@ The split is an ordinary ``REDUCE`` value decided at the ordinary schedule fork;
 structural is that the rewrite returns a different set of nodes. Those nodes are new kernels:
 
 - they carry NO knob, NO placement and NO schedule slice of the kernel they replace;
-- each reaches ``020_schedule`` and decides its own row, exactly like a freshly recognized term;
+- each reaches ``020_schedule`` and decides its own row, exactly like a newly lifted Fold tree;
 - each carries structural features re-derived from its OWN body, so it is separately identifiable
   to the evidence store;
 - the split is CONSUMED by the kernel that realizes it — the sliced axis is a window of its
@@ -25,6 +25,8 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
@@ -70,6 +72,26 @@ def _resolve(passes, graph=None):
 
 def _kernels(out) -> dict[str, dict]:
     return {nid: dict(n.op.knobs) for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None)}
+
+
+def _tile_pieces(graph=None) -> list[TileOp]:
+    loop, _ = _resolve(
+        ["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "loop/stamp"],
+        graph,
+    )
+    tiled, _ = Run(pipeline=Pipeline.build(["lowering/tile"]), ctx=_CTX).resolve(
+        loop,
+        lambda fp: flatten_leaves(fp.options)[0],
+    )
+    return [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+
+
+def _contains_raw_loop(value) -> bool:
+    if isinstance(value, Loop):
+        return True
+    if isinstance(value, Fold):
+        return any(_contains_raw_loop(edge) for edge in value.operands) or any(_contains_raw_loop(stmt) for stmt in value.lift.body)
+    return any(_contains_raw_loop(stmt) for body in value.nested() for stmt in body)
 
 
 def test_the_split_returns_two_kernels(monkeypatch) -> None:
@@ -125,16 +147,7 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
     whole row — 21 ``S_*`` features describing a body it no longer had — and the finalize
     already-placed with no knobs at all: no fork, no identity, untunable.)"""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "loop/stamp"])
-    # Drive the tile pass by hand so the pieces are caught between the splice and the schedule.
-    pieces: list[TileOp] = []
-
-    def catch(fp):
-        leaf = flatten_leaves(fp.options)[0]
-        return leaf
-
-    graph, _ = Run(pipeline=Pipeline.build(["lowering/tile"]), ctx=_CTX).resolve(out, catch)
-    pieces = [n.op for n in graph.nodes.values() if isinstance(n.op, TileOp)]
+    pieces = _tile_pieces()
     assert len(pieces) == 2, "the split must have produced two kernels"
     for piece in pieces:
         # Each SCHEDULED itself — so what it carries is its own row, keyed against its own tree.
@@ -143,6 +156,16 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
             f"a piece must not carry the split it came from: {decision_view(piece.knobs)}"
         )
         assert {k for k in piece.knobs if k.startswith(STRUCT_PREFIX)}, "…and its own structural stamp"
+
+
+@pytest.mark.parametrize("graph", [_matmul(), _sum()])
+def test_synthesized_split_reductions_reenter_total_lift(monkeypatch, graph) -> None:
+    """Both split-K and plain-reduce pieces pass through the public Tile stage; their synthesized
+    partial/finalize loops cannot survive in the resulting Fold trees."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    pieces = _tile_pieces(graph)
+    assert len(pieces) == 2
+    assert not any(_contains_raw_loop(piece.op) for piece in pieces)
 
 
 def test_each_piece_decides_its_own_row(monkeypatch) -> None:

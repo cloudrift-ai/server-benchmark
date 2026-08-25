@@ -21,7 +21,7 @@ from emmy.compiler.structural import Structural
 
 
 def _bare(*, buf: str = "x", acc: str = "acc0", load: str = "in0", v: str = "v1", extent: int = 512, op: str = "multiply") -> Fold:
-    """A recognized squared-sum reduce — loads inline, PLANAR (the demoted shape)."""
+    """A lifted squared-sum reduce — loads inline, PLANAR (the demoted shape)."""
     body = Body(
         (
             Load(name=load, input=buf, index=(Var("m"), Var("k"))),

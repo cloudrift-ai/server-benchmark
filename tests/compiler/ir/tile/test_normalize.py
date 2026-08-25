@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
@@ -8,7 +9,14 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import Placement, TileOp, lambda_equivalent_clusters
-from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile
+from emmy.compiler.pipeline import Pipeline
+
+
+def _lift(body: Body) -> TileOp:
+    graph = Graph()
+    graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
+    graph.outputs = ["out"]
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _planar_matmul() -> Fold:
@@ -159,7 +167,7 @@ def test_total_lift_produces_canonical_contraction() -> None:
         )
     )
 
-    tile = lift_tile(LoopOp(body=body))
+    tile = _lift(body)
 
     assert tile.op.role is AxisRole.CONTRACTION
     assert tile.op.loop.role is AxisRole.CONTRACTION

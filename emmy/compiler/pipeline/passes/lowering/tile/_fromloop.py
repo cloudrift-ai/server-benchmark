@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
-from emmy.compiler.ir.stmt import Accum, Body, Init, Loop
-from emmy.compiler.ir.tile.ops import head, reduce_loop
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt
+from emmy.compiler.ir.tile import Placement, TileOp, split_effects
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -29,11 +30,14 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def _lift_body(body) -> Body:
+def lift_body(body) -> Body:
     """Replace every reduction in one statement tree with a ``Fold``, in place."""
     out = []
     for stmt in Body.coerce(body):
         if not isinstance(stmt, Loop):
+            nested = stmt.nested()
+            if nested:
+                stmt = stmt.with_bodies(tuple(lift_body(child) for child in nested))
             out.append(stmt)
             continue
         if stmt.is_reduce:
@@ -42,15 +46,14 @@ def _lift_body(body) -> Body:
             out = [s for s in out if not (isinstance(s, Init) and s.name in seeds)]
             out.append(fold)
             continue
-        out.append(replace(stmt, body=_lift_body(stmt.body)))
+        out.append(replace(stmt, body=lift_body(stmt.body)))
     return Body(tuple(out))
 
 
-def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold:
-    """Lift one reduction from its explicit ``Accum`` statements, without recognition."""
-    del like
+def fold_from_loop(loop: Loop) -> Fold:
+    """Lift one reduction from its explicit ``Accum`` statements."""
     loop = _stamp_axes(loop)
-    body = _lift_body(loop.body)
+    body = lift_body(loop.body)
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
@@ -63,18 +66,52 @@ def fold_from_loop(loop: Loop, like: Fold | None = None) -> Fold:
     return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine)
 
 
-def nodify_reduce(op, like=None):
-    """Lift the outer reduction used by reduction partitioning."""
-    node = head(op)
-    if is_contraction(node):
-        return op, node
-    loop = reduce_loop(op)
-    if loop is None:
-        return op, None
-    red = fold_from_loop(loop, like)
-    body = list(op.body)
-    index = body.index(loop)
-    if index:
-        raise ValueError(f"unexpected prologue before reduce loop: {body[:index]}")
-    tail = Body(body[index + 1 :])
-    return (Fold.projection(operands=(red,), body=tail) if tail else red), red
+def _peel(body: Body) -> tuple[list, list[Stmt]]:
+    """Peel the outer parallel loop chain into placement axes."""
+    axes = []
+    prefix: list[Stmt] = []
+    current = list(body)
+    while True:
+        index = 0
+        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Select)):
+            index += 1
+        head, rest = current[:index], current[index:]
+        if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:
+            return axes, prefix + current
+        prefix.extend(head)
+        axes.append(rest[0].axis)
+        current = list(rest[0].body)
+
+
+def _raw_loops(body) -> list[Loop]:
+    """Return every Loop that survived total reduction lifting."""
+    out = []
+    for stmt in Body.coerce(body):
+        if isinstance(stmt, Loop):
+            out.append(stmt)
+        for nested in stmt.nested():
+            out.extend(_raw_loops(nested))
+    return out
+
+
+def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
+    """Peel free axes and lift the complete remaining nest as one Fold tree."""
+    free, cell = _peel(op.body)
+    split = split_effects(lift_body(cell))
+    if split is None:
+        raise ValueError("Loop IR effects are not a kernel-boundary store")
+    body, stores = split
+    raw = _raw_loops(body)
+    if raw:
+        axes = ", ".join(inner.axis.name for inner in raw)
+        raise ValueError(f"total lift left raw inner loops: {axes}")
+    return TileOp(
+        op=Fold.projection(body=Body(body)),
+        name=name,
+        place=Placement(free=tuple(free)),
+        inputs=dict(op.inputs),
+        stores=stores,
+    )
+
+
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op"]

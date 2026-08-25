@@ -16,7 +16,7 @@ error.
 | field | meaning |
 | --- | --- |
 | `axis` | reduction axis; `None` for the root pointwise projection |
-| `lift` | pure per-element `Lambda`; nested reductions are nested `Fold` statements here |
+| `lift` | pure per-element `Lambda`; nested reductions occupy their original structural position here |
 | `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
 | `operands` | explicit materialized or computed inputs used by later transforms |
 
@@ -39,9 +39,9 @@ fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
-pure body receives a dependency-safe order before it reaches a Fold. Structural identity therefore reads the stored
-order directly. Commutative argument sorting remains part of α-equivalence rather than stored normalization because
-contraction operand position carries the A/B role.
+pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
+Structural identity therefore reads the stored order directly. Contraction A/B roles remain on the Fold operand
+edges, not the product argument order.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
@@ -50,13 +50,13 @@ cone into a zero-axis Fold edge. Enclosing free-axis order determines A/B positi
 registered semiring leave the Fold planar. Canonicalization runs entirely in `TileOp.__post_init__`, including the
 output-sweep-to-free-axis adjustment exposed when factoring makes a contraction the root compute node.
 
-Scoped lambda equivalence uses the same dependency-respecting body order as structural identity and canonicalizes
-commutative argument order. It therefore ignores SSA spelling and harmless interleaving without weakening buffer or
-axis identity. The emit-side same-score legality query uses this same mechanism rather than maintaining a second cone
-canonicalizer.
+Scoped lambda equivalence uses that normalized order. It therefore ignores SSA spelling and harmless interleaving
+without weakening buffer or axis identity. The emit-side same-score legality query uses this same mechanism rather
+than maintaining a second cone canonicalizer.
 
-`pipeline/passes/lowering/tile/_lift.py` peels the outer free axes, invokes that conversion, separates root stores,
-checks the no-inner-loop invariant, and creates one zero-axis root `Fold` over the lifted cell.
+`pipeline/passes/lowering/tile/_fromloop.py` exposes the total-lift entry used by the pass and golden replay. It peels
+the outer free axes, invokes the conversion, separates root stores, checks the no-inner-loop invariant, and creates
+one zero-axis root `Fold` over the lifted cell.
 
 ## Algebraic rewrite
 

@@ -111,7 +111,8 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     if component_ops(combine) is None:
         old = tuple(r for r in combine.results if isinstance(r, str))
         old_other = tuple(f"{n}__o" for n in old)
-        if combine.params == old + old_other and tuple(combine.body) == tuple(exp_combine_states(old, old_other)):
+        expected = Lambda(params=old + old_other, body=Body(exp_combine_states(old, old_other)), results=old)
+        if combine == expected:
             names = tuple(rename_ssa(n) for n in old)
             other = tuple(f"{n}__o" for n in names)
             return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
@@ -128,7 +129,7 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
 # --------------------------------------------------------------------------------------------
 
 
-def merge_stmts(combine: Lambda, other: tuple[str, ...]) -> tuple[Stmt, ...]:
+def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
     """The cross-partition state⊕state combine, realized as loop-IR statements: ``combine``
     applied at ``S × S → S`` with its second operand naming ``other`` — a second FULLY-REDUCED
     state (a REG copy ``<n>__r1``, a tree neighbour's partial, a workspace slice ``<n>__p``).
@@ -143,12 +144,13 @@ def merge_stmts(combine: Lambda, other: tuple[str, ...]) -> tuple[Stmt, ...]:
     ``Accum`` form keyed on ``other[0]``: its temps are namespaced on the second operand's
     spelling, so two merges of different partials into one state cannot collide. Regenerating
     rather than patching is the same rule :func:`rename_combine` follows — a generated program is
-    the deterministic function of its state names."""
+    the deterministic function of its state names. ``dtype=None`` produces canonical Loop IR;
+    kernel-level consumers keep the default f32 accumulator stamp."""
     names = tuple(r for r in combine.results if isinstance(r, str))
     ops = component_ops(combine)
     if ops is None:
-        return exp_combine_states(names, other, key=other[0], accum=True)
-    return tuple(Accum(name=n, value=o, op=op, dtype=F32) for n, op, o in zip(names, ops, other, strict=True))
+        return exp_combine_states(names, other, key=other[0], accum=True, dtype=dtype)
+    return tuple(Accum(name=n, value=o, op=op, dtype=dtype) for n, op, o in zip(names, ops, other, strict=True))
 
 
 # --------------------------------------------------------------------------------------------

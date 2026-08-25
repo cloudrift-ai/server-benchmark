@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.pure import component_ops, merge_stmts
 from emmy.compiler.ir.stmt import Accum, Assign, Stmt
 
@@ -77,12 +78,12 @@ class Reduction:
             return tuple(self.fold.combine.body)
         return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
-    def merge_stmts(self, other: tuple[str, ...]) -> tuple[Stmt, ...]:
+    def merge_stmts(self, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
         """This fold's cross-partition combine against a second fully-reduced state named
         ``other``, as loop-IR statements (:func:`~emmy.compiler.ir.pure.algebra.merge_stmts` — the
         stored ``combine`` rendered to ``Assign`` temps plus one ``Accum`` per component, whose
         ``op.identity`` is the seed the ONE identity placement emits)."""
-        return merge_stmts(self.fold.combine, other)
+        return merge_stmts(self.fold.combine, other, dtype=dtype)
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:

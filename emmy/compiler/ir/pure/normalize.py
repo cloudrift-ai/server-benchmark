@@ -52,17 +52,12 @@ def _canonical_body_order(body: Body) -> Body:
 
 
 def normalize_lambda_body(body: Body) -> Body:
-    """Canonicalize context-independent statement order inside one pure Lambda body."""
-    return _canonical_body_order(body)
-
-
-def canonical_lambda_body(body: Body) -> Body:
-    """Canonicalize a Lambda body for alpha-equivalence comparisons."""
-    ordered = normalize_lambda_body(body)
+    """Canonicalize context-independent statement order and commutative arguments."""
+    ordered = _canonical_body_order(body)
     return Body(
         replace(stmt, args=tuple(sorted(stmt.args))) if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1 else stmt
         for stmt in ordered
     )
 
 
-__all__ = ["canonical_lambda_body", "normalize_lambda_body"]
+__all__ = ["normalize_lambda_body"]

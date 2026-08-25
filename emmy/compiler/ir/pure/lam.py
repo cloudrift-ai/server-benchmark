@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, _member_reads
 
 
@@ -26,7 +28,7 @@ class Lambda:
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
     ``Loop`` never do; no isinstance whitelist, so a new stmt kind is excluded until it declares
     itself) and every result is defined. The CONTEXTUAL half — free names ⊆ params ∪ enclosing
-    iteration vars — is the consuming node's check (Fold/Map formation), since a bare Lambda
+    iteration vars — is the consuming Fold's check, since a bare Lambda
     cannot know its scope.
 
     A result may also be a bare ``float`` literal — the injection ι is spelled in the lift
@@ -42,8 +44,6 @@ class Lambda:
     results: tuple[str | float, ...]
 
     def __post_init__(self) -> None:
-        from emmy.compiler.ir.pure.normalize import normalize_lambda_body  # noqa: PLC0415
-
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
         body = normalize_lambda_body(Body.coerce(self.body))
@@ -71,7 +71,7 @@ class Lambda:
 
     def free_names(self) -> frozenset[str]:
         """Names the body reads that this lambda does not bind — the contextual-invariant read
-        the consuming node (Fold/Map formation) checks against its iteration vars."""
+        the consuming Fold checks against its iteration vars."""
         reads: set[str] = set()
         for s in self.body:
             reads |= _member_reads(s)
@@ -82,8 +82,6 @@ class Lambda:
         walk order; free names (and float results) pass through unchanged. Deterministic, so two
         lambdas equal up to bound-name choice have EQUAL canonical forms — the α-invariant
         equality/hash substrate (:meth:`alpha_eq`)."""
-        from emmy.compiler.ir.pure.normalize import canonical_lambda_body  # noqa: PLC0415
-
         mapping = {p: f"_p{i}" for i, p in enumerate(self.params)}
         n = 0
         for s in self.body.iter():
@@ -97,7 +95,7 @@ class Lambda:
 
         return Lambda(
             params=tuple(mapping[p] for p in self.params),
-            body=canonical_lambda_body(Body(tuple(s.rewrite(rn) for s in self.body))),
+            body=Body(tuple(s.rewrite(rn) for s in self.body)),
             results=tuple(rn(r) if isinstance(r, str) else r for r in self.results),
         )
 
@@ -106,8 +104,6 @@ class Lambda:
         return isinstance(other, Lambda) and self.canonical() == other.canonical()
 
     def pretty(self, indent: str = "") -> list[str]:
-        from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415 — avoid an import cycle
-
         rs = ", ".join(r if isinstance(r, str) else repr(r) for r in self.results)
         head = f"{indent}λ({', '.join(self.params)}) -> ({rs})"
         return [head, *pretty_body(self.body, indent + "    ")]

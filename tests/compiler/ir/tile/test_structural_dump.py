@@ -93,10 +93,10 @@ def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
     assert "lift: λ(k, acc_g_b, a_e, acc_u_b) -> (acc_g__v, acc_u__v)" in text
 
 
-def test_map_dump_shows_the_binder_and_its_sources() -> None:
-    """A ``Map``'s storage is ``fn`` + ``sources``. The binder rides its OWN branch, next to the
-    body it binds — not the header, which on a big fold sat a screenful above its stmts. Every
-    λ-valued field reads the same way: ``lift:`` / ``combine:`` / ``fn:``, signature then body."""
+def test_projection_dump_shows_the_binder_and_its_operands() -> None:
+    """A zero-axis Fold stores its projection lambda and operands. The binder rides its own branch,
+    next to the body it binds rather than in the header. Every lambda-valued field reads the same
+    way: signature, then body."""
     m = Fold.projection(operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),)))
     text = "\n".join(pretty(m))
     assert text.splitlines()[0] == "Fold  free"

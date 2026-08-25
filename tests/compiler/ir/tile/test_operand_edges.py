@@ -92,10 +92,6 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
     assert operand_name(node.a) == "xhat"
 
 
-def test_external_reads_cover_every_channel() -> None:
-    assert set(_product().external_reads()) == {"x", "w", "Wg", "Wu"}
-
-
 def test_pretty_prints_the_channels_once() -> None:
     """One shared A edge, one branch per channel, each labelled by the lift param it binds."""
     from emmy.compiler.ir.tile._dump import pretty
@@ -124,4 +120,4 @@ def test_rewrite_reaches_a_channels_b_edge() -> None:
     assert renamed.channels[1].b.names == ("vb",)
 
 
-# --- Map.fn: the binder (1n — the ``source`` compat read retired with the ``out`` convention) ---- #
+# --- the projection binder ----------------------------------------------------------------------- #

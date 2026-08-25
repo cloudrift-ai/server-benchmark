@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -56,12 +57,12 @@ from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Lambda, component_ops
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body
-from emmy.compiler.ir.schedule import Stage
+from emmy.compiler.ir.schedule import Raster, Stage
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.ir.tile.ops import cone_seam, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import clamp_last, copy_cell, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -154,7 +155,7 @@ def _emit(op, ctx: Ctx) -> Frag:
 
 def _map_wire(op: Fold) -> Handle:
     """The :class:`Handle` a parent wires to for a zero-axis ``Fold`` node — mirrors ``Fold.out``'s cases but
-    stays robust where ``Fold.out`` would raise. An empty body surfaces the ``source``'s wire; a
+    stays robust where ``Fold.out`` would raise. An empty body surfaces the operand's wire; a
     ``Write``-terminated body is a ROOT sink (stored to gmem, never wired) so surfaces the written
     value at ``gmem`` residence; a body ending in an annotated reduce / contraction ``Loop`` surfaces
     its carried state's head (:func:`loop_state_head` — the acc / carried value, NOT the loop's
@@ -199,13 +200,9 @@ def factorize(tile, root, store=None) -> Tile:
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
-    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
-
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``Fold.a``.
-    from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
-
     # An empty schedule fork deliberately leaves the term unmapped. Materialization is the
     # guardrail's scalar fallback: bind one thread to every free-axis cell instead of carrying an
     # empty grid into loop lowering while the body still references those coordinates.
@@ -231,7 +228,7 @@ def factorize(tile, root, store=None) -> Tile:
 
 def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tuple = ()) -> Tile:
     """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind the leaf to the grid via
-    the ONE binder. A :class:`Fold` with a ``source`` **recurses**: its ``body`` (the projection /
+    the ONE binder. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
     ``stores`` reconstituted into it (``effect_tail`` — 1q: the root ``Write``\\ s / output sweep
     left the term for ``TileOp.stores``, so the tail downstream sees is byte-identical to the
@@ -430,9 +427,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
-        # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
-        # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
-        # zero-axis ``Fold`` was already peeled off by :func:`_factorize`).
+        # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduce — monoid,
+        # flash, coop-K, or split contraction — is a ``Fold`` node (a projecting zero-axis
+        # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         if plan is None or (plan.coop <= 1 and plan.reg <= 1):
@@ -618,9 +615,7 @@ def emit_combine(
     prog = red.combine_states
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
-    from emmy.compiler.backend.cuda.dtype import cuda_name as _cuda_name  # noqa: PLC0415
-
-    smem_c = _cuda_name(dtype)
+    smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
         # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
@@ -795,8 +790,6 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     fill_stmts: list[Stmt] = []
     op_stage = ctx.sched.get("STAGE", op)
     if lane is not None and op_stage is not None and op_stage.smem:
-        from emmy.compiler.backend.cuda.dtype import cuda_name  # noqa: PLC0415
-
         (staged,) = op_stage.smem
         grid_vars = tuple(Var(a.name) for a in grid)
         smem_name = f"{staged}_smem"

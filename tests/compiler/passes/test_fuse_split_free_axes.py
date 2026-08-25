@@ -18,8 +18,8 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile
 
 M, H, D, K = 8, 3, 4, 16  # N = H*D = 12
 
@@ -68,6 +68,13 @@ def _free_chain(op: LoopOp) -> list[Loop]:
 
 def _run(g: Graph) -> LoopOp:
     return Pipeline.build(["loop/canonicalize"]).run(g).nodes["out"].op
+
+
+def _lift(op: LoopOp, shape=(1,)) -> TileOp:
+    graph = Graph()
+    graph.add_node(op, [], Tensor("out", shape), node_id="out")
+    graph.outputs = ["out"]
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _reduce_name(op: LoopOp) -> str:
@@ -205,7 +212,7 @@ def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
     make the fused axis ``m`` and the stride-``D`` ``s`` the column — the mma store's ``+ col``
     would then address the wrong element (and did: a hang on the GPU)."""
     op = _run(_graph(_transposed_body(), (1, H, M, D)))
-    tile = lift_tile(op)
+    tile = _lift(op)
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.role is AxisRole.CONTRACTION
@@ -239,7 +246,7 @@ def test_canonical_nest_classifies_as_contraction():
         value="acc",
     )
     body = Body((Loop(axis=Axis("a0", Dim(M)), body=Body((Loop(axis=n, body=Body((kloop, wr))),))),))
-    tile = lift_tile(LoopOp(body=body))
+    tile = _lift(LoopOp(body=body))
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.role is AxisRole.CONTRACTION

@@ -227,7 +227,7 @@ def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
 
 
 def _extent_fingerprint(tile: TileOp) -> tuple[str, ...]:
-    """Every axis extent of the recognized term in walk order — the free grid, then each
+    """Every axis extent of the Fold tree in walk order — the free grid, then each
     ``Fold`` axis: a static extent as its integer, a symbolic axis as the bare ``sym`` marker
     (identity stays hint-free — a symbolic record is the symbolic kernel's identity at every
     hint). Part of :func:`deploy_identity` because the α-invariant algebra digest canonicalizes
@@ -255,7 +255,7 @@ def _extent_fingerprint(tile: TileOp) -> tuple[str, ...]:
 
 
 def _inner_free(place: Placement) -> Axis | None:
-    """The innermost NON-UNIT free axis — the m1 recognizer's synthesized unit axis can sit
+    """The innermost NON-UNIT free axis — a synthesized unit axis can sit
     innermost, and it is not the axis the transposed emitter sweeps."""
     if not place.free:
         return None
@@ -1616,9 +1616,9 @@ def _strip_variant(term: _Term, plan: TilePlan, name: str, knobs: dict) -> TileO
 
 
 def _free_option(term: _Term, plan: TilePlan, name: str, knobs: dict, nested: Sequence[tuple] = ()) -> TileOp:
-    """One zero-axis row: the flat per-cell map (also the raw-loop-IR escape's one row), or the
-    strip variant when the row's ``TILE`` names a register width. A zero-axis fold with no operands
-    has no nested sites, so the strip arm takes none."""
+    """One zero-axis row: the flat per-cell map, or the strip variant when the row's ``TILE``
+    names a register width. A zero-axis fold with no operands has no nested sites, so the strip
+    arm takes none."""
     if _strip_width(plan) > 1:
         return _strip_variant(term, plan, name, knobs)
     return _stamp(term, term.tile.op, name, knobs, nested)
@@ -1660,7 +1660,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     # sorts a body's outer free-loop chain by axis NAME, so a partition axis spelled ``a3_ks`` sorts
     # BELOW the row / column axes it must dominate and ``hoist_loop_invariants`` then sinks it between
     # the column sweep and the K fold — a shape ``bind_prologue_contraction`` cannot parse, which
-    # costs a re-recognized split piece its computed-A binding (and its warp rows). ``_`` sorts ahead
+    # costs a newly lifted split piece its computed-A binding (and its warp rows). ``_`` sorts ahead
     # of every ``aN``, keeping the partition a LEAD grid axis, the same convention the residual path's
     # ``_ksplit`` already relies on.
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
@@ -1890,11 +1890,11 @@ def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
 
 
 def deploy_identity(tile: TileOp) -> str:
-    """The verified-tier join key — the recognized term's α/buffer-invariant algebra digest
+    """The verified-tier join key — the Fold tree's α/buffer-invariant algebra digest
     (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint and the
     axis-extent fingerprint the term deliberately omits (:func:`_extent_fingerprint` — static
     sizes and symbolic markers, never hints). A golden record derives the SAME key from its own
-    persisted program through the shared total lift (``_lift.lift_tile``), so the
+    persisted program through the shared total lift (``_fromloop.lift_loop_op``), so the
     join is exact structural identity — no classified shape, no matching heuristic. Unlike
     :func:`pool_key` it excludes knobs, symbolic hints and live pins: identity is what the
     kernel IS; the strict row decode (exact spelled-row equality) is what guarantees a record
@@ -1915,7 +1915,7 @@ def pool_key(tile: TileOp) -> str:
 
 
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] | TileOp:
-    """Map a freshly-recognized (UNMAPPED) ``tile`` onto the grid and offer its scheduling fork.
+    """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
 
     Returns the lazy fork tree over the enumerated rows (levels ``[WORK, *site keys, RASTER]`` — the
     kernel-global worker inventory leads, so every deeper prefix row is self-decoding; the

@@ -1,7 +1,7 @@
-"""The tree-path knob codec (phase 2) — ONE walker + resolver over the recognized tile tree.
+"""The tree-path knob codec (phase 2) — ONE walker + resolver over the stored Fold tree.
 
 Grammar: ``FAMILY@<node-path>[.<axis>][<n>] = value``. A schedule key addresses the node (or edge)
-it decorates by POSITION in the recognized term tree — no parallel namespace of hand-invented site
+it decorates by POSITION in the Fold tree — no parallel namespace of hand-invented site
 names. The walker (:func:`sites`) enumerates every ``(path, node, schedule-bearing axis)`` triple
 once; the resolver (:func:`resolve`) and the canonical speller (:func:`spell`) are total over the
 sugar forms and shared by the pin layer, the stampers (phase 3) and the seam enumerator (phase 4).
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import combinations
 
 from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
 
@@ -169,23 +170,12 @@ def sites(root) -> tuple[Site, ...]:
     return tuple(result)
 
 
-def _is_escape(node) -> bool:
-    """Whether an operandless zero-axis fold is a RAW-LOOP-IR ESCAPE — an un-recognized cell,
-    ``030``'s finalize, the coop fused-tail sibling — rather than a pointwise strip target. The
-    discriminator is STRUCTURAL, not a role: its body carries a recognition-stamped reduce ``Loop``,
-    so the cell is a reduction whose algebra was never lifted, and tiling its "pointwise" cell would
-    strip a body that is not one."""
-    from emmy.compiler.ir.stmt import Loop, StridedLoop  # noqa: PLC0415 — stmt imports ir; keep path light
-
-    return any(isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce for s in node.body)
-
-
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
     CONTRACTION folds (:func:`~emmy.compiler.ir.pure.fold.is_contraction` — the same question
     :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
     the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
-    zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR escape).
+    zero-axis fold is not a strip target).
 
     An ``inline`` site carries NO slice: the enclosing cell evaluates it from lowered loop IR, so a
     ``TILE`` / ``REDUCE`` / ``STAGE`` value there could never be realized, and offering one would
@@ -200,7 +190,7 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
             continue
         if s.node.axis is not None and is_contraction(s.node):
             out.append(s)
-        elif s.node.axis is None and not s.node.operands and s.depth == 1 and not _is_escape(s.node):
+        elif s.node.axis is None and not s.node.operands and s.depth == 1:
             out.append(s)
     return tuple(out)
 
@@ -320,8 +310,6 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
 def _subsequences(n: int, k: int):
     """All strictly-increasing index tuples of length ``k`` into ``range(n)`` (tiny trees — brute
     force is fine)."""
-    from itertools import combinations  # noqa: PLC0415
-
     yield from combinations(range(n), k)
 
 

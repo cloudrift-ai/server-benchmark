@@ -297,14 +297,12 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
-def _loop_ir_lambda(params=(), body=(), results=()):
-    """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
-    arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
-    ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
-    from emmy.compiler.ir.pure.fold import _loop_ir_fn  # noqa: PLC0415
+def _pure_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr through its normal formation checks."""
+    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
 
-    return _loop_ir_fn(params, Body.coerce(body), results)
+    return Lambda(params=tuple(params), body=Body.coerce(body), results=tuple(results))
 
 
 def _stmt_eval_scope() -> dict:
@@ -386,10 +384,8 @@ def _stmt_eval_scope() -> dict:
         # any other non-finite literal, needs the bare names in scope to round-trip.
         "inf": _math.inf,
         "nan": _math.nan,
-        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
-        # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
-        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
-        "Lambda": _loop_ir_lambda,
+        # Rehydrate through normal Lambda formation so a dump cannot bypass purity or normalization.
+        "Lambda": _pure_lambda,
         "__builtins__": {},
     }
     # The stored term (the ``Fold`` node, in ``ir/pure/fold``) and the

@@ -662,14 +662,14 @@ def _target_kernel_nodes(record: GoldenRecord):
 
 def _lifted_target(record: GoldenRecord):
     """Lift the record's single selected kernel to Tile IR."""
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = lift_tile(node.op, name=node.id)
+    tile = lift_loop_op(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}
@@ -751,7 +751,7 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
     (``_schedule.deploy_identity``) of the lifted tile of the record's ONE target kernel,
-    derived through the exact total lift the live compile uses (``_lift.lift_tile``).
+    derived through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
     (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
     (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""

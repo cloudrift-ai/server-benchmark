@@ -43,7 +43,7 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.pure.normalize import canonical_lambda_body, normalize_lambda_body
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 
 __all__ = [
     "Channel",
@@ -52,7 +52,6 @@ __all__ = [
     "M",
     "UnstableCarrierError",
     "component_ops",
-    "canonical_lambda_body",
     "deep_defines",
     "deep_reads",
     "edge_refs_axis",

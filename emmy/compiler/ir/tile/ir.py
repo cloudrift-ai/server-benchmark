@@ -36,9 +36,11 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.pure.fold import edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.structural import digest
 
 
@@ -90,8 +92,7 @@ def effect_tail(stmts, stores) -> list[Stmt]:
 def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, Store decorations)`` — the
     conversion-side inverse of :func:`effect_tail`, valid ONLY when the reconstitution
-    round-trips byte-identically (checked here; ``None`` otherwise — the caller keeps the
-    raw-loop-IR spelling, the 1o construction-gate pattern). Recognized shapes: a trailing run
+    round-trips byte-identically (checked here; ``None`` otherwise). Recognized shapes: a trailing run
     of top-level root ``Write``\\ s, or ONE trailing non-reduce output sweep ``Loop`` of pure
     stmts whose last stmt is the ``Write``. An already-pure stream returns ``(stmts, ())``."""
     original = list(stmts)
@@ -159,9 +160,7 @@ class TileOp(Op):
     work: object = None
 
     def __post_init__(self) -> None:
-        from emmy.compiler.ir.pure.fold import edge_refs_axis, is_contraction  # noqa: PLC0415
-        from emmy.compiler.ir.tile.normalize import normalize_fold_tree  # noqa: PLC0415
-        from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415
+        from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp
 
         axes = [axis.name for axis in self.place.free]
         axes.extend(store.sweep.name for store in self.stores if store.sweep is not None)

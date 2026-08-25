@@ -69,8 +69,8 @@ is `Fold.lower()`.
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
 These are term operations spelled the same way so one canonicalizer and one deep walk serve both
-vocabularies; they are not statement behaviour, and `Fold` has no `render`. What remains genuinely
-impure is the compatibility arm used by split-reduce finalization (`_loop_ir_fn`).
+vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
+in Loop IR until total lift; there is no impure `Lambda` construction path.
 
 ## Invariants by stage
 
@@ -264,10 +264,8 @@ type to dispatch on and no second place for a fact to live.
   additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
 - Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis, `TWISTED` off the combine's
   twist family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node
-  through the projection wrapper; `ops.reduce_loop` still returns the outermost annotated reduce `Loop`, but
-  only for callers that consume a body — reading a node FACT off a synthesized nest is the inversion `ops`
-  exists to prevent (`Fold.loop` splices every edge and flattens every nested node just to hand back the
-  property it was given).
+  through the projection wrapper. Scheduling reads these facts directly from the Fold tree; `Fold.lower()` is
+  reserved for callers that consume Loop IR.
 
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
@@ -327,11 +325,11 @@ binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF
 `Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
 (`Lambda.canonical` — free names never renumbered). `Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
-dependency-safe body order, so this context-independent storage invariant does not belong to `Fold`, `TileOp`, or the
-structural-key path. Commutative argument sorting remains an α-equivalence operation: operand position is structural
-for contractions and is not rewritten in stored Lambda bodies. Formation is STRICT everywhere since 1q (the interim
-`effectful_lambda` is deleted; a kernel's root stores ride `TileOp.stores`, and only the tile layer's raw-loop-IR
-arm — `tile/ir._loop_ir_fn`, for split-reduce finalization — may hold an impure body). A result may be a bare
+dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
+belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
+commutative product's arguments does not change them. Formation is strict: a kernel's root stores ride
+`TileOp.stores`, and synthesized split-reduce loops remain Loop IR until the new kernel re-enters total lift. A result
+may be a bare
 `float` literal — ι is spelled in the lift (softmax's singleton
 is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
 class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
@@ -499,8 +497,8 @@ domain.
 
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
-the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. The standalone
-`LoopOp` remains the raw-loop escape, so the accumulator update and its `Write` stay in one serial loop.
+the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. Such an
+effectful inner loop is not valid input to total lift.
 
 An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
 declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that

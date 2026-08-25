@@ -99,6 +99,11 @@ kind-specific path — no attention special case.** SDPA lowers as ordinary cont
 online-softmax `TWISTED` reduce, each factorizing through this one recursion like any other contraction or monoid
 fold — **never** a bespoke emitter, which would be a divergent codegen path the mandate forbids.
 
+When the scheduler tiles both contractions directly inside an exp-family Fold, `_bind` applies only the distributive
+codegen reading needed by the existing contraction factorization: the first child supplies score fragments and the
+normalized weight becomes the computed A edge of the second child. The stored Fold tree is unchanged, and
+`reduce_codegen` plus `store_sink` remain the only MMA realization path for both ordinary contractions and SDPA.
+
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
 variant, and **no per-atom geometry object**. It expands any contraction-shaped `Fold` by tiling a **leaf atom**
 four ways through
@@ -224,6 +229,8 @@ per-fragment row/column placeholders. The destination index remains only an addr
 index to a tile-local slab, but it must not rebase a causal or other coordinate predicate. Later cell replication
 substitutes the predicate's real coordinate variables and the store fills only its element offsets. Inferring the
 predicate origin from `RegStore.dst_index` would make every nonzero chunk compare slab-local coordinates instead.
+Fragment lifting follows the unique fragment-valued argument rather than requiring it to occupy a particular operand
+position, so canonical commutative ordering does not disqualify a causal score expression.
 The epilogue also retains every captured `Assign.dtype`: fragment-local pointwise operations use the same promotion,
 native-operation, and final-conversion rules as the scalar Loop tail. In particular, an f32 accumulator crossing a
 declared f16 tensor boundary narrows before a later activation consumes it; register fusion cannot erase that store/load

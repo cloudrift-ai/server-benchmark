@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.commands.trace import graph_from_code
+from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import AxisRole
+from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.stmt import Load, Select
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 
 
 def _folds(root: Fold):
@@ -61,3 +65,26 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     assert len(fold.init) == 3
     assert any(isinstance(stmt, Select) for stmt in fold.lift.body)
     assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_sdpa_fold_tree_reaches_both_mma_sites(monkeypatch, causal: bool) -> None:
+    suffix = ", is_causal=True" if causal else ""
+    graph, _, _ = graph_from_code(
+        "F.scaled_dot_product_attention("
+        "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
+        "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
+        f"torch.randn(1, 1, 32, 16, dtype=torch.float16){suffix})"
+    )
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
+
+    assert source.count("emmy_mma_m16n8k16_f16_f32(") >= 3  # helper plus both contraction sites
+    assert "_s_c" in source and "_c0_" in source
+    assert "_psi" in source
+    if causal:
+        assert "?" in source

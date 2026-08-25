@@ -91,9 +91,7 @@ EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
     "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
     "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
     "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
-    # Over-budget paired score + value rows are intentionally absent; other fixture pools do not
-    # carry concurrently-live contraction fragments and remain byte-identical.
-    "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3457, "b3ecfbf96e98237f7e1fe8ee258d6dec")],
+    "flash_pair": [(("TILE@a3", "TILE@pj", "STAGE", "REDUCE"), 29, "a0c1bafcbcf96ba19e02ff7f50dda9eb")],
 }
 
 
@@ -161,6 +159,15 @@ def test_the_space_agrees_with_the_deploy_surface(case, unpinned, monkeypatch) -
     assert sorted(map(canonical_row_key, space)) == sorted(map(canonical_row_key, deploy)), (
         "the enumerated space and the fork's leaves are the same set of candidates or the space is a fiction"
     )
+
+
+def test_sdpa_fold_tree_offers_paired_mma_rows(unpinned, monkeypatch) -> None:
+    pools, _ = _enumerated(_sdpa_graph(), monkeypatch)
+    rows = [row for _, pool in pools for row in pool]
+    warp = [row for row in rows if str(row.get("WORK", "")).startswith("w")]
+
+    assert warp
+    assert all(sum(key.startswith("TILE@") and "mma_" in value for key, value in row.items()) == 2 for row in warp)
 
 
 # --- the space itself: two traversals of one structure -------------------------------------------

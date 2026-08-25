@@ -78,5 +78,6 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 
 Scheduling sees only the rewritten stored Fold tree. It does not derive alternate classified views. A shape for which
-the current scheduler has no row remains unmapped; that is an expected red-state limitation while recovery proceeds
-by fold-tree shape.
+the current scheduler has no row remains unmapped. When an exp-family Fold directly contains its score and value
+contractions, scheduling assigns compatible MMA tiles to those two child sites; it does not replace or annotate the
+Fold tree.

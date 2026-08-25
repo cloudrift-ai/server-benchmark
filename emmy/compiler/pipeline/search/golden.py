@@ -685,7 +685,7 @@ def decode_record(record: GoldenRecord) -> str | None:
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
     try:
-        tile = _lifted_target(record)
+        _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
     if record.is_routing:

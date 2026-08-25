@@ -822,7 +822,7 @@ def _frag_lift(
                 return None  # per-element, not cell-uniform — the caller keeps the scalar sweep
             out.append(s)  # a cell-uniform stmt of the lift (the scale ``Load``) — scalar, once
             continue
-        if not isinstance(s, Assign) or s.args[0] not in frag_names:
+        if not isinstance(s, Assign) or sum(arg in frag_names for arg in s.args) != 1:
             return None  # a shape the fragment tier cannot express — the caller keeps the scalar sweep
         frag_names |= set(s.defines())
         for i, row in enumerate(frags):

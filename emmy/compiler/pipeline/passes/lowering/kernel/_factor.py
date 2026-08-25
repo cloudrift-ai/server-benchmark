@@ -53,9 +53,12 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.pure import Lambda, component_ops
+from emmy.compiler.ir.pure.carrier import exp_combine_states
+from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body
+from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import cone_seam
@@ -279,6 +282,103 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
+def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
+    """Reassociate a tiled ``Fold ⊃ Fold`` step into the contraction codegen already realizes.
+
+    The stored Tile IR remains the canonical Fold tree.  This is only the distributive codegen
+    reading: a two-state exp-family statistic supplies a normalized computed A edge to the second
+    contraction, while its first contraction supplies the score blocks.
+    """
+    if (
+        not isinstance(op, Fold)
+        or op.axis is None
+        or component_ops(op.combine) is not None
+        or len(op.init) < 3
+        or len(op.combine.results) < 3
+    ):
+        return None
+    pair = tuple(stmt for stmt in op.step_stmts() if isinstance(stmt, Fold) and stmt.semiring is not None)
+    if len(pair) != 2:
+        return None
+    score, value = pair
+    score_tile, value_tile = (ctx.sched.tile_of(node) for node in pair)
+    if not (
+        score_tile is not None
+        and value_tile is not None
+        and score_tile.is_warp
+        and value_tile.is_warp
+        and score_tile.atom == value_tile.atom
+        and score_tile.units == value_tile.units
+        and score_tile.reg_m == value_tile.reg_m
+        and score_tile.tile_n == value_tile.bk * value_tile.atom.atom_k
+    ):
+        return None
+
+    states = tuple(op.combine.results[:2])
+    if len(states) != 2 or tuple(op.lift.results[1:2]) != (1.0,):
+        return None
+    numerator = op.combine.results[2]
+    assigns = [stmt for stmt in tail if isinstance(stmt, Assign)]
+    defs = {stmt.name: stmt for stmt in assigns}
+    normalize = defs.get(out_val)
+    if not (normalize is not None and normalize.op.name == "multiply" and numerator in normalize.args):
+        return None
+    others = tuple(arg for arg in normalize.args if arg != numerator)
+    if len(others) != 1:
+        return None
+    inverse = others[0]
+    inverse_stmt = defs.get(inverse)
+    if not (
+        inverse_stmt is not None
+        and inverse_stmt.op.name == "reciprocal"
+        and inverse_stmt.args == (states[1],)
+        and len(assigns) == 2
+        and normalize in assigns
+        and inverse_stmt in assigns
+    ):
+        return None
+
+    provider = [stmt for edge in op.operands if isinstance(edge, Fold) and edge.axis is None for stmt in operand_body(edge)]
+    lift_body = tuple(stmt for stmt in op.lift.body if not isinstance(stmt, Fold))
+    free = tuple((*provider, *(stmt for stmt in lift_body if isinstance(stmt, Load) and not any(e.free_vars() for e in stmt.index))))
+    prefix = tuple(stmt for stmt in lift_body if stmt not in free)
+    score_body = Body((*free, *prefix))
+    other = tuple(f"{name}__o" for name in states)
+    statistic = Fold(
+        axis=op.axis,
+        operands=(score,),
+        lift=Lambda(params=(op.axis.name, score.out), body=score_body, results=(op.lift.results[0], 1.0)),
+        init=op.init[:2],
+        combine=Lambda(params=(*states, *other), body=Body(exp_combine_states(states, other)), results=states),
+    )
+    free_defs = tuple(name for stmt in free for name in stmt.defines())
+    projection = Fold.projection(operands=(statistic,), body=Body((*free, inverse_stmt)), results=(states[0], inverse, *free_defs))
+    delta, weight, normalized = f"{out_val}__delta", f"{out_val}__weight", f"{out_val}__normalized"
+    cone = Fold.projection(
+        operands=(projection, score),
+        body=Body(
+            (
+                *prefix,
+                Assign(delta, "subtract", (op.lift.results[0], states[0])),
+                Assign(weight, "exp", (delta,)),
+                Assign(normalized, "multiply", (weight, inverse)),
+            )
+        ),
+        results=(normalized,),
+    )
+    product, plus = value.semiring
+    contraction = Fold.contraction(
+        k_axis=op.axis,
+        a=cone,
+        channels=(Channel(b=value.b, acc=out_val),),
+        product=product,
+        fold_op=plus,
+    )
+    stage = Stage(depth=1, transport="smem", bk_elems=score_tile.tile_n)
+    epilogue = tuple(stmt for stmt in tail if not isinstance(stmt, Assign))
+    return contraction, value_tile, stage, epilogue
+
+
 def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_stores: tuple = ()) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
@@ -306,7 +406,12 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
     # geometry the atom reads is the slice's own, not a separate view object's. A stored node
     # WITHOUT a TILE slice takes the reduce tiers instead (the per-cell / coop-K forms), where the
     # whole grid rides untiled.
-    tile = ctx.sched.tile_of(op) if is_contraction(op) else None
+    blocked = _blocked_contraction(op, ctx, tail, out_val)
+    if blocked is not None:
+        op, tile, stage, tail = blocked
+    else:
+        tile = ctx.sched.tile_of(op) if is_contraction(op) else None
+        stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
         c = op
         epi = list(tail)
@@ -319,7 +424,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
         lead = grid[:-2]
-        state_decls, reduce_region = reduce_codegen(c, tile, ctx.sched.get("STAGE", c), ctx.inputs, ctx.workers, seam, lead)
+        state_decls, reduce_region = reduce_codegen(c, tile, stage, ctx.inputs, ctx.workers, seam, lead)
         sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes

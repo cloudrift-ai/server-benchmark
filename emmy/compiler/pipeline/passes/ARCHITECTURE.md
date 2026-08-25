@@ -78,7 +78,9 @@ the tree-path codec, and every resolved slice lives beside the immutable Fold tr
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
-rows is recovery over Fold-tree structure, not another recognition layer.
+rows is recovery over Fold-tree structure, not another recognition layer. A Fold step containing two contractions
+may therefore offer compatible tiles for both child sites directly; the parent only checks their shared blocked-axis
+geometry.
 
 ## No shape-specific pattern matching
 
@@ -202,8 +204,9 @@ a maximum with additive exp-weighted components into the one `(maximum, denomina
 It reads both equivalent canonical spellings: sibling planar folds, and the contraction composition produced when
 canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
 in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the rewritten
-stored tree. Unsupported scheduling shapes remain unmapped; this is the intentional recovery boundary while schedule
-support is rebuilt over the complete tree.
+stored tree. Its blocked-composition rule can assign compatible MMA tiles to two direct contraction children without
+rewriting the tree. Unsupported scheduling shapes remain unmapped; this is the intentional recovery boundary while
+schedule support is rebuilt over the complete tree.
 
 ## The divide rule: `split` an iteration axis
 

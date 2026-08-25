@@ -6,10 +6,9 @@ SITE of a term, and the tree that generates it is the term's own:
 
 .. code-block:: text
 
-    for work in _inventories(views)           # the kernel's ONE inventory, CHOSEN at the root
-      for term in _views(tile)                # the derived views - the one union above the product
-        Segment(rows=_term_rows(term, work),  # ONE (WORK, view) rectangle of the space
-                rasters=_raster_values(term)) # kernel-global, like work - a free axis of the segment
+    for work in _inventories(term)            # the kernel's ONE inventory, CHOSEN at the root
+      Segment(rows=_term_rows(term, work),     # one WORK rectangle of the space
+              rasters=_raster_values(term))   # kernel-global, like work - a free axis of the segment
 
     _rows_at(site, work) = for combo in product(_rows_at(child, work) for child in children)
                              for block in _site_blocks(site, work)      # RESOLVED against work
@@ -64,10 +63,8 @@ What the walk covers:
   on A and an expanding pure producer on B): the warp tier over the mandatory ``reg``
   compute-fill, with the cone's own statistic site under the same inventory — a
   ``_site_values`` entry plus legality, not an emitter of its own;
-- the STREAMING PAIR (flash): the hoisted score edge and the derived P@V each enumerate their half
-  of the twisted geometry, the stream reconciles the pair and sizes its K/V transport against it,
-  and the chain is the same P@V site under the ``""`` inventory — again values plus legality, with
-  no emitter and no form dispatch.
+- a Fold step containing two contractions: each child carries its own tile and the parent accepts
+  exactly the geometries that share one blocked reduce axis.
 
 A term this walk cannot schedule yields NO rows, and ``020_schedule`` leaves it unmapped rather than
 guessing. That is the guardrail contract: empty enumeration returns ``[]``, never raises.
@@ -85,7 +82,7 @@ from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.pure import Lambda, M
+from emmy.compiler.ir.pure import Lambda, M, component_ops
 from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Level as _ReduceLevel
 from emmy.compiler.ir.schedule import (
@@ -103,7 +100,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Placement, Store, TileOp
-from emmy.compiler.ir.tile.ops import Sched, head, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
@@ -345,12 +342,30 @@ def _site_tree(op, key) -> tuple[_Node, ...]:
     return build(None)
 
 
+def _step_contractions(node) -> tuple[Fold, ...]:
+    """The direct bilinear children in one Fold step, in evaluation order."""
+    if not isinstance(node, Fold) or node.axis is None:
+        return ()
+    return tuple(stmt for stmt in node.step_stmts() if isinstance(stmt, Fold) and stmt.semiring is not None)
+
+
+def _blocked_pair(node) -> tuple[Fold, ...]:
+    """The two contractions in an exp-family Fold's blocked step, if present."""
+    pair = _step_contractions(node)
+    if (
+        len(pair) == 2
+        and component_ops(node.combine) is None
+        and len(node.init) >= 3
+        and len(node.combine.results) >= 3
+        and tuple(node.lift.results[1:2]) == (1.0,)
+    ):
+        return pair
+    return ()
+
+
 def _keeps_children(site: Site) -> bool:
-    """Whether the site's nested sites stay sites under the values this term offers. One shape
-    keeps them: a CONTRACTION, whose COMPUTED operand edges carry their own families (a
-    MATERIALIZED operand is not a site — its transport is the parent's ``STAGE``). Under every
-    other tier the fold's edges lower INLINE in its body, so they are not separately scheduled."""
-    return is_contraction(site.node)
+    """Whether a site's nested algebra remains independently schedulable."""
+    return is_contraction(site.node) or bool(_blocked_pair(site.node))
 
 
 def _kids(node: _Node) -> tuple[_Node, ...]:
@@ -365,21 +380,14 @@ def _kids(node: _Node) -> tuple[_Node, ...]:
 
 
 class _Term:
-    """Everything the enumeration reads about ONE VIEW of a term — the op, its grid placement,
-    the target and the key speller — plus the per-site catalogs, built once and grouped by the
-    inventory each candidate implies (the enumeration visits every site once per inventory).
+    """Everything enumeration reads about one stored term: its grid placement, target, schedule
+    key speller, and per-site tile catalogs grouped by worker inventory."""
 
-    ``ref`` is the union's ONE key namespace (:func:`_views`): the reference view's tree,
-    consulted before this view's own so a site the two SHARE spells the same key in both rows.
-    That is what keeps ``REDUCE`` bare on the contraction's K fold and the cone's statistic at
-    ``REDUCE@<axis>`` on BOTH views of a fused term."""
-
-    def __init__(self, tile: TileOp, place: Placement, ctx, *, ref: Sched | None = None) -> None:
+    def __init__(self, tile: TileOp, place: Placement, ctx) -> None:
         self.tile = tile
         self.place = place
         self.ctx = ctx
         self.sched = Sched(tile.op, {}, place=place)
-        self.ref = ref if ref is not None else self.sched
         self.proj = _projection(tile.op)
         self.tree = _site_tree(tile.op, self.key)
         self._tiles: dict[int, dict[str, list[TilePlan]]] = {}
@@ -393,12 +401,8 @@ class _Term:
         self.warp_eligible = False
 
     def key(self, family: str, node) -> str | None:
-        """The canonical key ``family`` spells ``node`` with in the UNION's namespace — the
-        reference view's tree first, this view's own as the fallback. A node the reference
-        tree does not carry is one this view DERIVED (the collapse's spliced fold, the monoid's
-        composed contraction), and a derivation keeps the site's tree POSITION, so the two
-        spellings coincide there by construction. ``None`` when the family has no site to key."""
-        return self.ref.key(family, node) or self.sched.key(family, node)
+        """The canonical key ``family`` spells for ``node``, or ``None`` when it has no site."""
+        return self.sched.key(family, node)
 
     def pin(self, family: str, node) -> str | None:
         """The live env pin for this site's ``family`` key — ``EMMY_KNOBS``'s ``FAMILY@<element>``
@@ -435,8 +439,6 @@ class _Term:
         self.warp_eligible = self.warp_eligible or bool(warp)
         # A synchronous-fill node is warp-ONLY: computed edges need evaluation, while a product
         # node has several B/C channels that the gmem-direct and scalar emitters cannot carry.
-        # Reduce tiers remain reachable through the COLLAPSE view, whose demoted spelling is the
-        # original planar fold (:func:`_views`).
         scalar = scalar_tile_moves() if not _requires_sync_fill(node) else []
         grouped: dict[str, list[TilePlan]] = {}
         for plan in scalar + warp:
@@ -447,11 +449,6 @@ class _Term:
         # re-resolved per inventory in :func:`_contraction_values`. The catalog still answers
         # "which inventories can this site spell against".
         return grouped
-
-
-def _views(tile: TileOp, ctx) -> tuple[list[_Term], int]:
-    """Schedule only the Fold tree stored by total lift."""
-    return [_Term(tile, tile.place.on_grid(), ctx)], 0
 
 
 def _has_computed_operand(node) -> bool:
@@ -474,7 +471,7 @@ def _requires_sync_fill(node) -> bool:
     A computed edge must be evaluated into a slab. A product contraction with more than one B/C
     channel must copy one shared A slab plus every compatible B slab before one A fragment feeds
     all MMA accumulator channels; the gmem-direct, async-copy, and scalar emitters are deliberately
-    single-channel. Both forms keep their original planar spelling as the scalar fallback view.
+    single-channel.
     """
     return _has_computed_operand(node) or len(node.channels) > 1
 
@@ -700,7 +697,7 @@ def _carries_partition(op) -> bool:
     receipt :func:`_splittable_axis` reads.
 
     The receipt sits on the sliced axis, and that axis is not always a NODE: on a computed-A cone
-    the stored map view keeps its sliced contraction inside the lift as a plain ``Loop``, so a
+    a computed-A cone can keep its sliced contraction inside the lift as a plain ``Loop``, so a
     ``sites``-only scan misses it and the ambient pin splits the piece a second time — the
     statistic fold, which no partition ever touched (measured on the gate⊗up twin: three kernels
     from one ``g4k``, the doubly-split partial off the mma tier). Scan the loop bodies too; the
@@ -1040,7 +1037,7 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
                 elif not legal.enforce(legal.warp_operand_dtype(node, plan, _a_dtype(node, term.tile.inputs)), pinned=False):
                     return []
             elif _requires_sync_fill(node):
-                return []  # a scalar pin belongs to the per-cell view, not the compute-filled edge
+                return []  # the compute-filled edge has no scalar realization
             else:
                 # The CTA thread budget, raised HERE rather than left to materialization: a pinned
                 # tile the hardware cannot launch is a user error, and `Pipeline.run`'s validity
@@ -1066,7 +1063,115 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     return out
 
 
-# --- the streaming pair: the two sites, then the stream that must agree with them ---
+def _blocked_plans(term: _Term, parent, node, work: Workers | None) -> list[TilePlan]:
+    """Tiles for a contraction evaluated as one block of its enclosing Fold.
+
+    The first contraction produces a block of the enclosing axis; the second consumes that same
+    block while covering its output axis exactly.  The rule is expressed only in tile geometry,
+    so any Fold tree with this composition gets the same rows.
+    """
+    pair = _blocked_pair(parent)
+    if len(pair) != 2 or not any(node is child for child in pair):
+        return []
+    if work is None or work.kind != "warp":
+        return [TilePlan()]
+    projected = list(term.proj)
+    states = tuple(parent.combine.results)
+    reciprocal = next(
+        (stmt for stmt in projected if isinstance(stmt, Assign) and stmt.op.name == "reciprocal" and stmt.args == (states[1],)), None
+    )
+    if (
+        reciprocal is None
+        or len(projected) != 2
+        or not isinstance(projected[-1], Assign)
+        or projected[-1].op.name != "multiply"
+        or set(projected[-1].args) != {states[2], reciprocal.name}
+    ):
+        return []
+    if work.units[1] != 1 or not parent.axis.extent.is_static:
+        return []
+    score, value = pair
+    score_mn = term.sched.placed(score, TilePlan()).axes
+    value_mn = term.sched.placed(value, TilePlan()).axes
+    if (
+        score_mn is None
+        or value_mn is None
+        or not score.axis.extent.is_static
+        or not score_mn[0].extent.is_static
+        or not value_mn[1].extent.is_static
+    ):
+        return []
+    stream = parent.axis.extent.as_static()
+    rows = score_mn[0].extent.as_static()
+    columns = value_mn[1].extent.as_static()
+    base = term.tiles(score).get(work.spell(), ())
+    plans: list[TilePlan] = []
+    for candidate in base:
+        atom = candidate.atom
+        if candidate.units_n != 1 or rows % candidate.tile_m:
+            continue
+        score_plan = replace(candidate, bk=-(-score.axis.extent.as_static() // atom.atom_k))
+        if stream % score_plan.tile_n or columns % atom.atom_n:
+            continue
+        value_plan = TilePlan(
+            atom=atom,
+            units=candidate.units,
+            regs=(candidate.reg_m, columns // atom.atom_n),
+            bk=max(1, score_plan.tile_n // atom.atom_k),
+        )
+        score_k = score_plan.bk * atom.atom_k
+        shared = atom.operand_dtype("a").nbytes * (
+            score_plan.tile_m * score_k
+            + score_plan.tile_n * score_k
+            + score_plan.tile_m * score_plan.tile_n
+            + score_plan.tile_n * value_plan.tile_n
+        )
+        if shared > term.ctx.max_dynamic_smem:
+            continue
+        plan = score_plan if node is score else value_plan
+        if plan not in plans:
+            plans.append(plan)
+    return plans
+
+
+def _blocked_child_blocks(term: _Term, site: Site, work: Workers | None, parent: _Node) -> list[Block]:
+    plans = _blocked_plans(term, parent.site.node, site.node, work)
+    pin = term.pin("TILE", site.node)
+    if pin is not None:
+        try:
+            wanted = resolve_site_tile(pin, work)
+        except ValueError as e:
+            term.pin_error = e
+            return []
+        term.pin_spelled = True
+        plans = [plan for plan in plans if plan == wanted]
+    if any(plan.is_warp for plan in plans):
+        term.warp_eligible = True
+    return [Block({"TILE": plan}, (None,)) for plan in plans]
+
+
+def _blocked_tiles(node: _Node, combo: tuple[_Row, ...]) -> tuple[TilePlan | None, TilePlan | None]:
+    pair = _blocked_pair(node.site.node)
+    found = {
+        id(child.site.node): plan if (plan := row.plans.get(child.keys.get("TILE"))) is not None and plan.is_tiled else None
+        for child, row in zip(_kids(node), combo, strict=True)
+    }
+    return tuple(found.get(id(child)) for child in pair) if len(pair) == 2 else (None, None)
+
+
+def _blocked_parent_blocks(term: _Term, node: _Node, combo: tuple[_Row, ...]) -> list[Block]:
+    first, second = _blocked_tiles(node, combo)
+    if first is None and second is None:
+        return _reduce_blocks(term, node.site.node)
+    if not (first is not None and second is not None and first.is_warp and second.is_warp):
+        return []
+    compatible = (
+        first.atom == second.atom
+        and first.units == second.units
+        and first.reg_m == second.reg_m
+        and first.tile_n == second.bk * second.atom.atom_k
+    )
+    return [Block({"REDUCE": ReducePlan()}, (None,))] if compatible else []
 
 
 def _raster_values(term: _Term) -> list[str]:
@@ -1081,21 +1186,28 @@ def _raster_values(term: _Term) -> list[str]:
     return list(RASTER.narrow(raster_moves()))
 
 
-def _site_blocks(term: _Term, site: Site, work: Workers | None, parent: _Node | None = None) -> list[Block]:
+def _site_blocks(
+    term: _Term,
+    current: _Node,
+    work: Workers | None,
+    parent: _Node | None = None,
+    combo: tuple[_Row, ...] = (),
+) -> list[Block]:
     """The values ``site`` offers under the chosen inventory, as :class:`Block` rectangles — TYPED
     schedule slices, keyed by family. Dispatch is the two stored-param predicates on the node,
     never the ``AxisRole``.
 
-    The one question a site cannot answer alone travels with it, and it is about the SITE TREE
-    rather than the node: ``parent``, because a parent FORM can realize a nested decision itself
-    (the cone's statistic, the streaming pair's geometry). Nothing here reads what the SUBTREE
-    decided, and that is the site tree's shape rather than an omission — the walk is a clean
-    product, so a site's values depend on ``work`` and its parent alone."""
-    node = site.node
+    The site-tree context travels with it: ``parent`` selects a child tile domain, while ``combo``
+    lets a composed Fold verify that its children chose compatible block geometry."""
+    site, node = current.site, current.site.node
+    if parent is not None and _blocked_pair(parent.site.node):
+        return _blocked_child_blocks(term, site, work, parent)
     if node.axis is None:
         return _strip_blocks(term, node)
     if is_contraction(node):
         return _contraction_blocks(term, node, work)
+    if _blocked_pair(node):
+        return _blocked_parent_blocks(term, current, combo)
     if _fill_realized(parent, site):
         # The one site that offers nothing but the decided empty: its PARENT form realizes the
         # partition itself, so there is no choice left here to spell.
@@ -1217,7 +1329,7 @@ def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | Non
     child_rows = [_rows_at(term, c, work, node) for c in children]
     out: list[_Row] = []
     for combo in product(*child_rows):
-        for block in _site_blocks(term, node.site, work, parent):
+        for block in _site_blocks(term, node, work, parent, combo):
             out.extend(_merge(node, block, combo, open_stage=open_stage))
     return out
 
@@ -1239,6 +1351,8 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
     of legal candidates; the position an entry lands in carries no meaning."""
     site = node.site
     out: list[Workers | None] = []
+    if parent is not None and _blocked_pair(parent.site.node):
+        return out
     if site.node.axis is None:
         out.append(None)
     elif is_contraction(site.node):
@@ -1249,27 +1363,27 @@ def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> 
         out.extend(_band_of(p) for p in _contraction_reduces(term, site.node, TilePlan()))
     else:
         out.extend(_band_of(p) for p in _reduce_specs(term, site.node))
+        if _blocked_pair(site.node):
+            for units_m in (1, 2, 4):
+                work = Workers(kind="warp", units=(units_m, 1))
+                pair = _blocked_pair(site.node)
+                if all(_blocked_plans(term, site.node, child, work) for child in pair):
+                    out.append(work)
     for child in _kids(node):
         out.extend(_site_inventories(term, child, node))
     return out
 
 
-def _inventories(terms: list[_Term]) -> list[Workers | None]:
-    """The kernel's ``WORK`` candidates — every inventory any VIEW's catalogs imply (``None``, the
-    derived per-cell / pure-reduce geometry, is one of them and a first-class inventory), plus the
-    ``+p`` producer bands a warp inventory can carry. CHOSEN at the root: every site of every view
-    resolves against it, so three of the parent/child couplings stop being rules at all.
-
-    Kernel-global means kernel-global: the list spans the VIEWS (a fork has ONE ``WORK`` level),
-    which is also what makes the pin fallback below a single decision instead of one per view."""
+def _inventories(term: _Term) -> list[Workers | None]:
+    """The kernel's ``WORK`` candidates from every site in the stored tree, with ``None`` as the
+    per-cell / pure-reduce geometry and producer bands derived from warp inventories."""
     out: list[Workers | None] = []
     seen: set[str] = set()
-    for term in terms:
-        for node in term.tree:
-            for w in _site_inventories(term, node):
-                if (spell := w.spell() if w is not None else "") not in seen:
-                    seen.add(spell)
-                    out.append(w)
+    for node in term.tree:
+        for w in _site_inventories(term, node):
+            if (spell := w.spell() if w is not None else "") not in seen:
+                seen.add(spell)
+                out.append(w)
     if "" not in seen:
         out.append(None)  # a term with no site still maps its placement — one all-empty row
     for w in list(out):
@@ -1293,9 +1407,8 @@ def _inventories(terms: list[_Term]) -> list[Workers | None]:
     # sibling seeing a matmul's warp pin). The catalog's own inventories stay as siblings so the
     # term still maps — emptying the fork would leave a term unmapped over a pin that was never
     # about it, which is the same degrade the strip site applies to a warp ``TILE`` pin it cannot
-    # spell. The view that used to share this branch — a COVERAGE GAP, where narrowing is right
-    # — is gone: the twisted streaming site enumerates its own warp geometry now, so a
-    # ``w<M>x<N>`` pin narrows there like anywhere else.
+    # spell. A composed Fold enumerates its own warp geometry, so a ``w<M>x<N>`` pin narrows there
+    # like anywhere else.
     # ``test_work_pin_widens_only_where_the_site_offers_no_warp_inventory`` pins both halves.
     logger.warning(
         "WORK pin %r matches no candidate's worker inventory (%s offered); offering it beside the full fork",
@@ -1320,22 +1433,19 @@ def _level_keys(term: _Term) -> list[str]:
     return [k for family in FAMILIES for k in decided[family]]
 
 
-def _union_keys(terms: list[_Term]) -> list[str]:
-    """The fork's site keys between ``WORK`` and ``RASTER`` — the UNION over the views, in
-    fork-level order. A family no view decided keys the BARE name, and a key one view lacks is
-    stamped there as a DECIDED empty: every leaf of one fork must spell the same family keys, or a
-    prefix-consistent evidence pick lets a gmem-direct leaf inherit a staged row's measurement."""
+def _keys(term: _Term) -> list[str]:
+    """The stored tree's site keys between ``WORK`` and ``RASTER``, in fork-level order. A family
+    with no keyed site keeps its bare key so every schedule row has the same family vocabulary."""
     seen: dict[str, list[str]] = {f: [] for f in FAMILIES}
-    for term in terms:
-        for key in _level_keys(term):
-            fam = family_of(key)
-            if key not in seen[fam]:
-                seen[fam].append(key)
+    for key in _level_keys(term):
+        fam = family_of(key)
+        if key not in seen[fam]:
+            seen[fam].append(key)
     return [k for family in FAMILIES for k in (seen[family] or [family])]
 
 
 def _term_rows(term: _Term, work: Workers | None) -> list[_Row]:
-    """One view's PARTLY-DECIDED rows at one inventory - the site product over the term's ROOT
+    """The partly decided rows at one inventory - the site product over the term's ROOT
     sites, filtered by the row-level inventory validation. The roots reconcile through the same
     :meth:`_Row.union` a site uses for its children: one rule, whichever level of the tree
     assembles the row.
@@ -1355,20 +1465,14 @@ def _term_rows(term: _Term, work: Workers | None) -> list[_Row]:
     return out
 
 
-def _space(terms: list[_Term]) -> PoolSpace:
-    """Every legal schedule candidate across the term VIEWS, as the addressable
-    :class:`~._pool.PoolSpace` - one ``(WORK, view)`` segment per inventory per view, in the order
-    the walk visits them.
-
-    A candidate carries NO ownership: which view it decodes through is a function of the row itself
-    - the derived contraction view offers only warp tiles (a computed operand's scalar list is
-    empty, :func:`_Term._build_tiles`), and the per-cell view only scalar / per-cell ones, so the
-    ``WORK`` tier is the discriminator by construction and two views can never spell one row."""
-    keys = _union_keys(terms)
-    works = _inventories(terms)
-    #: Every key the union spells, decided-empty - a view lacking a site stamps the empty there.
+def _space(term: _Term) -> PoolSpace:
+    """Every legal schedule candidate for the stored term, as an addressable space with one
+    segment per worker inventory."""
+    keys = _keys(term)
+    works = _inventories(term)
+    #: Every key the tree spells, decided-empty until a row supplies it.
     base = {k: "" for k in keys}
-    if any(term.warp_eligible for term in terms):
+    if term.warp_eligible:
         # ``S_``-prefixed - not a schedule family, so tile identity and prefix-consistency are
         # untouched (``canonical_row_key`` reads the tuning-knob view); it prices "a scalar tile
         # where tensor cores were on offer". It rides the BASE dict rather than a closing pass over
@@ -1378,14 +1482,13 @@ def _space(terms: list[_Term]) -> PoolSpace:
     segments: list[Segment] = []
     for work in works:
         spelled = {WORK.name: work.spell() if work is not None else ""}
-        for term in terms:
-            rows = _term_rows(term, work)
-            if rows:
-                segments.append(Segment.build(rows, spelled, [{RASTER.name: r} for r in _raster_values(term)]))
+        rows = _term_rows(term, work)
+        if rows:
+            segments.append(Segment.build(rows, spelled, [{RASTER.name: r} for r in _raster_values(term)]))
     return PoolSpace.build(*_decided(keys, base, segments))
 
 
-def _enumerate(terms: list[_Term], sample=None) -> tuple[list[dict], list[str], int]:
+def _enumerate(term: _Term, sample=None) -> tuple[list[dict], list[str], int]:
     """The space MATERIALIZED - every legal schedule row in the site value grammar, the fork's site
     keys, and the EXACT size of the space they came from. An empty result is the guardrail
     contract, never a raise: the caller leaves the term unmapped.
@@ -1399,21 +1502,20 @@ def _enumerate(terms: list[_Term], sample=None) -> tuple[list[dict], list[str], 
     A SAMPLED enumeration materializes nothing, so the budget has nothing to bind - but a widened
     product is a real finding, so the size is reported instead of swallowed. The abort dies there;
     the signal does not."""
-    space = _space(terms)
+    space = _space(term)
     total = len(space)
     if total > MAX_ROWS:
         why = (
-            f"schedule enumeration for {terms[0].tile.name!r} offers {total} rows, past the {MAX_ROWS}-row "
-            f"budget ({len(terms)} views, {len(space.keys)} site keys) - the product across sites widened; "
+            f"schedule enumeration for {term.tile.name!r} offers {total} rows, past the {MAX_ROWS}-row "
+            f"budget ({len(space.keys)} site keys) - the product across sites widened; "
             f"narrow a catalog or add the legality predicate that bounds it, never truncate"
         )
         if sample is None:
             raise ValueError(why)
         logger.warning("%s. Sampling %d of them.", why, sample.rows)
     rows = list(space) if sample is None else sample.take(space)
-    for term in terms:
-        if not rows and term.pin_error is not None and not term.pin_spelled:
-            raise term.pin_error  # NO inventory could spell the pin - a pin names a specific kernel
+    if not rows and term.pin_error is not None and not term.pin_spelled:
+        raise term.pin_error  # NO inventory could spell the pin - a pin names a specific kernel
     return rows, list(space.keys), total
 
 
@@ -1466,18 +1568,14 @@ def _decided(keys: list[str], base: dict, segments: list[Segment]) -> tuple[list
 # ---- materialization: one builder per form, all fed by the same row ------------------------------ #
 
 
-def _stamp(term: _Term, op, name, knobs: dict, slices, workers=None, place: Placement | None = None) -> TileOp:
+def _stamp(term: _Term, op, name, knobs: dict, slices, workers=None) -> TileOp:
     """Build the scheduled ``TileOp`` — :func:`ops.scheduled` over this term's placement and root
-    stores. The term stays pure algebra; no slice is ever a node field.
+    stores. The term stays pure algebra; no slice is ever a node field."""
 
-    ``place`` overrides the per-cell grid for a form that re-places it (the stream's warp shrink,
-    the chain's truncation): every placement construction is a closed-form function of (row, term),
-    built HERE rather than carried in a row, and ``free`` is never touched — the placed view each
-    site derives (``Sched._mn_for``) is over the free axes, not the grid."""
     return scheduled(
         op,
         name=name,
-        place=term.place if place is None else place,
+        place=term.place,
         knobs=knobs,
         stores=term.tile.stores,
         slices=slices,
@@ -1529,8 +1627,8 @@ def _free_option(term: _Term, plan: TilePlan, name: str, knobs: dict, nested: Se
 def _node_option(
     term: _Term, node, plan: TilePlan, rplan: ReducePlan, stage: Stage | None, work, name: str, knobs: dict, nested: Sequence[tuple] = ()
 ) -> TileOp:
-    """One un-split row whose compute is a single fold — EITHER view, and one rule for both.
-    What it stores is a property of the resolved plan, not of a role:
+    """One un-split row whose compute is a single fold. What it stores is a property of the
+    resolved plan, not of a role:
 
     - an UNTILED output stores its K partition on the node. That is a plain reduce's cooperative /
       ILP band, and equally a non-output-tiled contraction's — the contraction is the degenerate
@@ -1548,42 +1646,6 @@ def _node_option(
     workers = WarpSpec(work.producer) if work is not None and work.producer else None
     own = [("TILE", node, plan.placed_on(term.place)), ("STAGE", node, stage)]
     return _stamp(term, term.tile.op, name, knobs, [*own, *nested], workers=workers)
-
-
-def _row_stream_tiles(node: _Node, row: dict, work: Workers | None) -> tuple[TilePlan | None, TilePlan | None]:
-    """The ``(score, P@V)`` slices a materializing row carries — ``None`` where the site spelled the
-    decided empty. Read by SITE (``Site.derived`` tells the synthesized P@V from the hoisted score
-    edge), never by position. The materialization twin of :func:`_stream_tiles`, and it ends at the
-    same post-condition: each half is ``None`` or a TILED plan.
-
-    The two read "decided" from different places, and that is not drift — it is what each one has.
-    The enumeration reads a decided SLICE out of ``_Row.plans``, where an absent key means the site
-    chose nothing; here there are only spelled values, and the empty spelling IS the decided empty.
-    Resolving ``""`` instead of guarding on it would answer a different question: an empty ``TILE``
-    beside a thread inventory legally resolves to a unit-register tile (``resolve_site_tile``'s one
-    ambiguity), so every per-cell flash row would come back claiming a stream geometry it never
-    chose — which is what the digest and the explicit-mask attention cases say when this guard is
-    dropped."""
-    out: dict[bool, TilePlan | None] = {False: None, True: None}
-    for child in _kids(node):
-        spec = row.get(child.keys.get("TILE"), "") or ""
-        plan = resolve_site_tile(spec, work) if spec else None
-        out[child.site.derived] = plan if plan is not None and plan.is_tiled else None
-    return out[False], out[True]
-
-
-def _warp_stream_place(term: _Term, qk: TilePlan, pv: TilePlan) -> Placement:
-    """The grid a WARP-streaming row launches on: the query axis shrinks to its CTA-block count
-    (``um`` warps × ``fm`` register query tiles × ``atom_m`` rows each, all read off the placed
-    score slice) and the value axis leaves the grid entirely — it folds into the P@V fragment. The
-    stream axis never maps: it IS the stream, walked serially per CTA."""
-    rows, m_name, d_name = qk.tile_m, qk.m.axis.name, pv.n.axis.name
-    grid = tuple(
-        Axis(name=ax.name, extent=ax.extent.ceil_div(rows), window=Window(parent=ax.source_axis or ax)) if ax.name == m_name else ax
-        for ax in term.place.free
-        if ax.name != d_name
-    )
-    return Placement(free=term.place.free, grid=grid)
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
@@ -1693,11 +1755,11 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
     # ONE root, and it is checked rather than assumed: ``_term_rows`` products over EVERY root of
     # ``term.tree``, so a second root would contribute knobs to the row and then be dropped here —
     # its nested slices never stamped, form dispatch reading the wrong node, and both silently. No
-    # live term has one; if a view ever produces one, this says so instead of mis-materializing.
+    # live term has one; if one appears, this says so instead of mis-materializing.
     if len(term.tree) > 1:
         raise ValueError(
             f"{term.tile.name!r}: {len(term.tree)} root site trees — materialization stamps ONE. "
-            "Walk the forest here (as _term_rows does) before a view may produce this shape."
+            "Walk the forest here (as _term_rows does) before producing this shape."
         )
     root = term.tree[0] if term.tree else None
     keys = root.keys if root is not None else {}
@@ -1775,8 +1837,7 @@ def _stage_of(term: _Term, node, plan: TilePlan, spec: str) -> Stage | None:
 class _Pool:
     """One term's enumerated schedule pool — everything :func:`schedule` derives that is
     OP-INDEPENDENT: the fork's site keys and the rows. A row is a complete spelled identity and
-    carries no resolved slices and no view ownership — materialization re-resolves from the
-    spelling and decodes the view from the row itself. Shared through ``ctx.session_cache``
+    carries no resolved slices — materialization re-resolves them from the spelling. Shared through ``ctx.session_cache``
     across ops with equal ``cache_key`` and across tune trajectories (the pipeline re-runs
     ``020_schedule`` per trajectory), so it sits BELOW the search policies: greedy and MCTS hit
     it alike, and it holds NO ranking and consults NO evidence — only what evidence cannot
@@ -1864,9 +1925,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
 
     The enumeration itself is memoized in ``ctx.session_cache`` (:class:`_Pool`): the rows are a
     pure function of ``(term, ctx, pins, hints, ctx.pool_sample)``, so N same-shape ops — and every tune trajectory
-    after the first — pay one enumeration. Only the VIEWS re-bind per op (:func:`_views` is
-    cheap), so materialization always stamps against THIS op's placement and stores."""
-    terms, warp_view = _views(tile, ctx)
+    after the first — pay one enumeration. The term is rebuilt per op so materialization always stamps against THIS
+    op's placement and stores."""
+    term = _Term(tile, tile.place.on_grid(), ctx)
     cache = getattr(ctx, "session_cache", None)
     sample = getattr(ctx, "pool_sample", None)
     # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES the
@@ -1875,7 +1936,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     key = digest(pool_key(tile), sample.key if sample is not None else "") if cache is not None or sample is not None else None
     pool = cache.get(key) if cache is not None else None
     if pool is None:
-        pool = _Pool.build(*_enumerate(terms, sample))
+        pool = _Pool.build(*_enumerate(term, sample))
         if cache is not None:
             cache.put(key, pool)
     if sample is not None:
@@ -1884,10 +1945,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
         return []
 
     def materialize(row: dict) -> TileOp:
-        # The row decodes its own view: warp-tier rows ride the contraction view, every other
-        # tier the per-cell one — disjoint by construction (see :func:`_enumerate`).
-        on_warp = str(row.get(WORK.name) or "").startswith("w")
-        term = terms[warp_view if on_warp else (1 - warp_view) % len(terms)]
         return _materialize(term, row, name, knobs)
 
     if len(pool.rows) == 1:

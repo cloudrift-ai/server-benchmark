@@ -411,9 +411,9 @@ def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2")
-    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
+    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f2x4")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))

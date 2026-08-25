@@ -105,9 +105,10 @@ numpy backends in three places:
 ### Tile lowering (`passes/lowering/tile/`)
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
-then checks the resulting carrier arity and the derived contraction sites. The generated carrier's numerical laws are
-covered independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax
-and attention accuracy remain covered by the e2e suites.
+then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
+sites through the CUDA pipeline. `test_pool_space.py` checks that the two child sites receive compatible MMA schedule
+rows. The generated carrier's numerical laws are covered independently by `tests/compiler/ir/pure/test_carrier_gen.py`
+and `test_lambda_monoid.py`; end-to-end softmax and attention accuracy remain covered by the e2e suites.
 
 ## Adding a New Rule Test
 

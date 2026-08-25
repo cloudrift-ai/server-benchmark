@@ -452,19 +452,46 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
     job = document["jobs"]["onboard"]
     script = next(step["run"] for step in job["steps"] if step.get("name") == "Run onboard-model agent")
+    readme = (workspace / "README.md").read_text()
     qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
+    benchmark = (workspace / "prompts" / "onboard-model" / "benchmark.md").read_text()
     investigate = (workspace / "prompts" / "onboard-model" / "investigate.md").read_text()
     skill = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
     investigator = (workspace / ".opencode" / "agents" / "onboard-investigator.md").read_text()
 
     assert job["env"]["OPENCODE_CONFIG_DIR"] == f"{job['env']['WORKFLOW_SOURCE']}/.opencode"
+    assert '--file "$WORKFLOW_SOURCE/README.md"' in script
     assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/qualify.md"' in script
+    assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/benchmark.md"' in script
     assert '--file "$WORKFLOW_SOURCE/prompts/onboard-model/investigate.md"' in script
     assert '--file "$AGENT_TASK"' in script
     assert "jq -n \\" in script
     assert "Path(os.environ" not in script
+    assert "README.md" in skill
+    for project in ("cloudrift", "1Cat-vLLM", "rift-provisioning", "rift-relay"):
+        assert f"https://github.com/cloudrift-ai/{project}" in readme
+    for project in ("vllm-project/vllm", "sgl-project/sglang"):
+        assert f"https://github.com/{project}" in readme
+    assert "`../<repository-name>`" in readme
     assert "prompts/onboard-model/qualify.md" in skill
+    assert "prompts/onboard-model/benchmark.md" in skill
     assert "prompts/onboard-model/investigate.md" in skill
+    assert benchmark.strip()
+    assert "http://" not in benchmark
+    assert "https://" not in benchmark
+    for row in (
+        "| 4096 | 4096 | 1 | 8 | 3 |",
+        "| 4096 | 4096 | 4 | 32 | 1 |",
+        "| 4096 | 4096 | 8 | 64 | 1 |",
+        "| 8192 | 256 | 4 | 20 | 1 |",
+        "| 256 | 256 | 64 | 320 | 1 |",
+        "| 4096 | 4096 | 16 | 128 | 1 |",
+        "| 4096 | 4096 | 32 | 256 | 1 |",
+        "| 8192 | 256 | 16 | 80 | 1 |",
+        "| 1024 | 1024 | 64 | 320 | 1 |",
+        "| 256 | 256 | 256 | 1280 | 1 |",
+    ):
+        assert row in benchmark
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
         assert f"{field}:" in script
         assert f"`{field}`" in qualify

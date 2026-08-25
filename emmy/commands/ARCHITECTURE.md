@@ -684,10 +684,15 @@ ranking — the rest are either constant within every pool or affine copies of a
 expressiveness-neutral. `--out DIR` defaults to
 `_tune/fits/<timestamp>-<trainer>-<data>/`.
 
-A run writes `metrics.json` — the per-run record two fits
-are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and the `cv.shape`
-block (pooled holdout / train tables, per-card gap, per-fold detail); folds group by shape, so goldens sharing a
-candidate pool are held out together rather than scored by a model trained on that pool — and `weights.json`, the
+A run writes `metrics.json` — the per-run record two fits are diffed by: `full_train` (per-golden dual ranks plus
+per-card **cells**) and the `cv` block (holdout and train cells, per-card gap, per-fold detail); folds group by
+shape, so goldens sharing a candidate pool are held out together rather than scored by a model trained on that
+pool. The per-card blocks are the same `Cell` `emmy eval prior` emits — same four fields, built by the same
+`prior/report.rank_metrics` — so a fit's file and an eval report state the golden screen identically rather than
+agreeing by coincidence; each cell's `axes` carry the `split` (`full_train` / `holdout` / `train`) beside the card,
+because one file holds all three. Goldens that never became a case sit BESIDE the cells in `full_train.skipped`,
+keyed by card: they have no pool and no rank, so they are a fact about the corpus rather than about a scored card,
+and keeping them out preserves the shared cell shape. Also written: `weights.json`, the
 full-train artifact in the shipped format (a `catboost` fit also writes the booster as a `weights.cbm` sidecar
 beside it, named after its own JSON so several artifacts can share a directory); `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired

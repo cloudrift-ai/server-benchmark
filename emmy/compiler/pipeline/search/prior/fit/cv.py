@@ -50,7 +50,7 @@ import statistics
 
 from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
-from emmy.compiler.pipeline.search.prior.report import TOP_KS
+from emmy.compiler.pipeline.search.prior.report import Cell, rank_metrics
 
 # The ``skipped`` reason for golden kinds the fitter has no case builder for
 # (attention / rms_norm / softmax) — counted per card as ``out_of_scope``, distinct from
@@ -110,26 +110,32 @@ def case_ranks(case: GoldenGroup, model) -> tuple[int, int] | None:
 
 
 def _median(vals: list[float]) -> float:
-    return round(float(statistics.median(vals)), 2)
+    """One decimal, matching :func:`~..report.rank_metrics` — so every median in the file, cell or
+    fold detail, is quoted to the same precision. Ranks are integers, so the second digit this used to
+    carry was padding everywhere except the median-of-medians the ``train`` block takes."""
+    return round(float(statistics.median(vals)), 1)
 
 
-def _per_card(entries: list[tuple[GoldenGroup, tuple[int, int]]]) -> dict:
-    """Per-card aggregates over ``(case, (rank, rank_optimistic))`` rows: count, median
-    and top-k coverage under both tie conventions. Cards never pool."""
+def _per_card(entries: list[tuple[GoldenGroup, tuple[int, int]]], *, split: str) -> list[Cell]:
+    """Per-card :class:`~..report.Cell`s over ``(case, (rank, rank_optimistic))`` rows. Cards never pool.
+
+    Exactly the cell ``emmy eval prior`` emits — same four fields, same :func:`~..report.rank_metrics` — so a
+    fit's metrics file and an eval report state the golden screen identically instead of two summarisers
+    agreeing by coincidence. ``split`` rides in the axes because one file carries three of these (the
+    shippable model's, the holdout, and the fold models' training ranks) and a row has to say which it is.
+    Not "stage": this package already spends that word on the linear fit's static/dynamic stages, and the
+    compiler spends it again on pipeline stages and the ``STAGE`` knob family.
+
+    ``unscored`` is 0 by construction — a case the model cannot score is dropped by :func:`case_ranks`
+    before it reaches here. Goldens that never became a case at all are a fact about the CORPUS, not about
+    a scored card, and are counted beside the cells by :func:`build_metrics`."""
     by_gpu: dict[str, list[tuple[int, int]]] = {}
     for case, ranks in entries:
         by_gpu.setdefault(case.gpu, []).append(ranks)
-    out = {}
-    for gpu, ranks in sorted(by_gpu.items()):
-        pes, opt = [r for r, _ in ranks], [o for _, o in ranks]
-        out[gpu] = {
-            "n": len(ranks),
-            "median": _median(pes),
-            "median_optimistic": _median(opt),
-            "top": {str(k): sum(r < k for r in pes) for k in TOP_KS},
-            "top_optimistic": {str(k): sum(r < k for r in opt) for k in TOP_KS},
-        }
-    return out
+    return [
+        Cell(axes={"split": split, "gpu": gpu}, groups=len(ranks), unscored=0, metrics=rank_metrics(ranks))
+        for gpu, ranks in sorted(by_gpu.items())
+    ]
 
 
 def evaluate_full_train(cases: list[GoldenGroup], model) -> dict:
@@ -141,11 +147,11 @@ def evaluate_full_train(cases: list[GoldenGroup], model) -> dict:
         c.key: {"rank": r, "rank_optimistic": o, "pool": c.total, "sampled": len(c.feats), "positives": len(c.golden_ids)}
         for c, (r, o) in entries
     }
-    return {"per_golden": per_golden, "per_card": _per_card(entries)}
+    return {"per_golden": per_golden, "cells": [c.to_json() for c in _per_card(entries, split="full_train")]}
 
 
 def run_folds(cases: list[GoldenGroup], *, trainer, k: int = DEFAULT_FOLDS) -> dict:
-    """The full cross-validation → the ``cv.shape`` metrics block.
+    """The full cross-validation → the ``cv`` metrics block.
 
     ``trainer`` is any object with ``fit(groups) -> model`` where the model satisfies
     :func:`case_ranks`' protocol. ONE instance serves every fold: the trainer is immutable and
@@ -185,21 +191,20 @@ def run_folds(cases: list[GoldenGroup], *, trainer, k: int = DEFAULT_FOLDS) -> d
         fold_medians[str(f)] = {"median": _median([r for _, (r, _) in hold_entries]) if hold_entries else None, "n": len(hold_entries)}
 
     train_entries = [(c, (_median(pes), _median(opt))) for c, pes, opt in train_acc.values()]
-    holdout_cards = _per_card(holdout)
-    train_cards = _per_card(train_entries)
+    holdout_cards = _per_card(holdout, split="holdout")
+    train_cards = _per_card(train_entries, split="train")
+    # ``gap`` = holdout median − train median, per card: it separates overfitting (train good, holdout bad)
+    # from a model class too weak for the problem (both bad, small gap). Read off the cells, so the two
+    # numbers it subtracts are the ones the file actually reports.
+    hold_med = {c.axes["gpu"]: c.metrics["rank"]["median"] for c in holdout_cards}
+    train_med = {c.axes["gpu"]: c.metrics["rank"]["median"] for c in train_cards}
     return {
-        "holdout": {
-            "per_golden": {
-                c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids), "fold": holdout_fold[c.key]}
-                for c, (r, o) in holdout
-            },
-            "per_card": holdout_cards,
+        "cells": [c.to_json() for c in holdout_cards + train_cards],
+        "holdout_per_golden": {
+            c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids), "fold": holdout_fold[c.key]} for c, (r, o) in holdout
         },
-        "train": {
-            "per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids)} for c, (r, o) in train_entries},
-            "per_card": train_cards,
-        },
-        "gap": {gpu: round(holdout_cards[gpu]["median"] - train_cards[gpu]["median"], 2) for gpu in holdout_cards if gpu in train_cards},
+        "train_per_golden": {c.key: {"rank": r, "rank_optimistic": o, "positives": len(c.golden_ids)} for c, (r, o) in train_entries},
+        "gap": {gpu: round(hold_med[gpu] - train_med[gpu], 1) for gpu in hold_med if gpu in train_med},
         "fold_detail": {"holdout_medians": fold_medians, "excluded": excluded},
     }
 
@@ -211,11 +216,14 @@ def build_metrics(header: dict, cases: list[GoldenGroup], skipped: list[tuple[st
     failures count per card as ``unranked`` (never silently dropped), kinds the fitter
     doesn't case-build (attention / rms_norm / softmax) as ``out_of_scope``."""
     full = evaluate_full_train(cases, full_model)
+    # Beside the cells, not inside them: a golden that never became a case has no pool, no rank and nothing
+    # to score, so it is a fact about the CORPUS rather than about a scored card. Folding it into a cell
+    # would also give the fit a five-key cell where an eval report has four, which is exactly the schema
+    # split this step exists to close. A card whose every golden was skipped still appears — as a key here,
+    # with no cell — so a card going missing stays loud.
+    counts = {c["axes"]["gpu"]: {"unranked": 0, "out_of_scope": 0} for c in full["cells"]}
     for gpu, _name, reason in skipped:
-        card = full["per_card"].setdefault(gpu, {"n": 0, "median": None, "median_optimistic": None, "top": {}, "top_optimistic": {}})
-        kind = "out_of_scope" if reason == OUT_OF_SCOPE else "unranked"
-        card[kind] = card.get(kind, 0) + 1
-    for card in full["per_card"].values():
-        card.setdefault("unranked", 0)
-        card.setdefault("out_of_scope", 0)
+        per_card = counts.setdefault(gpu, {"unranked": 0, "out_of_scope": 0})
+        per_card["out_of_scope" if reason == OUT_OF_SCOPE else "unranked"] += 1
+    full["skipped"] = dict(sorted(counts.items()))
     return {"header": header, "full_train": full, "cv": cv}

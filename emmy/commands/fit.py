@@ -11,7 +11,7 @@ A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two 
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and ``<out>/weights.json``, the full-train artifact in the
 shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
-a ``cv.shape`` holdout/train/gap block) is documented on
+a ``cv`` holdout/train/gap block, both carrying ``prior/report.py`` cells) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
 module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
@@ -427,6 +427,31 @@ TRAINERS = {
 }
 
 
+def _log_cells(metrics: dict) -> None:
+    """The run's cells as one line per card per split — the same rows ``metrics.json`` carries, so what
+    scrolls past and what is written down cannot disagree. Indexes rather than defends: every key read here
+    is one the same process wrote a few lines earlier, so a shape mismatch should raise rather than render
+    a line full of ``None``."""
+    full, cv = metrics["full_train"], metrics["cv"]
+    train = {c["axes"]["gpu"]: c["metrics"]["rank"]["median"] for c in cv.get("cells", []) if c["axes"]["split"] == "train"}
+    gap = cv.get("gap", {})
+    for cell in full["cells"] + [c for c in cv.get("cells", []) if c["axes"]["split"] == "holdout"]:
+        split, gpu, rank = cell["axes"]["split"], cell["axes"]["gpu"], cell["metrics"]["rank"]
+        line = f"{split:<11} {gpu:<34} n={cell['groups']:<3} median={rank['median']} (optimistic {rank['median_optimistic']})"
+        if split == "full_train":
+            skipped = full["skipped"][gpu]
+            line += f" unranked={skipped['unranked']} out_of_scope={skipped['out_of_scope']}"
+        else:
+            line += f" train={train.get(gpu)} gap={gap.get(gpu)}"
+        logger.info("%s", line)
+    # A card every one of whose goldens was skipped has no cell at all — say so rather than let it vanish.
+    for gpu, skipped in full["skipped"].items():
+        if gpu not in {c["axes"]["gpu"] for c in full["cells"]}:
+            logger.info("%-11s %-34s no ranked cases  unranked=%d out_of_scope=%d", "full_train", gpu, *skipped.values())
+    for f, why in cv.get("fold_detail", {}).get("excluded", {}).items():
+        logger.info("cv fold %s EXCLUDED: %s", f, why)
+
+
 def handle_fit(args) -> None:
     from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
 
@@ -509,27 +534,5 @@ def handle_fit(args) -> None:
         _write_artifact(artifact_path, model, provenance)
         logger.info("wrote %s", artifact_path)
 
-    for gpu, card in metrics["full_train"]["per_card"].items():
-        logger.info(
-            "full_train  %-34s n=%-3d median=%s (optimistic %s) unranked=%d out_of_scope=%d",
-            gpu,
-            card["n"],
-            card["median"],
-            card["median_optimistic"],
-            card["unranked"],
-            card["out_of_scope"],
-        )
-    for axis, block in metrics["cv"].items():
-        for gpu, card in block["holdout"]["per_card"].items():
-            logger.info(
-                "cv.%-9s %-34s holdout median=%s (optimistic %s) train=%s gap=%s",
-                axis,
-                gpu,
-                card["median"],
-                card["median_optimistic"],
-                block["train"]["per_card"][gpu]["median"],
-                block["gap"].get(gpu),
-            )
-        for f, why in block["fold_detail"]["excluded"].items():
-            logger.info("cv.%-9s fold %s EXCLUDED: %s", axis, f, why)
+    _log_cells(metrics)
     logger.info("wrote %s", out_dir / "metrics.json")

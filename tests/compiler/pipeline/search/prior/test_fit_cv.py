@@ -71,8 +71,8 @@ def test_a_merged_case_reports_its_positive_count():
     # The merged case scores on its BEST positive: D_a descends, so row 0 wins and the pool ranks top-1.
     assert rows["gpuA/m.1024"]["rank"] == 0 and rows["gpuA/m.512"]["rank"] == 1
     out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=2)
-    assert out["holdout"]["per_golden"]["gpuA/m.1024"]["positives"] == 2
-    assert out["train"]["per_golden"]["gpuA/m.1024"]["positives"] == 2
+    assert out["holdout_per_golden"]["gpuA/m.1024"]["positives"] == 2
+    assert out["train_per_golden"]["gpuA/m.1024"]["positives"] == 2
 
 
 # --- the golden case builder's pool merge ------------------------------------------
@@ -400,17 +400,20 @@ FOLD_TRAINER = LinearTrainer(
 
 def test_folds_hold_out_every_golden_exactly_once():
     out = fit_cv.run_folds(_cases(), trainer=FOLD_TRAINER, k=3)
-    assert set(out["holdout"]["per_golden"]) == {c.key for c in _cases()}
-    for row in out["holdout"]["per_golden"].values():
+    assert set(out["holdout_per_golden"]) == {c.key for c in _cases()}
+    for row in out["holdout_per_golden"].values():
         assert isinstance(row["rank"], int) and isinstance(row["rank_optimistic"], int)
         assert row["rank"] >= row["rank_optimistic"]  # pessimistic can only add ties
     # Train side: same keys (every case was in the other folds' training slices).
-    assert set(out["train"]["per_golden"]) == {c.key for c in _cases()}
+    assert set(out["train_per_golden"]) == {c.key for c in _cases()}
     # Aggregates are per card only — a REPORT axis, independent of what the folds group by — and the
     # gap is their arithmetic difference.
     for gpu in ("gpuA", "gpuB"):
-        assert gpu in out["holdout"]["per_card"] and gpu in out["train"]["per_card"]
-        assert out["gap"][gpu] == round(out["holdout"]["per_card"][gpu]["median"] - out["train"]["per_card"][gpu]["median"], 2)
+        cells = {(c["axes"]["split"], c["axes"]["gpu"]): c for c in out["cells"]}
+        assert ("holdout", gpu) in cells and ("train", gpu) in cells
+        assert out["gap"][gpu] == round(
+            cells[("holdout", gpu)]["metrics"]["rank"]["median"] - cells[("train", gpu)]["metrics"]["rank"]["median"], 2
+        )
     assert out["fold_detail"]["excluded"] == {}
 
 
@@ -437,7 +440,7 @@ def test_a_shape_group_is_never_split_across_folds():
     assert len({folds[k] for k in shared}) == 1, "one shape, one fold — on every card"
 
     out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)
-    held = out["holdout"]["per_golden"]
+    held = out["holdout_per_golden"]
     assert len({held[k]["fold"] for k in shared}) == 1
 
 
@@ -457,7 +460,7 @@ def test_more_folds_than_groups_leaves_no_empty_fold_scored():
     skipped, rather than being scored as empty holdouts."""
     cases = [_case("m.1", "thread", "gpuA", shape="s1"), _case("m.2", "thread", "gpuA", shape="s2")]
     out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=5)
-    assert set(out["holdout"]["per_golden"]) == {c.key for c in cases}
+    assert set(out["holdout_per_golden"]) == {c.key for c in cases}
     assert all(d["n"] > 0 for d in out["fold_detail"]["holdout_medians"].values())
 
 
@@ -473,9 +476,9 @@ def test_fittability_guard_excludes_fold_loudly():
     ]
     out = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=4)
     assert list(out["fold_detail"]["excluded"].values()) == ["dynamic weight set unfittable (0 dyn cases in training)"]
-    assert "gpuA/matmul.mlp_down.h4096.dynM" not in out["holdout"]["per_golden"]
+    assert "gpuA/matmul.mlp_down.h4096.dynM" not in out["holdout_per_golden"]
     # The healthy folds still pool.
-    assert "gpuA/matmul.square.512" in out["holdout"]["per_golden"]
+    assert "gpuA/matmul.square.512" in out["holdout_per_golden"]
 
 
 # --- metrics assembly: determinism + skip accounting -------------------------------
@@ -484,7 +487,7 @@ def test_fittability_guard_excludes_fold_loudly():
 def _metrics():
     cases = _cases()
     model = LinearFit(LinearModel(weights={"D_a": -1.0, "D_b": 0.25}, weights_dynamic={"D_a": -0.5}, scale=0.1, **SEED_PARAMS), [0], [0])
-    cv = {"shape": fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)}
+    cv = fit_cv.run_folds(cases, trainer=FOLD_TRAINER, k=3)
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),
         ("gpuA", "matmul.o_proj.h4096", "golden not in 12 candidates"),
@@ -502,11 +505,15 @@ def test_metrics_json_is_deterministic():
 
 def test_metrics_counts_every_skipped_golden():
     m = _metrics()
-    cards = m["full_train"]["per_card"]
-    assert cards["gpuA"]["unranked"] == 1 and cards["gpuA"]["out_of_scope"] == 1
-    assert cards["gpuB"]["unranked"] == 0 and cards["gpuB"]["out_of_scope"] == 0
-    # A card whose every golden was skipped still appears — absence is loud, not silent.
-    assert cards["gpuC"]["n"] == 0 and cards["gpuC"]["out_of_scope"] == 1
+    assert all(c["axes"]["split"] == "full_train" for c in m["full_train"]["cells"])
+    # Skipped goldens sit BESIDE the cells: they have no pool, so they are a fact about the corpus rather
+    # than about a scored card — and a fit cell stays the same four-key shape an eval report emits.
+    assert set(m["full_train"]["cells"][0]) == {"axes", "groups", "unscored", "metrics"}
+    assert m["full_train"]["skipped"]["gpuA"] == {"unranked": 1, "out_of_scope": 1}
+    assert m["full_train"]["skipped"]["gpuB"] == {"unranked": 0, "out_of_scope": 0}
+    # A card whose every golden was skipped still appears — as a skipped entry with no cell.
+    assert m["full_train"]["skipped"]["gpuC"]["out_of_scope"] == 1
+    assert "gpuC" not in {c["axes"]["gpu"] for c in m["full_train"]["cells"]}
     # full_train per-golden rows carry the pool size; ranks respect the tie ordering.
     row = m["full_train"]["per_golden"]["gpuA/matmul.square.512"]
     assert row["pool"] == 6 and row["rank"] >= row["rank_optimistic"]
@@ -552,10 +559,10 @@ def test_run_fit_stub_trainer_deterministic():
     trainer whose models implement only ``score_rows`` yields the full metrics shape, identically on
     every call. It returns the FIT, not an artifact — assembling one is the caller's shipping policy."""
     metrics, fit = _run_stub_fit()
-    assert set(metrics) == {"header", "full_train", "cv"} and set(metrics["cv"]) == {"shape"}
+    assert set(metrics) == {"header", "full_train", "cv"}
     assert metrics["header"] == {"trainer": "stub", "seed": 0}
-    assert metrics["full_train"]["per_card"]["gpuC"]["out_of_scope"] == 1
-    assert set(metrics["cv"]["shape"]["holdout"]["per_golden"]) == {c.key for c in _cases()}
+    assert metrics["full_train"]["skipped"]["gpuC"]["out_of_scope"] == 1
+    assert set(metrics["cv"]["holdout_per_golden"]) == {c.key for c in _cases()}
     assert fit.w == -1.0  # the shippable model came from the full-train trainer, not a fold one
     a, b = _run_stub_fit(), _run_stub_fit()
     assert json.dumps(a[0], sort_keys=True) == json.dumps(b[0], sort_keys=True)
@@ -599,7 +606,7 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     assert metrics["header"]["trainer_params"]["objective"] == "mean_log_rank"
     # The two seeding policies stay recorded: without them two fits are not comparable.
     assert metrics["header"]["trainer_params"]["fold_seed_weights"] == "zeros"
-    assert set(metrics["cv"]) == {"shape"}
+    assert metrics["cv"]["cells"]
     # Cases are candidate pools now, so the header carries how many verified rows they hold between them —
     # otherwise a case count that fell because two goldens shared a pool reads as lost data.
     assert metrics["header"]["cases"] == {"groups": 8, "positives": 8, "merged": 0}

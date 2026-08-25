@@ -6,8 +6,10 @@ metric's definition — it decides nothing about what to score, and it prints no
 scoring callable and assembles :class:`EvalReport`, which serializes. Turning that into text is the CLI's job
 (``emmy/commands/eval.py``), where the console-table renderer already lives.
 
-``emmy eval prior`` is the caller today; ``emmy fit``'s metrics file moves onto the same cells with the fold
-harness, so the two commands' numbers become comparable by construction rather than by two paths agreeing.
+Both ``emmy eval prior`` and ``emmy fit`` build from here — the eval through :func:`golden_cells`, which scores a
+pool and reads the ranks off the scores, and the fit through :func:`rank_metrics` directly, because a
+cross-validated cell spans SEVERAL models and there is no one scorer to hand it. The two commands' numbers are
+therefore comparable by construction rather than by two paths agreeing.
 
 **Two questions, and they are not interchangeable.**
 
@@ -191,12 +193,20 @@ def measured_cells(half: str, groups: Sequence[MeasuredGroup], score: Scorer) ->
 # --- golden pools: where the verified row landed --------------------------------------------------------
 
 
-def _golden_metrics(entries: list[tuple[GoldenGroup, np.ndarray]]) -> dict:
-    """The golden rank screen, under both tie conventions.
+def rank_metrics(ranks: Sequence[tuple[int, int]]) -> dict:
+    """The golden rank screen from already-computed ``(rank, rank_optimistic)`` pairs.
 
-    A pool with several verified rows is scored on the best of them (:func:`~..metrics.best_dual_rank`): deploy
-    ships one config, so any acceptable one ranked first is the same win."""
-    ranks = [best_dual_rank(quality, g.golden_ids) for g, quality in entries]
+    Split from :func:`golden_cells`' scoring pass because a cross-validated cell has no single scorer to pass
+    it. ``eval prior`` scores one pool with one model and reads the rank off those scores. A ``holdout`` cell is
+    also one rank per case from one model — but a DIFFERENT model per case, each case ranked by the fold model
+    that never trained on it — so the cell spans as many models as there are folds and :func:`golden_cells`'
+    single ``score`` callable cannot express it. (The ``train`` block is looser still: it is deliberately
+    in-sample, each case ranked by the k-1 models that DID train on it and those ranks medianed, and it exists
+    only as the baseline the holdout is subtracted from.) Sharing the assembly rather than the scoring is what
+    lets both commands report the same statistic without one of them faking a score vector.
+
+    Ranks are medians, not means: a rank distribution has a long tail, and one 300k-row pool would otherwise
+    decide the number for a whole card."""
     pessimistic, optimistic = [r for r, _ in ranks], [o for _, o in ranks]
     # No per-metric ``groups`` here, unlike the measured side: no rank metric has a size minimum, so every
     # block's count would be the cell's own scored total and the cell already publishes that. The top-k
@@ -205,6 +215,13 @@ def _golden_metrics(entries: list[tuple[GoldenGroup, np.ndarray]]) -> dict:
     for k in TOP_KS:
         out[f"top{k}"] = {"count": sum(r < k for r in pessimistic)}
     return out
+
+
+def _golden_metrics(entries: list[tuple[GoldenGroup, np.ndarray]]) -> dict:
+    """:func:`rank_metrics` over a scored pool. A pool with several verified rows is scored on the best of
+    them (:func:`~..metrics.best_dual_rank`): deploy ships one config, so any acceptable one ranked first is
+    the same win."""
+    return rank_metrics([best_dual_rank(quality, g.golden_ids) for g, quality in entries])
 
 
 def golden_cells(half: str, groups: Sequence[GoldenGroup], score: Scorer) -> list[Cell]:

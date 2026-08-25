@@ -9,7 +9,8 @@ Five subcommands:
   corpus (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
   golden). BOTH prior halves are reported, labelled — they fail for different reasons.
   The cells are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
-  still emits its own metrics layout and moves onto these cells with the fold harness.
+  writes the same cells into its ``metrics.json``, so a fit and an eval state the golden
+  screen with one implementation rather than two that agree by coincidence.
 - ``eval golden``    — validate one canonical golden YAML against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants

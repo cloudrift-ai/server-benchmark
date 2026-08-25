@@ -1364,8 +1364,8 @@ over the goldens, the tune DB's `node` table, or a measurement freeze, and it re
 prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
-(`--json`), so comparing two models is a `diff`. `emmy fit` still writes its own metrics layout and adopts these
-cells with the fold harness. The report computes nothing itself:
+(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same cells into its `metrics.json`, through
+the same `report.rank_metrics`. The report computes nothing itself:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
 both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
 where a score comes from.

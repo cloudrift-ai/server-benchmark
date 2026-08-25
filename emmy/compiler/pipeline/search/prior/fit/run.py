@@ -26,7 +26,10 @@ def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, t
     """One complete fit run → ``(metrics, fit)``. ``trainer.fit(groups)`` produces the shippable
     model over every group; ``fold_trainer`` is the same trainer under the fold-seeding policy and
     fits one model per :func:`~.cv.run_folds` fold. ``folds`` is the fold count (``0`` skips
-    cross-validation entirely and the metrics carry an empty ``cv`` block)."""
+    cross-validation entirely and the metrics carry an empty ``cv`` block).
+
+    The cross-validation block is the folds' own result, not a map keyed by fold axis: there is one axis
+    (shape) and there has only ever been one, so the key was a wrapper a reader had to step through."""
     full = trainer.fit(groups)
 
     # Each fold re-fits — silence the fit package's per-case rank logging for that stage
@@ -35,7 +38,7 @@ def run_fit(groups: list[GoldenGroup], skipped: list[tuple[str, str, str]], *, t
     level = pkg_logger.level
     pkg_logger.setLevel(logging.WARNING)
     try:
-        cv = {"shape": run_folds(groups, trainer=fold_trainer, k=folds)} if folds else {}
+        cv = run_folds(groups, trainer=fold_trainer, k=folds) if folds else {}
     finally:
         pkg_logger.setLevel(level)
 

@@ -348,6 +348,16 @@ a shared producer or change the recognized computation. Merge order may temporar
 another reduction; the later legal merge is still taken. Every fused-versus-cut choice belongs to placement and the
 deploy evidence hierarchy.
 
+Repeated-compute detection reads the final fused Loop IR symbolically. Each pure SSA value expands to its exact
+external-load and elementwise expression; coordinate axes alpha-rename by first use, so equal computations placed
+under differently named loops join one value class while buffer identity, operations, dtypes, and index maps remain
+significant. Each occurrence records its consumer execution scope and the axes its producer coordinates actually
+depend on. A consumer-only axis proves replication even with symbolic extents; for fully static affine indices,
+`index_set_size` gives a conservative coordinate-count upper bound, so a larger execution domain is a second proof.
+Equal demand maps collapse without enumerating tensor elements. Cyclic, effectful, reduction-derived, or unsupported
+expressions produce no value class. This analysis exposes facts to placement; it never inserts a fusion boundary or
+chooses between inline and materialized execution.
+
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
 coordinates are related by reshape and axis permutation. The proof matches source coordinates to mixed-radix digits

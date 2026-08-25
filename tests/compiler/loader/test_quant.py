@@ -15,15 +15,19 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
     _fp4_quant_config,
     _fp8_quant_config,
+    _static_fp4_activation_declared,
     decode_f8,
     dequantize,
     dequantize_awq4,
     dequantize_nvfp4,
+    encode_f4x2,
+    encode_f8,
     fuse_nvfp4_scales,
     quantize_nvfp4,
     spell_dynamic_fp8_activations,
     spell_quantized_constants,
     spell_quantized_inputs,
+    spell_static_fp4_activations,
     unpack_awq4,
 )
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
@@ -1134,6 +1138,138 @@ def _nvfp4_matmul_graph(tmp_path):
     g.inputs = [x_in]
     assert spell_quantized_constants(g, str(tmp_path)) == 1
     return g, y, (packed, scale_bits, s2)
+
+
+# ===================================================================
+# Static 4-bit activations — the W4A4 declared program's activation half
+# ===================================================================
+
+#: The 8B's own declaration shape: config_groups marking input_activations 4-bit static float.
+_W4A4_MODELOPT_QC = {
+    **_FP4_MODELOPT_QC,
+    "config_groups": {
+        "group_0": {
+            "input_activations": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
+            "targets": ["Linear"],
+        }
+    },
+}
+
+
+def _w4a4_checkpoint(dirpath, modules, *, k=32, qc=_W4A4_MODELOPT_QC):
+    """NVFP4 weight trio + static ``input_scale`` per module — the 8B's marking at toy shape.
+
+    ``modules`` maps a module name to ``(n, input_scale)``; ``input_scale=None`` writes no
+    activation marker for that module. Returns each module's ``(packed, scale_bits)``."""
+    tensors, data = {}, {}
+    for name, (n, iscale) in modules.items():
+        packed = rng.integers(0, 256, (n, k // 2)).astype(np.uint8)
+        scale_bits = rng.integers(0, 0x7F, (n, k // 16)).astype(np.uint8)
+        tensors[f"{name}.weight"] = torch.from_numpy(packed)
+        tensors[f"{name}.weight_scale"] = _fp8_tensor(scale_bits)
+        tensors[f"{name}.weight_scale_2"] = torch.tensor(0.25, dtype=torch.float32)
+        if iscale is not None:
+            tensors[f"{name}.input_scale"] = torch.tensor(iscale, dtype=torch.float32)
+        data[name] = (packed, scale_bits)
+    dirpath.mkdir(exist_ok=True)
+    _write_checkpoint(dirpath, tensors, quant_config=qc)
+    return data
+
+
+def _w4a4_graph(modules, *, k=32, dtype="f32"):
+    """One shared activation feeding a ``LinearOp`` per module — q/k/v's shape at toy size."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, k), dtype), node_id="x")
+    outs = []
+    for name, n in modules.items():
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype=dtype),
+            inputs=[],
+            output=Tensor(f"{name}_w", (n, k), dtype),
+            node_id=f"{name}_w",
+        )
+        outs.append(g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor(f"{name}_y", (4, n), dtype), node_id=f"{name}_y"))
+    g.inputs, g.outputs = ["x"], outs
+    return g
+
+
+def _static_quantize_ref(x, s2):
+    """The spelled quantize's numpy twin: :func:`quantize_nvfp4` with the static ``s2``, the
+    divisor floored the way the graph floors it (a zero fused scale divides by the floor; the
+    decode multiplies those blocks back to zero either way)."""
+    blocks = x.astype(np.float32).reshape(*x.shape[:-1], -1, 16)
+    scale_bits = encode_f8(np.abs(blocks).max(axis=-1) / 6.0 / s2, "f8e4m3")
+    fused = fuse_nvfp4_scales(scale_bits, np.float32(s2).reshape(1)).astype(np.float32)
+    quot = blocks / np.maximum(fused[..., None], 1e-12)
+    return dequantize_nvfp4(encode_f4x2(quot.reshape(x.shape)), scale_bits, np.float32(s2).reshape(1))
+
+
+def _count_encodes(g):
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp as EW
+
+    return sum(1 for n in g.nodes.values() if isinstance(n.op, EW) and n.op.name == "to_f4e2m1")
+
+
+def test_spell_static_fp4_matches_the_quantize_oracle(tmp_path):
+    """numpy on the spelled W4A4 graph equals the declared round trip built from the repo's own
+    encode primitives: x̂ @ ŵᵀ with x̂ the static-scale quantize of x. A zeroed block rides along
+    to pin the zero-guard (its codes multiply back to zero, never NaN)."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    s2 = 0.03
+    (packed, scale_bits) = _w4a4_checkpoint(tmp_path, {"layer": (8, s2)})["layer"]
+    g = _w4a4_graph({"layer": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+
+    x = (rng.standard_normal((4, 32)) * 0.5).astype(np.float32)
+    x[1, :16] = 0.0
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    result, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    got = result.outputs["layer_y"]
+    ref = _static_quantize_ref(x, s2) @ dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32)).T
+    assert not np.any(np.isnan(got))
+    np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+
+def test_spell_static_fp4_shares_equal_scales_and_splits_unequal(tmp_path):
+    """q/k share one calibrated scale value and must share ONE quantize chain; v carries its own
+    value and quantizes separately — two encodes for three rewired linears."""
+    _w4a4_checkpoint(tmp_path, {"q": (8, 0.03), "k": (8, 0.03), "v": (8, 0.07)})
+    g = _w4a4_graph({"q": 8, "k": 8, "v": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 3
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 3
+    assert _count_encodes(g) == 2
+
+
+def test_spell_static_fp4_requires_the_per_linear_marker(tmp_path):
+    """A module without its ``input_scale`` keeps its 16-bit activation even when the config
+    declares the scheme — the per-linear tensor is the marker, and eligibility is per linear."""
+    _w4a4_checkpoint(tmp_path, {"a": (8, 0.03), "b": (8, None)})
+    g = _w4a4_graph({"a": 8, "b": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+    assert _count_encodes(g) == 1
+
+
+def test_spell_static_fp4_is_idempotent(tmp_path):
+    _w4a4_checkpoint(tmp_path, {"layer": (8, 0.03)})
+    g = _w4a4_graph({"layer": 8})
+    spell_quantized_constants(g, str(tmp_path))
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 0
+
+
+def test_static_fp4_declaration_reader():
+    """The config-level reader: 4-bit static input_activations declare; dynamic or absent
+    activation groups decline; a bare modelopt NVFP4 config (no ``config_groups``) defers to the
+    per-linear marker and declares."""
+    assert _static_fp4_activation_declared(_W4A4_MODELOPT_QC)
+    assert _static_fp4_activation_declared(_FP4_MODELOPT_QC), "bare modelopt: input_scale siblings are the marker"
+    assert not _static_fp4_activation_declared(_FP4_CT_QC), "weights-only groups do not mark activations"
+    dyn = {**_W4A4_MODELOPT_QC, "config_groups": {"g": {"input_activations": {"dynamic": True, "num_bits": 4, "type": "float"}}}}
+    assert not _static_fp4_activation_declared(dyn), "a dynamic declaration is not the static path"
 
 
 def test_both_loaders_bind_an_f8_bits_constant_identically(tmp_path):

@@ -205,11 +205,28 @@ written for — either copy transport, an N-major weight of 16-value blocks unde
 same 16; anything else declines to the general reading, which computes the same values. A TMA box deposits its byte
 slab dense where cp.async pads each row, so the two forms differ in slab size and row stride, not in what they drain.
 
+**Static 4-bit activations (the declared W4A4 program).** An NVFP4 checkpoint that declares static 4-bit input
+activations and stores per-linear `input_scale` tensors (modelopt's calibrated activation `scale_2`, one f32 =
+calibration amax / (6 · 448)) marks its linears for W4A4. `loader.quant.spell_static_fp4_activations` runs after `spell_quantized_constants`,
+whose spelled weight cones are the marker it reads, and writes the quantize→dequantize round trip in front of each
+marked linear, in the same
+shared-vocabulary algebra: per 16-element K block, the e4m3 scale round trip (`to_f8e4m3(amax / (6·s2))`), ONE
+f32→f16 rounding of the fused scale (`fuse_nvfp4_scales` parity), the e2m1 encode over the rounded scale, the pair
+pack into an `f4e2m1x2` buffer, and the same pair-table-gather decode chain the weight side spells. Both matmul
+operands then read as one decode-chain shape, the graph's own meaning becomes Σ x̂·ŵ for the marked matmuls, and the
+numpy backend stays the parity oracle for every lowering of it. Equal-valued `input_scale` tensors over one
+activation share one chain (a fused projection group calibrates to one scale); unmarked linears keep their 16-bit
+activations. One parity property is inherent rather than a defect: behind a COMPUTED producer the two backends reach
+the encodes with epsilon-different upstream values, and a block whose scale ratio lands within that epsilon of a
+rounding boundary flips one code — parity there is distributional (median exact, rare flips bounded by the
+quantization step), where direct-feed comparisons stay tight.
+
 Both readings still hand the tensor cores 16-bit fragments, because every mma before Blackwell multiplies 16-bit or
 8-bit operands. Consumer Blackwell adds one that multiplies the 4-bit codes THEMSELVES and applies each 16-value
 block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul would carry no decode at
-all. Nothing offers it yet: the instruction wants BOTH multiplicands packed, and an activation arrives as f16 or
-bf16, so quantizing one is the missing piece rather than the cell itself.
+all. Nothing offers it yet: the instruction wants BOTH multiplicands packed, and the activation speller above now
+delivers a packed activation for marked linears — so the missing piece is the both-sides recognition and the
+scale-fragment hand-off, no longer the operands.
 
 **Mixed-scheme checkpoints.** A checkpoint may quantize different leaves differently, and the two
 recognizers answer independently rather than exclusively: each asks whether ANY declared weight group is

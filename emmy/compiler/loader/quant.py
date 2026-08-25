@@ -744,6 +744,54 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
     return True
 
 
+def _f4_pair_table(graph: Graph, *, name: str, out_name: str, dtype) -> str:
+    """Add the 256x2 e2m1 pair-value table to ``graph`` as a source-free COMPUTED constant
+    (the trellis-codebook mechanism — ``ConstantOp.value`` carries scalars only) and return its
+    node id: row ``b`` holds byte ``b``'s low and high e2m1 values, concatenated along a trailing
+    axis of 2. Shared by the weight speller and the static activation speller, so both decode
+    chains read one table shape."""
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, RangeOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    tg = Graph()
+    codes = tg.add_node(op=RangeOp(stop=256, dtype="i32"), inputs=[], output=Tensor("codes", (256,), "i32"), node_id="codes")
+    mask = tg.add_node(op=ConstantOp(name="mask", value=15), inputs=[], output=Tensor("mask", (1,), "i32"))
+    shift = tg.add_node(op=ConstantOp(name="shift", value=4), inputs=[], output=Tensor("shift", (1,), "i32"))
+    low = tg.add_node(
+        op=ElementwiseOp(op="bitwise_and"),
+        inputs=[codes, broadcast_to(tg, mask, (256,))],
+        output=Tensor("low", (256,), "i32"),
+    )
+    high = tg.add_node(
+        op=ElementwiseOp(op="right_shift"),
+        inputs=[codes, broadcast_to(tg, shift, (256,))],
+        output=Tensor("high", (256,), "i32"),
+    )
+    vlow = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[low], output=Tensor("vlow", (256,), "f32"))
+    vhigh = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[high], output=Tensor("vhigh", (256,), "f32"))
+    pairs_t = tg.add_node(
+        op=IndexMapOp(
+            out_shape=(256, 2),
+            sources=(
+                IndexSource(input_idx=0, coord_map=(placeholder(0),), select=placeholder(1).lt(Literal(1, "int"))),
+                IndexSource(input_idx=1, coord_map=(placeholder(0),)),
+            ),
+        ),
+        inputs=[vlow, vhigh],
+        output=Tensor("pairs", (256, 2), "f32"),
+    )
+    if dtype.name != "f32":
+        pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), dtype))
+    tg.outputs = [pairs_t]
+    return graph.add_node(
+        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype),
+        inputs=[],
+        output=Tensor(out_name, (256, 2), dtype),
+    )
+
+
 def _spell_fp4_one(
     graph: Graph,
     nid: str,
@@ -767,9 +815,8 @@ def _spell_fp4_one(
     trace promised, so every later pass is unaffected. Checkpoint shapes that do not
     match the packing leave the constant alone (``False``) — never a compile error.
     """
-    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
@@ -800,44 +847,7 @@ def _spell_fp4_one(
         output=Tensor(f"{out.name}_bits", packed_shape, F4E2M1x2.name),
     )
     idx = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{out.name}_idx", packed_shape, "i32"))
-    # The pair table binds as a source-free COMPUTED constant (the trellis-codebook
-    # mechanism — ``ConstantOp.value`` carries scalars only): row b holds byte b's low
-    # and high e2m1 values, concatenated along a trailing axis of 2.
-    tg = Graph()
-    codes = tg.add_node(op=RangeOp(stop=256, dtype="i32"), inputs=[], output=Tensor("codes", (256,), "i32"), node_id="codes")
-    mask = tg.add_node(op=ConstantOp(name="mask", value=15), inputs=[], output=Tensor("mask", (1,), "i32"))
-    shift = tg.add_node(op=ConstantOp(name="shift", value=4), inputs=[], output=Tensor("shift", (1,), "i32"))
-    low = tg.add_node(
-        op=ElementwiseOp(op="bitwise_and"),
-        inputs=[codes, broadcast_to(tg, mask, (256,))],
-        output=Tensor("low", (256,), "i32"),
-    )
-    high = tg.add_node(
-        op=ElementwiseOp(op="right_shift"),
-        inputs=[codes, broadcast_to(tg, shift, (256,))],
-        output=Tensor("high", (256,), "i32"),
-    )
-    vlow = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[low], output=Tensor("vlow", (256,), "f32"))
-    vhigh = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[high], output=Tensor("vhigh", (256,), "f32"))
-    pairs_t = tg.add_node(
-        op=IndexMapOp(
-            out_shape=(256, 2),
-            sources=(
-                IndexSource(input_idx=0, coord_map=(placeholder(0),), select=placeholder(1).lt(Literal(1, "int"))),
-                IndexSource(input_idx=1, coord_map=(placeholder(0),)),
-            ),
-        ),
-        inputs=[vlow, vhigh],
-        output=Tensor("pairs", (256, 2), "f32"),
-    )
-    if out.dtype.name != "f32":
-        pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), out.dtype))
-    tg.outputs = [pairs_t]
-    table = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_f4_pairs", source_graph=tg, source_shape=(256, 2), source_dtype=out.dtype),
-        inputs=[],
-        output=Tensor(f"{out.name}_f4_pairs", (256, 2), out.dtype),
-    )
+    table = _f4_pair_table(frag, name=f"{op.name}_f4_pairs", out_name=f"{out.name}_f4_pairs", dtype=out.dtype)
     pairs = frag.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{out.name}_pairs", packed_shape + (2,), out.dtype))
     vals = frag.add_node(op=ReshapeOp(shape=shape), inputs=[pairs], output=Tensor(f"{out.name}_vals", shape, out.dtype))
 
@@ -1387,6 +1397,239 @@ def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
         formats = ", ".join(sorted({fmt for _linear, _activation, fmt in eligible}))
         logger.info("spelled dynamic %s activation algebra for %d linear(s) from %s", formats, len(eligible), model_dir)
     return len(eligible)
+
+
+def _static_fp4_activation_declared(qc: dict) -> bool:
+    """Whether an NVFP4 checkpoint declares STATIC 4-bit float input activations.
+
+    modelopt 0.35+ and llm-compressor write a ``config_groups`` entry whose ``input_activations``
+    is 4-bit static float over 16-element groups; older modelopt configs carry no
+    ``config_groups`` at all, and there the per-linear ``input_scale`` tensors are the marker
+    (checked per linear, not here). A dynamic declaration declines — the static per-tensor
+    level is what this path's checkpoints calibrate."""
+    groups = qc.get("config_groups")
+    if not groups:
+        return qc.get("quant_method") == "modelopt"
+    for group in groups.values():
+        acts = group.get("input_activations") if isinstance(group, dict) else None
+        if (
+            isinstance(acts, dict)
+            and acts.get("type") == "float"
+            and int(acts.get("num_bits") or 0) == 4
+            and not acts.get("dynamic")
+            and int(acts.get("group_size") or NVFP4_BLOCK) == NVFP4_BLOCK
+        ):
+            return True
+    return False
+
+
+def _cone_fp4_weight_base(graph: Graph, start: str) -> str | None:
+    """The checkpoint module base (the ``.weight`` key minus its suffix) of the ONE packed NVFP4
+    weight constant upstream of buffer ``start``, or ``None`` — no packed weight, several, or a
+    source path outside the ``<module>.weight`` pairing that ``input_scale`` siblings follow."""
+    pending = [start]
+    seen: set[str] = set()
+    paths: set[str] = set()
+    while pending:
+        node = graph.producer(pending.pop())
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ConstantOp) and node.output.dtype.name == F4E2M1x2.name and node.op.source_path:
+            paths.add(node.op.source_path)
+        pending.extend(node.inputs)
+    if len(paths) != 1:
+        return None
+    path = next(iter(paths))
+    return path.removesuffix(".weight") if path.endswith(".weight") else None
+
+
+def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
+    """Whether an activation buffer is already downstream of an e2m1 encode (idempotency)."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+
+    pending = [start]
+    seen: set[str] = set()
+    while pending:
+        node = graph.producer(pending.pop())
+        if node is None or node.id in seen:
+            continue
+        seen.add(node.id)
+        if isinstance(node.op, ElementwiseOp) and node.op.op.name == "to_f4e2m1":
+            return True
+        pending.extend(node.inputs)
+    return False
+
+
+def _spell_static_fp4_activation(graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]) -> str | None:
+    """Spell one static 4-bit activation quantize→dequantize round trip and return its restored
+    buffer, or ``None`` when the activation's shape cannot carry it (symbolic or non-16-multiple
+    K, a non-scalar ``input_scale``).
+
+    The algebra is :func:`quantize_nvfp4` with the checkpoint's static per-linear ``input_scale``
+    standing in for the tensor-derived ``scale_2``: per 16-element K block, the e4m3 block-scale
+    round trip (``to_f8e4m3(amax / (6·s2))``), ONE f32→f16 rounding of the fused scale
+    (:func:`fuse_nvfp4_scales` parity), the e2m1 encode of the block over the rounded fused
+    scale, and the pair pack into an ``f4e2m1x2`` buffer. The declared reconstruction then
+    mirrors the weight cone — pair-table gather over the packed buffer, fused-scale multiply at
+    the promised dtype — so both matmul operands read as the same decode-chain shape. The
+    quantize's divisor is floored at 1e-12 so an all-zero block divides by the floor instead of
+    by zero; its codes are zeros either way, and the decode multiplies by the unfloored scale."""
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    source = graph.buffer(activation)
+    if source is None or not source.shape or source.dtype.name not in {"f16", "bf16", "f32"}:
+        return None
+    kd = source.shape[-1]
+    if not kd.is_static or kd.as_static() % NVFP4_BLOCK or int(np.prod(s2_shape) if s2_shape else 1) != 1:
+        return None
+    k = kd.as_static()
+    lead = tuple(d.as_static() if d.is_static else str(d) for d in source.shape[:-1])
+    blocked = (*lead, k // NVFP4_BLOCK, NVFP4_BLOCK)
+    bshape = (*lead, k // NVFP4_BLOCK, 1)
+    flat, half = (*lead, k), (*lead, k // 2)
+    # Freshness must be probed on a DERIVED name: the stem itself never becomes a node, and
+    # ``add_node`` silently falls back to an ``n<i>`` node id on a taken name while keeping the
+    # duplicate TENSOR name — two buffers sharing one name then cross-read at the kernel level,
+    # where references are by name. ``_value`` exists in every chain, so it is the probe.
+    stem, suffix = f"{activation}_static_fp4", 2
+    while f"{stem}_value" in graph.nodes or graph.buffer(f"{stem}_value") is not None:
+        stem = f"{activation}_static_fp4_{suffix}"
+        suffix += 1
+    dt = source.dtype
+
+    blk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[activation], output=Tensor(f"{stem}_blk", blocked, dt))
+    absolute = graph.add_node(op=ElementwiseOp(op="abs"), inputs=[blk], output=Tensor(f"{stem}_abs", blocked, "f32"))
+    amax = graph.add_node(op=ReduceOp(op="maximum", axis=-1), inputs=[absolute], output=Tensor(f"{stem}_amax", bshape, "f32"))
+    s2 = graph.add_node(
+        op=ConstantOp(
+            name=f"{stem}_scale_2",
+            source_path=scale_key,
+            source_shape=tuple(s2_shape),
+            source_dtype="f32",
+            load_ops=() if tuple(s2_shape) == (1,) * len(bshape) else (ReshapeOp(shape=(1,) * len(bshape)),),
+        ),
+        inputs=[],
+        output=Tensor(f"{stem}_scale_2", (1,) * len(bshape), "f32"),
+    )
+    s2_bc = broadcast_to(graph, s2, bshape)
+    fmax = const_bc(graph, name=f"{stem}_f4_max", value=_F4_MAX, target_shape=bshape, dtype="f32")
+    denom = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[fmax, s2_bc], output=Tensor(f"{stem}_denom", bshape, "f32"))
+    ratio = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[amax, denom], output=Tensor(f"{stem}_ratio", bshape, "f32"))
+    sbits = graph.add_node(op=ElementwiseOp(op="to_f8e4m3"), inputs=[ratio], output=Tensor(f"{stem}_scale_bits", bshape, F8E4M3.name))
+    sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))
+    fused32 = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[sdec, s2_bc], output=Tensor(f"{stem}_fused32", bshape, "f32"))
+    fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{stem}_fused", bshape, "f16"))
+    div32 = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_div32", bshape, "f32"))
+    floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=bshape, dtype="f32")
+    safe = graph.add_node(op=ElementwiseOp(op="maximum"), inputs=[div32, floor], output=Tensor(f"{stem}_safe", bshape, "f32"))
+    safe_bc = broadcast_to(graph, safe, blocked)
+    quot = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[blk, safe_bc], output=Tensor(f"{stem}_norm", blocked, "f32"))
+    codes = graph.add_node(op=ElementwiseOp(op="to_f4e2m1"), inputs=[quot], output=Tensor(f"{stem}_codes", blocked, "i32"))
+    codes_f = graph.add_node(op=ReshapeOp(shape=flat), inputs=[codes], output=Tensor(f"{stem}_codes_flat", flat, "i32"))
+    d = len(flat) - 1
+    lead_ph = tuple(placeholder(i) for i in range(d))
+    even = graph.add_node(
+        op=IndexMapOp(out_shape=half, sources=(IndexSource(input_idx=0, coord_map=(*lead_ph, placeholder(d) * Literal(2, "int"))),)),
+        inputs=[codes_f],
+        output=Tensor(f"{stem}_even", half, "i32"),
+    )
+    odd = graph.add_node(
+        op=IndexMapOp(
+            out_shape=half,
+            sources=(IndexSource(input_idx=0, coord_map=(*lead_ph, placeholder(d) * Literal(2, "int") + Literal(1, "int"))),),
+        ),
+        inputs=[codes_f],
+        output=Tensor(f"{stem}_odd", half, "i32"),
+    )
+    four_bc = const_bc(graph, name=f"{stem}_shift", value=4, target_shape=half, dtype="i32")
+    hi = graph.add_node(op=ElementwiseOp(op="left_shift"), inputs=[odd, four_bc], output=Tensor(f"{stem}_hi", half, "i32"))
+    byte = graph.add_node(op=ElementwiseOp(op="bitwise_or"), inputs=[even, hi], output=Tensor(f"{stem}_byte", half, "i32"))
+    bits = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[byte], output=Tensor(f"{stem}_bits", half, F4E2M1x2.name))
+
+    idx = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{stem}_idx", half, "i32"))
+    table = _f4_pair_table(graph, name=f"{stem}_f4_pairs", out_name=f"{stem}_f4_pairs", dtype=dt)
+    pairs = graph.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{stem}_pairs", (*half, 2), dt))
+    vblk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[pairs], output=Tensor(f"{stem}_vals", blocked, dt))
+    fused_x = fused
+    if dt.name != "f16":
+        fused_x = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_fused_cast", bshape, dt))
+    f_bc = broadcast_to(graph, fused_x, blocked)
+    scaled = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[vblk, f_bc], output=Tensor(f"{stem}_sblk", blocked, dt))
+    return graph.add_node(op=ReshapeOp(shape=flat), inputs=[scaled], output=Tensor(f"{stem}_value", flat, dt))
+
+
+def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
+    """Spell checkpoint-declared STATIC 4-bit activation quantization in front of NVFP4-marked
+    linears — the activation half of the declared W4A4 program.
+
+    A linear is marked when its already-spelled weight cone holds a packed NVFP4 constant AND the
+    checkpoint stores that module's ``input_scale`` — modelopt's calibrated per-linear activation
+    ``scale_2`` (one f32, ``calibration amax / (6 · 448)``). The graph's own meaning then becomes
+    Σ x̂·ŵ program-wide, and the numpy backend stays the parity oracle. Unmarked linears keep
+    their 16-bit activations untouched. Consumers reading one activation through equal-valued
+    ``input_scale`` tensors share one quantized value (the checkpoint calibrates a fused
+    projection group — q/k/v, gate/up — to one scale, stored once per member); unequal values
+    quantize per scale path. Returns the number of rewired linears; weight-only or non-NVFP4
+    checkpoints are a no-op. Runs after :func:`spell_quantized_constants`, whose spelled weight
+    cones are the marker it reads."""
+    from safetensors import safe_open  # noqa: PLC0415
+
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir  # noqa: PLC0415
+
+    model_dir = _resolve_model_dir(model_id_or_path)
+    qc4 = _fp4_quant_config(model_dir)
+    if qc4 is None or not _static_fp4_activation_declared(qc4):
+        return 0
+    index = _build_index(model_dir)
+
+    eligible: list[tuple[str, str, str]] = []
+    for node in list(graph.nodes.values()):
+        if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
+            continue
+        activation, weight = node.inputs[:2]
+        base = _cone_fp4_weight_base(graph, weight)
+        if base is None or _cone_has_fp4_encode(graph, activation):
+            continue
+        scale_key = base + ".input_scale"
+        if scale_key in index:
+            eligible.append((node.id, activation, scale_key))
+    if not eligible:
+        return 0
+
+    spelled = 0
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _open(key: str):
+            path = str(index[key])
+            handle = handles.get(path)
+            if handle is None:
+                handle = handles[path] = stack.enter_context(safe_open(path, framework="numpy"))
+            return handle
+
+        rewritten: dict[tuple[str, float], str] = {}
+        for linear_id, activation, scale_key in eligible:
+            value = float(np.asarray(_open(scale_key).get_tensor(scale_key), dtype=np.float32).reshape(-1)[0])
+            restored = rewritten.get((activation, value))
+            if restored is None:
+                s2_shape = tuple(int(x) for x in _open(scale_key).get_slice(scale_key).get_shape())
+                restored = _spell_static_fp4_activation(graph, activation, scale_key, s2_shape)
+                if restored is None:
+                    logger.warning("static fp4 activation %s: shape cannot carry the block quantize; linear stays 16-bit", scale_key)
+                    continue
+                rewritten[(activation, value)] = restored
+            graph.replace_input(linear_id, activation, restored)
+            spelled += 1
+    if spelled:
+        logger.info("spelled static 4-bit activation algebra for %d linear(s) from %s", spelled, model_dir)
+    return spelled
 
 
 def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) -> tuple[int, int, int, int] | None:

@@ -358,6 +358,14 @@ Equal demand maps collapse without enumerating tensor elements. Cyclic, effectfu
 expressions produce no value class. This analysis exposes facts to placement; it never inserts a fusion boundary or
 chooses between inline and materialized execution.
 
+A closed fused-value cut is the exact inverse over one such class. Its child evaluates one dependency-closed pure
+spelling over the producer coordinates and writes either an existing live output port or a typed workspace. Its
+parent replaces every equivalent spelling with a `Load`, retains every other output port with its original shape and
+dtype, and removes only definitions made dead by that replacement. Construction declines when effects or unresolved
+captures enter the cone, an output has multiple or scope-mismatched writes, coordinates cannot represent the output
+shape, or the cut would transfer every output and leave no parent. The fragment is ordinary multi-output graph
+structure; it carries no schedule choice and does not alter fusion.
+
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
 coordinates are related by reshape and axis permutation. The proof matches source coordinates to mixed-radix digits

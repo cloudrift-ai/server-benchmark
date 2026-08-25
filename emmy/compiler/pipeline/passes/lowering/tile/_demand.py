@@ -45,6 +45,7 @@ class ValueOccurrence:
     evaluations: int | None
     coordinate_upper_bound: int | None
     uses: tuple[ValueUse, ...]
+    dependencies: tuple[Stmt, ...]
 
     @property
     def replication_lower_bound(self) -> int | None:
@@ -101,6 +102,7 @@ class _Expansion:
     axes: dict[str, int]
     coordinate_exprs: list[Expr]
     loads: set[tuple[int, int]]
+    values: set[str]
 
 
 class _Unsupported(Exception):
@@ -187,6 +189,7 @@ class _Analysis:
         if definition is None or name in pending:
             return None
         stmt = definition.stmt
+        expansion.values.add(name)
         pending.add(name)
         try:
             if isinstance(stmt, Load):
@@ -217,7 +220,7 @@ class _Analysis:
         # A load is already materialized data, not a computed value placement may extract.
         if isinstance(definition.stmt, Load):
             return None
-        expansion = _Expansion(axes={}, coordinate_exprs=[], loads=set())
+        expansion = _Expansion(axes={}, coordinate_exprs=[], loads=set(), values=set())
         try:
             key = self._value_key(definition.name, expansion, set())
         except _Unsupported:
@@ -247,6 +250,11 @@ class _Analysis:
             evaluations=evaluations,
             coordinate_upper_bound=distinct,
             uses=tuple(self.uses.get(definition.name, ())),
+            dependencies=tuple(
+                item.stmt
+                for item in sorted(self.definitions.values(), key=lambda item: self.order[item.name])
+                if item.name in expansion.values
+            ),
         )
         return key, signature, occurrence
 

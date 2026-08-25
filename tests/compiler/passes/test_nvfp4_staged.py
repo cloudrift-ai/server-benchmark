@@ -487,6 +487,68 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
+    """A leading unit batch axis on A — the shape every ``emmy compile --layer`` trace carries
+    (``[1, seq, K]``) — must box the TMA descriptor at FULL rank. ``_a_slab_operand`` used to
+    leave the box at the 2-D slab shape while ``_box_origin`` yielded the full-rank origin, so
+    the emitted copy carried more coordinates than the descriptor's encoded rank; TMA treats
+    that as an invalid tensor map and the kernel raised ILLEGAL INSTRUCTION from its first
+    thread (UTMALDG.4D over a rank-3 map, found by the layer-0 W4A4 parity run). The staged
+    matmul tests were all 2-D, and the cp.async transport indexes flat rather than boxing,
+    which is why only TMA faulted."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import dequantize_nvfp4, spell_quantized_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.loader.test_quant import _FP4_MODELOPT_QC, _fp8_tensor, _write_checkpoint
+
+    m, n, k = 16, 1024, 4096
+    rng = np.random.default_rng(7)
+    packed = rng.integers(0, 256, (n, k // 2)).astype(np.uint8)
+    scale_bits = rng.integers(0, 0x7F, (n, k // 16)).astype(np.uint8)
+    s2 = np.array(0.25, dtype=np.float32)
+    _write_checkpoint(
+        tmp_path,
+        {
+            "layer.weight": torch.from_numpy(packed),
+            "layer.weight_scale": _fp8_tensor(scale_bits),
+            "layer.weight_scale_2": torch.tensor(float(s2), dtype=torch.float32),
+        },
+        quant_config={**_FP4_MODELOPT_QC, "ignore": ["lm_head"]},
+    )
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, m, k), "f16"), node_id="x")
+    w = g.add_node(
+        op=ConstantOp(name="w", source_path="layer.weight", source_shape=(n, k), source_dtype="f16"),
+        inputs=[],
+        output=Tensor("w", (n, k), "f16"),
+        node_id="w",
+    )
+    g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor("y", (1, m, n), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+
+    x = (np.random.default_rng(3).standard_normal((1, m, k)) * 0.05).astype(np.float16)
+    backend = CudaBackend()
+    with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x4/k8", "WORK": "w1x1", "REDUCE": "g8k", "STAGE": "d1/smem-tma"}):
+        compiled = backend.compile(g)
+    src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
+    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
+    data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
+    result, _ = backend.run(compiled, input_data={**data, "x": x})
+    y = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
+    ref = x.reshape(m, k).astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
+    denom = max(float(np.abs(ref).max()), 1e-9)
+    assert float(np.abs(y - ref).max()) / denom < 1e-3
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
 def test_the_packed_drain_composes_with_the_f16_accumulate_atom(tmp_path):
     """The byte slab under the f16-accumulate atom (``FAST_MATH``'s ``F16_MMA_F32_ACC`` member):
     the kernel carries the packed drain, the f16-fragment mma chain and its chunk promote

@@ -639,10 +639,18 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
 
     Returns ``(operand, copied, prologue)``."""
     if isinstance(c.a, Load):
+        shape = (mn[0].tile, bk_elems)
         op = Operand(
             tag="a",
             buf=c.a.input,
-            shape=(mn[0].tile, bk_elems),
+            shape=shape,
+            # A >2-D operand boxes as rank-N with leading extent-1 dims — the convention
+            # ``_slab_operands`` applies. ``_box_origin`` already yields the FULL-RANK origin, so
+            # a box left at the 2-D shape gives the emitted copy more coordinates than the
+            # descriptor's encoded rank, and TMA treats that as an invalid tensor map (measured
+            # on a leading unit batch axis: UTMALDG.4D over a rank-3 map raises ILLEGAL
+            # INSTRUCTION from the first thread).
+            box=(1,) * (len(c.a.index) - 2) + shape if len(c.a.index) > 2 else None,
             coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
             index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
             swizzle=swizzle,

@@ -70,6 +70,8 @@ include = ["emmy*"]
 
 [tool.setuptools.package-data]
 # Model-agnostic hardware goldens; model goldens are staged with their recipes below.
+# ``search/freezes/`` is deliberately NOT here: a measurement freeze is evaluation data for
+# `emmy fit` / `emmy eval prior`, which a wheel install never runs, and it is several MB per card.
 "emmy.compiler.pipeline.search" = ["goldens/*.yaml"]
 "emmy.compiler.pipeline.search.prior" = ["*.json"]
 # Staged out of the top-level recipes/ by `scripts/prepare_dist.py --recipes`

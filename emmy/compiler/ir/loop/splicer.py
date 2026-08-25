@@ -114,6 +114,7 @@ class _OutputEquivalenceCluster:
 
     buffers: tuple[str, ...]
     copy_nodes: tuple[str, ...]
+    inverse_strides: tuple[tuple[int, ...], ...]
 
 
 @dataclass
@@ -312,34 +313,34 @@ def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[
             continue
         buffers = [output]
         copy_nodes: list[str] = []
+        inverse_strides: list[tuple[int, ...]] = []
         current = output
         while True:
             copy = graph.producer(current)
             if copy is None or copy.id not in loop_nodes:
                 break
-            source = _layout_copy_source(graph, copy, current)
-            if source is None or source in graph.outputs or graph.buffer_users(source) != {copy.id}:
+            inverse = _layout_copy_inverse(graph, copy, current)
+            if inverse is None:
+                break
+            source, strides = inverse
+            if source in graph.outputs or graph.buffer_users(source) != {copy.id}:
                 break
             source_node = graph.producer(source)
             if source_node is None or source_node.id not in loop_nodes:
                 break
             buffers.append(source)
             copy_nodes.append(copy.id)
+            inverse_strides.append(strides)
             current = source
         if copy_nodes:
             clusters.append(
                 _OutputEquivalenceCluster(
                     buffers=tuple(reversed(buffers)),
                     copy_nodes=tuple(reversed(copy_nodes)),
+                    inverse_strides=tuple(reversed(inverse_strides)),
                 )
             )
     return tuple(clusters)
-
-
-def _layout_copy_source(graph, node, output: str) -> str | None:
-    """Return the source buffer when ``node`` is a proven bijective layout copy."""
-    inverse = _layout_copy_inverse(graph, node, output)
-    return inverse[0] if inverse is not None else None
 
 
 def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]] | None:
@@ -470,15 +471,11 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
         return None
 
     steps: list[tuple[tuple[int, ...], object]] = []
-    current = source
-    for node_id, destination in zip(cluster.copy_nodes, cluster.buffers[1:], strict=True):
-        copy = graph.nodes.get(node_id)
-        inverse = _layout_copy_inverse(graph, copy, destination) if copy is not None else None
+    for inverse, destination in zip(cluster.inverse_strides, cluster.buffers[1:], strict=True):
         tensor = graph.buffer(destination)
-        if inverse is None or inverse[0] != current or tensor is None:
+        if tensor is None:
             return None
-        steps.append((inverse[1], tensor.shape))
-        current = destination
+        steps.append((inverse, tensor.shape))
 
     ctx = _extent_ctx(extents)
     replacement: dict[int, Write] = {}

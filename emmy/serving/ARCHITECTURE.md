@@ -443,7 +443,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `cdiv(max_model_len, block_size)`-page rows — TRITON_ATTN's unmasked block-table load then feeds garbage page
   ids into its K/V loads (capture-warmup illegal memory access, reproduced standalone: clean at 4096, faulting
   from 4097, at head_dim 256 AND 512 — head width is irrelevant), and FLEX_ATTENTION fails the same arithmetic
-  loudly in its sliding-window block-mask shapes. 5090-measured with the earlier 2112 rung cap (2026-08-15,
+  loudly in its sliding-window block-mask shapes. Reported upstream as vllm-project/vllm#53658; the patch goes
+  away once the vllm pin reaches a release that closes it. 5090-measured with the earlier 2112 rung cap (2026-08-15,
   fcbc880f+fix tree, medians of 3): small_c1 256/256 TTFT 90.4 → 72.2 ms (capture off → on; stock 66.5 — the
   1.36x gap closes to 1.09x)
   with TPOT unchanged, and c64 np256 on the capped lane TPOT 34.9 → 33.1 ms, 1243 → 1255 tok/s, greedy chat

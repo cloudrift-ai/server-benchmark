@@ -204,7 +204,7 @@ def cuttable_seams(root, stores: tuple = (), free: tuple = ()) -> list[CutSite]:
     return _grouped_sites(root, stores, free, legal)
 
 
-def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, CutSite | None]:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
+def route_cut(root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, CutSite | None]:
     """The ``PLACE`` pin resolution for a freshly-recognized kernel: ``("cut", seam)`` when a pin
     cuts, ``("fuse", None)`` when a pin names this tree and keeps it fused (authoritative — no
     placement fork is offered), ``(None, None)`` when no pin decides (the placement FORK owns the
@@ -398,30 +398,6 @@ def _cut_ops(root, stores: tuple, free: tuple, cut: CutSite, ws: str) -> tuple[L
     return child_op, parent_op, axes
 
 
-def reusable_cut_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
-    """Return the two Loop-IR pieces for one unambiguous grouped computed-edge cut.
-
-    The recognized form has a concrete materialization sibling whose producer runs once.
-    No group, or more than one possible group, declines.
-    """
-    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
-
-    try:
-        tile = recognized_tile(loop_op, name=loop_op.name)
-        pro = fused_view(tile)
-    except (AssertionError, ValueError):
-        return None
-    if pro is None:
-        return None
-    tree, free, stores = pro[0], (*tile.place.free, *pro[1]), pro[2]
-    groups = [cut for cut in cuttable_seams(tree, stores, free) if len(cut.members) == 2]
-    if len(groups) != 1:
-        return None
-    child_op, parent_op, _ = _cut_ops(tree, stores, free, groups[0], "__reuse_ws")
-    return child_op, parent_op
-
-
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: CutSite) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
@@ -505,4 +481,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Cu
     return frag
 
 
-__all__ = ["CutSite", "cuttable_seams", "placement_pins", "realize_cut", "reusable_cut_pieces", "route_cut"]
+__all__ = ["CutSite", "cuttable_seams", "placement_pins", "realize_cut", "route_cut"]

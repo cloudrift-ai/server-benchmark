@@ -91,14 +91,16 @@ def capture_twin_graphs(
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the same names
     ``scripts/capture_gen_twins.py`` writes. ``extra_widths`` adds release-specific decode or
-    prefill buckets. On an EXL3 checkpoint each
-    twin holding coded weights is replaced by its spelled forms, one per rate profile
-    (``…@b4``). ``static_only`` is the deliberate exception: it accepts only the proven
-    decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
+    prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
+    spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
+    config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
+    profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
+    ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
+    only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import strip_engine_quant_config  # noqa: PLC0415
+    from emmy.compiler.loader.quant import fp8_weight_profile, mxfp4_weight_profile, strip_engine_quant_config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
     from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
         build_attention_split_wrapper,
@@ -112,6 +114,8 @@ def capture_twin_graphs(
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
     storage = coded_tensor_storage(model, cfg, revision=revision)
+    fp8 = fp8_weight_profile(text)
+    mxfp4 = mxfp4_weight_profile(text)
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
     if (text.pad_token_id or 0) >= text.vocab_size:
@@ -199,6 +203,10 @@ def capture_twin_graphs(
                 expert_name = f"expert{name}{suffix}"
                 if storage:
                     graphs.update(_spell_expert_twins(expert_name, graph, storage))
+                elif fp8 is not None:
+                    graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
+                elif mxfp4 is not None:
+                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members))
                 else:
                     graphs[expert_name] = graph
     return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes) if storage else graphs
@@ -252,14 +260,20 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
 
     out = []
     for i, block in enumerate(trunk.layers):
-        inferred_heads, _width = _attention_query_layout(block.self_attn)
+        attn = at(types, i, "homogeneous")
+        attention = getattr(block, "self_attn", None)
+        if attention is None:
+            raise NotImplementedError(
+                f"serving twins: layer {i} ({type(block).__name__}, {attn}) has no self_attn; "
+                "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"
+            )
+        inferred_heads, _width = _attention_query_layout(attention)
         if hyper_connection_seam(block) is not None:
             # The attention sublayer is the fork's and the router runs outside the twins, so every
             # DeepSeek V4 layer compiles the same pre/post/expert programs whatever its attention
             # (sliding/HCA/CSA) or router (hash/top-k) kind: one profile, lowered once.
             out.append(("sparse", "hyper_connection", int(inferred_heads)))
             continue
-        attn = at(types, i, "homogeneous")
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
         nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))
@@ -338,6 +352,55 @@ def _expert_examples(experts, rows: int, hidden: int, dtype, *, split_gate_up: b
             torch.zeros(tuple(experts.down_proj_bias.shape[1:]), dtype=dtype),
         ]
     return args
+
+
+def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) -> dict[str, Graph]:
+    """The fp8 routed-expert twins of one profile, weight-free.
+
+    Serving spells the expert program from the per-layer store (``spell_quantized_inputs`` with
+    the store's bits + scale shapes); the golden must record that program, not the f16 GEMM
+    the trace promised. ``name@<fmt>`` carries ``w_gate_up`` / ``w_down`` as fp8 bits with the
+    block scales the config's ``weight_block_size`` tiles over the traced weight shapes, for
+    the layers the quantizer converted; the plain ``name`` stays beside it when any layer of the
+    profile kept its experts unquantized (Laguna's last four layers deploy f16). ``profile`` is
+    :func:`loader.quant.fp8_weight_profile`'s reading of the config."""
+    from emmy.compiler.loader.quant import _is_skipped, spell_quantized_inputs  # noqa: PLC0415
+
+    fmt, block, patterns = profile
+    coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.weight", patterns)}
+    out: dict[str, Graph] = {}
+    if coded:
+        specs = {}
+        for inp in ("w_gate_up", "w_down"):
+            n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+            specs[inp] = (fmt, (1, 1) if block is None else (-(-n // block[0]), -(-k // block[1])), "f32")
+        spelled = graph.copy()
+        spell_quantized_inputs(spelled, specs)
+        out[f"{name}@{fmt}"] = spelled
+    if layers - coded:
+        out[name] = graph
+    return out
+
+
+def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int]) -> dict[str, Graph]:
+    """The native MXFP4 routed-expert twin derived from logical input shapes."""
+    from emmy.compiler.loader.quant import _is_skipped, spell_mxfp4_inputs  # noqa: PLC0415
+
+    coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.gate_up_proj_blocks", patterns)}
+    if skipped := layers - coded:
+        raise NotImplementedError(
+            f"native MXFP4 serving requires every routed-expert layer in profile {name!r} to stay compressed; "
+            f"quantization skip patterns exclude layer(s) {sorted(skipped)}"
+        )
+    specs = {}
+    for inp in ("w_gate_up", "w_down"):
+        k, n = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+        if k % 32:
+            raise ValueError(f"MXFP4 expert input {inp!r} has input width {k}, not divisible by 32")
+        specs[inp] = ((n, k // 32, 16), (n, k // 32))
+    spelled = graph.copy()
+    spell_mxfp4_inputs(spelled, specs)
+    return {f"{name}@mxfp4": spelled}
 
 
 def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Graph]:

@@ -15,7 +15,7 @@ import pytest
 from emmy.commands import fit as fit_cmd
 from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, Group, feature_view
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -59,15 +59,6 @@ def test_feature_view_globs_and_names():
     assert not keep("D_bk_gap") and not keep("S_ext_free_prod") and not keep("MMA")
 
 
-def test_from_dicts_normalizes_one_or_many_positives():
-    """A bare int and a sequence are the same input — most callers pin one row and wrapping it would say
-    nothing. Either way the stored tuple is sorted and duplicate-free, which is what lets the builder grow a
-    group's pins without the trainers having to re-sort or de-duplicate them."""
-    rows = [{"D_a": float(i)} for i in range(5)]
-    assert Group.from_dicts("g/x", "x", "warp", "g", "x", 2, rows).pinned == (2,)
-    assert Group.from_dicts("g/x", "x", "warp", "g", "x", [3, 1, 3], rows).pinned == (1, 3)
-
-
 def test_a_merged_case_reports_its_positive_count():
     """A case is a candidate pool, so a merged one is one row in ``per_golden`` where two goldens used to be
     two. ``positives`` is what makes that visible: without it a metrics file with fewer cases looks like lost
@@ -89,11 +80,19 @@ def test_a_merged_case_reports_its_positive_count():
 
 class _StubRecord:
     """The slice of a ``GoldenRecord`` the case builder reads, with the candidate pool handed in directly
-    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads."""
+    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads.
 
-    def __init__(self, name, knobs, rows):
+    The builder groups on ``GoldenRecord.pool_key``, so a stub that hands its pool in must answer that
+    question consistently with the pool it hands in, or it is describing a world that cannot happen.
+    ``program`` therefore defaults to the pool's own content, and is passed explicitly only to build the two
+    shapes that matter: the FAST_MATH one (one program, two pin sets, two enumerations) and the re-recorded
+    one (two programs, one pool, which only the packed matrix can see)."""
+
+    def __init__(self, name, knobs, rows, *, pins=(), program=None):
         self.name, self.knobs, self.target_program = name, knobs, rows
-        self.gpu_name, self.compute_cap, self.pin_map = "gpuA", (12, 0), {}
+        self.gpu_name, self.compute_cap = "gpuA", (12, 0)
+        self.pool_key = (repr(rows if program is None else program), tuple(pins))
+        self.pin_key, self.pin_map = tuple(pins), dict(pins)
         self.structural_features, self.dynamic = {}, False
         self.shape_key = SimpleNamespace(kind="", is_warp=True)
 
@@ -132,27 +131,28 @@ def _build(records, monkeypatch, **kwargs):
     return build_golden_groups(**kwargs)
 
 
-def test_builder_merges_goldens_that_match_one_pool_and_only_those(monkeypatch):
-    """Membership is decided by CONSTRUCTION — two goldens share a group only when the featurized pool they
-    enumerate is the same one — never by a metadata key.
+def test_builder_merges_goldens_that_share_a_recorded_program_and_only_those(monkeypatch):
+    """Membership is decided by what the RECORD says the enumeration will read — the program, the target,
+    the bindings and the pins — never by the name and never by a derived summary of the shape.
 
-    That distinction is the whole point: most same-name duplicates are ``FAST_MATH`` siblings whose pools are
-    genuinely disjoint (the fast-math enumeration offers an atom the standard one never emits), so merging on
-    the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded twice —
-    once against the standard pool and once against the fast-math one — and only the two goldens that really
-    do share a pool merge."""
+    The name is the obvious wrong answer: most same-name duplicates are ``FAST_MATH`` siblings, one program
+    under two pin sets, and the fast-math enumeration offers an atom the standard one never emits — so
+    merging on the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded
+    twice against ONE program with different pins, and only the two goldens whose provenance really does
+    agree merge."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
     fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
     cases, skipped = _build(
         [
             _StubRecord("m.512", {"TILE": "b"}, std),
-            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name over the SAME pool: merges
-            _StubRecord("m.512", {"TILE": "f"}, fastmath),  # same name, disjoint pool: stays its own case
+            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name, same provenance: merges
+            # Same name AND same program, but pinned differently — so a different enumeration, its own case.
+            _StubRecord("m.512", {"TILE": "f"}, fastmath, program=std, pins=(("FAST_MATH", True),)),
             _StubRecord("m.512.absent", {"TILE": "zz"}, std),  # matches no row: skipped, as before
         ],
         monkeypatch,
     )
-    assert [(c.key, c.pinned, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
+    assert [(c.key, c.golden_ids, len(c.feats)) for c in cases] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
     assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
     # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged case keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
@@ -163,11 +163,11 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     """Sampling must not break the merge, and the merge is what makes two verified answers to one
     question one training case instead of two.
 
-    ``_pool_identity`` digests the packed feature matrix, so two goldens over one pool merge only if they
-    RETAIN identical rows. They do because the draw is a pure function of ``(pool size, sample, seed)`` and
-    both goldens are bucketed onto the same keep-set. Both recorded rows survive the draw even though neither
-    was picked by it: the pool's first and last rows are exactly the positions a 4-of-26 draw is least likely
-    to reach."""
+    The two are one group before the draw happens — they share a program, so they share an enumeration and
+    the builder runs it once. What sampling must not break is the PINS: both recorded rows have to survive
+    the draw, which they do because it is a pure function of ``(pool size, sample, seed)`` and both goldens
+    bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last rows are
+    exactly the positions a 4-of-26 draw is least likely to reach."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
     cases, skipped = _build(
         [
@@ -180,19 +180,51 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     assert skipped == []
     assert len(cases) == 1, "one pool, one case - the draw must not fracture it into two"
     (case,) = cases
-    assert len(case.pinned) == 2, "both recorded rows survive the draw and pin into the case"
+    assert len(case.golden_ids) == 2, "both recorded rows survive the draw and land in the case"
     assert case.total == 26 and len(case.feats) < 26, "the true pool size travels beside the sample"
     kept = {chr(int(v)) for v in case.feats[:, 0]}
     assert {"a", "z"} <= kept
 
 
 def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
-    """Two recordings of the same config over the same pool are ONE fact. They pin the same row, so the pin
-    set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
+    """Two recordings of the same config over the same pool are ONE fact. They verify the same row, so the
+    label set does not grow — where the ``#2`` case they used to become counted that one fact twice in every
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
     cases, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
-    assert [(c.key, c.pinned) for c in cases] == [("gpuA/m.512", (1,))]
+    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1,))]
+
+
+def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch):
+    """The reason the packed pool decides membership and the recorded key only groups the work.
+
+    A program recorded in two sessions carries two different wires — different node ids, same graph — so it
+    reads as two enumerations and is enumerated twice. The pools they produce are identical, and the second
+    stage folds them. Without it the V100 corpus, where the same shapes are recorded many times over, reports
+    306 cases where there are 108 pools, each one counting a single fact on its own."""
+    std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
+    cases, _ = _build(
+        [
+            _StubRecord("m.512", {"TILE": "b"}, std),
+            # Same pool, but recorded as a different program — the recorded key cannot see they are one.
+            _StubRecord("m.512.resession", {"TILE": "c"}, std, program=[{"same-graph": "other-ids"}]),
+        ],
+        monkeypatch,
+    )
+    assert [(c.key, c.golden_ids) for c in cases] == [("gpuA/m.512", (1, 2))]
+
+
+def test_a_pool_is_named_after_a_golden_that_is_actually_in_it(monkeypatch):
+    """A record can be grouped onto a pool and then fail to find its own row in it. Naming the case after
+    that record would put a rank in ``metrics.json`` under a name the same run reports as skipped — and the
+    golden whose row IS pinned would appear nowhere."""
+    std = [{"TILE": "a"}, {"TILE": "b"}]
+    cases, skipped = _build(
+        [_StubRecord("m.512.absent", {"TILE": "zz"}, std), _StubRecord("m.512", {"TILE": "b"}, std)],
+        monkeypatch,
+    )
+    assert [(c.key, c.name) for c in cases] == [("gpuA/m.512", "m.512")]
+    assert [s[1] for s in skipped] == ["m.512.absent"]
 
 
 # --- synthetic cases ---------------------------------------------------------------
@@ -211,7 +243,7 @@ def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
     stamp = {"S_ext_n_symbolic_axis": 1.0 if tier == "dyn" else 0.0}
     feats = [{"D_a": float(i), "D_b": float((i * 7) % 3), **stamp} for i in range(n_rows)]
     shape = shape or name.removesuffix(".dynM")
-    return Group.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
+    return GoldenGroup.from_dicts(key or f"{gpu}/{name}", name, tier, gpu, shape, pinned, feats)
 
 
 def _cases():
@@ -252,9 +284,9 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
     # under the wrong weight set with nothing reporting it.
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
+        GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
     with pytest.raises(ValueError, match="disagree about the weight set"):
-        Group.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
+        GoldenGroup.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
 
 
 def test_a_routing_feature_may_never_carry_a_fitted_weight():
@@ -270,13 +302,13 @@ def test_a_routing_feature_may_never_carry_a_fitted_weight():
 
 
 def test_matrix_fill_declares_the_absent_semantics():
-    """``Group`` stores absent features as ``NaN`` and each model class projects them to what IT means by
+    """``GoldenGroup`` stores absent features as ``NaN`` and each model class projects them to what IT means by
     absent. Both kinds of absence are covered: a name the pool never stamped, and a key missing from one
     row whose siblings carry it.
 
     The ``fill=0.0`` default must stay bit-identical to ``feats.get(k, 0.0)`` — that is the linear model's
     contract, and the whole dataset is packed once for both trainers."""
-    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    g = GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
     zeros = g.matrix(["D_a", "D_b", "D_never"])
     assert zeros.tolist() == [[1.0, 2.0, 0.0], [3.0, 0.0, 0.0]]
 
@@ -284,7 +316,7 @@ def test_matrix_fill_declares_the_absent_semantics():
     assert nans[0].tolist() == [1.0, 2.0] + [pytest.approx(np.nan, nan_ok=True)]
     assert nans[1][0] == 3.0 and np.isnan(nans[1][1]) and np.isnan(nans[1][2])
     # A genuine 0.0 is never confused for an absent value under either fill.
-    z = Group.from_dicts("gpuA/z", "z", "warp", "gpuA", "z", 0, [{"D_a": 0.0}])
+    z = GoldenGroup.from_dicts("gpuA/z", "z", "warp", "gpuA", "z", 0, [{"D_a": 0.0}])
     assert z.matrix(["D_a"], fill=np.nan).tolist() == [[0.0]]
 
 
@@ -296,7 +328,7 @@ def test_matrix_is_memoized_and_read_only():
 
     One entry is enough — a fit uses one column list for its whole run — so a different request evicts
     rather than accumulating."""
-    g = Group.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
+    g = GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "D_b": 2.0}, {"D_a": 3.0}])
     first = g.matrix(["D_a", "D_b"])
     assert g.matrix(["D_a", "D_b"]) is first, "a repeat request must not rebuild the projection"
     assert not first.flags.writeable

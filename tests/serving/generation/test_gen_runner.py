@@ -94,6 +94,37 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
         )
 
 
+def test_float32_residual_moe_rider_keeps_normalized_activation_in_float16():
+    """The two-output fp32-residual post rider must not allocate ``xn`` in residual dtype."""
+    torch = pytest.importorskip("torch")
+
+    class PostProgram:
+        output_names = ("hidden", "moe_xn")
+
+        def run_device(self, inputs, *, out):
+            _attn_out, residual = inputs
+            out[0].copy_(residual)
+            out[1].copy_(residual.to(out[1].dtype))
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._post_m1 = None
+    runner._post_decode = [PostProgram()]
+    runner._post_prefill = [PostProgram()]
+    runner._post = []
+    runner._pre_decode = [object()]
+    runner._pre_prefill = [object()]
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._activation_dtype = torch.float16
+
+    residual = torch.randn(6, 8, dtype=torch.float32)
+    hidden, normalized = runner._route_post_device(0, torch.randn(6, 8, dtype=torch.float16), residual)
+
+    assert hidden.dtype == torch.float32
+    assert normalized.dtype == torch.float16
+    assert torch.nn.Linear(8, 2, dtype=torch.float16)(normalized).dtype == torch.float16
+
+
 def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
     runner = EmmyGenRunner(
         embed_weight=None,

@@ -17,7 +17,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -75,6 +75,47 @@ def _has_update(body) -> bool:
 
 def _local_combine_fns(locals_) -> set[str]:
     return {lb.op.name for lb in locals_ if lb.op is not None}
+
+
+def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
+    """The fallback predicate remains boolean through rendering and Loop IR persistence."""
+    import json
+
+    from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("left", (2, 2)), node_id="left")
+    graph.add_node(InputOp(), [], Tensor("right", (2, 2)), node_id="right")
+    graph.add_node(
+        IndexMapOp(
+            out_shape=(2, 2),
+            sources=(
+                IndexSource(
+                    input_idx=0,
+                    coord_map=(placeholder(0), placeholder(1)),
+                    select=placeholder(1).lt(Literal(1, "int")),
+                ),
+                IndexSource(input_idx=1, coord_map=(placeholder(0), placeholder(1))),
+            ),
+        ),
+        ["left", "right"],
+        Tensor("out", (2, 2)),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["left", "right"], ["out"]
+    inputs = {
+        "left": np.array([[1, 2], [3, 4]], dtype=np.float32),
+        "right": np.array([[5, 6], [7, 8]], dtype=np.float32),
+    }
+    lifted = Pipeline.build(["loop/lifting"]).run(graph)
+    select = next(stmt for stmt in _kernel_nodes(lifted)[0].op.body.iter() if isinstance(stmt, Select))
+    assert select.branches[-1].select == Literal(True, "bool")
+    assert select.branches[-1].select.render(None) == "1"
+    _assert_close(_run(graph, inputs), _run(lifted, inputs))
+
+    restored = loop_graph_from_wire(json.loads(json.dumps(loop_graph_to_wire(lifted))))
+    restored_select = next(stmt for stmt in _kernel_nodes(restored)[0].op.body.iter() if isinstance(stmt, Select))
+    assert restored_select.branches[-1].select == Literal(True, "bool")
 
 
 # ===================================================================

@@ -35,9 +35,18 @@ from typing import TYPE_CHECKING
 
 from emmy import config
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.pipeline.knob import canonical_row_key, context_view, decision_view
+from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.pipeline.knob import (
+    canonical_row_key,
+    context_view,
+    decision_view,
+    family_of,
+    stamp_schedule_families,
+    tuning_knob_items,
+)
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
+from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async
 from emmy.compiler.structural import digest
@@ -82,6 +91,10 @@ class SearchNode:
     # CUDA kernels (for example a split reduction + combine). A candidate-file
     # annotation is only unambiguous in the one-CudaOp case.
     realized_cuda_ops: int | None = field(default=None, repr=False)
+    # Decision rows from the directly measured per-kernel receipts. Structural winners use them to
+    # reject a parent row whose ordinary schedule pins describe a different
+    # independently tuned child than the terminal actually measured.
+    realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
     # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
     # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
     # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
@@ -242,6 +255,7 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
+        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _us, _status in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -350,27 +364,87 @@ class TuningSearch(Search):
             return None
         return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
 
-    def best_realized(self) -> tuple[dict, float, int | None] | None:
-        """Return the fastest directly observed successful terminal.
+    @staticmethod
+    def _structural_row(knobs: dict | None) -> dict[str, str] | None:
+        """The exact kernel-set-changing replay row in ``knobs``, if any."""
+        if not knobs:
+            return None
+        row = dict(tuning_knob_items(knobs))
+        cuts = {key: value for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
+        if cuts:
+            return cuts
+        work = Workers.parse(row.get("WORK"))
+        if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
+            return stamp_schedule_families(row)
+        return None
 
-        Unlike ``tree.best_reward``, this preserves the knobs and direct cost as
-        one indivisible observation. Callers must not reconstruct the knobs from
-        a later greedy/deploy replay, whose evidence hierarchy can select a
-        different configuration. Equal medians break deterministically by the
-        canonical knob row.
-        """
-        best: tuple[dict, float, int | None] | None = None
+    def _structural_replay_row(self, node: SearchNode) -> dict[str, str] | None:
+        """The first exact kernel-set-changing row on ``node``'s path."""
+        path: list[SearchNode] = []
+        cur: SearchNode | None = node
+        while cur is not None:
+            path.append(cur)
+            cur = cur.parent
+        for cur in reversed(path):
+            knobs = getattr(cur.candidate, "resolved_knobs", None)
+            structural = self._structural_row(knobs)
+            if structural is not None:
+                return structural
+        return None
+
+    def _best_terminal_node(self) -> SearchNode | None:
+        """The fastest directly observed successful terminal node."""
+        best: tuple[float, bool, tuple, SearchNode] | None = None
         stack = list(self.tree.root.children)
         while stack:
             node = stack.pop()
             stack.extend(node.children)
             stats = node.bench_stats
-            if node.bench_status != "ok" or node.realized_knobs is None or stats is None or stats.median <= 0:
+            if node.bench_status != "ok" or stats is None or stats.median <= 0:
                 continue
-            candidate = (dict(node.realized_knobs), float(stats.median), node.realized_cuda_ops)
-            if best is None or (candidate[1], canonical_row_key(candidate[0])) < (best[1], canonical_row_key(best[0])):
+            key = canonical_row_key(node.realized_knobs) if node.realized_knobs is not None else ()
+            candidate = (float(stats.median), node.realized_knobs is None, key, node)
+            if best is None or candidate[:3] < best[:3]:
                 best = candidate
-        return best
+        return best[3] if best is not None else None
+
+    def best_realized(self, *, validated_input_route: dict | None = None) -> tuple[dict, float, int | None, bool] | None:
+        """Return an exact replay row for the fastest directly observed successful terminal.
+
+        Unlike ``tree.best_reward``, this preserves the knobs and direct cost as
+        one indivisible observation. Callers must not reconstruct the knobs from
+        a later greedy/deploy replay, whose evidence hierarchy can select a
+        different configuration. When the winner changes the kernel set, its
+        first structural row is the replay contract and the independently
+        scheduled pieces remain separate targets. If neither that row nor one
+        terminal knob row exists, never fall back to a slower representable
+        sibling. An authoritative ``validated_input_route`` may supply the row
+        when pinning made the structural choice deterministic rather than a tree
+        node, but only for a conflicting multi-CUDA terminal. Equal medians
+        prefer a representable row and then break deterministically by its
+        canonical key.
+        """
+        node = self._best_terminal_node()
+        if node is None:
+            return None
+        structural = self._structural_replay_row(node)
+        # A compatible multi-CUDA terminal has one exact merged row even though
+        # its kernel-set-changing choice never appeared as a search-tree fork.
+        if structural is None and (node.realized_cuda_ops or 0) > 1:
+            structural = self._structural_row(node.realized_knobs)
+        if structural is None and node.realized_knobs is None and (node.realized_cuda_ops or 0) > 1:
+            structural = self._structural_row(validated_input_route)
+        if structural is not None:
+            place_only = all(family_of(key) == "PLACE" for key in structural)
+            if not place_only and (
+                not node.realized_cuda_knobs
+                or unreproducible_pin_flag(structural, node.realized_cuda_knobs, reject_conflicts=True) is not None
+            ):
+                return None
+            return structural, float(node.bench_stats.median), node.realized_cuda_ops, True
+        if node.realized_knobs is None:
+            return None
+        return dict(node.realized_knobs), float(node.bench_stats.median), node.realized_cuda_ops, False
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;
@@ -534,12 +608,27 @@ class TuningSearch(Search):
         return digest(context_key, gpu, op_sig, tun)
 
     def _collect_node_records(
-        self, *, context_key: str, op_sig: str, gpu: str = "", run_id: str = "", o3_context_key: str | None = None
+        self,
+        *,
+        context_key: str,
+        op_sig: str,
+        gpu: str = "",
+        run_id: str = "",
+        o3_context_key: str | None = None,
+        validated_input_route: dict | None = None,
     ) -> list[NodeRow]:
         """Post-search tree walk producing keyed, parent-linked :class:`NodeRow`
         records for :meth:`SearchDB.record_nodes` — the persistent/keyed/deduped
         sibling of :meth:`_collect_rows` (which feeds the prior's in-memory
         reservoir).
+
+        ``validated_input_route`` is an authoritative proposal row whose
+        realized-pin check already passed. When that row is structural and the
+        directly measured winner is a conflicting multi-CUDA terminal with no
+        structural node on its path, the walk records the original Loop parent
+        and its measured structural child. This is the pinned full-fork case:
+        the input route was applied deterministically instead of becoming an
+        ordinary search-tree node.
 
         Pre-order descent from the top forks (the sentinel root is skipped); each
         node passing the same ``visits > 0 and best_reward > 0`` guard as
@@ -583,6 +672,15 @@ class TuningSearch(Search):
         taking the max (not sum) of the duplicates' ``visits`` so
         ``record_nodes``'s SUM accumulation never double-counts within one run."""
         out: dict[str, NodeRow] = {}
+        structural_leaf = self._best_terminal_node()
+        structural_input = self._structural_row(validated_input_route)
+        if (
+            structural_leaf is None
+            or structural_leaf.realized_knobs is not None
+            or (structural_leaf.realized_cuda_ops or 0) <= 1
+            or self._structural_replay_row(structural_leaf) is not None
+        ):
+            structural_input = None
 
         def emit(row: NodeRow) -> None:
             prev = out.get(row.node_key)
@@ -611,7 +709,51 @@ class TuningSearch(Search):
                 # A benched leaf with no single row (several kernels with different
                 # decisions) has nothing to key a node record on — see :meth:`_collect_rows`.
                 skip = is_leaf and node.realized_knobs is None
-                if node.visits > 0 and node.best_reward > 0 and not skip:
+                if node is structural_leaf and structural_input is not None and node.visits > 0 and node.best_reward > 0:
+                    value_us = 1.0 / node.best_reward
+                    route_parent = parent_key
+                    route_depth = depth
+                    if route_parent is None:
+                        base_features = dict(self._base_knobs)
+                        route_parent = self._node_key(base_features, op_sig, context_key, gpu)
+                        emit(
+                            NodeRow(
+                                node_key=route_parent,
+                                parent_key=None,
+                                context_key=context_key,
+                                op_sig=op_sig,
+                                features=base_features,
+                                value_us=value_us,
+                                depth=depth,
+                                gpu=gpu,
+                                visits=node.visits,
+                                is_leaf=False,
+                                status="ok",
+                                run_id=run_id,
+                            )
+                        )
+                        route_depth += 1
+                    route_features = {**self._base_knobs, **structural_input}
+                    nk = self._node_key(route_features, op_sig, context_key, gpu)
+                    emit(
+                        NodeRow(
+                            node_key=nk,
+                            parent_key=route_parent,
+                            context_key=context_key,
+                            op_sig=op_sig,
+                            features=route_features,
+                            value_us=value_us,
+                            depth=route_depth,
+                            gpu=gpu,
+                            visits=node.visits,
+                            is_leaf=True,
+                            variance=stats.variance if stats is not None else None,
+                            n_samples=stats.n_samples if stats is not None else None,
+                            status="ok",
+                            run_id=run_id,
+                        )
+                    )
+                elif node.visits > 0 and node.best_reward > 0 and not skip:
                     feats = node.realized_knobs if is_leaf else self._node_knobs(node)
                     value_us = 1.0 / node.best_reward
                     assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"

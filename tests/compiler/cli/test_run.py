@@ -247,10 +247,11 @@ def test_ab_samples_parse_label_and_shape():
     """``_ab_samples`` parses each spec with the ``EMMY_KNOBS`` grammar, labels
     the row with the raw spec, and marks it shapeless (the ``_print_kernel_stats``
     cue to nest by kernel ``S_*`` signature instead of a golden matmul shape)."""
-    from emmy.commands.run import _ab_samples
+    from emmy.commands.run import _ab_samples, _sample_replay_knobs
 
     (s,) = _ab_samples(["tile=f2x4, STAGE=d2/smem-async"])
     assert s.knobs == {"TILE": "f2x4", "STAGE": "d2/smem-async"}  # names uppercased, whitespace tolerated
+    assert s.pins == {}
     assert s.name == "ab tile=f2x4, STAGE=d2/smem-async"
     assert s.shape is None
     assert s.dynamic is None
@@ -258,6 +259,51 @@ def test_ab_samples_parse_label_and_shape():
     # builds the same symbolic graph as the greedy run.
     (d,) = _ab_samples(["TILE=f2x4"], dynamic=["seq_len@x0:0"])
     assert d.dynamic == ("seq_len@x0:0",)
+
+    # Registered Boolean values are input pins, not kernel-row knobs: replay must
+    # retain an explicit False instead of dropping it with pass-marker booleans.
+    (p,) = _ab_samples(["FAST_MATH=False,FAST_EXP=0,VECTORIZE_LOADS=False,TILE=f2x4"])
+    assert p.pins == {"FAST_MATH": "False", "FAST_EXP": "0", "VECTORIZE_LOADS": "False"}
+    assert p.knobs == {"TILE": "f2x4"}
+
+    assert _sample_replay_knobs(p) == {
+        "FAST_MATH": "False",
+        "FAST_EXP": "0",
+        "VECTORIZE_LOADS": "False",
+        "TILE": "f2x4",
+    }
+
+
+def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
+    """The re-lowered IR path must use the same merged input-and-schedule pin map."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.graph import Graph
+
+    seen = []
+
+    @contextlib.contextmanager
+    def capture_pins(knobs):
+        seen.append(knobs)
+        yield
+
+    class Backend:
+        async def bench_pinned_async(self, _graph, *, warmup, num_iters):
+            assert (warmup, num_iters) == (1, 2)
+            return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
+
+    source = tmp_path / "loop.json"
+    source.write_text("{}")
+    monkeypatch.setattr(run_mod, "pinned_knobs", capture_pins)
+    monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"TILE": "f2x4"}])
+    monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
+
+    rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
+
+    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}]
+    assert len(rows) == 1 and rows[0].status == "ok"
 
 
 def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
@@ -352,6 +398,18 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     failed = _strict_correctness_proof({"o": np.array([1.01, 100.0], dtype=np.float32)}, eager)
     assert failed["status"] == "fail"
     assert "exceeds" in failed["error"]
+
+    greedy = _strict_correctness_proof(
+        {"o": np.array([1.0015, 100.05], dtype=np.float32)},
+        eager,
+        reference="same-input-greedy",
+    )
+    assert greedy["status"] == "pass"
+    assert greedy["reference"] == "same-input-greedy"
+    assert greedy["rtol"] == greedy["atol"] == 1e-3
+    assert greedy["max_abs_error"] > 0
+    assert greedy["mean_abs_error"] > 0
+    assert greedy["max_rel_error"] > 0
 
 
 def test_unreproducible_pin_flag(monkeypatch):
@@ -601,6 +659,43 @@ def test_graph_lane_is_any_kernel_not_a_dict_union(monkeypatch):
     assert run_mod._graph_lane(object()) == "std"
 
 
+def test_pinned_lane_uses_realized_boolean_policy(monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+
+    sample = SimpleNamespace(knobs={}, pins={"FAST_EXP": "1"})
+    row = run_mod._GoldenBench(sample, object(), None, (), "ok")
+    monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"FAST_EXP": True}])
+
+    assert run_mod._pinned_lane(row) == "fm"
+
+
+@pytest.mark.parametrize(
+    ("pins", "lane"),
+    [
+        ({"FAST_MATH": "True"}, "fm"),
+        ({"FAST_MATH": "False"}, "std"),
+        ({"F16_MMA_F32_ACC": "1"}, "fm"),
+        ({"FP8_MMA": True}, "fm"),
+        (
+            {"FAST_MATH": True, "FAST_EXP": False, "F16_MMA_F32_ACC": False, "FP8_MMA": False},
+            "std",
+        ),
+    ],
+)
+def test_failed_pinned_lane_uses_requested_precision_inputs(pins, lane):
+    """A row without a compiled graph keeps the lane its Boolean pins requested."""
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+
+    sample = SimpleNamespace(knobs={}, pins=pins)
+    row = run_mod._GoldenBench(sample, None, None, (), "bench_fail")
+
+    assert run_mod._pinned_lane(row) == lane
+
+
 def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     """The A/B ``--json`` carries a ``lane`` on the greedy block and on every pinned row so a
     sweep can filter to the greedy's lane — never comparing a pinned ``[fm]`` latency against a
@@ -617,8 +712,13 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     def _node(knobs):
         return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
 
-    # Greedy deployed a std kernel; the stub stands in for every kernel-node walk.
-    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", lambda g: [_node({"TILE": "f2x8", "WORK": "t32x8"})])
+    greedy_graph, fm_graph, std_graph = object(), object(), object()
+
+    def _nodes(graph):
+        knobs = {"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"} if graph is fm_graph else {"TILE": "f2x8", "WORK": "t32x8"}
+        return [_node(knobs)]
+
+    monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
 
     fm = Sample(
         knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
@@ -634,11 +734,14 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
         name="mlp_gate_up",
         shape=object(),
     )
-    golden_benches = [run_mod._GoldenBench(s, object(), None, (), "ok") for s in (fm, std)]
+    golden_benches = [
+        run_mod._GoldenBench(fm, fm_graph, None, (), "ok"),
+        run_mod._GoldenBench(std, std_graph, None, (), "ok"),
+    ]
 
     out = tmp_path / "ab.json"
     args = SimpleNamespace(code="x", input=None, ir=None, golden="mlp_gate_up", dynamic=None, warmup=2, iters=5, json=str(out))
-    run_mod._write_ab_json(args, {}, object(), None, golden_benches, greedy_fail=None, greedy_iso=None)
+    run_mod._write_ab_json(args, {}, greedy_graph, None, golden_benches, greedy_fail=None, greedy_iso=None)
 
     rec = json.loads(out.read_text())
     assert rec["greedy"]["lane"] == "std"
@@ -1075,6 +1178,42 @@ def test_bind_inputs_preserves_int_dtype():
     np.testing.assert_array_equal(bound["position_ids"], np.arange(8, dtype=np.int32)[None, :])
 
 
+def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
+    import numpy as np
+
+    from emmy.commands.run import _bind_inputs, _comparison_outputs
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (2,), dt.BF16), node_id="x")
+    g.add_node(
+        op=ConstantOp(name="weight", source_path="weight"),
+        inputs=[],
+        output=Tensor("weight", (2,), dt.BF16),
+        node_id="weight",
+    )
+    g.inputs = ["x"]
+    g.outputs = ["x"]
+
+    class _Module(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([3.0, -4.0], dtype=torch.bfloat16))
+
+    x = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+    bound = _bind_inputs(g, _Module(), (x,), {})
+
+    assert bound["x"].dtype == np.uint16
+    assert bound["weight"].dtype == np.uint16
+    np.testing.assert_array_equal(bound["x"], x.view(torch.uint16).numpy())
+    np.testing.assert_array_equal(
+        _comparison_outputs({"x": bound["x"]}, g)["x"],
+        np.array([1.0, -2.0], dtype=np.float32),
+    )
+
+
 def test_bind_inputs_arity_mismatch_raises():
     """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
     also runs inside the bench worker child, where an exit(1) reached the parent as an
@@ -1378,6 +1517,34 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     outp = capsys.readouterr().out
     assert "bench_fail" in outp and "greedy bench failed: hung" in outp
     assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp
+
+
+def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _print_kernel_stats
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.expr import Var
+
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="k_dynamic", grid=((Var("num_tokens"),), (1,), (1,))),
+        inputs=[],
+        output=Tensor("out", (1,)),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    bench = SimpleNamespace(
+        min_ms=0.5,
+        time_ms=0.5,
+        per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)],
+        e2e_min_ms=None,
+    )
+
+    _print_kernel_stats(graph, bench, sym_env={"num_tokens": 32})
+
+    assert "k_dynamic" in capsys.readouterr().out
 
 
 def _iso_bench_fixtures():

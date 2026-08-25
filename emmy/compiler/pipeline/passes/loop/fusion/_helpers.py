@@ -128,7 +128,7 @@ def closed_loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str],
     return region, graph.nodes[sink_id]
 
 
-def build_merged_region(graph: Graph, region: set[str], sink: Node) -> LoopOp | None:
+def build_merged_region(graph: Graph, region: set[str], sink: Node, *, max_work: int | None = None) -> LoopOp | None:
     """Splice an owned DAG of ``LoopOp`` nodes into ``sink``.
 
     ``region`` may be the ordinary two-node case or fan out and reconverge.
@@ -175,7 +175,7 @@ def build_merged_region(graph: Graph, region: set[str], sink: Node) -> LoopOp | 
         sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
     sub.outputs = [sink.id]
 
-    result = splice_graph(sub)
+    result = splice_graph(sub, max_work=max_work)
     if result is None:
         return None
     merged, _ = result

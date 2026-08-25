@@ -523,6 +523,10 @@ class EmmyGenModel(nn.Module, SupportsPP):
             self.model = _EmmyTargetInner(_SharedRawEmbedding(self))
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
+        # Snapshot BEFORE this uncaptured call so a short probe can delimit the preceding
+        # workload. Captured decode replay still updates the device counters because the
+        # scatter itself lives inside the graph; only this host read is capture-excluded.
+        self.runner.maybe_log_routing_histogram()
         device = positions.device
         t = int(positions.shape[0])
         ids = None
@@ -682,8 +686,11 @@ class EmmyGenModel(nn.Module, SupportsPP):
                     # gpt-oss attention sinks are stage-local beside the runner's layer interval.
                     layer = int(name.split(".layers.")[1].split(".")[0])
                     if self.start_layer <= layer < self.end_layer:
-                        self.sinks[layer - self.start_layer].data.copy_(w)
-                        loaded.add(name)
+                        local_layer = layer - self.start_layer
+                        self.sinks[local_layer].data.copy_(w)
+                        # vLLM's strict tracker compares the returned names with this module's
+                        # registered parameters, not with the checkpoint source spelling.
+                        loaded.add(f"sinks.{local_layer}")
         if not is_last_rank:
             self.reclaim_device_memory()
             return loaded

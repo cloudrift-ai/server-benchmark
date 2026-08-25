@@ -174,7 +174,7 @@ class ExperimentRecord:
         if not self.provenance.git_revision or self.provenance.git_dirty is None:
             missing.append("Git provenance")
         elif self.provenance.git_dirty:
-            missing.append("clean Git worktree")
+            missing.append("clean staged source")
         gpus = self.system.gpus if self.system else []
         if not gpus or not all(item.uuid or item.pci_bus_id for item in gpus):
             missing.append("GPU provenance")

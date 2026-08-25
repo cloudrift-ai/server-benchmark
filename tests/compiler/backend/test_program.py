@@ -1,9 +1,24 @@
 """Tests for cupy dispatch of a lowered ``Graph[CudaOp]``."""
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import _collapse_inert_dims, _Compiled, _resolve_symbolic, benchmark_program, run_program
+from emmy.compiler.backend.cuda.program import (
+    CompiledProgram,
+    _collapse_inert_dims,
+    _Compiled,
+    _load_plan,
+    _numpy_storage,
+    _resolve_symbolic,
+    benchmark_program,
+    run_program,
+)
+from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan
+from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import BF16, F32, decode_bf16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
@@ -13,7 +28,64 @@ from tests.compiler.helpers import requires_cuda
 def _minimal_compiled(**kw) -> _Compiled:
     """A ``_Compiled`` with no kernels — enough to exercise ``_resolve_symbolic``
     (which only reads the symbolic_* maps). No CUDA needed."""
-    return _Compiled(bufs=[], buf_by_name={}, constants={}, kernels={}, launches=[], **kw)
+    return _Compiled(bufs=[], buf_by_name={}, constants={}, kernels={}, launches=[], outputs=[], **kw)
+
+
+def test_bf16_host_values_materialize_as_bits():
+    values = np.array([1.0, -2.0, np.pi], dtype=np.float32)
+    storage = _numpy_storage(values, BF16)
+
+    assert storage.dtype == np.uint16
+    np.testing.assert_array_equal(decode_bf16(storage), np.array([1.0, -2.0, 3.140625], dtype=np.float32))
+    np.testing.assert_array_equal(_numpy_storage(storage, BF16), storage)
+
+
+def test_compiled_program_outputs_follow_declared_order_not_allocation_order():
+    class HostArray:
+        def __init__(self, value):
+            self.value = np.atleast_1d(np.asarray(value, dtype=np.float32))
+
+        def get(self):
+            return self.value.copy()
+
+        def ravel(self):
+            return HostArray(self.value.ravel())
+
+        def __getitem__(self, item):
+            return HostArray(self.value[item])
+
+        def reshape(self, shape):
+            return self.value.reshape(shape)
+
+    plan = ExecutionPlan(
+        backend="cuda",
+        inputs=[],
+        outputs=["first", "second"],
+        buffers=[
+            BufferSpec("second", (Dim(1),), F32, "output"),
+            BufferSpec("scratch", (Dim(1),), F32, "scratch"),
+            BufferSpec("first", (Dim(1),), F32, "output"),
+        ],
+        constants={},
+        runtime_constants={},
+        launches=[],
+        kernels={},
+    )
+    program = CompiledProgram(
+        compiled=_load_plan(plan),
+        arrays={"second": HostArray(2), "scratch": HostArray(3), "first": HostArray(1)},
+        descs={},
+    )
+
+    outputs = program.outputs(sym_values={})
+    device_outputs = program.output_prefix_device(sym_values={})
+
+    assert list(outputs) == ["first", "second"]
+    np.testing.assert_array_equal(outputs["first"], [1])
+    np.testing.assert_array_equal(outputs["second"], [2])
+    assert list(device_outputs) == ["first", "second"]
+    np.testing.assert_array_equal(device_outputs["first"], [1])
+    np.testing.assert_array_equal(device_outputs["second"], [2])
 
 
 class TestSymbolicCapacityGuard:
@@ -161,6 +233,44 @@ def test_benchmark_program_returns_timing():
     assert result.num_launches == 1
     assert result.per_launch is not None
     assert len(result.per_launch) == 1
+
+
+def _fake_benchmark_program(monkeypatch, iter_ms: float):
+    import emmy.compiler.backend.cuda.program as program_mod
+    import emmy.compiler.backend.gpu_lock as lock_mod
+
+    class _FakeProgram:
+        def __init__(self) -> None:
+            self.compiled = SimpleNamespace(launches=[SimpleNamespace(kernel_name="k")])
+            self.calls = 0
+
+        def iter_once(self, *, batch_sizes=None, pre_iter=None):
+            self.calls += 1
+            return [iter_ms]
+
+    fake = _FakeProgram()
+    monkeypatch.setattr(program_mod.CompiledProgram, "build", classmethod(lambda _cls, *_args, **_kwargs: fake))
+    monkeypatch.setattr(lock_mod, "gpu_lock", nullcontext)
+    return fake
+
+
+def test_benchmark_program_explicit_warmup_count_is_unchanged(monkeypatch):
+    fake = _fake_benchmark_program(monkeypatch, iter_ms=5.0)
+
+    result = benchmark_program(Graph(), warmup=5, num_iters=1, run_timeout_s=2.0, capture_graphs=False)
+
+    assert fake.calls == 6
+    assert result.time_ms == 5.0
+    assert result.per_launch[0].samples == (5.0,)
+
+
+def test_benchmark_program_run_budget_still_fails_on_first_slow_iteration(monkeypatch):
+    fake = _fake_benchmark_program(monkeypatch, iter_ms=2100.0)
+
+    with pytest.raises(RuntimeError, match="benchmark run stage exceeded 2.0s of GPU time"):
+        benchmark_program(Graph(), warmup=1, num_iters="auto", run_timeout_s=2.0, capture_graphs=False)
+
+    assert fake.calls == 1
 
 
 @requires_cuda

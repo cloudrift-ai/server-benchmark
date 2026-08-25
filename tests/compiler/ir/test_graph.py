@@ -4,7 +4,7 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 
 # ---- helpers ----
 
@@ -248,6 +248,25 @@ def test_to_dict_serializes_composite_shape_dim():
     assert isinstance(shape[1], str) and "seq_len" in shape[1] and "64" in shape[1], (
         f"composite dim must serialize to its pretty expr string, got {shape[1]!r}"
     )
+
+
+def test_to_dict_roundtrips_composite_op_field_dim():
+    from emmy.compiler.dim import Dim
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (48,)), node_id="x")
+    groups = Dim(48) // Dim("num_tokens")
+    g.add_node(
+        op=IndexMapOp(out_shape=(groups,), sources=()),
+        inputs=["x"],
+        output=Tensor("y", (groups,)),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    restored = Graph.from_dict(g.to_dict())
+
+    assert restored.nodes["y"].op.out_shape == (groups,)
 
 
 # ---- multi-output (MIMO) foundation ----

@@ -18,9 +18,9 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   known-good row. Deterministic rewrites (single option) trivially
   win their own slot via the same path.
 - ``perf`` — backend-agnostic measurement store. ``op_key`` is whichever
-  terminal op the backend measured (today: a CudaOp; tomorrow whatever
-  other backends lower to). ``backend`` partitions the table so the
-  loop interpreter and the CUDA backend can coexist in the same DB.
+  terminal op the backend measured, or the finalized Loop cache key for a
+  directly measured whole-slice structural route. ``backend`` partitions the
+  table so the loop interpreter and the CUDA backend can coexist in the same DB.
 - ``node`` — one row per search-tree node (every partial branch + leaf of a
   per-kernel autotune search), keyed by ``digest(context_key, op_sig,
   tunable-knob set)``. Each row carries the full feature dict passed to the

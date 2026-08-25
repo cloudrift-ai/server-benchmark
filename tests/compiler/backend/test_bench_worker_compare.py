@@ -424,6 +424,29 @@ def test_benchmark_pinned_isolated_async_ships_inputs_once_and_retries_on_miss()
     assert bench == "B" and outputs == {"o": 1}
 
 
+async def test_cuda_backend_pinned_bench_keeps_default_warmup(monkeypatch) -> None:
+    import emmy.compiler.backend.cuda.program as program_mod
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    seen = {}
+
+    async def _fake_pinned(compiled, **kwargs):
+        seen.update(compiled=compiled, **kwargs)
+        return "bench", None
+
+    monkeypatch.setattr(program_mod, "benchmark_pinned_isolated_async", _fake_pinned)
+    backend = CudaBackend()
+    worker = object()
+    monkeypatch.setattr(backend, "_async_worker", lambda: worker)
+
+    result = await backend.bench_pinned_async("G")
+
+    assert result == ("bench", None)
+    assert seen["worker"] is worker
+    assert seen["warmup"] == 5
+    assert seen["num_iters"] == 20
+
+
 def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     """A ``trace_args`` job with ``accuracy``: the child binds the rebuilt module's real
     inputs, runs the emmy program on them, and compares vs eager. A numeric failure ships
@@ -569,6 +592,40 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
     assert response["reference_run_us"] == 4_000_000.0
     assert response["greedy_error"] == "RuntimeError: repeated greedy timing crossed the watchdog"
     assert response["result"] is None and response["results"] is None
+
+
+def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.backend.cuda import _bench_worker
+    from emmy.compiler.backend.cuda import backend as backend_mod
+
+    class _FakeBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+    async def _fake_compare(*_args, sym_env_out, **_kwargs):
+        sym_env_out.append({"num_tokens": 32})
+        return {"Emmy": 1.0}, SimpleNamespace(captured=True), False, True, None
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", _fake_compare)
+
+    response = asyncio.run(
+        _bench_worker._run_job(
+            {
+                "graph": "LOWERED",
+                "torch_spec": ("frontend_graph", "FRONTEND"),
+                "bench_backends": "emmy",
+                "warmup": 1,
+                "iters": 1,
+                "seed": 0,
+            }
+        )
+    )
+
+    assert response["sym_env"] == {"num_tokens": 32}
 
 
 @requires_cuda

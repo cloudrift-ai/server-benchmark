@@ -33,12 +33,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
+_GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
 
 
 def _generation_precision_contract(model_type, expert_store):
     """Pack-key component for architecture precision rewrites that run only on cold trace."""
     if model_type == "laguna" and (expert_store or {}).get("fmt") == "exl3":
         return _LAGUNA_EXL3_PRECISION_CONTRACT
+    if model_type == "gpt_oss" and (expert_store or {}).get("fmt") == "mxfp4":
+        return _GPT_OSS_MXFP4_PRECISION_CONTRACT
     return None
 
 
@@ -103,13 +106,16 @@ class _Program:
         per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
         stream so the upload, replay and output read stay ordered.
 
-        ``out`` (A3, eager only): a list of torch CUDA destination views aligned to
-        ``output_names``, each ``[T, …]``. The single protective copy lands directly in the
-        caller's destination (``dest.copy_(view)``) instead of a freshly allocated clone — the
+        ``out`` (A3): a list of torch CUDA destination views aligned to ``output_names``,
+        each ``[T, …]``. The single protective copy lands directly in the caller's
+        destination (``dest.copy_(view)``) instead of a freshly allocated clone — the
         rider path passes slices of one shared joint tensor, so the halves need no
-        ``torch.cat`` (which paid a second full copy plus the allocation). Illegal under an
-        outer capture: the captured branch returns raw views by design (dropping copies is the
-        point there), so ``out`` would silently change semantics — asserted against.
+        ``torch.cat`` (which paid a second full copy plus the allocation). Under an outer
+        capture the copies are RECORDED into the graph (the rider split's captured form —
+        whole-step chunk capture): correct because the destinations are persistent
+        pointer-stable tensors minted on an uncaptured warmup step (``_rider_dest`` guards)
+        and the graph's fixed kernel order runs each half's copy before the other half's
+        kernels overwrite the shared output backing.
 
         Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
         capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
@@ -127,7 +133,6 @@ class _Program:
             feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
-                assert out is None, "run_device(out=...) is an eager-path contract — captured steps return views"
                 self.program.run_once()
                 # Under the outer whole-step capture the output CLONES are dead weight: the graph's
                 # fixed kernel order guarantees every consumer (RoPE — in-place on the view is fine,
@@ -137,7 +142,13 @@ class _Program:
                 # ~4 D2D copy nodes per layer per step from the captured graph (the emmy↔vLLM seam
                 # traffic the decode-gap trace attributed). The uncaptured path keeps the clone —
                 # there the program graph may replay again before the caller consumes the view.
+                # ``out`` (the rider split) keeps its copies even here — they land in the
+                # persistent joint destination, recorded into the graph.
                 outs = self.program.output_prefix_device()
+                if out is not None:
+                    for o, n in zip(out, self.output_names, strict=True):
+                        o.copy_(torch.from_dlpack(outs[n])[:t])
+                    return out
                 return [torch.from_dlpack(outs[n])[:t] for n in self.output_names]
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
@@ -371,6 +382,7 @@ def _compile_split(
     plan=None,
     indirect_inputs=None,
     quant_specs=None,
+    mxfp4_specs=None,
     trellis_specs=None,
     aux_examples=None,
     weight_inputs=(),
@@ -401,6 +413,10 @@ def _compile_split(
     become fp8 bits inputs with appended scale inputs; ``example_args`` then carries the scale
     EXAMPLES as its LAST ``len(quant_specs)`` entries (matching the speller's append order),
     while only the leading entries are the wrapper's forward args for the trace.
+    ``mxfp4_specs`` is the native MXFP4 counterpart: each logical weight input is
+    replaced by uint8 blocks and an appended uint8 E8M0 scale input. Its build feed
+    comes by name through ``aux_examples`` because both the shape and dtype differ
+    from the traced logical argument.
     ``trellis_specs`` (the EXL3 expert path) feeds ``spell_trellis_inputs`` the same way — the
     named weight inputs become int16 CODES inputs with appended channel-vector inputs — but its
     extra examples come by NAME in ``aux_examples`` rather than by position, so the build feed
@@ -418,6 +434,8 @@ def _compile_split(
     ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
     cold path (an explicit pack ``plan`` still wins), after every loader spelling and ABI hint has
     reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
+    if sum(bool(specs) for specs in (quant_specs, mxfp4_specs, trellis_specs)) > 1:
+        raise ValueError("expert input formats are mutually exclusive")
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -448,6 +466,10 @@ def _compile_split(
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
             spell_quantized_inputs(graph, quant_specs)
+        if mxfp4_specs:
+            from emmy.compiler.loader.quant import spell_mxfp4_inputs
+
+            spell_mxfp4_inputs(graph, mxfp4_specs)
         if trellis_specs:
             from emmy.compiler.loader.quant import spell_trellis_inputs
 
@@ -627,6 +649,12 @@ class EmmyGenRunner:
         # tiers fall back to the upload copy, still correct.
         self._moe = moe
         self._expert_tiers = expert_tiers
+        from emmy import config as emmy_config
+
+        self._routing_histogram_interval = max(0, emmy_config.gen_routing_histogram_interval()) if moe else 0
+        self._routing_histogram_calls = 0
+        self._routing_histogram_counts = None
+        self._routing_histogram_capture_seen = False
         # The fixed-slot tier is ALL-OR-NOTHING across groups: a whole-step CUDA graph capture
         # records one launch set for every layer, so a group left on the routed (eager) path
         # would make the captured step wrong for its layers.
@@ -1053,17 +1081,31 @@ class EmmyGenRunner:
                 inter, hidden_e = experts.gate_up_proj.shape[1] // 2, experts.gate_up_proj.shape[2]
                 logical = {"w_gate": (inter, hidden_e), "w_up": (inter, hidden_e), "w_down": (hidden_e, inter)}
                 w_names = list(logical)
+            elif expert_fmt == "mxfp4":
+                w_names = ["w_gate_up", "w_down"] + (["b_gate_up", "b_down"] if has_bias else [])
+                logical = {
+                    "w_gate_up": tuple(experts.gate_up_proj.shape[1:]),
+                    "w_down": tuple(experts.down_proj.shape[1:]),
+                }
+                if has_bias:
+                    logical.update({n: tuple(einputs[n].shape[1:]) for n in ("b_gate_up", "b_down")})
             else:
                 w_names = ["w_gate_up", "w_down"] + (["b_gate_up", "b_down"] if has_bias else [])
                 logical = {n: tuple(einputs[n].shape[1:]) for n in w_names}
             example_w = [torch.zeros(*logical[n], dtype=dtype) for n in w_names]
-            quant_specs = trellis_specs = aux_examples = None
-            if expert_fmt is not None and not trellis and einputs["w_gate_up"].dtype == torch.uint8:
+            quant_specs = mxfp4_specs = trellis_specs = aux_examples = None
+            if expert_fmt is not None and expert_fmt != "mxfp4" and not trellis and einputs["w_gate_up"].dtype == torch.uint8:
                 quant_specs = {
                     "w_gate_up": (expert_fmt, tuple(einputs["w_gate_up_scale"].shape[1:]), "f32"),
                     "w_down": (expert_fmt, tuple(einputs["w_down_scale"].shape[1:]), "f32"),
                 }
                 example_w += [torch.zeros(*einputs[f"{n}_scale"].shape[1:], dtype=torch.float32) for n in ("w_gate_up", "w_down")]
+            if expert_fmt == "mxfp4":
+                mxfp4_specs = {n: (tuple(einputs[n].shape[1:]), tuple(einputs[f"{n}_scale"].shape[1:])) for n in ("w_gate_up", "w_down")}
+                aux_examples = {
+                    n: torch.zeros(*einputs[n].shape[1:], dtype=torch.uint8)
+                    for n in ("w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale")
+                }
             if trellis:
                 cbs = (expert_store or {}).get("codebooks", {}).get(layer) or {}
                 trellis_specs = {n: (int(cbs.get(n, 0)), tuple(einputs[n].shape[1:])) for n in w_names}
@@ -1083,6 +1125,7 @@ class EmmyGenRunner:
             )
             expert_kw = {
                 "quant_specs": quant_specs,
+                "mxfp4_specs": mxfp4_specs,
                 "trellis_specs": trellis_specs,
                 "aux_examples": aux_examples,
                 "weight_inputs": ind_names,
@@ -1242,6 +1285,9 @@ class EmmyGenRunner:
                     {
                         "gate": copy.deepcopy(gate).to(dtype),
                         "inputs": einputs,
+                        "local_layer": local_i,
+                        "layer": i,
+                        "num_experts": int(next(iter(einputs.values())).shape[0]),
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
                         "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
@@ -1695,6 +1741,9 @@ class EmmyGenRunner:
                     m["gate"] = m["gate"].to("cuda")
                     m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                     m["inputs_cp"] = {n: [cp.from_dlpack(w) for w in t] for n, t in m["inputs"].items()}
+                if self._routing_histogram_interval:
+                    width = max(m["num_experts"] for m in self._moe if m is not None)
+                    self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
                 if self._slots_ok:
                     # Fixed-slot indirect tables: PER SHAPE GROUP, one flat [group layers * E]
                     # int64 pointer table per expert-input kind (weights, biases, and — on the
@@ -1836,6 +1885,16 @@ class EmmyGenRunner:
         dtype = ref.dtype if dtype is None else dtype
         d = dests.get((name, cols, dtype))
         if d is None:
+            # ``ref.is_cuda`` first: only a CUDA destination can be captured, and the capture
+            # probe is unavailable on a CPU-only torch build (which is what CI installs, and
+            # the host-path tests reach this line there).
+            if ref.is_cuda and torch.cuda.is_current_stream_capturing():
+                # A tensor allocated inside an active capture lives in the graph's private
+                # memory pool, whose blocks are recycled between replays — a "persistent"
+                # destination minted here would silently dangle. vLLM's uncaptured warmup
+                # of each capture size mints every destination first; reaching this raise
+                # means a capture ran without that warmup.
+                raise RuntimeError(f"rider destination {name!r} requested inside an active CUDA-graph capture; warm the width first")
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
@@ -1864,7 +1923,8 @@ class EmmyGenRunner:
         if 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: both halves copy ONCE, straight into slices of one shared joint destination —
             # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
-            # rider step). Rider steps are eager by construction, run_device's out= contract.
+            # rider step). Under a whole-step capture the copies are recorded (run_device's
+            # out= contract); the destinations are persistent, minted on the warmup step.
             pb = self._prefill_bucket
             hd, nh, nkv, _ = self._attn_meta[layer]
             widths = (nh * hd, nkv * hd, nkv * hd)
@@ -1929,7 +1989,7 @@ class EmmyGenRunner:
             if output_count == 1:
                 specs = (("hidden", residual.dtype),)
             elif output_count == 2:
-                specs = (("hidden", residual.dtype), ("moe_xn", residual.dtype))
+                specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype))
             elif output_count == 3:
                 specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype), ("shared_expert", torch.float32))
             else:
@@ -1957,6 +2017,7 @@ class EmmyGenRunner:
 
         self._ensure_device()
         gated = moe["gate"](xn)
+        self._record_routing(moe, gated[-1])
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             return combine_routed_experts(
                 xn,
@@ -1985,6 +2046,7 @@ class EmmyGenRunner:
         self._ensure_device()
         gated = moe["gate"](xn)
         scores, indices = gated[-2], gated[-1]  # [1, k] each
+        self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
@@ -2004,6 +2066,79 @@ class EmmyGenRunner:
             xn.dtype,
             accumulate_float32=moe.get("accumulate_float32", False),
         )
+
+    def _record_routing(self, moe, indices) -> None:
+        """Count routed rows per persistent E-leading input slice on the current device.
+
+        ``scatter_add_`` has a fixed destination and no host read, so the mutation is recorded
+        by an outer CUDA graph and repeated by every decode replay. The histogram is optional;
+        its disabled hot path is one attribute check."""
+        counts = self._routing_histogram_counts
+        if counts is None:
+            return
+        import torch
+
+        if counts.is_cuda and torch.cuda.is_current_stream_capturing():
+            self._routing_histogram_capture_seen = True
+        flat = indices.reshape(-1).to(torch.int64)
+        counts[moe["local_layer"]].scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.int64))
+
+    def routing_histogram(self, *, reset: bool = False) -> dict | None:
+        """Return the cumulative routed-buffer selection histogram, or ``None`` when disabled.
+
+        This synchronizes the small counter tensor to the host and must not run during CUDA
+        capture. ``reset`` starts a new measurement window after taking the snapshot."""
+        counts = self._routing_histogram_counts
+        if counts is None:
+            return None
+        import torch
+
+        if counts.is_cuda and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("routing_histogram cannot snapshot during CUDA capture")
+        host = counts.detach().cpu()
+        layers = []
+        for moe in self._moe:
+            if moe is None:
+                continue
+            selections = host[moe["local_layer"], : moe["num_experts"]].tolist()
+            layers.append(
+                {
+                    "layer": moe["layer"],
+                    "num_experts": moe["num_experts"],
+                    "top_k": moe["top_k"],
+                    "total_selections": sum(selections),
+                    "selections": selections,
+                }
+            )
+        if reset:
+            counts.zero_()
+        return {"event": "emmy_routing_histogram", "layers": layers}
+
+    def maybe_log_routing_histogram(self) -> None:
+        """Log the cumulative histogram at the configured uncaptured-forward interval."""
+        if not self._routing_histogram_interval:
+            return
+        import json
+
+        import torch
+
+        counts = self._routing_histogram_counts
+        if counts is None:
+            return
+        if counts.is_cuda and torch.cuda.is_current_stream_capturing():
+            return
+        if getattr(self, "_routing_histogram_capture_seen", False):
+            # Capture executes the graph once while recording it. That warmup route is not a
+            # served row; clear it before the first uncaptured boundary snapshot. Replays still
+            # execute the captured scatter, without re-running this Python flag assignment.
+            counts.zero_()
+            self._routing_histogram_capture_seen = False
+            self._routing_histogram_calls = 0
+        self._routing_histogram_calls += 1
+        if self._routing_histogram_calls % self._routing_histogram_interval:
+            return
+        if payload := self.routing_histogram():
+            logger.info("[gen_runner] routing histogram %s", json.dumps(payload, separators=(",", ":")))
 
     def _launch_expert(self, moe, e, rows):
         """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the

@@ -29,7 +29,7 @@ from emmy.compiler.ir.stmt import Body, Loop
 from emmy.compiler.ir.stmt.leaves import ElementwiseImpl
 from emmy.compiler.ir.tile.ops import split_invariant_factors
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view, pair_softmax
+from emmy.compiler.pipeline.passes.lowering.tile._classify import _chained_column, fused_view, pair_softmax
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, _stamp_axes, fold_from_loop
 from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
 
@@ -199,10 +199,14 @@ def test_pair_stays_above_the_free_sweep() -> None:
     # column; the pair stays at its own level — the sweep's per-ROW statistic — and the sweep's
     # contraction stays a raw body loop for the fused view to bind.
     tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
-    (stat,) = tile.op.operands
+    # The chain form: the sweep's column fold (it reads the sweep axis, so it is the root's one
+    # fold body member) is closed over the pair's normalize through a projection edge — the
+    # pair itself stays the plain (m, d) carrier at the head of that edge.
+    (col,) = [s for s in tile.op.body if isinstance(s, Fold)]
+    assert not tile.op.operands
+    stat, epi, _loop = _chained_column(col)
     assert stat.role is AxisRole.TWISTED and len(stat.combine.results) == 2, "the plain (m, d) pair"
-    assert any(isinstance(s, Assign) and s.op.name == "reciprocal" for s in tile.op.body)
-    assert any(isinstance(s, Loop) and s.is_reduce for s in tile.op.body), "the sweep contraction rides the body"
+    assert any(isinstance(s, Assign) and s.op.name == "reciprocal" for s in epi)
 
 
 def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
@@ -213,12 +217,14 @@ def test_twisted_statistic_binds_the_sweep_as_one_contraction() -> None:
     from emmy.compiler.ir.pure.fold import is_contraction
 
     tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
-    (stat,) = tile.op.operands
+    (col,) = [s for s in tile.op.body if isinstance(s, Fold)]
+    stat, _epi, _loop = _chained_column(col)
     assert stat.role is AxisRole.TWISTED, "the row statistic is the online-softmax pair"
 
     bound = fused_view(tile)
     assert bound is not None, "the sweep must bind as a computed-A contraction over the twisted statistic"
-    node, n_axis, _stores = bound
+    node, added_axes, _stores = bound
+    (n_axis,) = added_axes
     con = node
     assert is_contraction(con) and con.axis.extent == Dim(128), "one contraction over the whole reduce axis"
     assert n_axis.extent == Dim(32), "the output column axis joins the grid"
@@ -239,10 +245,11 @@ def test_twisted_statistic_survives_the_loop_dialect_round_trip() -> None:
     tile = recognized_tile(LoopOp(body=_wrap_rows(_sweep_body()), inputs={}))
     bound = fused_view(tile)
     assert bound is not None
-    node, n_axis, stores = bound
+    node, added_axes, stores = bound
+    (n_axis,) = added_axes
 
     stmts = tuple(effect_tail(node.lower(), stores))
-    for axis in reversed((*tile.place.free, n_axis)):
+    for axis in reversed((*tile.place.free, *added_axes)):
         stmts = (Loop(axis=axis, body=Body.coerce(stmts)),)
     relifted = recognized_tile(LoopOp(body=Body.coerce(stmts)))
     again = fused_view(relifted)

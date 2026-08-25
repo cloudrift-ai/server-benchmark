@@ -160,6 +160,16 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     assert "cp.async" not in src and "ldmatrix" not in src
 
 
+def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
+    """A literal unit output row is still the M side of a plain m1×K×N contraction."""
+    _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
+    src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert knobs["TILE"] == f"{VOLTA}/f1x1"
+    assert knobs["WORK"] == "w1x1"
+    assert "emmy_mma_m8n8k4_f16_f32" in src
+    assert "_um_b" in src and "< (1)" in src
+
+
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
     """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
 

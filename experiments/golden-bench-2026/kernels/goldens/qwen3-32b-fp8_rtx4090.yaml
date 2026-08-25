@@ -7389,15 +7389,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
+      WORK: t128
       TILE: ''
-      REDUCE: ''
+      REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 2441.2
-      reference_us: 532.5
+      emmy_us: 7.8
+      reference_us: 530.2
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7414,15 +7414,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t4
+      WORK: t128
       TILE: ''
       REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13.3
-      reference_us: 36.7
+      emmy_us: 2.4
+      reference_us: 38.2
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7444,7 +7444,7 @@ configs:
       RASTER: ''
     measurements:
       emmy_us: 2.9
-      reference_us: 139.5
+      reference_us: 140.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7459,14 +7459,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f8
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
       emmy_us: 3.1
-      reference_us: 160.3
+      reference_us: 164.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7488,8 +7488,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 86.4
-      reference_us: 377.2
+      emmy_us: 88.8
+      reference_us: 382.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7501,20 +7501,20 @@ configs:
     - to_2
     - view
   realizations:
-  - name: k_linear_8c505c.810418ec80f8.s512
+  - name: k_linear_9b226f.8b64d3676e61.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      TILE: ''
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
       REDUCE: ''
-      STAGE: ''
+      STAGE: d2/smem-async
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 66156.5
-      reference_us: 4610.0
+      emmy_us: 288.1
+      reference_us: 4624.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7526,14 +7526,20 @@ configs:
     - to_4
     - view_1
   realizations:
-  - name: k_linear_e1595b.af098967fbfc.s512
+  - name: k_linear_9a03bf.a8737cb3dae2.s512
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs: {}
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      STAGE: d2/smem-async
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 1933.3
-      reference_us: 410.8
+      emmy_us: 88.5
+      reference_us: 415.2
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7588,8 +7594,8 @@ configs:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 76296.2
-      reference_us: 1954.7
+      emmy_us: 97814.4
+      reference_us: 1960.6
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7607,8 +7613,8 @@ configs:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 13039.6
-      reference_us: 435.8
+      emmy_us: 19534.8
+      reference_us: 437.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7625,15 +7631,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t64
+      WORK: t128
       TILE: ''
       REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 3.2
-      reference_us: 40.2
+      emmy_us: 3.1
+      reference_us: 41.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7648,14 +7654,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f2
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 4.0
-      reference_us: 301.4
+      emmy_us: 5.0
+      reference_us: 302.0
       reference_backend: torch-eager
 - program: 0
   target:
@@ -7673,17 +7679,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: w1x2
-      TILE: mma_m16n8k32_e4m3_f32/f8x2/k4
-      REDUCE: ''
-      STAGE: d1/smem-async
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 382.5
-      reference_us: 4611.6
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7703,17 +7699,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 2441.2
-      reference_us: 532.5
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7728,17 +7714,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t4
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 13.3
-      reference_us: 36.8
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7750,17 +7726,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 2.9
-      reference_us: 139.5
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7782,17 +7748,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 483092.5
-      reference_us: 27078.7
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7807,17 +7763,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 7.3
-      reference_us: 137.5
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7829,17 +7775,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f8
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 17.5
-      reference_us: 1237.2
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
@@ -7856,17 +7792,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: w16x1
-      TILE: mma_m16n8k32_e4m3_f32/f4x4/k2
-      REDUCE: ''
-      STAGE: d1/smem-async
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 4311.0
-      reference_us: 14768.1
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -7887,15 +7813,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
+      WORK: t128
       TILE: ''
-      REDUCE: ''
+      REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 193.5
-      reference_us: 85.8
+      emmy_us: 6.1
+      reference_us: 82.5
       reference_backend: torch-eager
 - program: 1
   target:
@@ -7912,15 +7838,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t64
+      WORK: t128
       TILE: ''
       REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 1.7
-      reference_us: 23.1
+      emmy_us: 1.5
+      reference_us: 24.6
       reference_backend: torch-eager
 - program: 1
   target:
@@ -7935,14 +7861,14 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: ''
+      TILE: f2
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
       emmy_us: 0.8
-      reference_us: 16.7
+      reference_us: 17.2
       reference_backend: torch-eager
 - program: 1
   target:
@@ -7964,7 +7890,7 @@ configs:
       RASTER: ''
     measurements:
       emmy_us: 0.8
-      reference_us: 19.0
+      reference_us: 20.3
       reference_backend: torch-eager
 - program: 1
   target:
@@ -7986,8 +7912,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 4.4
-      reference_us: 349.7
+      emmy_us: 4.8
+      reference_us: 352.6
       reference_backend: torch-eager
 - program: 1
   target:
@@ -7999,7 +7925,7 @@ configs:
     - to_2
     - view
   realizations:
-  - name: k_linear_c4eeb2.eb3382be369c.s1
+  - name: k_linear_b591a9.80f9d7ed2849.s1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8011,8 +7937,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 19.9
-      reference_us: 4088.7
+      emmy_us: 19.7
+      reference_us: 4087.3
       reference_backend: torch-eager
 - program: 1
   target:
@@ -8024,7 +7950,7 @@ configs:
     - to_4
     - view_1
   realizations:
-  - name: k_linear_915f6b.8a13af323c45.s1
+  - name: k_linear_30e047.ffe81b3b4129.s1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8036,8 +7962,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 5.1
-      reference_us: 367.6
+      emmy_us: 5.2
+      reference_us: 370.8
       reference_backend: torch-eager
 - program: 1
   target:
@@ -8092,8 +8018,8 @@ configs:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 203.8
-      reference_us: 208.6
+      emmy_us: 196.6
+      reference_us: 221.4
       reference_backend: torch-eager
 - program: 1
   target:
@@ -8110,10 +8036,6 @@ configs:
     pins:
       FAST_MATH: false
     knobs: {}
-    measurements:
-      emmy_us: 380.6
-      reference_us: 353.9
-      reference_backend: torch-eager
 - program: 1
   target:
     origins:
@@ -8128,17 +8050,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 2.1
-      reference_us: 23.5
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8150,17 +8062,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f2
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 0.8
-      reference_us: 16.7
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8177,17 +8079,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 23.7
-      reference_us: 4082.7
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8207,17 +8099,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 193.5
-      reference_us: 85.8
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8232,17 +8114,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t64
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 1.7
-      reference_us: 23.2
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8254,17 +8126,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 0.8
-      reference_us: 16.7
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8286,17 +8148,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 1111.0
-      reference_us: 25757.7
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8311,17 +8163,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t4
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 64.6
-      reference_us: 27.0
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8333,17 +8175,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 0.8
-      reference_us: 17.2
-      reference_backend: torch-eager
+    knobs: {}
 - program: 1
   target:
     origins:
@@ -8360,14 +8192,4 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: t4
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 754.7
-      reference_us: 12888.1
-      reference_backend: torch-eager
+    knobs: {}

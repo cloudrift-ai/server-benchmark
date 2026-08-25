@@ -309,7 +309,7 @@ async def bench_terminal_async(cand, *, backend, db):
     if kind == "done":
         return *payload, False, b.per_kernel
     try:
-        result = await backend.benchmark_async(b.graph, num_iters="auto")
+        result = await backend.benchmark_async(b.graph, warmup=1, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
         return *b.finalize_exc(exc), True, b.per_kernel
     return *b.finalize_result(result), True, b.per_kernel

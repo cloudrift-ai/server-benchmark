@@ -359,6 +359,7 @@ def _tune_one(
             ctx=ctx,
             max_candidates=getattr(args, "max_candidates", None),
             prior=prior,
+            run_id=run_id,
         )
         # Working-file feedback is durable as soon as its measurements finish;
         # an interrupted/failed MCTS must not discard already-paid proposal data.
@@ -509,6 +510,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 ctx=ctx,
                 max_candidates=getattr(args, "max_candidates", None),
                 prior=prior,
+                run_id=run_id,
             )
             if target.proposals:
                 persist_proposal_rankings(args.golden_file, document, target, rankings)

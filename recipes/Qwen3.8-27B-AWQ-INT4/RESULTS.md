@@ -1,8 +1,8 @@
 # Qwen3.8-27B W4A16 on one RTX 4090
 
-Status: serving-qualified with stock vLLM on the text-only path at an 8,192-token context. Emmy is **ineligible** for
-this checkpoint: its compiler frontend cannot lower 48 of the model's 64 layers, so this recipe has no Emmy lane and
-no comparison column.
+Status: serving-qualified with stock vLLM on the text-only path at an 8,192-token context. Emmy remains **ineligible**
+for this checkpoint: exact compiler coverage is complete, but strict correctness and attention performance still
+block a canonical golden file, so this recipe has no Emmy lane and no comparison column.
 
 ## Qualified deployment
 
@@ -56,41 +56,41 @@ template does pre-fill `<think>\n`, which is the layout the parser expects, and 
 result. No Qwen3.8-specific reasoning parser exists in this image. Clients that need the reasoning text should not
 rely on this field until an upstream parser lands.
 
-## Emmy eligibility: ineligible
+## Emmy eligibility: coverage complete, qualification blocked
 
-The blocking gate is compiler coverage. Qwen3.8 is a hybrid checkpoint: 48 of its 64 layers are `linear_attention`
-(`Qwen3_5GatedDeltaNet`) and 16 are `full_attention`. The linear-attention path does not lower.
+The compiler inventory was re-traced from repository revision
+`94e2a74a2b9359699701847b28839f20b20a1de0` (tree
+`9a0866098b896dfb82e32c521e1a120e5fc1e643`) on the qualified RTX 4090. It covers seven representative programs and
+227 golden configurations, including both kinds of decoder layer and the distinct MTP paths:
 
-Traced against the real modules built from the pinned configuration, at FP16 and sequence length 512:
+| Program | Model coverage | Configurations | Working-golden SHA-256 |
+| --- | --- | ---: | --- |
+| decoder layer 0 — Gated DeltaNet | 48 `linear_attention` layers | 196 | `4bd3e5bfe476aa43304de335886101e114e7344ebb6436aa0e018117bacde0d4` |
+| decoder layer 3 — full attention | 16 `full_attention` layers | 13 | `30f1b77534e87c55f134318632147087bc2a41254f2fb42f1664f2fb6e948929` |
+| final `RMSNorm` | final normalization | 1 | `d8486bf41bc248fb7a8a4a9a34b3939979dfa880435152a9824d3ff707e9be37` |
+| `embed_tokens` | input embedding | 1 | `bda686565e67ce156888c98bc64059971478ed31147504d7dbc3a2d6e2e7b488` |
+| `lm_head` | output projection | 1 | `571ac07a9fef3f71a387bb40478197f9d86eef1461bb68cb7114eb165410d071` |
+| MTP full block | full MTP path | 13 | `75d06475d3ea8d4b68ad7590130122a24319c58e217798761a803e292a8ccb9e` |
+| MTP pre-FC2 block | distinct pre-FC2 path | 2 | `0d405f6bc4b17841b2258b6ceddd72f440c08a9b6674a683a88e9c35b452078b` |
 
-| Coverage manifest entry | Result |
-| --- | --- |
-| `embed_tokens` | traces (3 nodes) |
-| final `RMSNorm` | traces (20 nodes) |
-| `lm_head` | traces (3 nodes) |
-| dense MLP | traces (9 nodes) |
-| decoder layer 3 — full attention, 16 of 64 layers | traces (196 nodes) |
-| decoder layer 0 — linear attention, 48 of 64 layers | **fails** in the chunked delta rule |
+These are working golden files, not deployment evidence. Two gates prevent promotion to a canonical golden file:
 
-Coverage is therefore **partial**, so this recipe intentionally has no `golden/` directory — a partial inventory is
-not repository evidence. Because that gate fails, gates 3 and 5 (the W4A16 loader path and representative kernel
-correctness) were not evaluated for this checkpoint.
+- The final normalization has 14 of 2,621,440 BF16 outputs outside the unchanged strict tolerance. Each differs by
+  one BF16 ULP; the maximum absolute error is 0.0078125. This remains a correctness failure.
+- For full-attention target `k_sdpa_reduce_fd92e2.e496506297b2`, the fastest strict schedule measured at deployable
+  `-O3` is `WORK=w2x2`, `TILE=mma_m16n8k16_f16_f32/f4x8/k2`, `STAGE=d1/smem`, `RASTER=gm8`. Two repeated replays
+  measured 191.283 and 191.898 us against 61.850 and 62.240 us for eager PyTorch: 3.09x slower by the medians, with
+  maximum absolute error 0.0009765625 and CUDA source SHA-256
+  `f22aba2cb34fc1c6fa267ff8f5837947ff974489c560a586c854f9ff27c7f10d`.
 
-### Where the path stops
+Under equal cold search budgets, hybrid tuning found a 1.93x faster complete attention candidate than MCTS-only in
+the `-Xcicc -O1` tuning regime. Repeated `-O3` replay still exposes the deploy gap above, so that search improvement
+is not a serving speedup. Profiling a strict k2 kernel attributes the gap to 14.9 million load/store instructions,
+255 registers per thread, and 3.4% DRAM throughput; schedule-neighbor, staging, raster, and fast-exponential sweeps did
+not close it.
 
-The two operations the layer opens with — a depthwise causal `conv1d` and the delta-rule `einsum` — used to stop the
-tracer outright and now decompose; see `compiler/pipeline/passes/frontend/decomposition/`. What remains is not
-another missing operation of the same kind:
-
-- `torch.triu` / `Tensor.tril` have no tracer mapping, and the chunked delta rule builds its per-chunk causal masks
-  with them.
-- Behind that, the rule unrolls a sequential recurrence over the 64-wide chunk in Python, reading and writing
-  overlapping slices each step. That is an algorithm the frontend would have to absorb, not an operation to add.
-- This is the pure-torch reference path, which is what traces when `flash-linear-attention` is absent. With the fast
-  path installed the same layer dispatches to an opaque custom CUDA kernel instead, which `torch.export` does not see
-  through at all. Closing the reference path therefore does not by itself make the deployed path traceable.
-
-Treat the remaining work as qualifying Gated DeltaNet as a whole, not as finishing a short list of operators.
+Until strict correctness passes across the inventory and attention reaches parity, this recipe intentionally has no
+`golden/` directory and no Emmy serving lane.
 
 ## Reproduce
 

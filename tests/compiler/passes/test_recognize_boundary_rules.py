@@ -22,11 +22,12 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _same_program, fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
@@ -223,6 +224,61 @@ def _m1_linear_graph() -> Graph:
     return g
 
 
+def _m1_contraction_tile(*, row: int | Var = 0, context: str | None = None) -> TileOp:
+    """A direct unit-row contraction, optionally nested under an ordinary output axis."""
+    n, k = Axis("n", Dim(16)), Axis("k", Dim(16))
+    row_index = Literal(row) if isinstance(row, int) else row
+    load_prefix = (Var(context),) if context is not None else ()
+    store_prefix = (Var(context),) if context is not None else ()
+    cell = Body(
+        (
+            Loop(
+                axis=n,
+                body=Body(
+                    (
+                        Loop(
+                            axis=k,
+                            body=Body(
+                                (
+                                    Load(name="a", input="x", index=(*load_prefix, Literal(0), Var("k"))),
+                                    Load(name="b", input="w", index=(Var("n"), Var("k"))),
+                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a", "b")),
+                                    Accum(name="acc", value="p", op=ElementwiseImpl("add"), axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Write(output="o", index=(*store_prefix, row_index, Var("n")), value="acc"),
+                    )
+                ),
+            ),
+        )
+    )
+    body = cell if context is None else Body((Loop(axis=Axis(context, Dim(8)), body=cell),))
+    node, free, stores = _lift_tree(body)
+    from emmy.compiler.ir.tile import Placement
+
+    return TileOp(op=node, place=Placement(free=tuple(free)), stores=stores)
+
+
+def test_unit_contraction_view_restores_only_the_literal_zero_output_row():
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    view = unit_contraction_view(_m1_contraction_tile())
+    assert view is not None and [axis.name for axis in view[1]] == ["_um", "n"]
+    assert unit_contraction_view(_m1_contraction_tile(row=1)) is None
+    assert unit_contraction_view(_m1_contraction_tile(row=Var("m"))) is None
+
+
+@pytest.mark.parametrize("context", ["batch", "head"])
+def test_unit_contraction_view_does_not_reclassify_output_context(context):
+    """A second output axis is not M unless a realized split receipt proves otherwise."""
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import unit_contraction_view
+
+    tile = _m1_contraction_tile(context=context)
+    assert [axis.name for axis in tile.place.free] == [context, "n"]
+    assert unit_contraction_view(tile) is None
+
+
 def _resolve(g: Graph, pick=None, ctx: Context | None = None) -> tuple[list[dict], TileOp]:
     """Run the tile passes, capturing every fork leaf's knob row; ``pick`` selects the applied
     leaf (default: option-0, the emission-order head). Returns ``(rows, the one TileOp)``."""
@@ -277,6 +333,15 @@ def test_wide_m1_flinear_offers_the_warp_k_fold_and_a_pin_realizes_it(monkeypatc
     _, tile = _resolve(_m1_linear_graph(), ctx=ctx)
     assert [v for k, v in tile.knobs.items() if family_of(k) == "REDUCE"] == ["coop"]
     assert tile.knobs.get("WORK") == "t32"
+
+
+def test_direct_m1_contraction_offers_scalar_and_volta_mma_rows():
+    """Restoring the unit M axis adds the Volta tier without losing scalar schedules."""
+    ctx = Context.from_target((7, 0), gpu_name="NVIDIA Tesla V100 SXM3 32GB")
+    rows, _ = _resolve(_m1_linear_graph(), ctx=ctx)
+
+    assert any(str(row.get("WORK", "")).startswith("t") for row in rows)
+    assert any(str(row.get("WORK", "")).startswith("w") and "mma_m8n8k4_f16_f32" in str(row.get("TILE", "")) for row in rows)
 
 
 def test_norm_linear_offers_both_the_map_rows_and_the_warp_contraction_rows():
@@ -364,7 +429,7 @@ def test_norm_linear_cone_is_an_inline_node_tree():
     assert operand_body(c.a) == tuple(cone.lower()) == (*pro, *cell)
 
 
-def _attention_cone_term() -> tuple[Fold, Fold]:
+def _attention_cone_term(kv_extent: int = 32, score_extent: int = 16) -> tuple[Fold, Fold]:
     """The attention shape of the computed-A cone, built directly: the ``softmax(Q·Kᵀ)·V``
     contraction over the KV axis whose A cone is ``exp(s − m)·(1/d)`` over a COMPUTED score — one
     edge for the row statistic (the twisted ``(m, d)`` pair) and one for the per-cell score
@@ -380,8 +445,8 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
 
     names, other = ("mx", "dn"), ("mx__o", "dn__o")
     stat = Fold(
-        axis=Axis("kv", Dim(32)),
-        operands=(score("kv", Axis("dd", Dim(16)), "s1"),),
+        axis=Axis("kv", Dim(kv_extent)),
+        operands=(score("kv", Axis("dd", Dim(score_extent)), "s1"),),
         lift=Lambda(params=("kv", "s1"), body=Body(()), results=("s1", 1.0)),
         init=(float("-inf"), 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
@@ -397,11 +462,94 @@ def _attention_cone_term() -> tuple[Fold, Fold]:
                 Assign(name="pw", op="multiply", args=("rd", "ex1")),
             )
         ),
-        operands=(prologue, score("kvb", Axis("ddb", Dim(16)), "s2")),
+        operands=(prologue, score("kvb", Axis("ddb", Dim(score_extent)), "s2")),
     )
     v = Load(names=("vl",), input="v", index=(Var("kvb"), Var("n")))
-    pv = Fold.contraction(k_axis=Axis("kvb", Dim(32)), a=cone, channels=(Channel(b=v, acc="o"),))
+    pv = Fold.contraction(k_axis=Axis("kvb", Dim(kv_extent)), a=cone, channels=(Channel(b=v, acc="o"),))
     return Fold.projection(body=Body(()), operands=(pv,)), cone
+
+
+def _attention_schedule_term(kv_extent: int = 512, value_extent: int = 128):
+    """An A100 head128 paired-contraction term and its outer value fold."""
+    from emmy.compiler.ir.tile import Placement
+
+    root, _ = _attention_cone_term(kv_extent=kv_extent, score_extent=128)
+    pv = root.operands[0]
+    inputs = {name: Tensor(name, (Dim(1),), dtype=F16) for name in ("q", "k", "v")}
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", Dim(kv_extent)), Axis("n", Dim(value_extent)))), inputs=inputs)
+    return tile, pv
+
+
+def test_paired_fragment_register_bound_matches_emitted_lifetimes():
+    """The bound counts the peak live score/output ``RegFragment`` families."""
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+
+    _tile, pv = _attention_schedule_term()
+    bad = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k8", Workers.parse("w8x2"))
+    fixed = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k4", Workers.parse("w8x2"))
+    historical = TilePlan.parse("mma_m16n8k16_f16_f32/f1x16/k8", Workers.parse("w4x1"))
+    wide_k4 = TilePlan.parse("mma_m16n8k16_f16_f32/f1x16/k4", Workers.parse("w8x2"))
+
+    assert legal.paired_fragment_registers(pv, bad, Stage(depth=1, transport="smem", bk_elems=128)) == (132, 128)
+    assert legal.paired_fragment_registers(pv, fixed, Stage(depth=1, transport="smem", bk_elems=64)) == (84, 128)
+    assert legal.paired_fragment_registers(pv, historical, Stage(depth=1, transport="smem", bk_elems=128)) == (164, 255)
+    assert legal.paired_fragment_registers(pv, wide_k4, Stage(depth=1, transport="smem", bk_elems=64)) == (116, 128)
+
+
+def test_attention_schedule_refuses_only_the_over_budget_paired_row(monkeypatch):
+    """The real seq512 structure drops bad K8, retains K4, and accepts the historical K8 pin."""
+    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as schedule
+
+    tile, pv = _attention_schedule_term()
+    ctx = Context.from_target((8, 0), gpu_name="NVIDIA A100 80GB")
+    term = schedule._Term(tile, tile.place.on_grid(), ctx)
+    blocks = schedule._contraction_blocks(term, pv, Workers.parse("w8x2"))
+    unsplit = {block.values["TILE"].spell() for block in blocks if not block.values["REDUCE"].needs_split}
+    assert "mma_m16n8k16_f16_f32/f1x8/k8" not in unsplit
+    assert "mma_m16n8k16_f16_f32/f1x8/k4" in unsplit
+    split_tile, split_pv = _attention_schedule_term(kv_extent=1024)
+    split_term = schedule._Term(split_tile, split_tile.place.on_grid(), ctx)
+    split_blocks = schedule._contraction_blocks(split_term, split_pv, Workers.parse("w8x2"))
+    assert any(
+        block.values["TILE"].spell() == "mma_m16n8k16_f16_f32/f1x8/k8" and block.values["REDUCE"].spell() == "g8k" for block in split_blocks
+    ), "the split route reschedules its child kernels, so the unsafe unsplit parent's bound does not apply"
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x16/k8")
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    pinned = schedule._Term(tile, tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(pinned, pv, Workers.parse("w4x1"))
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x16/k4")
+    wide_tile, wide_pv = _attention_schedule_term(value_extent=256)
+    wide_k4 = schedule._Term(wide_tile, wide_tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(wide_k4, wide_pv, Workers.parse("w8x2"))
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x8/k8")
+    refused = schedule._Term(tile, tile.place.on_grid(), ctx)
+    with pytest.raises(ValueError, match="132 live fragment registers/thread.*128-register envelope"):
+        schedule._contraction_blocks(refused, pv, Workers.parse("w8x2"))
+
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    pinned_split = schedule._Term(split_tile, split_tile.place.on_grid(), ctx)
+    assert schedule._contraction_blocks(pinned_split, split_pv, Workers.parse("w8x2"))
+
+
+def test_standalone_k8_contraction_has_no_paired_fragment_bound():
+    """A K8 tile without a chained score remains governed by the ordinary per-tile budget."""
+    from emmy.compiler.ir.pure.fold import Channel
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+
+    node = Fold.contraction(
+        k_axis=Axis("k", Dim(512)),
+        a=Load(name="a", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b", input="b", index=(Var("k"), Var("n"))), acc="o"),),
+    )
+    plan = TilePlan.parse("mma_m16n8k16_f16_f32/f1x8/k8", Workers.parse("w8x2"))
+    assert legal.paired_fragment_register_budget(node, plan, Stage(depth=1, transport="smem", bk_elems=128)) is None
 
 
 def test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice():
@@ -450,16 +598,29 @@ def test_cone_cell_lambda_is_closed(shape):
     then a positional edge like every other; what bridges through the stat smem rows is exactly
     that edge's results."""
     from emmy.compiler.ir.tile.ops import cone_seam
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values, cuttable_seams
 
     _, tile = _resolve_sdpa(is_causal=True) if shape == "sdpa" else _resolve(_norm_linear_graph(), pick=_is_warp_row)
     fold = tile.op.operands[0] if (isinstance(tile.op, Fold) and tile.op.axis is None) else tile.op
     cone = fold.a
     prologue = cone.operands[0]
     assert "captures" not in tile.pretty_body()
-    assert cone.lift.params == prologue.lift.results, "the cell binds every prologue result positionally"
     if shape == "sdpa":  # ``exp(s − m)`` reads the carrier's ``m`` itself; RMSNorm's cell reads only the projected rsqrt
+        from emmy.compiler.ir.pure.fold import is_contraction, operand_name
+
+        score_edges = cone.operands[1:]
+        assert len(score_edges) == 1 and is_contraction(score_edges[0]), "the cell has one computed score operand"
+        score = score_edges[0]
+        assert cone.lift.params == (*prologue.lift.results, operand_name(score)), (
+            "bridged statistics and the computed score bind positionally"
+        )
+        groups = [cut for cut in cuttable_seams(tile.op, tile.stores, tile.place.free) if len(cut.members) == 2]
+        assert len(groups) == 1 and any(member.node is score for member in groups[0].members), (
+            "the closed computed score must be one use of the grouped placement inverse"
+        )
         assert set(prologue.operands[0].combine.results) & set(prologue.lift.results), "the statistic's own state passes through"
+    else:
+        assert cone.lift.params == prologue.lift.results, "the cell binds every prologue result positionally"
     _, _, stats = cone_seam(cone, fold.axis.name)
     assert set(stats) == set(prologue.lift.results), f"the bridge is the prologue's results: {stats} vs {prologue.lift.results}"
     axes = stmt_axis_names(cone.lower()) | {a.name for a in (*tile.place.free, *tile.place.grid)} | {fold.axis.name}
@@ -607,8 +768,8 @@ def test_norm_linear_symbolic_m_offers_warp_rows():
     assert any(_is_warp_row(r) for r in rows)
 
 
-def _mlp_gate_up_graph() -> Graph:
-    S, H, inter = 32, 1024, 3072
+def _mlp_gate_up_graph(S: int = 32) -> Graph:
+    H, inter = 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
     g.add_node(InputOp(), [], Tensor("wn", (Dim(H),), dtype=F16), node_id="wn")
@@ -621,6 +782,80 @@ def _mlp_gate_up_graph() -> Graph:
     g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
     g.inputs, g.outputs = ["x", "wn", "wg", "wu"], ["o"]
     return g
+
+
+def _materialized_gate_up_graph(S: int = 32, *, up_dtype=F16) -> Graph:
+    """Two projections over one materialized activation, followed by SwiGLU."""
+    H, inter = 256, 512
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, Dim(S), Dim(H)), dtype=F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("wg", (Dim(inter), Dim(H)), dtype=F16), node_id="wg")
+    g.add_node(InputOp(), [], Tensor("wu", (Dim(inter), Dim(H)), dtype=up_dtype), node_id="wu")
+    g.add_node(LinearOp(), ["x", "wg"], Tensor("gate", (1, Dim(S), Dim(inter)), dtype=F16), node_id="gate")
+    g.add_node(LinearOp(), ["x", "wu"], Tensor("up", (1, Dim(S), Dim(inter)), dtype=F16), node_id="up")
+    g.add_node(ElementwiseOp("silu"), ["gate"], Tensor("sg", (1, Dim(S), Dim(inter)), dtype=F16), node_id="sg")
+    g.add_node(ElementwiseOp("multiply"), ["sg", "up"], Tensor("o", (1, Dim(S), Dim(inter)), dtype=F16), node_id="o")
+    g.inputs, g.outputs = ["x", "wg", "wu"], ["o"]
+    return g
+
+
+def test_materialized_gate_up_offers_one_shared_a_mma_fill_and_scalar_fallback():
+    """One materialized A may feed compatible gate/up MMA channels through one sync fill."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.pipeline.knob import family_value
+
+    rows, tile = _resolve(_materialized_gate_up_graph(), pick=_is_warp_row, ctx=Context.from_target((7, 0)))
+    node = tile.op.operands[0] if isinstance(tile.op, Fold) and tile.op.axis is None else tile.op
+    assert is_contraction(node)
+    assert isinstance(node.a, Load) and len(node.channels) == 2
+    assert {ch.b.input for ch in node.channels} == {"wg", "wu"}
+    warp = [row for row in rows if _is_warp_row(row)]
+    assert warp and any(not _is_warp_row(row) for row in rows), "the original planar fallback remains a sibling"
+    assert {family_value(row, "STAGE") for row in warp} == {"d1/smem", "d2/smem"}
+    assert all(family_value(row, "STAGE") for row in warp), "multi-channel MMA cannot use the single-fold gmem-direct path"
+    assert all(str(family_value(row, "TILE")).startswith("mma_m8n8k4_f16_f32/") for row in warp)
+
+
+def test_materialized_gate_up_mixed_b_dtypes_keeps_scalar_fallback_only():
+    """A byte-copied B channel whose dtype differs from the atom must decline the MMA fill."""
+    rows, _tile = _resolve(_materialized_gate_up_graph(up_dtype=F32), ctx=Context.from_target((7, 0)))
+    assert rows and not any(_is_warp_row(row) for row in rows)
+
+
+def _bind_materialized_channels(*, b_layouts=("kn", "kn"), mix_a_axis=False):
+    """Bind the minimal two-channel product fold, or return ``None`` when it is ineligible."""
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes
+
+    body = [
+        Load(
+            name="av",
+            input="x",
+            index=(Var("m") + Var("n"), Var("k")) if mix_a_axis else (Var("m"), Var("k")),
+        )
+    ]
+    for i, layout in enumerate(b_layouts):
+        index = (Var("k"), Var("n")) if layout == "kn" else (Var("n"), Var("k"))
+        body.extend(
+            (
+                Load(name=f"b{i}", input=f"w{i}", index=index),
+                Assign(name=f"p{i}", op="multiply", args=("av", f"b{i}")),
+                Accum(name=f"acc{i}", value=f"p{i}", op="add", axes=("k",)),
+            )
+        )
+    fold = fold_from_loop(_stamp_axes(Loop(axis=Axis("k", Dim(32)), body=Body(tuple(body)))))
+    assert fold is not None
+    return bind_bilinear(fold, "m", "n", frozenset({"m", "n"}))
+
+
+def test_materialized_channels_with_disagreeing_b_layouts_decline():
+    """One shared A fragment cannot feed B slabs with different K orientations."""
+    assert _bind_materialized_channels(b_layouts=("kn", "nk")) is None
+
+
+def test_materialized_channels_with_mixed_role_axis_decline():
+    """An A index mixing both output axes has no addressable MMA slab role."""
+    assert _bind_materialized_channels(mix_a_axis=True) is None
 
 
 def test_mlp_gate_up_nodifies_as_two_channel_product_contraction():
@@ -754,6 +989,8 @@ def _prologue_shape(*, b_layouts, cone_per_channel=False):
 
 
 def test_channels_with_agreeing_b_layouts_form_one_product_node():
+    from emmy.compiler.ir.tile.ops import cone_seam
+
     node, free = _prologue_shape(b_layouts=(False, False))
     bound = _fused(node, free)
     assert bound is not None
@@ -762,6 +999,9 @@ def test_channels_with_agreeing_b_layouts_form_one_product_node():
     assert product.role is AxisRole.CONTRACTION
     assert len(product.channels) == 2, "two channels over ONE shared edge — sharing is the node's arity"
     assert product.a is not None
+    prologue, _cell, stats = cone_seam(product.a, product.axis.name)
+    assert stats == ("rs",)
+    assert sum(isinstance(s, Load) and s.input == "x" for s in Body(prologue).iter()) == 1
 
 
 def test_channels_with_disagreeing_b_layouts_never_group():
@@ -848,3 +1088,112 @@ def test_masked_score_cone_keeps_its_predicate_per_cell():
     pro, cell, _stats = cone_seam(fold.a, fold.axis.name)
     assert any(isinstance(s, Select) for s in cell), "the mask predicates the per-cell weight"
     assert not any(isinstance(s, Select) for s in pro), "the mask is k-varying — it never joins the row prologue"
+
+
+def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
+    """Gemma-shaped attention scores: RMSNorm'd Q against RMSNorm'd K. Root formation chains the
+    score fold over both statistics' projected scales; the binder reads it as ONE contraction
+    whose A and B are both computed cones, each sourcing its own statistic. The ``b`` seam —
+    the normalized keys — is then a legal cut: the form that turns the per-query replay of the
+    key statistic into a materialized operand the mma tier streams."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.ir.tile.path import spell
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
+    scores = next(n for n in g.nodes.values() if isinstance(n.op, LoopOp) and n.id.endswith("_scaled"))
+    tile = recognized_tile(scores.op, name=scores.id)
+    pro = fused_view(tile)
+    assert pro is not None, "the chained score column binds through the fused view"
+    node = pro[0].operands[0]
+    assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
+    seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, *pro[1]))]
+    assert "PLACE@b" in seams, seams
+
+
+def _m1_norm_gate_up_body() -> Body:
+    """One row of norm → gate/up → SiLU·up as loop fusion leaves it: the row statistic, its
+    epilogue, the SiLU's fill constant (``one``) loaded ahead of the column sweep, and the
+    combine tail reading it after the two-channel contraction."""
+    lit0 = Literal(0, "int")
+    stat = Loop(
+        axis=Axis("k0", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xs",), input="x", index=(lit0, lit0, Var("k0"))),
+                Assign(name="xf", op="copy", args=("xs",), dtype=F32),
+                Assign(name="sq", op="multiply", args=("xf", "xf")),
+                Accum(name="ss", value="sq", op="add", axes=("k0",)),
+            )
+        ),
+    )
+    col = Loop(
+        axis=Axis("k", Dim(64)),
+        body=Body(
+            (
+                Load(names=("xc",), input="x", index=(lit0, lit0, Var("k"))),
+                Load(names=("wn",), input="w", index=(Var("k"),)),
+                Assign(name="xcf", op="copy", args=("xc",), dtype=F32),
+                Assign(name="wnf", op="copy", args=("wn",), dtype=F32),
+                Assign(name="sc", op="multiply", args=("rs", "xcf")),
+                Assign(name="nm", op="multiply", args=("sc", "wnf")),
+                Assign(name="nh", op="copy", args=("nm",), dtype=F16),
+                Load(names=("g",), input="wg", index=(Var("k"), Var("n"))),
+                Assign(name="pg", op="multiply", args=("g", "nh")),
+                Accum(name="ag", value="pg", op="add", axes=("k",)),
+                Load(names=("u",), input="wu", index=(Var("k"), Var("n"))),
+                Assign(name="pu", op="multiply", args=("nh", "u")),
+                Accum(name="au", value="pu", op="add", axes=("k",)),
+            )
+        ),
+    )
+    sweep = Loop(
+        axis=Axis("n", Dim(128)),
+        body=Body(
+            (
+                col,
+                Assign(name="ng", op="negative", args=("ag",)),
+                Assign(name="eg", op="exp", args=("ng",)),
+                Assign(name="dn", op="add", args=("one", "eg")),
+                Assign(name="sg", op="reciprocal", args=("dn",)),
+                Assign(name="si", op="multiply", args=("ag", "sg")),
+                Assign(name="o", op="multiply", args=("au", "si")),
+                Write(output="out", index=(lit0, lit0, Var("n")), value="o"),
+            )
+        ),
+    )
+    return Body(
+        (
+            stat,
+            Load(names=("cnt",), input="count", index=(lit0,)),
+            Assign(name="mean", op="divide", args=("ss", "cnt")),
+            Load(names=("eps",), input="eps", index=(lit0,)),
+            Assign(name="ve", op="add", args=("eps", "mean")),
+            Assign(name="rs", op="rsqrt", args=("ve",)),
+            Load(names=("one",), input="silu_one", index=(lit0,)),
+            sweep,
+        )
+    )
+
+
+def test_fused_view_tail_prefix_is_alpha_renamed_from_the_statistic_prologue():
+    """At one row the fused gate/up reading prepends the tail's stat-free cone stmts (the
+    SiLU's fill constant) so the store side re-evaluates them — a SECOND spelling of names the
+    statistic prologue also defines. A PLACE cut flattens both into one raw loop body (the
+    parent piece), so the copies must carry their own names or the piece defines a name twice
+    and the cut is refused (Qwen3.8 ``PLACE@a0=cut`` on norm→gate/up M=1)."""
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.ir.tile.ir import effect_tail
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _nest
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    tile = recognized_tile(LoopOp(body=_m1_norm_gate_up_body()))
+    pro = fused_view(TileOp(op=tile.op, place=Placement(free=tuple(tile.place.free)), stores=tuple(tile.stores)))
+    assert pro is not None, "the one-row norm→gate/up must bind the fused (computed-A) reading"
+    tree, added_axes, stores = pro
+    assert any(s.name.endswith("__p") for s in tree.body if isinstance(s, Load)), [s for s in tree.body]
+    # The parent piece of any cut is this flattening; it must be a valid single-scope program.
+    LoopOp(body=Body(tuple(_nest(effect_tail(tree.lower(), stores), [*tile.place.free, *added_axes]))))

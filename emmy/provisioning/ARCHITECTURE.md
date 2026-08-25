@@ -101,9 +101,9 @@ so every task's result reflects its host's stand-up cost. `vm_provision` is omit
 ## Command source staging
 
 Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
-while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging sends the
-selected files without computing or returning a manifest or content digest; the experiment record separately captures
-the repository revision and dirty flag.
+while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging returns
+the invoking worktree's revision and path-scoped dirty flag to the benchmark runner, which records that source instead
+of deriving provenance from the installed package or a reused remote source tree.
 
 ## Error contract
 

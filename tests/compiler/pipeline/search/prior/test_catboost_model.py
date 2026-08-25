@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.data.group import Group
+from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
@@ -26,7 +26,7 @@ from emmy.compiler.pipeline.search.prior.fit.catboost import CatBoostTrainer
 FEATURES = ("D_a", "D_b")
 
 
-def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[Group]:
+def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[GoldenGroup]:
     """Pools whose golden is the row maximizing ``D_a`` — a signal any working ranker recovers, and one
     that is invisible to ``D_b`` (pure noise), so a fitted model must have learned the right column."""
     rng = np.random.default_rng(0)
@@ -34,7 +34,7 @@ def _groups(n_pools: int = 8, n_rows: int = 30, dynamic: bool = False) -> list[G
     out = []
     for gi in range(n_pools):
         rows = [{"D_a": float(i), "D_b": float(rng.integers(0, 5)), **stamp} for i in range(n_rows)]
-        out.append(Group.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi}", n_rows - 1, rows))
+        out.append(GoldenGroup.from_dicts(f"gpuA/p{gi}", f"p{gi}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi}", n_rows - 1, rows))
     return out
 
 
@@ -70,7 +70,7 @@ def test_the_tree_prices_the_two_regimes_from_the_routing_column():
             ]
             pinned = 0 if dynamic else 29  # dynamic pools want the LOW D_a row, static the high one
             out.append(
-                Group.from_dicts(
+                GoldenGroup.from_dicts(
                     f"gpuA/p{gi + offset}", f"p{gi + offset}", "dyn" if dynamic else "warp", "gpuA", f"shape{gi + offset}", pinned, rows
                 )
             )
@@ -88,7 +88,7 @@ def test_routing_stamp_is_an_ordinary_column():
     any other, so there is no second weight set and no unfittable-dynamic-set fold to exclude.
 
     The load-bearing assertion is that the column arrives with the STAMP in it. It used to arrive all-NaN:
-    the dataset withheld the name, the trainer appended it to ``cols`` anyway, and ``Group.matrix`` filled
+    the dataset withheld the name, the trainer appended it to ``cols`` anyway, and ``GoldenGroup.matrix`` filled
     a column it could not find with ``ABSENT``. Every training row landed in one bucket while every live
     candidate carried a real 0.0/1.0 — a train/serve skew that ``cols`` alone could never reveal."""
     routing = ("S_ext_n_symbolic_axis",)
@@ -125,7 +125,7 @@ def test_score_rows_projects_onto_the_models_own_columns():
     mis-filled column would score identically. That is why the fill is pinned where it is decided
     (:func:`test_absent_features_are_nan_not_zero`) rather than by its effect."""
     model = _fit()  # trained on ("D_a", "D_b")
-    group = Group.from_dicts("gpuA/p", "p", "warp", "gpuA", "s", 0, [{"D_a": float(i)} for i in range(6)])
+    group = GoldenGroup.from_dicts("gpuA/p", "p", "warp", "gpuA", "s", 0, [{"D_a": float(i)} for i in range(6)])
     assert group.feat_names == ("D_a",)  # the pool is missing a column the model wants
 
     scores = model.score_rows(group)
@@ -168,7 +168,10 @@ def test_row_accounting_covers_every_positive():
     """``rows`` is what the fit reports it trained on, so a pool with two pins must count two — otherwise the
     number silently understates the training set as the corpus grows siblings."""
     trainer = CatBoostTrainer(feature_names=FEATURES, negatives=4)
-    groups = [_groups(n_pools=1)[0], replace(_groups(n_pools=1)[0], key="gpuA/p1", pinned=(0, 1, 2))]
+    rows = [{"D_a": float(i), "D_b": 0.0, "S_ext_n_symbolic_axis": 0.0} for i in range(30)]
+    extra = GoldenGroup.from_dicts("gpuA/p1", "p1", "warp", "gpuA", "s1", (0, 1, 29), rows)
+    groups = [_groups(n_pools=1)[0], extra]
+    assert (len(groups[0].golden_ids), len(extra.golden_ids)) == (1, 3)
     assert trainer._n_rows([np.arange(4), np.arange(4)], groups) == (4 + 1) + (4 + 3)
 
 
@@ -177,7 +180,7 @@ def test_fit_treats_every_pin_as_a_positive():
     needs no reshaping: both pins ride into the training set at label 1.0 and both end up ahead of every
     unpinned row. A run that had drawn one of them as a negative would have pushed it back down."""
     rows = [{"D_a": float(i), "D_b": 0.0} for i in range(20)]
-    groups = [Group.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
+    groups = [GoldenGroup.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
     fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=8).fit(groups)
     assert fit.rows == 6 * (8 + 2)
     assert set(np.argsort(-fit.score_rows(groups[0]), kind="stable")[:2].tolist()) == {18, 19}

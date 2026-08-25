@@ -397,3 +397,84 @@ def test_model_tag_may_pin_the_rung(spec, want):
     """A coded checkpoint's rung lives on a branch, and the rungs differ in exactly the bit
     allocation the keys carry — so the ``model:`` tag may pin one."""
     assert split_revision(spec) == want
+
+
+def test_fp8_expert_twins_spell_bits_and_block_scales_and_keep_the_unconverted_profile():
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from emmy.compiler.loader.quant import fp8_weight_profile
+    from emmy.serving.gen_runner import trace_split
+    from emmy.serving.twins import _spell_fp8_expert_twins
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+            return nn.functional.linear(nn.functional.silu(gate) * up, w_down)
+
+    h, inter = 3072, 1024
+    graph = trace_split(
+        Expert(),
+        tuple(torch.zeros(*shape, dtype=torch.float16) for shape in ((1, h), (2 * inter, h), (h, inter))),
+        None,
+    )
+    config = type("Cfg", (), {})()
+    config.quantization_config = {
+        "quant_method": "fp8",
+        "weight_block_size": [128, 128],
+        "ignored_layers": ["lm_head", "model.layers.44.mlp.experts"],
+    }
+    profile = fp8_weight_profile(config)
+    assert profile == ("f8e4m3", (128, 128), ["lm_head", "model.layers.44.mlp.experts"])
+
+    twins = _spell_fp8_expert_twins("expert-sparse-sliding", graph, profile, {1, 44})
+    assert set(twins) == {"expert-sparse-sliding@f8e4m3", "expert-sparse-sliding"}
+    spelled = twins["expert-sparse-sliding@f8e4m3"]
+    spelled.validate()
+    assert spelled.inputs == ["x", "w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"]
+    assert spelled.nodes["w_gate_up"].output.dtype.name == "f8e4m3"
+    # Block scales are declared at the interleaved (grid, 1) layout the dequant cone broadcasts.
+    assert tuple(d.as_static() for d in spelled.nodes["w_gate_up_scale"].output.shape) == (16, 1, 24, 1)
+    assert tuple(d.as_static() for d in spelled.nodes["w_down_scale"].output.shape) == (24, 1, 8, 1)
+    assert twins["expert-sparse-sliding"] is graph
+    # Every layer converted: no plain twin. A config without fp8 spells nothing.
+    assert list(_spell_fp8_expert_twins("e", graph, profile, {1, 2})) == ["e@f8e4m3"]
+    assert fp8_weight_profile(type("Cfg", (), {"quantization_config": {"quant_method": "exl3"}})()) is None
+
+
+def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from emmy.compiler.loader.quant import mxfp4_weight_profile
+    from emmy.serving.gen_runner import trace_split
+    from emmy.serving.twins import _spell_mxfp4_expert_twins
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down, b_gate_up, b_down):
+            gate, up = (x @ w_gate_up + b_gate_up).chunk(2, dim=-1)
+            return gate * up @ w_down + b_down
+
+    hidden, inter = 64, 32
+    graph = trace_split(
+        Expert(),
+        tuple(
+            torch.zeros(*shape, dtype=torch.float16)
+            for shape in ((1, hidden), (hidden, 2 * inter), (inter, hidden), (2 * inter,), (hidden,))
+        ),
+        None,
+    )
+    config = type("Cfg", (), {"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}})()
+    profile = mxfp4_weight_profile(config)
+    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1})
+    assert set(twins) == {"expert1@mxfp4"}
+    spelled = twins["expert1@mxfp4"]
+    spelled.validate()
+    assert spelled.inputs == ["x", "w_gate_up", "w_down", "b_gate_up", "b_down", "w_gate_up_scale", "w_down_scale"]
+    assert tuple(d.as_static() for d in spelled.nodes["w_gate_up"].output.shape) == (64, 2, 16)
+    assert tuple(d.as_static() for d in spelled.nodes["w_down"].output.shape) == (64, 1, 16)
+    assert tuple(d.as_static() for d in spelled.nodes["w_gate_up_scale"].output.shape) == (64, 2)
+    assert profile == ["lm_head"]
+
+    with pytest.raises(NotImplementedError, match=r"requires every routed-expert layer.*layer\(s\) \[1\]"):
+        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1})

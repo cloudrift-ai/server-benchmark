@@ -5,7 +5,7 @@ def test_compile_code_torch_ir(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))", "--ir", "torch")
     assert rc == 0, f"stderr: {stderr}"
     assert "rms_norm" in stdout
-    assert "(1, 32, 2048)" in stdout
+    assert "f32[1,32,2048]" in stdout
 
 
 def test_compile_code_tensor_ir(run_cli):
@@ -60,7 +60,7 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "F.softmax(torch.randn(1,32,128), dim=-1)", "--ir", "tensor")
     assert rc == 0, f"stderr: {stderr}"
     assert "1 inputs" in stdout
-    assert "maximum(" in stdout and "sum(" in stdout
+    assert "amax(" in stdout and "sum(" in stdout
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):

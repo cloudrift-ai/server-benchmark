@@ -7,6 +7,8 @@ target identity needed by search consumers directly as data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import tempfile
@@ -176,6 +178,31 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
+
+    @cached_property
+    def pool_key(self) -> tuple:
+        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
+        consumer that groups goldens groups them the same way.
+
+        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
+        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
+        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
+        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
+        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
+        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
+        does not go stale when the scheduler changes.
+
+        When a group identity is recorded with the golden instead, this property returns it and its callers
+        do not change."""
+        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+        kind = "loop" if self.loop_wire is not None else "prog"
+        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
+        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+
+    @cached_property
+    def pin_key(self) -> tuple:
+        """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
+        return tuple((k, str(v)) for k, v in self.pins)
 
     @cached_property
     def program(self):
@@ -674,7 +701,7 @@ def decode_record(record: GoldenRecord) -> str | None:
             return verdicts[verdict_key]
         pro = fused_view(tile)
         route_tree, route_free, route_stores = (
-            (pro[0], (*tile.place.free, pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
+            (pro[0], (*tile.place.free, *pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
         )
         seams = cuttable_seams(route_tree, route_stores, route_free)
         all_sites = sites(route_tree)
@@ -691,7 +718,7 @@ def decode_record(record: GoldenRecord) -> str | None:
                 site = resolve(route_tree, str(key), all_sites=all_sites)
             except ValueError as exc:
                 return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or site not in seams:
+            if site is None or not any(site in cut.members for cut in seams):
                 return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
         return _remember_verdict(verdict_key, None)
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))

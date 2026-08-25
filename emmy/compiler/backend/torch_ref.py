@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
     from emmy.compiler.graph import Graph
 
-# Frontend / tensor ops with a torch twin. Everything else (IndexMapOp,
-# GatherOp, ScatterOp, ScanOp, …) makes a graph non-runnable as a torch ref.
+# Frontend / tensor ops with a torch twin. Everything else (GatherOp,
+# ScatterOp, …) makes a graph non-runnable as a torch ref.
 SUPPORTED = frozenset(
     {
         "TransposeOp",
@@ -41,6 +41,8 @@ SUPPORTED = frozenset(
         "SoftmaxOp",
         "ElementwiseOp",
         "ReduceOp",
+        "ScanOp",
+        "RangeOp",
         "IndexMapOp",
     }
 )
@@ -63,8 +65,14 @@ def torch_dtype(dtype) -> torch.dtype | None:
         # numeric torch float8 value.
         "f8e4m3": torch.uint8,
         "f8e5m2": torch.uint8,
+        "bool": torch.bool,
+        "u8": torch.uint8,
+        "i16": torch.int16,
         "i32": torch.int32,
         "i64": torch.int64,
+        "u16": torch.uint16,
+        "u32": torch.uint32,
+        "u64": torch.uint64,
     }.get(str(dtype))
 
 
@@ -82,6 +90,8 @@ def is_runnable(graph: Graph) -> bool:
                 _elementwise_callable(node.op.op.name)
             except NotImplementedError:
                 return False
+        if type(node.op).__name__ == "ScanOp" and node.op.op.name not in ("sum", "add"):
+            return False
     return True
 
 
@@ -110,9 +120,17 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "prod": lambda a: a[0] * a[1],
         "divide": lambda a: a[0] / a[1],
         "true_divide": lambda a: a[0] / a[1],
+        "floor_divide": lambda a: torch.floor_divide(a[0], a[1]),
+        "remainder": lambda a: torch.remainder(a[0], a[1]),
+        "left_shift": lambda a: torch.bitwise_left_shift(a[0], a[1]),
+        "right_shift": lambda a: torch.bitwise_right_shift(a[0], a[1]),
+        "bitwise_and": lambda a: torch.bitwise_and(a[0], a[1]),
+        "bitwise_or": lambda a: torch.bitwise_or(a[0], a[1]),
+        "bitwise_xor": lambda a: torch.bitwise_xor(a[0], a[1]),
         "pow": lambda a: a[0] ** a[1],
         "maximum": lambda a: torch.maximum(a[0], a[1]),
         "minimum": lambda a: torch.minimum(a[0], a[1]),
+        "where": lambda a: torch.where(a[0], a[1], a[2]),
         "negative": lambda a: -a[0],
         "abs": lambda a: torch.abs(a[0]),
         "reciprocal": lambda a: torch.reciprocal(a[0]),
@@ -135,6 +153,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "from_f8e4m3": from_f8(torch.float8_e4m3fn),
         "from_f8e5m2": from_f8(torch.float8_e5m2),
         "copy": lambda a: a[0],
+        "pad": lambda a: a[0],
     }
 
 
@@ -177,6 +196,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
     name = type(op).__name__
     if name == "ElementwiseOp":
         return _elementwise(op.op.name, ins)
+    if name == "RangeOp":
+        return torch.arange(op.start, op.stop, op.step, dtype=torch_dtype(op.dtype))
     if name == "ReduceOp":
         x, ax, fn = ins[0], op.axis, op.op.name
         if fn in ("sum", "add"):
@@ -188,6 +209,11 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None):
         if fn in ("minimum", "amin", "min"):
             return x.amin(dim=ax, keepdim=True)
         raise NotImplementedError(f"torch_ref: reduce {fn!r} unmapped")
+    if name == "ScanOp":
+        fn = op.op.name
+        if fn in ("sum", "add"):
+            return torch.cumsum(ins[0], dim=op.axis)
+        raise NotImplementedError(f"torch_ref: scan {fn!r} unmapped")
     if name == "LinearOp":
         return F.linear(ins[0], ins[1], ins[2] if op.has_bias else None)
     if name == "MatmulOp":
@@ -270,11 +296,20 @@ def _idx_expr(e, env: dict):
     routes ``&&``/``||`` through ``np.logical_and``, which can't take a CUDA
     tensor). Falls back to ``Expr.eval`` for leaf node types that don't appear
     in coord maps."""
+    import torch  # noqa: PLC0415
+
     cls = type(e).__name__
     if cls == "Var":
         return env[e.name]
     if cls == "Literal":
         return e.value
+    if cls == "TernaryExpr":
+        cond = _idx_expr(e.cond, env)
+        if_true = _idx_expr(e.if_true, env)
+        if_false = _idx_expr(e.if_false, env)
+        if not torch.is_tensor(cond):
+            return if_true if cond else if_false
+        return torch.where(cond, if_true, if_false)
     if cls == "BinaryExpr":
         lo, ro = _idx_expr(e.left, env), _idx_expr(e.right, env)
         op = e.op
@@ -361,8 +396,9 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     """Build a torch callable for ``graph`` plus its positional input list.
 
     The returned ``fn(*tensors)`` runs the frontend ops in topological order and
-    returns the graph's first output; the input list is the ``tensors`` to call
-    it with (drawn from ``input_tensors`` in boundary topo order). Scalar
+    returns a tensor for a single-output graph or a tuple following
+    ``graph.outputs`` order for a multi-output graph; the input list is the
+    ``tensors`` to call it with (drawn from ``input_tensors`` in boundary topo order). Scalar
     constants are read inline from the graph (so ``fn`` is a pure function of
     its tensor inputs and ``torch.compile`` can trace it).
 
@@ -371,6 +407,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     inside the traced function used to trigger a dynamo recompile per distinct
     op (``add`` vs ``multiply`` vs …), hitting the recompile limit on big
     graphs."""
+    import torch  # noqa: PLC0415
+
     from emmy.compiler.ir.expr import Var  # noqa: PLC0415
     from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
 
@@ -407,10 +445,24 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
             continue
         if type(node.op).__name__ == "ElementwiseOp":
             op_callable = _elementwise_callable(node.op.op.name)
+        elif type(node.op).__name__ == "RangeOp":
+            first_input = next(iter(input_tensors.values()), None)
+            device = first_input.device if first_input is not None else torch.device("cpu")
+            op_callable = (
+                lambda n, d: (
+                    lambda _ins: torch.arange(
+                        n.op.start,
+                        n.op.stop,
+                        n.op.step,
+                        dtype=torch_dtype(n.op.dtype),
+                        device=d,
+                    )
+                )
+            )(node, device)
         else:
             op_callable = (lambda n: lambda ins: _eval(n, ins, sym_env))(node)
         compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))
-    out_id = graph.outputs[0]
+    out_ids = tuple(graph.outputs)
 
     def fn(*tensors):
         env = dict(scalars)
@@ -418,6 +470,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
         for nid, op_callable, in_ids, out_dtype in compute_steps:
             v = op_callable([env[i] for i in in_ids])
             env[nid] = v if out_dtype is None else v.to(out_dtype)
-        return env[out_id]
+        if len(out_ids) == 1:
+            return env[out_ids[0]]
+        return tuple(env[out_id] for out_id in out_ids)
 
     return fn, [input_tensors[i] for i in tensor_ids]

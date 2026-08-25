@@ -9,7 +9,7 @@ across the redefinition.
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import U32
+from emmy.compiler.dtype import I32, U32
 from emmy.compiler.ir.stmt.base import RenderCtx, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign
@@ -39,6 +39,22 @@ def test_fold_keeps_target_rendered_bitcast_named(monkeypatch) -> None:
     )
     assert any("unsigned int bits = emmy_bitcast<unsigned int>(x);" in line for line in lines)
     assert any(" y = bits;" in line for line in lines)
+
+
+def test_fold_preserves_integer_dtype_for_bitwise_consumer(monkeypatch) -> None:
+    """Inlining a typed shift must not turn its consumer's integer mask into logical AND."""
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    ctx = RenderCtx(ssa_dtypes={"packed": "i32", "shift": "i32", "mask": "i32"})
+    lines = render_body(
+        Body(
+            (
+                Assign(name="shifted", op="right_shift", args=("packed", "shift"), dtype=I32),
+                Assign(name="nibble", op="bitwise_and", args=("shifted", "mask"), dtype=I32),
+            )
+        ),
+        ctx,
+    )
+    assert lines == ["    int nibble = (packed >> shift) & mask;"]
 
 
 def test_fold_declines_across_operand_redefinition(monkeypatch) -> None:

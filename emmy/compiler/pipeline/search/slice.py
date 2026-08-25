@@ -10,8 +10,9 @@ Used in two places:
 
 The slice keeps the root kernel node plus its transitive ``ConstantOp`` /
 ``InputOp`` producers (so scalar-constant inlining and load-op replay behave
-identically) and replaces every *compute* ancestor — another kernel feeding
-this one — with a synthetic ``InputOp`` boundary, so the result is standalone.
+identically), declares every retained ``InputOp`` as an external boundary, and
+replaces every *compute* ancestor — another kernel feeding this one — with a
+synthetic ``InputOp`` boundary, so the result is standalone.
 The root op is shared **by reference**: its body (and therefore
 :meth:`~emmy.compiler.ir.base.Op.cache_key`) is byte-for-byte the full-graph op's, which is what lets
 inner-tuned ``perf`` / ``lowering`` rows transfer back to the assembled graph.
@@ -79,8 +80,8 @@ def single_node_graph(graph: Graph, node_id: str) -> Graph:
     """Slice ``graph`` to the single kernel node ``node_id`` plus its
     leaf-op closure, with every compute-op input turned into a synthetic
     ``InputOp``. Returns a standalone :class:`Graph` whose sole output is
-    ``node_id`` and whose ``inputs`` list its synthetic boundaries + real
-    graph inputs — sized identically to the full graph (partition
+    ``node_id`` and whose ``inputs`` list every retained or synthetic
+    ``InputOp`` boundary — sized identically to the full graph (partition
     enumeration depends on the producers' extents)."""
     from emmy.compiler.graph import Graph as _Graph  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
@@ -97,8 +98,8 @@ def single_node_graph(graph: Graph, node_id: str) -> Graph:
             sub.inputs.extend(src.buffer_names())
         else:
             sub.add_node(src.op, list(src.inputs), outputs=src.outputs, node_id=src.id)
-            if isinstance(src.op, InputOp) and kid in graph.inputs:
-                sub.inputs.append(kid)
+            if isinstance(src.op, InputOp):
+                sub.inputs.extend(src.buffer_names())
     # Every buffer of the sliced node is a slice output (a non-primary buffer
     # with no in-slice consumer must plan as an output, not dead scratch).
     sub.outputs.extend(graph.nodes[node_id].buffer_names())

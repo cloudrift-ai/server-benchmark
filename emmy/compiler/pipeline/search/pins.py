@@ -33,12 +33,14 @@ def _stampable_reduce(want: str) -> str | None:
     return "/".join(tokens[1:])
 
 
-def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | None:
+def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_conflicts: bool = False) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
     A registered family with no realized key is ungateable because serialized IR
     can omit knob stamps. Declared OFF values mean not-applicable rather than a
     conflicting realization; an unknown absent family remains a likely typo.
+    ``reject_conflicts`` additionally rejects any matching child scope that decided
+    a different non-OFF value, even when another child realized the requested pin.
     """
     if not any(kernel_knobs):
         return None
@@ -57,13 +59,15 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
                     continue
                 probe = rest
         others: list[str] = []
+        conflicts: list[str] = []
         saw_off = False
         hit = False
         for raw in kernel_knobs:
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
-                if pin_key_matches(name, key) and values_equal(name, probe, got):
+                same_scope = pin_key_matches(name, key)
+                if same_scope and values_equal(name, probe, got):
                     hit = True
                 elif is_off_value(fam, got):
                     saw_off = True
@@ -71,13 +75,16 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict]) -> str | Non
                     spell = f"{key}={got}" if key != name else str(got)
                     if spell not in others:
                         others.append(spell)
-            if hit:
+                    if same_scope and spell not in conflicts:
+                        conflicts.append(spell)
+            if hit and not reject_conflicts:
                 break
-        if hit:
+        if hit and (not reject_conflicts or not conflicts):
             continue
         if not others and not saw_off and get(fam) is not None:
             continue
-        ran = "/".join(others) if others else ("(off)" if saw_off else "(unset)")
+        ran_values = conflicts if reject_conflicts and conflicts else others
+        ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
         misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 

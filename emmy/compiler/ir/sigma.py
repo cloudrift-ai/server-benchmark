@@ -37,6 +37,14 @@ class Sigma:
         key = tuple(sorted((k, v.pretty()) for k, v in self.mapping.items()))
         object.__setattr__(self, "_key", key)
 
+    @classmethod
+    def _from_key(cls, mapping: dict[str, Expr], key: tuple[tuple[str, str], ...]) -> Sigma:
+        """Construct a derived substitution whose canonical entries are already known."""
+        sigma = object.__new__(cls)
+        object.__setattr__(sigma, "mapping", mapping)
+        object.__setattr__(sigma, "_key", key)
+        return sigma
+
     def apply(self, e: Expr) -> Expr:
         return e.substitute(self.mapping)
 
@@ -48,11 +56,16 @@ class Sigma:
         return e.substitute(self.mapping).simplify(ctx)
 
     def extend(self, name: str, expr: Expr) -> Sigma:
-        return Sigma({**self.mapping, name: expr})
+        mapping = {**self.mapping, name: expr}
+        existing = ((axis, canonical) for axis, canonical in self._key if axis != name)
+        key = tuple(sorted((*existing, (name, expr.pretty()))))
+        return self._from_key(mapping, key)
 
     def restrict(self, names: set[str]) -> Sigma:
         """Return a new Sigma keeping only bindings whose axis name is in ``names``."""
-        return Sigma({k: v for k, v in self.mapping.items() if k in names})
+        mapping = {k: v for k, v in self.mapping.items() if k in names}
+        key = tuple(entry for entry in self._key if entry[0] in names)
+        return self._from_key(mapping, key)
 
     def get(self, name: str) -> Expr | None:
         return self.mapping.get(name)

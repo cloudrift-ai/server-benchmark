@@ -2,11 +2,11 @@
 
 This module is the ONE place quantization-as-a-concept exists (together with the
 safetensors loader that reads the checkpoint and ``trace/huggingface.py``'s
-architecture-twin construction). Three checkpoint families share the design — FP8
+architecture-twin construction). Four checkpoint families share the design — FP8
 (scale-paired bits, ``quant_method: "fp8"`` / compressed-tensors), AWQ GEMM
 (packed int4 ``qweight`` / ``qzeros`` plus group scales), and EXL3 (trellis-coded
-sibling tensors, ``quant_method: "exl3"``; decode math in ``loader/exl3.py``).
-Per family:
+sibling tensors, ``quant_method: "exl3"``; decode math in ``loader/exl3.py``), plus
+MXFP4 (two nibbles per byte with one E8M0 scale per 32 values). Per family:
 
 - Pure numpy fp8 math: :func:`decode_f8` (re-exported from
   :mod:`emmy.compiler.dtype`, the leaf module the LUT lives in so the
@@ -74,6 +74,17 @@ _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
 _AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
 
 
+def scale_is_reciprocal(scale_key: str) -> bool:  # noqa: ARG001 — the key is the one fact a caller has
+    """Whether a checkpoint's stored scale is the RECIPROCAL of the dequant multiplier. It never
+    is: DeepSeek's ``weight_scale_inv`` (Laguna, DeepSeek-V3/V4 lineage) names the inverse of the
+    QUANTIZATION scale — ``q = w / s`` stored beside ``s`` — so the dequant is ``q * s`` exactly
+    as for ``weight_scale`` (DeepSeek's own ``weight_dequant`` and vLLM's block-fp8 path
+    multiply by it). Dividing by it, as the suffix once suggested here, scaled every
+    ``_scale_inv`` weight by ``1/s²``. The ``inverse=`` plumbing stays for a checkpoint that
+    declares a true reciprocal; the suffix alone never selects it."""
+    return False
+
+
 def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) -> np.ndarray:
     """Apply a quantization scale to a decoded weight, deriving the block from the shapes.
 
@@ -125,6 +136,21 @@ def _fp8_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
+def _mxfp4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's native MXFP4 declaration, or ``None``.
+
+    OpenAI gpt-oss stores routed expert matrices as ``*_blocks`` uint8 tensors (two
+    FP4 values per byte) beside ``*_scales`` uint8 E8M0 exponents. Emmy owns that
+    storage directly; expanding it through the engine quantizer would defeat the
+    expert-streaming memory contract.
+    """
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        return None
+    qc = json.loads(cfg_path.read_text()).get("quantization_config")
+    return qc if isinstance(qc, dict) and qc.get("quant_method") == "mxfp4" else None
+
+
 def _exl3_quant_config(model_dir: Path) -> dict | None:
     """The checkpoint's ``quantization_config`` when it declares the EXL3 trellis scheme.
 
@@ -170,6 +196,28 @@ def _awq_quant_config(model_dir: Path) -> dict | None:
 def is_awq_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the supported packed AWQ GEMM scheme."""
     return _awq_quant_config(Path(model_dir)) is not None
+
+
+def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Decode native MXFP4 storage to its logical ``(..., in, out)`` matrix.
+
+    ``blocks`` is ``(..., out, groups, 16)``: each byte holds the even value in
+    its low nibble and the odd value in its high nibble, so one group contains 32
+    values. ``scales`` is ``(..., out, groups)`` and stores the base-2 exponent
+    biased by 127. The result swaps the stored output/input axes to match the
+    gpt-oss expert wrapper's ``x @ W`` contract.
+    """
+    blocks = np.asarray(blocks)
+    scales = np.asarray(scales)
+    if blocks.dtype != np.uint8 or scales.dtype != np.uint8:
+        raise ValueError(f"MXFP4 blocks/scales must be uint8, got {blocks.dtype} and {scales.dtype}")
+    if blocks.ndim < 3 or blocks.shape[-1] != 16 or scales.shape != blocks.shape[:-1]:
+        raise ValueError(f"MXFP4 storage geometry mismatch: blocks={blocks.shape}, scales={scales.shape}")
+    nibbles = np.stack((blocks & np.uint8(0xF), blocks >> np.uint8(4)), axis=-1).reshape(*blocks.shape[:-1], 32)
+    values = np.asarray((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0))
+    decoded = np.ldexp(values[nibbles], scales.astype(np.int32)[..., None] - 127)
+    dense = decoded.reshape(*blocks.shape[:-2], blocks.shape[-2] * 32)
+    return np.swapaxes(dense, -2, -1).astype(np.float32)
 
 
 def unpack_awq4(packed: np.ndarray) -> np.ndarray:
@@ -264,6 +312,8 @@ def checkpoint_quant_summary(model_dir) -> str:
         return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
     if (qc := _awq_quant_config(model_dir)) is not None:
         return f"awq int{qc.get('bits')} g{qc.get('group_size', qc.get('q_group_size'))} {qc.get('version', 'gemm')}"
+    if _mxfp4_quant_config(model_dir) is not None:
+        return "mxfp4"
     return "unquantized"
 
 
@@ -272,15 +322,13 @@ def engine_config_overrides(hf_config) -> dict:
     loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's
     "config unreadable").
 
-    The trellis-coded (EXL3) scheme is the case today: vLLM carries no method for it and refuses
-    the boot outright, while nothing in the engine needs one — emmy's runner owns every coded
-    weight, and the single engine-owned parameter (``lm_head``) decodes to fp16 at load
-    (``serving/vllm_model_gen.py``). Presented as unquantized, the model is exactly what the
-    engine then treats it as. This lives in the loader band rather than at the ``emmy serve``
-    call site because naming a checkpoint scheme is frontend-band knowledge."""
+    EXL3, AWQ and MXFP4 are owned by Emmy's loader and compiler. Presenting their shape-only
+    architecture twin as unquantized prevents the engine from rejecting an otherwise supported
+    device or trying to allocate a second decoded expert table. This lives in the loader band
+    because naming a checkpoint scheme is frontend-band knowledge."""
     scheme = getattr(hf_config, "quantization_config", None)
     method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
-    return {"quantization_config": None} if method in {"exl3", "awq"} else {}
+    return {"quantization_config": None} if method in {"exl3", "awq", "mxfp4"} else {}
 
 
 def strip_engine_quant_config(hf_config) -> None:
@@ -300,12 +348,49 @@ def _exl3_codebook(index, base: str) -> int:
     return 1 if base + ".mcg" in index else 2 if base + ".mul1" in index else 0
 
 
+def fp8_weight_profile(hf_config) -> tuple[str, tuple[int, int] | None, list[str]] | None:
+    """``(fmt, weight block, skip patterns)`` when ``hf_config`` declares fp8 weights, else ``None``.
+
+    Read off ``quantization_config`` BEFORE :func:`strip_engine_quant_config` drops it: the
+    storage format token, the 2-D block one scale covers (``None`` = one per-tensor scale) and
+    the module patterns the quantizer left unconverted (:func:`_skip_patterns`). A weight-free
+    twin derives its scale shapes from this profile and the traced weight shapes alone."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "fmt", "weight_block_size", *_SKIP_KEYS)}
+    if qc.get("quant_method") != "fp8":
+        return None
+    block = qc.get("weight_block_size")
+    fmt = "f8e5m2" if qc.get("fmt") == "e5m2" else "f8e4m3"
+    return fmt, (None if block is None else tuple(int(b) for b in block)), _skip_patterns(qc)
+
+
+def mxfp4_weight_profile(hf_config) -> list[str] | None:
+    """MXFP4 skip patterns from a shape-only config, or ``None`` for another scheme."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", *_SKIP_KEYS)}
+    return _skip_patterns(qc) if qc.get("quant_method") == "mxfp4" else None
+
+
+_SKIP_KEYS = ("ignored_layers", "modules_to_not_convert", "ignore")
+
+
+def _skip_patterns(qc: dict) -> list[str]:
+    """The module patterns a ``quantization_config`` leaves unquantized, every spelling pooled."""
+    return [pat for key in _SKIP_KEYS for pat in (qc.get(key) or [])]
+
+
 def _is_skipped(weight_key: str, patterns: list[str]) -> bool:
     """Whether the weight's module is excluded from quantization.
 
-    ``quant_method: fp8`` lists module names in ``modules_to_not_convert``;
-    compressed-tensors lists them in ``ignore``, where a ``re:`` prefix marks a
-    regex. Plain entries match the module path exactly or as a dotted prefix /
+    ``quant_method: fp8`` lists module names in ``modules_to_not_convert`` (the DeepSeek
+    lineage writes ``ignored_layers``); compressed-tensors lists them in ``ignore``, where a
+    ``re:`` prefix marks a regex. Plain entries match the module path exactly or as a dotted prefix /
     suffix component (``"lm_head"`` matches both ``lm_head`` and
     ``model.lm_head``; a parent-module entry covers its children).
     """
@@ -333,6 +418,11 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     ``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``). An
     unquantized checkpoint passes through unchanged.
 
+    Native MXFP4 checkpoints: each routed expert's ``<projection>_blocks`` /
+    ``<projection>_scales`` pair decodes to the logical ``<projection>`` tensor in the
+    architecture twin's ``(experts, in, out)`` orientation. The consumed storage tensors
+    are dropped.
+
     EXL3 checkpoints: each linear's sibling tensors (``<module>.trellis`` +
     ``suh``/``svh`` + markers) decode to a ``<module>.weight`` value in the
     HF ``(out, in)`` orientation, fp16 (the decode's canonical precision);
@@ -348,9 +438,10 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     model_dir = Path(model_dir)
     index = _build_index(model_dir)
     qc = _fp8_quant_config(model_dir)
+    mxfp4 = _mxfp4_quant_config(model_dir) is not None
     exl3 = _exl3_quant_config(model_dir) is not None
     awq = _awq_quant_config(model_dir)
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or []) if qc else []
+    patterns = _skip_patterns(qc) if qc else []
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -363,6 +454,17 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     consumed: set[str] = set()
     for key in index:
+        if mxfp4 and key.endswith("_blocks"):
+            base = key[: -len("_blocks")]
+            scales_key = base + "_scales"
+            if scales_key not in index:
+                raise ValueError(f"MXFP4 tensor {key!r} is missing scales {scales_key!r}")
+            out[base] = decode_mxfp4(sources[key], sources[scales_key])
+            consumed |= {key, scales_key}
+            continue
+        if mxfp4 and key.endswith("_scales") and key[: -len("_scales")] + "_blocks" in index:
+            consumed.add(key)
+            continue
         if awq is not None and key.endswith(".qweight"):
             base = key[: -len(".qweight")]
             qzeros_key, scales_key = base + ".qzeros", base + ".scales"
@@ -393,7 +495,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
         if qc is not None and key in fp8_keys and not _is_skipped(key, patterns):
             scale_key = next((k for k in (key + "_scale", key + "_scale_inv") if k in index), None)
             if scale_key is not None:
-                out[key] = dequantize(sources[key], sources[scale_key], inverse=scale_key.endswith("_inv"))
+                out[key] = dequantize(sources[key], sources[scale_key], inverse=scale_is_reciprocal(scale_key))
                 consumed.add(scale_key)
                 continue
         out[key] = sources[key]
@@ -528,7 +630,7 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
         shape=shape,
         out_dtype=out.dtype,
         out_name=out.name,
-        inverse=scale_key.endswith("_inv"),
+        inverse=scale_is_reciprocal(scale_key),
         grid=grid,
         block=block,
         degenerate=degenerate,
@@ -802,7 +904,7 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
         return _spell_awq4_constants(graph, model_dir, awq)
     if qc is None:
         return 0
-    patterns = list(qc.get("modules_to_not_convert") or []) + list(qc.get("ignore") or [])
+    patterns = _skip_patterns(qc)
     index = _build_index(model_dir)
 
     spelled = 0
@@ -1247,6 +1349,206 @@ def spell_quantized_inputs(
         graph.replace_node(tmp, final)  # the original consumers now read the cone's value
         graph.remove_node(tmp)
         out_map[name] = sid
+    return out_map
+
+
+def spell_mxfp4_inputs(
+    graph: Graph,
+    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+) -> dict[str, str]:
+    """Spell logical expert inputs as native MXFP4 blocks plus E8M0 scales.
+
+    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice.
+    The traced logical input remains the wrapper's ``(in, out)`` value matrix,
+    while the re-minted ``name`` input binds ``(out, in/32, 16)`` uint8 blocks
+    and the appended ``<name>_scale`` input binds ``(out, in/32)`` uint8 scales.
+    Generic tensor algebra decodes the nibbles and scale exponents in-graph, so
+    lowering can fuse those operations into the ordinary matrix multiplication
+    instead of materializing a persistent dense expert table.
+    """
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, RangeOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    out_map: dict[str, str] = {}
+    for name, (blocks_shape, scales_shape) in specs.items():
+        node = graph.nodes.get(name)
+        if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
+            raise ValueError(f"spell_mxfp4_inputs: {name!r} is not a graph input")
+        out = node.output
+        if any(not d.is_static for d in out.shape):
+            raise ValueError(f"spell_mxfp4_inputs: input {name!r} has symbolic dims; only static weights are supported")
+        logical = tuple(d.as_static() for d in out.shape)
+        blocks_shape, scales_shape = tuple(blocks_shape), tuple(scales_shape)
+        if len(logical) != 2:
+            raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be rank-2, got {logical}")
+        k, n = logical
+        expected_blocks = (n, k // 32, 16) if k % 32 == 0 else None
+        expected_scales = (n, k // 32) if k % 32 == 0 else None
+        if blocks_shape != expected_blocks or scales_shape != expected_scales:
+            raise ValueError(
+                f"spell_mxfp4_inputs: {name!r} storage blocks={blocks_shape}, scales={scales_shape} do not reproduce logical {logical}"
+            )
+
+        tmp = f"{name}__dq_src"
+        graph.rename_node(name, tmp)
+        blocks = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, blocks_shape, "u8"), node_id=name)
+        graph.inputs = [blocks if i == tmp else i for i in graph.inputs]
+        scale_name = f"{name}_scale"
+        scales = graph.add_node(
+            op=InputOp(),
+            inputs=[],
+            output=Tensor(scale_name, scales_shape, "u8"),
+            node_id=scale_name,
+        )
+        graph.inputs.append(scales)
+
+        expanded = (n, k // 32, 16, 2)
+        values_shape = (n, k // 32, 32)
+        blocks_i32 = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[blocks],
+            output=Tensor(f"{name}_blocks_i32", blocks_shape, "i32"),
+        )
+        blocks_view = graph.add_node(
+            op=ReshapeOp(shape=(n, k // 32, 16, 1)),
+            inputs=[blocks_i32],
+            output=Tensor(f"{name}_blocks_view", (n, k // 32, 16, 1), "i32"),
+        )
+        blocks_bc = broadcast_to(graph, blocks_view, expanded)
+        lanes = graph.add_node(
+            op=RangeOp(start=0, stop=2, step=1, dtype="i32"),
+            inputs=[],
+            output=Tensor(f"{name}_lanes", (2,), "i32"),
+        )
+        lanes = graph.add_node(
+            op=ReshapeOp(shape=(1, 1, 1, 2)),
+            inputs=[lanes],
+            output=Tensor(f"{name}_lanes_view", (1, 1, 1, 2), "i32"),
+        )
+        lanes = broadcast_to(graph, lanes, expanded)
+        four = const_bc(graph, name=f"{name}_four", value=4, target_shape=expanded, dtype="i32")
+        shifts = graph.add_node(
+            op=ElementwiseOp(op="multiply"),
+            inputs=[lanes, four],
+            output=Tensor(f"{name}_shifts", expanded, "i32"),
+        )
+        shifted = graph.add_node(
+            op=ElementwiseOp(op="right_shift"),
+            inputs=[blocks_bc, shifts],
+            output=Tensor(f"{name}_shifted", expanded, "i32"),
+        )
+        mask15 = const_bc(graph, name=f"{name}_mask15", value=15, target_shape=expanded, dtype="i32")
+        nibbles = graph.add_node(
+            op=ElementwiseOp(op="bitwise_and"),
+            inputs=[shifted, mask15],
+            output=Tensor(f"{name}_nibbles4", expanded, "i32"),
+        )
+        nibbles = graph.add_node(
+            op=ReshapeOp(shape=values_shape),
+            inputs=[nibbles],
+            output=Tensor(f"{name}_nibbles", values_shape, "i32"),
+        )
+
+        mask7 = const_bc(graph, name=f"{name}_mask7", value=7, target_shape=values_shape, dtype="i32")
+        magnitude_i32 = graph.add_node(
+            op=ElementwiseOp(op="bitwise_and"),
+            inputs=[nibbles, mask7],
+            output=Tensor(f"{name}_magnitude_i32", values_shape, "i32"),
+        )
+        magnitude = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[magnitude_i32],
+            output=Tensor(f"{name}_magnitude", values_shape, "f32"),
+        )
+
+        def constant(label: str, value: float, *, _name=name, _shape=values_shape) -> str:
+            return const_bc(graph, name=f"{_name}_{label}", value=value, target_shape=_shape, dtype="f32")
+
+        def binary(label: str, op: str, left: str, right: str, *, _name=name, _shape=values_shape) -> str:
+            return graph.add_node(
+                op=ElementwiseOp(op=op),
+                inputs=[left, right],
+                output=Tensor(f"{_name}_{label}", _shape, "f32"),
+            )
+
+        # FP4 magnitudes [0, .5, 1, 1.5, 2, 3, 4, 6] without a gather:
+        # .5*m + .5*max(m-4, 0) + max(m-6, 0).
+        zero = constant("zero", 0.0)
+        half = constant("half", 0.5)
+        mag4 = binary("mag4", "subtract", magnitude, constant("four_f32", 4.0))
+        mag6 = binary("mag6", "subtract", magnitude, constant("six_f32", 6.0))
+        base = binary("magnitude_half", "multiply", magnitude, half)
+        extra4 = binary("extra4_pos", "maximum", mag4, zero)
+        extra4 = binary("extra4", "multiply", extra4, half)
+        extra6 = binary("extra6", "maximum", mag6, zero)
+        magnitude_value = binary("magnitude_plus4", "add", base, extra4)
+        magnitude_value = binary("magnitude_value", "add", magnitude_value, extra6)
+
+        three = const_bc(graph, name=f"{name}_sign_shift", value=3, target_shape=values_shape, dtype="i32")
+        sign_i32 = graph.add_node(
+            op=ElementwiseOp(op="right_shift"),
+            inputs=[nibbles, three],
+            output=Tensor(f"{name}_sign_i32", values_shape, "i32"),
+        )
+        sign = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[sign_i32],
+            output=Tensor(f"{name}_sign", values_shape, "f32"),
+        )
+        sign = binary("sign_twice", "multiply", sign, constant("two_f32", 2.0))
+        sign = binary("sign_value", "subtract", constant("one_f32", 1.0), sign)
+        fp4 = binary("fp4", "multiply", magnitude_value, sign)
+
+        scales_i32 = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[scales],
+            output=Tensor(f"{name}_scales_i32", scales_shape, "i32"),
+        )
+        scales_f32 = graph.add_node(
+            op=ElementwiseOp(op="copy"),
+            inputs=[scales_i32],
+            output=Tensor(f"{name}_scales_f32", scales_shape, "f32"),
+        )
+        exponent = graph.add_node(
+            op=ElementwiseOp(op="subtract"),
+            inputs=[scales_f32, const_bc(graph, name=f"{name}_bias127", value=127.0, target_shape=scales_shape, dtype="f32")],
+            output=Tensor(f"{name}_exponent", scales_shape, "f32"),
+        )
+        scale_values = graph.add_node(
+            op=ElementwiseOp(op="pow"),
+            inputs=[const_bc(graph, name=f"{name}_scale_base", value=2.0, target_shape=scales_shape, dtype="f32"), exponent],
+            output=Tensor(f"{name}_scale_values", scales_shape, "f32"),
+        )
+        scale_values = graph.add_node(
+            op=ReshapeOp(shape=(n, k // 32, 1)),
+            inputs=[scale_values],
+            output=Tensor(f"{name}_scale_view", (n, k // 32, 1), "f32"),
+        )
+        scale_values = broadcast_to(graph, scale_values, values_shape)
+        decoded = binary("decoded_blocks", "multiply", fp4, scale_values)
+        decoded = graph.add_node(
+            op=ReshapeOp(shape=(n, k)),
+            inputs=[decoded],
+            output=Tensor(f"{name}_stored_orientation", (n, k), "f32"),
+        )
+        decoded = graph.add_node(
+            op=TransposeOp(axes=(1, 0)),
+            inputs=[decoded],
+            output=Tensor(f"{name}_logical_f32", logical, "f32"),
+        )
+        if out.dtype.name != "f32":
+            decoded = graph.add_node(
+                op=ElementwiseOp(op="copy"),
+                inputs=[decoded],
+                output=Tensor(f"{name}_logical", logical, out.dtype),
+            )
+        graph.replace_node(tmp, decoded)
+        graph.remove_node(tmp)
+        out_map[name] = scales
     return out_map
 
 

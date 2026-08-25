@@ -9,6 +9,7 @@ from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
 from emmy.compiler.torch_wire import expr_from_wire, expr_to_wire, graph_from_wire, graph_to_wire
 
 _EXPR_TAGS = {"var", "literal", "binary", "builtin", "call", "ternary", "cast"}
+_NAMED_SHAPE_OPS = {"torch.reshape", "torch.slice"}
 
 
 def _specialize_expr(value: Mapping, bindings: Mapping[str, int]) -> dict:
@@ -37,6 +38,16 @@ def _specialize_dim(value, bindings: Mapping[str, int]):
     return {key: _specialize_wire(item, bindings) for key, item in value.items()}
 
 
+def _specialize_named_shape(value, bindings: Mapping[str, int]):
+    if isinstance(value, str):
+        return bindings.get(value, value)
+    if isinstance(value, list):
+        return [_specialize_named_shape(item, bindings) for item in value]
+    if isinstance(value, Mapping) and set(value) == {"__tuple__"}:
+        return {"__tuple__": _specialize_named_shape(value["__tuple__"], bindings)}
+    return value
+
+
 def _specialize_wire(value, bindings: Mapping[str, int]):
     if isinstance(value, list):
         return [_specialize_wire(item, bindings) for item in value]
@@ -57,7 +68,13 @@ def _specialize_wire(value, bindings: Mapping[str, int]):
     if keys in ({"__expr__"}, {"expr"}):
         key = next(iter(keys))
         return {key: _specialize_expr(value[key], bindings)}
-    return {key: _specialize_wire(item, bindings) for key, item in value.items()}
+    specialized = {key: _specialize_wire(item, bindings) for key, item in value.items()}
+    attrs = specialized.get("attrs")
+    tag = specialized.get("op")
+    if isinstance(tag, str) and tag in _NAMED_SHAPE_OPS and isinstance(attrs, Mapping) and "shape" in attrs:
+        specialized["attrs"] = dict(attrs)
+        specialized["attrs"]["shape"] = _specialize_named_shape(attrs["shape"], bindings)
+    return specialized
 
 
 def specialize_program(graph, bindings: Mapping[str, int], *, loop: bool = False):

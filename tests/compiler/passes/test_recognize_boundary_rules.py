@@ -1204,6 +1204,16 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
     (cell,) = (n for n in g.nodes.values() if isinstance(n.op, LoopOp))
     tile = recognized_tile(cell.op, name=cell.id)
+
+    def fold_tree(node):
+        if not isinstance(node, Fold):
+            return
+        yield node
+        for child in (*node.operands, *node.body):
+            yield from fold_tree(child)
+
+    (carrier,) = (fold for fold in fold_tree(tile.op) if fold.role is AxisRole.TWISTED)
+    assert any(is_contraction(operand) for operand in carrier.operands), "the nested Q·K producer binds bottom-up"
     pro = fused_view(tile)
     assert pro is not None, "the chained score column binds through the fused view"
     node = pro[0].operands[0]

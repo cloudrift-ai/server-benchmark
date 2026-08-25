@@ -102,23 +102,25 @@ def close_folds(cell: list) -> list:
         results = tuple(rewrite(name) for name in (*sorted(needed), *passthrough))
         if rename:
             body = tuple(stmt.rewrite(rewrite) for stmt in body)
+            existing = tuple(operand.rewrite(rewrite) for operand in fold.operands)
             lift = Lambda(
-                params=(*fold.lift.params, *results),
+                params=(*(rewrite(param) for param in fold.lift.params), *results),
                 body=Body(tuple(stmt.rewrite(rewrite) for stmt in fold.lift.body)),
                 results=tuple(rewrite(result) if isinstance(result, str) else result for result in fold.lift.results),
             )
         else:
+            existing = fold.operands
             lift = Lambda(params=(*fold.lift.params, *results), body=fold.lift.body, results=fold.lift.results)
         edge = Fold.projection(operands=operands, body=Body(body), results=results)
         edge_at = next(
-            (operand_at for operand_at, operand in enumerate(fold.operands) if _captures(operand) & set(results)),
-            len(fold.operands),
+            (operand_at for operand_at, operand in enumerate(existing) if _captures(operand) & set(results)),
+            len(existing),
         )
-        before = sum(len(_operand_result_names(operand)) for operand in fold.operands[:edge_at])
+        before = sum(len(_operand_result_names(operand)) for operand in existing[:edge_at])
         lead = 1 if fold.axis is not None else 0
         params = (*lift.params[: lead + before], *results, *lift.params[lead + before : -len(results)])
         lift = replace(lift, params=params)
-        nested = (*fold.operands[:edge_at], edge, *fold.operands[edge_at:])
+        nested = (*existing[:edge_at], edge, *existing[edge_at:])
         out[index] = replace(fold, operands=nested, lift=lift)
 
     in_edge = {

@@ -192,6 +192,24 @@ def test_every_sugar_level_resolves_and_canonicalizes() -> None:
         assert canonical(root, canon) == canon
 
 
+def test_root_operand_role_stays_short_when_a_nested_contraction_has_the_same_role() -> None:
+    inner_b = Fold.projection(body=Body((Load(name="ib", input="K", index=(Var("dd"), Var("j"))),)))
+    inner = Fold.contraction(
+        k_axis=Axis("dd", 64),
+        a=Load(name="ia", input="Q", index=(Var("m"), Var("dd"))),
+        channels=(Channel(b=inner_b, acc="score"),),
+    )
+    outer_a = Fold.projection(operands=(inner,), body=Body((Assign(name="prob", op="copy", args=("score",)),)))
+    outer_b = Fold.projection(body=Body((Load(name="value", input="V", index=(Var("k"), Var("n"))),)))
+    outer = Fold.contraction(k_axis=Axis("k", 64), a=outer_a, channels=(Channel(b=outer_b, acc="out"),))
+    root = Fold.projection(operands=(outer,), body=Body((Write(output="y", value="out", index=(Var("m"), Var("n"))),)))
+
+    assert spell(root, "PLACE", outer_b) == "PLACE@b"
+    assert resolve(root, "PLACE@b").node is outer_b
+    nested = spell(root, "PLACE", inner_b)
+    assert nested != "PLACE@b" and resolve(root, nested).node is inner_b
+
+
 def test_broken_stored_key_fails_loudly() -> None:
     root = _contraction_fold()
     with pytest.raises(ValueError, match="names no site"):

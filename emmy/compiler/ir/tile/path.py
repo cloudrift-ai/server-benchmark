@@ -22,7 +22,9 @@ already canonical and the corpus needs zero migration):
   the shared A edge vs a channel's B). Any unique ANCHORED SUBSEQUENCE of the full segment path is
   accepted at pin time (the last path component must be the node's own segment); the canonical
   spelling is the shortest unique one, deepest anchors first (``REDUCE@a.fold.k`` for the cone's
-  stat when the axis name collides with the contraction's).
+  stat when the axis name collides with the contraction's). ``PLACE@a`` / ``PLACE@b`` select the
+  unique root-most edge of that role; nested contractions keep a longer path, so recognizing one
+  cannot re-key the outer placement seam.
 - the ordinal ``<n>`` (1-based, canonicalized traversal order) exists ONLY for true same-path
   collisions — two sites with identical full path AND axis; current kernels never need it.
 
@@ -307,6 +309,12 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
     """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`."""
     if primary(family, fam_sites) is site:
         return family
+    if family == "PLACE" and site.segments[-1] in ("a", "b"):
+        role_sites = [other for other in fam_sites if other.segments[-1] == site.segments[-1]]
+        depth = min(other.depth for other in role_sites)
+        root_roles = [other for other in role_sites if other.depth == depth]
+        if len(root_roles) == 1 and root_roles[0] is site:
+            return f"{family}@{site.segments[-1]}"
     axis_part = f".{site.axis}" if site.axis is not None else ""
     if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
         return f"{family}@{site.axis}"
@@ -379,6 +387,18 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in fam_sites))
         raise ValueError(f"{parsed.family} is ambiguous: use {cands}")
     matches = _match(parsed, fam_sites)
+    if (
+        parsed.family == "PLACE"
+        and parsed.axis is None
+        and parsed.ordinal is None
+        and len(parsed.segments) == 1
+        and parsed.segments[0] in ("a", "b")
+        and len(matches) > 1
+    ):
+        depth = min(site.depth for site in matches)
+        root_role = [site for site in matches if site.depth == depth]
+        if len(root_role) == 1:
+            matches = root_role
     if not matches and parsed.axis is None and parsed.ordinal is not None and parsed.segments and parsed.segments[-1] in ("a", "b"):
         # The strict parse read ``a2`` as the second ``a`` edge; an axis the loop stamp named
         # ``a2`` is the other reading, and the literal axis name comes first.

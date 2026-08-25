@@ -141,7 +141,9 @@ several sites of one family. Read
 and written through `ops.Sched`, which is also the one home of the `(m, n)` binding rule (`Sched.placed` /
 `Sched.tile_of`). The path codec spells `map` / `fold` / `a` / `b` segments off the derived readings. A computed-A
 cone accepts the explicit `PLACE@a` spelling; when it is the root contraction's shallowest seam, short-path
-canonicalization spells it as bare `PLACE`. A sliced axis's window is the one `Axis.window`.
+canonicalization spells it as bare `PLACE`. The explicit `PLACE@a` / `PLACE@b` role sugar selects the unique
+root-most edge of that role; a newly recognized nested contraction receives a longer path instead of re-keying the
+outer seam. A sliced axis's window is the one `Axis.window`.
 
 Since step 7 the wire forms are SITE-LOCAL: the worker inventory is spelled once in `WORK`
 (`w<M>x<N>[+p<np>]` / `t<N>[x<M>]`, the producer band riding `+p`), and `TILE` / `REDUCE` values shed their worker

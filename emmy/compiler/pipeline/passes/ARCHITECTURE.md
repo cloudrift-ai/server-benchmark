@@ -218,6 +218,11 @@ statistic and dot to the raw-loop escape the moment one read the other's project
 name. Edges that do not read the fold's axis lower ONCE ahead of the loop (`Fold.lower`, the reduce tier's `_emit`);
 the test is scope-aware, so a child reduction reusing the same axis name shadows rather than captures its parent.
 The captured loop therefore stays byte-exact.
+Algebra classification runs only after this structural closure and walks the Fold tree bottom-up. A nested producer
+is classified with the enclosing fold's output axis and the kernel's free axes; when it uniquely captures sibling
+producer results, those dependencies join the same algebraic read. Online-softmax pairing therefore compares the
+complete dependency cones, then binds its Q·K producer before the enclosing P·V reading. Moving the sibling group
+under a projection edge cannot change either recognition result.
 The two readings above derive from the chain: `fused_view` reads a chained column (its edge's statistic and epilogue,
 the column minus the edge regenerating the raw column loop), and the per-cell reading is the chain UNDONE
 (`_classify.demoted_chain` — the statistic back at the root, the column as its captured loop), which is what the
@@ -736,7 +741,8 @@ rides the engine's splice event, which every fragment goes through. (The histori
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; a cone edge accepts the
-`PLACE@a` view-role spelling and canonicalizes to bare `PLACE` when it is the root contraction's shallowest seam),
+`PLACE@a` view-role spelling and canonicalizes to bare `PLACE` when it is the root contraction's shallowest seam;
+`PLACE@a` / `PLACE@b` keep selecting the unique root-most role edge when nested contractions add the same role),
 spelled/resolved by the same tree-path codec as the schedule families. Resolution is
 decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
 bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated

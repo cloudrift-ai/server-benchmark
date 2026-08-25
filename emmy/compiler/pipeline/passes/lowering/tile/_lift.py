@@ -27,7 +27,7 @@ from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile import Placement, TileOp, split_effects
-from emmy.compiler.pipeline.passes.lowering.tile._classify import classify, pair_softmax
+from emmy.compiler.pipeline.passes.lowering.tile._classify import classify
 from emmy.compiler.pipeline.passes.lowering.tile._closure import close_folds
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 
@@ -154,7 +154,7 @@ def _form_root(cell: list, *, chain: bool = False, sweeps: frozenset = frozenset
     the projection body. Operands lower BEFORE the body, so a fold reading a name the body
     defines cannot hoist: it stays a BODY member — a term is a legal body stmt — until
     :func:`close_folds` closes it over those values through a projection edge (``chain=True``, run
-    after the online-softmax pairing has consumed its sibling pair), after which it hoists. A
+    before algebra classification), after which it hoists. A
     single bare fold with nothing else is the root node itself."""
     kept = close_folds(list(cell)) if chain else list(cell)
     body_defs = {n for s in kept if not isinstance(s, Fold) for n in deep_defines(s)}
@@ -182,7 +182,8 @@ def _deep_exprs(st):
 def _chain_root(node, sweeps: frozenset = frozenset()):
     """Re-form a projection root with its cell CLOSED (:func:`close_folds`): every fold left in the
     body for reading a body-defined value takes that value through a projection edge and hoists.
-    Runs after the pairing, which reads the ``(max, den)`` siblings by name."""
+    Classification runs bottom-up afterward, so closure never depends on which algebra the
+    sibling group will become."""
     if not (isinstance(node, Fold) and node.axis is None and any(isinstance(s, Fold) for s in node.body)):
         return node
     return _form_root([*node.operands, *node.body], chain=True, sweeps=sweeps)
@@ -225,7 +226,7 @@ def recognized_tile(op: LoopOp, name: str = "") -> TileOp:
     split = split_effects(tuple(cell))
     cell, stores = (list(split[0]), split[1]) if split is not None else (cell, ())
     sweeps = frozenset(st.sweep.name for st in stores if st.sweep is not None)
-    node = _chain_root(pair_softmax(_form_root(cell, sweeps=sweeps)), sweeps)
+    node = _chain_root(_form_root(cell, sweeps=sweeps), sweeps)
     if any(st.sweep is not None for st in stores) and isinstance(node, Fold) and node.axis is not None:
         # A sweep store rides a projecting zero-axis root (the materializer's flat-root arm
         # asserts ``sweep is None``) — wrap the bare fold in its empty projection.

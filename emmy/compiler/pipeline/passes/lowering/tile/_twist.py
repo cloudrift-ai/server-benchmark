@@ -1,4 +1,4 @@
-"""General exp-family monoid rewrite over a Tile IR Fold tree."""
+"""Canonical exp-family rewrites over a Tile IR Fold tree."""
 
 from __future__ import annotations
 
@@ -11,55 +11,46 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters
-from emmy.compiler.ir.tile.ops import split_invariant_factors
 
 
 @dataclass(frozen=True)
-class _ScopedLambda:
+class _Score:
     fn: Lambda
     axes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class _Component:
-    state: str
-    invariant: tuple[str, ...]
-    value_body: Body
-    values: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class _Member:
-    section: str
-    value: object
+class _NormalizedExp:
+    statistic: Fold
+    provider: Fold | None
+    inverse: str
 
 
 def _bindings(fold: Fold) -> dict[str, object]:
     return {name: edge for edge in fold.operands for name in _operand_result_names(edge)}
 
 
-def _score_lambda(fold: Fold, result: str, axes: tuple[str, ...]) -> _ScopedLambda | None:
-    """The one-source pure cone producing a fold's per-element score."""
+def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> _Score | None:
+    """A fold's one-source pure score cone, scoped by its streaming axis."""
     bindings = _bindings(fold)
-    if result in bindings:
-        members = (bindings[result],)
-    else:
-        members = fold.lift.body.backward_cone((result,)).members
+    members = (bindings[result],) if result in bindings else fold.body.backward_cone((result,)).members
     if not members or any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in members):
         return None
 
-    used_edges = tuple(edge for name, edge in bindings.items() if any(name in stmt.deps() for stmt in members))
+    used_edges = tuple(edge for name, edge in bindings.items() if any(name in _member_reads(stmt) for stmt in members))
     indexed_loads = tuple(stmt for stmt in members if isinstance(stmt, Load) and any(expr.free_vars() for expr in stmt.index))
-    inline_nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
-    if len({id(source) for source in (*used_edges, *indexed_loads, *inline_nodes)}) != 1:
+    nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
+    if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
         return None
-
-    fn = Lambda(params=(fold.axis.name,), body=Body(members), results=(result,))
-    return _ScopedLambda(fn=fn, axes=(*axes, fold.axis.name))
+    return _Score(Lambda(params=(fold.axis.name,), body=Body(members), results=(result,)), (*axes, fold.axis.name))
 
 
-def _equivalent(left: _ScopedLambda, right: _ScopedLambda) -> bool:
+def _same_score(left: _Score, right: _Score) -> bool:
     return lambda_equivalent_clusters(((left.fn, left.axes), (right.fn, right.axes))) == ((0, 1),)
+
+
+def _same_axis(left: Fold, right: Fold) -> bool:
+    return left.axis.extent == right.axis.extent and left.axis.window == right.axis.window and left.unroll == right.unroll
 
 
 def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> str | None:
@@ -70,83 +61,91 @@ def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> st
     return None
 
 
-def _components(
-    fold: Fold,
-    maximum: str,
-    pivots: frozenset[str],
-    score: _ScopedLambda,
-    states: tuple[str, ...],
-    axes: tuple[str, ...],
-) -> tuple[_Component, ...] | None:
-    """Read every additive component as weight × value × invariant factors."""
+def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, _Score] | None:
+    if fold.axis is None:
+        return None
     ops = component_ops(fold.combine)
-    if ops is None or any(op.reduce_canon != "add" for op in ops):
+    if ops is None or len(ops) != 1 or ops[0].reduce_canon != "maximum":
         return None
-
-    body = fold.lift.body
-    defs = body.definitions
-    edge_results = frozenset(_bindings(fold))
-    if edge_results and not edge_results <= {name for stmt in body for name in stmt.deps()}:
+    result = fold.lift.results[0]
+    if not isinstance(result, str):
         return None
-
-    components: list[_Component] = []
-    covered: set[int] = set()
-    for state, result in zip(fold.combine.results, fold.lift.results, strict=True):
-        if not isinstance(result, str):
-            return None
-        factors = split_invariant_factors(list(body), result, fold.axis.name)
-        if factors is None:
-            return None
-        invariant, local = factors
-        if edge_results & set(invariant):
-            return None
-
-        weights: list[str] = []
-        values: list[str] = []
-        for name in local:
-            candidate = _exp_score(defs, name, pivots)
-            candidate_score = _score_lambda(fold, candidate, axes) if candidate is not None else None
-            if candidate_score is not None and _equivalent(score, candidate_score):
-                weights.append(name)
-            else:
-                values.append(name)
-        if len(weights) != 1:
-            return None
-
-        value_cone = body.backward_cone(values)
-        if any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in value_cone.members):
-            return None
-        banned = {maximum, *states, *fold.combine.results, *edge_results}
-        if any(banned & set(_member_reads(stmt)) for stmt in value_cone.members):
-            return None
-
-        covered.update(id(stmt) for stmt in body.backward_cone((result,)).members)
-        components.append(
-            _Component(
-                state=state,
-                invariant=invariant,
-                value_body=Body(value_cone.members),
-                values=tuple(values),
-            )
-        )
-    if any(id(stmt) not in covered for stmt in body):
+    score = _score(fold, result, axes)
+    cone = fold.body.backward_cone((result,))
+    if score is None or {id(stmt) for stmt in cone.members} != {id(stmt) for stmt in fold.body}:
         return None
-    return tuple(components)
+    return fold.combine.results[0], score
 
 
-def _same_axis(left: Fold, right: Fold) -> bool:
-    return left.axis.extent == right.axis.extent and left.axis.window == right.axis.window and left.unroll == right.unroll
+def _denominator(fold: Fold, pivots: frozenset[str], score: _Score, axes: tuple[str, ...]) -> bool:
+    if fold.axis is None:
+        return False
+    ops = component_ops(fold.combine)
+    if ops is None or len(ops) != 1 or ops[0].reduce_canon != "add":
+        return False
+    result = fold.lift.results[0]
+    if not isinstance(result, str):
+        return False
+    candidate = _exp_score(fold.body.definitions, result, pivots)
+    candidate_score = _score(fold, candidate, axes) if candidate is not None else None
+    cone = fold.body.backward_cone((result,))
+    return (
+        candidate_score is not None
+        and _same_score(score, candidate_score)
+        and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.body}
+    )
 
 
-def _rewrite_axis(stmt, old: str, new: str):
-    if old == new:
-        return stmt
-    sigma = Sigma({old: Var(new)})
-    return stmt.rewrite(lambda name: new if name == old else name, sigma)
+def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
+    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
+
+    states = (maximum.combine.results[0], denominator.combine.results[0])
+    other = tuple(f"{name}__o" for name in states)
+    lift = replace(maximum.lift, results=(maximum.lift.results[0], 1.0))
+    combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
+    return Fold(
+        axis=maximum.axis,
+        unroll=maximum.unroll,
+        operands=maximum.operands,
+        lift=lift,
+        init=(maximum.init[0], denominator.init[0]),
+        combine=combine,
+    )
+
+
+def _merge_siblings(operands: tuple, body: Body, axes: tuple[str, ...]) -> tuple[tuple, Body]:
+    """Join a maximum and its additive exponential denominator wherever they are siblings."""
+    items = [("operand", edge) for edge in operands] + [("body", stmt) for stmt in body]
+    while True:
+        changed = False
+        for index, (_, candidate) in enumerate(items):
+            found = _maximum(candidate, axes) if isinstance(candidate, Fold) else None
+            if found is None:
+                continue
+            maximum, score = found
+            pivots = {maximum}
+            for _, member in items[index + 1 :]:
+                if isinstance(member, Assign) and member.op.name == "copy" and len(member.args) == 1 and member.args[0] in pivots:
+                    pivots.add(member.name)
+            for position in range(index + 1, len(items)):
+                section, denominator = items[position]
+                if not isinstance(denominator, Fold) or not _same_axis(candidate, denominator):
+                    continue
+                if not _denominator(denominator, frozenset(pivots), score, axes):
+                    continue
+                items[index] = (items[index][0], _twisted_pair(candidate, denominator))
+                del items[position]
+                changed = True
+                break
+            if changed:
+                break
+        if not changed:
+            break
+    return tuple(value for section, value in items if section == "operand"), Body(value for section, value in items if section == "body")
 
 
 def _projection_members(node: Fold) -> Body:
-    """Flatten zero-axis grouping while retaining every iterating Fold as an algebraic node."""
+    """Remove zero-axis grouping without lowering any iterating Fold."""
     assert node.axis is None
     members = list(node.body)
     for edge in reversed(node.operands):
@@ -156,27 +155,8 @@ def _projection_members(node: Fold) -> Body:
         members[position:position] = expanded
     out = []
     for member in members:
-        if isinstance(member, Fold) and member.axis is None:
-            out.extend(_projection_members(member))
-        else:
-            out.append(member)
+        out.extend(_projection_members(member) if isinstance(member, Fold) and member.axis is None else (member,))
     return Body(out)
-
-
-def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[_ScopedLambda, Body] | None:
-    """The part of a score cone that varies with its fold axis; invariant providers stay captured."""
-    cone = body.backward_cone((result,))
-    varying = {axis}
-    members = []
-    for stmt in cone.members:
-        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and edge_refs_axis(stmt, axis))
-        if direct or varying & set(_member_reads(stmt)):
-            members.append(stmt)
-            varying.update(stmt.defines())
-    if not members:
-        return None
-    fn = Lambda(params=(axis,), body=Body(members), results=(result,))
-    return _ScopedLambda(fn=fn, axes=(*axes, axis)), Body(members)
 
 
 def _mul_leaves(defs: dict[str, object], name: str) -> tuple[str, ...] | None:
@@ -189,8 +169,22 @@ def _mul_leaves(defs: dict[str, object], name: str) -> tuple[str, ...] | None:
     return None if left is None or right is None else (*left, *right)
 
 
+def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[_Score, Body] | None:
+    cone = body.backward_cone((result,))
+    varying = {axis}
+    members = []
+    for stmt in cone.members:
+        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and edge_refs_axis(stmt, axis))
+        if direct or varying & set(_member_reads(stmt)):
+            members.append(stmt)
+            varying.update(stmt.defines())
+    if not members:
+        return None
+    fn = Lambda(params=(axis,), body=Body(members), results=(result,))
+    return _Score(fn, (*axes, axis)), Body(members)
+
+
 def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> frozenset[int]:
-    """Assignment-only expression cone, stopping at the algebraic values supplied by the new Fold."""
     found: set[int] = set()
 
     def visit(name: str) -> None:
@@ -207,20 +201,9 @@ def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> f
     return frozenset(found)
 
 
-def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | None:
-    """Extend an exp-family statistic with ``sum(normalized_exp(score) * value)``.
-
-    Contraction canonicalization turns the expectation into an outer contraction and places the
-    statistic inside its computed probability edge. This rule reads that canonical composition
-    directly and rebuilds the equivalent three-component twisted Fold.
-    """
-    if not is_contraction(fold) or len(fold.channels) != 1:
-        return None
-    product, plus = fold.semiring
-    if product.name != "multiply" or plus.reduce_canon != "add" or not isinstance(fold.a, Fold) or fold.a.axis is not None:
-        return None
-
-    members = _projection_members(fold.a)
+def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _NormalizedExp | None:
+    """View a canonical pointwise edge as ``exp(score - maximum) / denominator``."""
+    members = _projection_members(edge)
     statistics = [
         stmt
         for stmt in members
@@ -233,8 +216,6 @@ def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | 
     if len(statistics) != 1:
         return None
     statistic = statistics[0]
-    if not _same_axis(statistic, fold):
-        return None
 
     maximum, denominator = statistic.combine.results
     pivots = {maximum}
@@ -244,12 +225,12 @@ def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | 
 
     body = Body(members)
     defs = body.definitions
-    probability = operand_name(fold.a)
+    probability = operand_name(edge)
     leaves = _mul_leaves(defs, probability)
     if leaves is None or len(leaves) != 2:
         return None
-    weighted = [(leaf, _exp_score(defs, leaf, frozenset(pivots))) for leaf in leaves]
-    weights = [(leaf, score) for leaf, score in weighted if score is not None]
+    weights = [(leaf, _exp_score(defs, leaf, frozenset(pivots))) for leaf in leaves]
+    weights = [(leaf, score) for leaf, score in weights if score is not None]
     inverses = [
         leaf
         for leaf in leaves
@@ -257,16 +238,17 @@ def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | 
     ]
     if len(weights) != 1 or len(inverses) != 1:
         return None
-    _, score_name = weights[0]
-    current = _varying_score(body, score_name, fold.axis.name, axes)
-    reference = _score_lambda(statistic, statistic.lift.results[0], axes)
-    if current is None or reference is None or not _equivalent(reference, current[0]):
+
+    score_name = weights[0][1]
+    current = _varying_score(body, score_name, axis, axes)
+    reference = _score(statistic, statistic.lift.results[0], axes)
+    if current is None or reference is None or not _same_score(reference, current[0]):
         return None
 
-    captures = tuple(name for name in statistic.lift.free_names() if name not in {*axes, statistic.axis.name})
-    provider_cone = body.backward_cone(captures)
-    provider_defs = {name for stmt in provider_cone.members for name in stmt.defines()}
-    if set(captures) - provider_defs:
+    free = set(statistic.lift.free_names()) - {*axes, statistic.axis.name}
+    provider_cone = body.backward_cone(free)
+    captures = tuple(name for stmt in provider_cone.members for name in stmt.defines() if name in free)
+    if set(captures) != free:
         return None
     provider = Fold.projection(body=Body(provider_cone.members), results=captures) if captures else None
 
@@ -274,202 +256,74 @@ def _absorb_normalized_expectation(fold: Fold, axes: tuple[str, ...]) -> Fold | 
     consumed = {id(statistic), *expression, *(id(stmt) for stmt in current[1]), *(id(stmt) for stmt in provider_cone.members)}
     if any(id(stmt) not in consumed for stmt in members):
         return None
+    return _NormalizedExp(statistic=statistic, provider=provider, inverse=inverses[0])
 
-    value = _rewrite_axis(fold.b, fold.axis.name, statistic.axis.name)
-    operands = (*((provider,) if provider is not None else ()), *statistic.operands, value)
-    state = f"{fold.acc}__sum"
-    names = (*statistic.combine.results, state)
-    other = tuple(f"{name}__o" for name in names)
+
+def _rewrite_axis(stmt, old: str, new: str):
+    if old == new:
+        return stmt
+    sigma = Sigma({old: Var(new)})
+    return stmt.rewrite(lambda name: new if name == old else name, sigma)
+
+
+def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
+    """Add every channel of ``sum(normalized_exp(score) * value)`` to its statistic."""
     from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
 
+    statistic = view.statistic
+    values = tuple(_rewrite_axis(channel.b, fold.axis.name, statistic.axis.name) for channel in fold.channels)
+    operands = (*((view.provider,) if view.provider is not None else ()), *statistic.operands, *values)
+    sums = tuple(f"{channel.acc}__sum" for channel in fold.channels)
+    states = (*statistic.combine.results, *sums)
+    other = tuple(f"{name}__o" for name in states)
     lift = Lambda(
         params=(statistic.axis.name, *(name for edge in operands for name in _operand_result_names(edge))),
-        body=statistic.lift.body,
-        results=(*statistic.lift.results, operand_name(value)),
+        body=statistic.body,
+        results=(*statistic.lift.results, *(operand_name(value) for value in values)),
     )
-    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
     merged = Fold(
         axis=statistic.axis,
         unroll=statistic.unroll,
         operands=operands,
         lift=lift,
-        init=(*statistic.init, plus.identity),
+        init=(*statistic.init, *((fold.semiring[1].identity,) * len(sums))),
         combine=combine,
     )
-    inverse = inverses[0]
-    epilogue = Body(
-        (
-            Assign(name=inverse, op="reciprocal", args=(denominator,)),
-            Assign(name=fold.acc, op="multiply", args=(state, inverse)),
-        )
+    epilogue = [Assign(name=view.inverse, op="reciprocal", args=(statistic.combine.results[1],))]
+    epilogue.extend(
+        Assign(name=channel.acc, op="multiply", args=(state, view.inverse)) for channel, state in zip(fold.channels, sums, strict=True)
     )
-    return Fold.projection(operands=(merged,), body=epilogue, results=(fold.acc,))
-
-
-def _value_term(
-    component: _Component,
-    fold: Fold,
-    target_axis: str,
-    edges: list,
-    prefix: list,
-) -> str | float:
-    """Move one residual value cone into the merged lift or onto a direct operand edge."""
-    body = [_rewrite_axis(stmt, fold.axis.name, target_axis) for stmt in component.value_body]
-    values = tuple(target_axis if name == fold.axis.name else name for name in component.values)
-    if not values:
-        return 1.0
-
-    if len(values) == 1 and len(body) == 1 and isinstance(body[0], Load) and body[0].name == values[0]:
-        edges.append(body[0])
-        return values[0]
-
-    prefix.extend(body)
-    term = values[0]
-    for index, value in enumerate(values[1:]):
-        name = f"{component.state}__v{index}"
-        prefix.append(Assign(name=name, op="multiply", args=(term, value)))
-        term = name
-    return term
-
-
-def _merge(maximum_fold: Fold, rest: list[tuple[int, Fold]], pivots: frozenset[str], axes: tuple[str, ...]):
-    ops = component_ops(maximum_fold.combine)
-    if ops is None or len(ops) != 1 or ops[0].reduce_canon != "maximum" or len(maximum_fold.combine.results) != 1:
-        return None
-    maximum = maximum_fold.out
-    score_name = maximum_fold.lift.results[0]
-    if not isinstance(score_name, str):
-        return None
-    score = _score_lambda(maximum_fold, score_name, axes)
-    if score is None:
-        return None
-    score_members = maximum_fold.lift.body.backward_cone((score_name,)).members
-    if {id(stmt) for stmt in score_members} != {id(stmt) for stmt in maximum_fold.lift.body}:
-        return None
-
-    states = [maximum]
-    terms: list[str | float] = [score_name]
-    prefix = list(maximum_fold.lift.body)
-    edges = list(maximum_fold.operands)
-    replacements: dict[int, tuple[Assign, ...]] = {}
-    consumed: list[int] = []
-
-    for position, fold in rest:
-        if not _same_axis(maximum_fold, fold):
-            continue
-        found = _components(fold, maximum, pivots, score, tuple(states), axes)
-        if found is None:
-            continue
-        epilogue: list[Assign] = []
-        for component in found:
-            term = _value_term(component, fold, maximum_fold.axis.name, edges, prefix)
-            state = f"{component.state}__sum" if component.invariant else component.state
-            states.append(state)
-            terms.append(term)
-            current = state
-            for index, factor in enumerate(component.invariant):
-                name = component.state if index == len(component.invariant) - 1 else f"{component.state}__c{index}"
-                epilogue.append(Assign(name=name, op="multiply", args=(current, factor)))
-                current = name
-        replacements[position] = tuple(epilogue)
-        consumed.append(position)
-
-    if not consumed or len(terms) < 2 or terms[1] != 1.0:
-        return None
-
-    from emmy.compiler.ir.pure.carrier import exp_combine_states  # noqa: PLC0415
-
-    names = tuple(states)
-    other = tuple(f"{name}__o" for name in names)
-    lift = Lambda(
-        params=(maximum_fold.axis.name, *(name for edge in edges for name in _operand_result_names(edge))),
-        body=Body(prefix),
-        results=tuple(terms),
-    )
-    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-    merged = Fold(
-        axis=maximum_fold.axis,
-        unroll=maximum_fold.unroll,
-        operands=tuple(edges),
-        lift=lift,
-        init=(ops[0].identity,) + (0.0,) * (len(names) - 1),
-        combine=combine,
-    )
-    return merged, frozenset(consumed), replacements
-
-
-def _rewrite_members(items: list[_Member], axes: tuple[str, ...]) -> tuple[list[_Member], bool]:
-    for index, item in enumerate(items):
-        fold = item.value
-        if not isinstance(fold, Fold) or fold.axis is None:
-            continue
-        rest = [
-            (position, candidate.value)
-            for position, candidate in enumerate(items[index + 1 :], index + 1)
-            if isinstance(candidate.value, Fold)
-        ]
-        pivots = {fold.out}
-        for candidate in items[index + 1 :]:
-            stmt = candidate.value
-            if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.args[0] in pivots:
-                pivots.add(stmt.name)
-        merged = _merge(fold, rest, frozenset(pivots), axes)
-        if merged is None:
-            continue
-        node, consumed, replacements = merged
-        out: list[_Member] = []
-        for position, member in enumerate(items):
-            if position == index:
-                out.append(_Member(member.section, node))
-            elif position in consumed:
-                out.extend(_Member(member.section, stmt) for stmt in replacements[position])
-            else:
-                out.append(member)
-        return out, True
-    return items, False
-
-
-def _pair_members(items: list[_Member], axes: tuple[str, ...]) -> list[_Member]:
-    while True:
-        items, changed = _rewrite_members(items, axes)
-        if not changed:
-            return items
-
-
-def _rewrite_body(body: Body, axes: tuple[str, ...]) -> Body:
-    return Body(_rewrite_fold(stmt, axes) if isinstance(stmt, Fold) else stmt for stmt in body)
+    return Fold.projection(operands=(merged,), body=Body(epilogue), results=tuple(fold.defines()))
 
 
 def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     operands = tuple(_rewrite_fold(edge, axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     body_axes = (*axes, fold.axis.name) if fold.axis is not None else axes
-    body = _rewrite_body(fold.lift.body, body_axes)
-
-    if fold.axis is None:
-        items = [*(_Member("operand", edge) for edge in operands), *(_Member("body", stmt) for stmt in body)]
-        rewritten = _pair_members(items, axes)
-        new_operands = tuple(item.value for item in rewritten if item.section == "operand")
-        new_body = Body(item.value for item in rewritten if item.section == "body")
-        if new_operands == fold.operands and new_body == fold.lift.body:
-            return fold
-        return Fold.projection(operands=new_operands, body=new_body, results=fold.lift.results)
-
-    node = fold
-    if operands != fold.operands:
-        node = replace(node, operands=operands)
-    if body != node.lift.body:
+    body = Body(_rewrite_fold(stmt, body_axes) if isinstance(stmt, Fold) else stmt for stmt in fold.body)
+    node = replace(fold, operands=operands) if operands != fold.operands else fold
+    if body != node.body:
         node = node.with_bodies((body,))
-    absorbed = _absorb_normalized_expectation(node, axes)
-    if absorbed is not None:
-        return absorbed
 
-    items = _pair_members([_Member("body", stmt) for stmt in node.lift.body], body_axes)
-    new_body = Body(item.value for item in items)
-    return node.with_bodies((new_body,)) if new_body != node.lift.body else node
+    if node.axis is None:
+        new_operands, new_body = _merge_siblings(node.operands, node.body, axes)
+        if new_operands == node.operands and new_body == node.body:
+            return node
+        return Fold.projection(operands=new_operands, body=new_body, results=node.lift.results)
+
+    if is_contraction(node) and isinstance(node.a, Fold) and node.a.axis is None:
+        view = _normalized_exp(node.a, node.axis.name, axes)
+        if view is not None and _same_axis(view.statistic, node):
+            product, plus = node.semiring
+            if product.name == "multiply" and plus.reduce_canon == "add":
+                return _extend_statistic(node, view)
+
+    _, new_body = _merge_siblings((), node.body, body_axes)
+    return node.with_bodies((new_body,)) if new_body != node.body else node
 
 
 def rewrite_twisted(root, axes=()):
-    """Join max/denominator/expectation Fold siblings into exp-family monoids."""
+    """Rewrite maximum/normalized-exponential Fold algebra into exp-family monoids."""
     return _rewrite_fold(root, tuple(axes)) if isinstance(root, Fold) else root
 
 

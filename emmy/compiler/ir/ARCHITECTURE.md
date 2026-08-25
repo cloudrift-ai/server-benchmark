@@ -272,10 +272,8 @@ type to dispatch on and no second place for a fact to live.
   property it was given).
 
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
-from the stored params, splicing each operand's body before the first read of its bound param. An operand is hoisted
-only when it does not reference the enclosing fold axis under lexical axis shadowing; a nested reduction may reuse
-the same canonical axis name without making its row-invariant source vary with the parent. Loops carry NO algebra —
-a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
+from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
+algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
 what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) rather than the lowered nest.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗

@@ -1654,8 +1654,8 @@ VALUES are site-local too: the worker inventory is spelled once in `WORK` (`w<M>
 finalize letter kept: a MODE, not an axis token); the retired embedded-token spellings raise, and the
 golden corpus itself was re-spelled mechanically (715 rows, replay digest-identical; the one-shot script is gone
 with the grammar it read).
-The reserved graph-level placement grammar stays outside the tree codec: the `in.<operand>` path prefix is rejected,
-and closed fused-value placement owns leading-`=` value pins. The
+The reserved
+graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
 golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its
 kind's tree and proves every spelling canonical. The tune DB / reservoir /
 online prior are REGENERATED after a re-key, never migrated — no reader special-cases pre-phase-3 axis-suffixed

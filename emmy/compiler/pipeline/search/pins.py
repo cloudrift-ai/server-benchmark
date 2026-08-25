@@ -94,19 +94,16 @@ def pinned_knobs(knobs: dict):
     """Temporarily publish ``knobs`` as authoritative environment pins.
 
     Axis-scoped keys ride both their programmatic ``EMMY_<KNOB@site>`` splat and the raw
-    ``EMMY_KNOBS`` aggregate. A graph-value ``PLACE@=<value>`` key rides only the aggregate because
-    ``=`` cannot occur in an environment-variable name. Schedule readers consume the splat after
-    import, while placement routing reads the aggregate directly because ``@`` is not a portable
-    shell-variable name.
+    ``EMMY_KNOBS`` aggregate. Schedule readers consume the splat after import, while placement
+    routing reads the aggregate directly because ``@`` is not a portable shell-variable name.
     """
     saved: dict[str, str | None] = {}
     try:
         scoped = []
         for name, value in knobs.items():
             key = config.knob_var(name)
-            if "=" not in key:
-                saved[key] = os.environ.get(key)
-                os.environ[key] = str(value)
+            saved[key] = os.environ.get(key)
+            os.environ[key] = str(value)
             if axis_of(name) is not None:
                 scoped.append(f"{name}={value}")
         if scoped:

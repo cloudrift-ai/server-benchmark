@@ -286,7 +286,6 @@ def test_parse_knob_spec_grammar():
     from emmy.compiler.pipeline.knob import parse_knob_spec
 
     assert parse_knob_spec(" bk = 2 ,, BM=16, STAGE=d2/smem-async ") == {"BK": "2", "BM": "16", "STAGE": "d2/smem-async"}
-    assert parse_knob_spec("PLACE@=x_f8=cut") == {"PLACE@=x_f8": "cut"}
     assert parse_knob_spec("") == {}
     with pytest.raises(ValueError, match="missing '='"):
         parse_knob_spec("BK2")

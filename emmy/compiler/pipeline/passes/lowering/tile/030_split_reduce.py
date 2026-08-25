@@ -161,36 +161,14 @@ def _piece_inputs(root: Node, op: Fold, *first: str) -> list[str]:
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
 
-def _add_result(match: Match, frag: Graph, root: Node, piece: LoopOp, inputs: list[str]) -> None:
-    """Add the replacement kernel with every original output port.
-
-    Secondary fragment buffers need temporary names because their original producer still owns the
-    friendly names until the splice removes it. ``Graph.splice`` restores those names afterward.
-    """
-    old = root.buffer_names()
-    new = (root.id, *(f"{root.id}__split_out{i}" for i in range(1, len(old))))
-    rename = dict(zip(old, new, strict=True))
-
-    def retarget(stmt):
-        if isinstance(stmt, Write) and stmt.output in rename:
-            return replace(stmt, output=rename[stmt.output])
-        return stmt
-
-    piece = replace(piece, body=piece.body.map(retarget))
-    tensors = tuple(Tensor(t.name if i == 0 else new[i], t.shape, t.dtype) for i, t in enumerate(root.outputs))
-    frag.add_node(op=piece, inputs=inputs, outputs=tensors, node_id=root.id)
-    frag.outputs = list(new)
-    if len(old) > 1:
-        match.output = rename
-
-
-def _one(match: Match, frag: Graph, root: Node, piece: LoopOp) -> Graph:
+def _one(frag: Graph, root: Node, piece: LoopOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
     further", so it merges the replaced op's knobs forward and does not restart the pass scan. The
     atomic partial is a different kernel — its own placement, its own body — and it has to reach
     ``020_schedule`` carrying nothing of the one it replaced."""
-    _add_result(match, frag, root, piece, list(root.inputs))
+    frag.add_node(op=piece, inputs=list(root.inputs), output=root.output, node_id=root.output.name)
+    frag.outputs = [root.output.name]
     return frag
 
 
@@ -283,7 +261,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         p_body, p_stores = _boundary(atomic_epi)
-        return _one(match, frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
+        return _one(frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -338,7 +316,8 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    _add_result(match, frag, root, fin_tile, _piece_inputs(root, fin_op, ws_name))
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.outputs = [out.name]
     return frag
 
 
@@ -434,7 +413,7 @@ def rewrite(match: Match, root: Node) -> Graph:
         atomic_op = Fold.projection(body=Body((*before, sliced_loop, *proj_body)))
         frag = _frag(match, root)
         piece = _piece(_residual(atomic_op, fold_node), (split, *grid), stores=proj_stores)
-        return _one(match, frag, root, piece)
+        return _one(frag, root, piece)
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
@@ -489,5 +468,6 @@ def rewrite(match: Match, root: Node) -> Graph:
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_op, grid, stores=fin_stores)
-    _add_result(match, frag, root, fin_tile, _piece_inputs(root, fin_op, ws_name))
+    frag.add_node(op=fin_tile, inputs=_piece_inputs(root, fin_op, ws_name), output=Tensor(out.name, out.shape, out.dtype), node_id=out.name)
+    frag.outputs = [out.name]
     return frag

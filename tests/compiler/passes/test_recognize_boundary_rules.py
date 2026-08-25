@@ -11,8 +11,6 @@ a computed-A bilinear ``Fold`` fork sibling of the ``Map`` form.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from emmy.compiler.context import Context
@@ -722,81 +720,6 @@ def test_composed_step_keeps_a_row_invariant_prologue_ahead_of_its_producer():
     assert fold is not None and _same_program(fold.loop.body, body)
 
 
-def test_composed_producer_closes_over_an_earlier_statistic():
-    """A producer nested in another reduce receives its pure statistic cone through an operand.
-
-    The two sibling reductions deliberately reuse one axis name. Once the statistic becomes the
-    producer's child, that inner binding shadows the producer axis and remains loop-invariant.
-    """
-    stat = Loop(
-        axis=Axis("d", Dim(16)),
-        body=Body(
-            (
-                Load(names=("xs",), input="x", index=(Var("kv"), Var("d"))),
-                Assign(name="sq", op="multiply", args=("xs", "xs")),
-                Accum(name="ss", value="sq", op="add", axes=("d",)),
-            )
-        ),
-    )
-    producer = Loop(
-        axis=Axis("d", Dim(16)),
-        body=Body(
-            (
-                Load(names=("q",), input="q", index=(Var("m"), Var("d"))),
-                Assign(name="term", op="multiply", args=("q", "scale")),
-                Accum(name="score", value="term", op="add", axes=("d",)),
-            )
-        ),
-    )
-    loop = Loop(
-        axis=Axis("kv", Dim(32)),
-        body=Body(
-            (
-                stat,
-                Assign(name="scale", op="rsqrt", args=("ss",)),
-                producer,
-                Accum(name="total", value="score", op="add", axes=("kv",)),
-            )
-        ),
-    )
-
-    fold = fold_from_loop(loop)
-    assert fold is not None and _same_program(fold.loop.body, loop.body)
-    (score,) = fold.operands
-    (source,) = score.operands
-    assert source.axis is None and source.operands[0].axis.name == "d"
-    assert source.lift.results == ("scale",), "the statistic cone is a positional producer input"
-
-
-def test_root_closure_orders_a_new_edge_before_its_nested_consumer():
-    """A dependency routed from an outer cell precedes the existing operand that captures it."""
-    from emmy.compiler.pipeline.passes.lowering.tile._closure import close_folds
-
-    stat = fold_from_loop(
-        Loop(
-            axis=Axis("d", Dim(16)),
-            body=Body(
-                (
-                    Load(names=("xs",), input="x", index=(Var("m"), Var("d"))),
-                    Assign(name="sq", op="multiply", args=("xs", "xs")),
-                    Accum(name="ss", value="sq", op="add", axes=("d",)),
-                )
-            ),
-        )
-    )
-    consumer = fold_from_loop(_composed_rowmax())
-    assert stat is not None and consumer is not None
-    (producer,) = consumer.operands
-    producer = replace(
-        producer, lift=replace(producer.lift, body=Body((*producer.body, Assign(name="capture", op="copy", args=("scale",)))))
-    )
-    consumer = replace(consumer, operands=(producer,))
-
-    (closed,) = close_folds([stat, Assign(name="scale", op="rsqrt", args=("ss",)), consumer])
-    assert closed.operands[0].axis is None and closed.operands[1].axis.name == "d0"
-    assert closed.lift.params[1 : 1 + len(closed.operands[0].lift.results)] == closed.operands[0].lift.results
-
-
 def test_composed_step_ignores_independent_statement_order():
     """A coordinate mask may appear on either side of its independent score producer."""
     score = _score_loop("kv", "d0", "s0", "0")
@@ -1204,43 +1127,12 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     g = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
     (cell,) = (n for n in g.nodes.values() if isinstance(n.op, LoopOp))
     tile = recognized_tile(cell.op, name=cell.id)
-
-    def fold_tree(node):
-        if not isinstance(node, Fold):
-            return
-        yield node
-        for child in (*node.operands, *node.body):
-            yield from fold_tree(child)
-
-    (carrier,) = (fold for fold in fold_tree(tile.op) if fold.role is AxisRole.TWISTED)
-    assert any(is_contraction(operand) for operand in carrier.operands), "the nested Q·K producer binds bottom-up"
     pro = fused_view(tile)
     assert pro is not None, "the chained score column binds through the fused view"
     node = pro[0].operands[0]
     assert is_contraction(node) and isinstance(node.a, Fold) and isinstance(node.channels[0].b, Fold), "both operands computed"
     seams = [spell(pro[0], "PLACE", s.node) for s in cuttable_seams(pro[0], pro[2], (*tile.place.free, *pro[1]))]
     assert "PLACE@b" in seams, seams
-
-
-def test_bilinear_binding_partitions_multiple_computed_producers():
-    """Each product side receives only the producer operands in its dependency cone."""
-    from emmy.compiler.ir.pure.fold import is_contraction
-    from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
-
-    graph = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
-    (cell,) = (node for node in graph.nodes.values() if isinstance(node.op, LoopOp))
-    tile = recognized_tile(cell.op, name=cell.id)
-    (column,) = (stmt for stmt in tile.op.body if isinstance(stmt, Fold))
-    n_axis = tile.stores[0].sweep
-    assert n_axis is not None
-    axes = frozenset({*(axis.name for axis in tile.place.free), n_axis.name})
-
-    bound = bind_bilinear(column, tile.place.free[-1].name, n_axis.name, axes, producer=True)
-    assert bound is not None and is_contraction(bound[0])
-    contraction, epilogue = bound
-    assert not epilogue and isinstance(contraction.a, Fold) and isinstance(contraction.b, Fold)
-    assert set(map(id, contraction.a.operands)).isdisjoint(map(id, contraction.b.operands))
 
 
 def _m1_norm_gate_up_body() -> Body:

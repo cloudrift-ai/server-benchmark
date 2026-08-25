@@ -21,8 +21,6 @@ workspace rule; a value seam keeps its leaf operand dtype — the same bytes the
 slab stored), and the piece bodies from ``Fold.lower`` with loop-invariant stmts placed at the
 shallowest level that defines their reads. Legality is structural (edge-iff-closed holds by
 construction); an open seam cannot be spelled because ``PLACE`` sites are tree children.
-When the parent is multi-output, every live port stays on the parent fragment and the graph splice restores each
-primary or secondary buffer identity after the cut.
 """
 
 from __future__ import annotations
@@ -77,7 +75,7 @@ class CutSite:
         return min(s.depth for s in self.members)
 
 
-def placement_pins() -> dict[str, str]:
+def _place_pins() -> dict[str, str]:
     """The live ``PLACE`` pins — authoritative over routing entries. ``PLACE@…`` keys ride the
     ``EMMY_KNOBS`` aggregate (an ``@`` key is not a shell-var name); a bare ``EMMY_PLACE`` pin
     rides its own var and resolves like any bare family key (the primary seam)."""
@@ -204,14 +202,14 @@ def cuttable_seams(root, stores: tuple = (), free: tuple = ()) -> list[CutSite]:
     return _grouped_sites(root, stores, free, legal)
 
 
-def route_cut(root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, CutSite | None]:
+def route_cut(ctx, knobs: dict, root, stores: tuple = (), free: tuple = ()) -> tuple[str | None, CutSite | None]:  # noqa: ARG001 — ctx/knobs kept for the rewrite-rule call signature
     """The ``PLACE`` pin resolution for a freshly-recognized kernel: ``("cut", seam)`` when a pin
     cuts, ``("fuse", None)`` when a pin names this tree and keeps it fused (authoritative — no
     placement fork is offered), ``(None, None)`` when no pin decides (the placement FORK owns the
     choice). A key that names no seam (or an uncuttable one) on this tree is skipped (a
     whole-model pin targets one kernel shape). A bare ``PLACE=cut`` pin takes the shallowest
     CUTTABLE seam."""
-    pins = placement_pins()
+    pins = _place_pins()
     if not pins:
         return None, None
     all_sites = sites(root)
@@ -398,6 +396,31 @@ def _cut_ops(root, stores: tuple, free: tuple, cut: CutSite, ws: str) -> tuple[L
     return child_op, parent_op, axes
 
 
+def reusable_cut_pieces(loop_op: LoopOp) -> tuple[LoopOp, LoopOp] | None:
+    """Return the two Loop-IR pieces for one unambiguous grouped computed-edge cut.
+
+    Fusion uses this as its boundedness witness: the recognized form has a concrete
+    materialization sibling whose producer runs once, so duplicated raw-loop work is not the
+    work the recognized tile must perform. No group, or more than one possible group, declines.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
+
+    try:
+        tile = recognized_tile(loop_op, name=loop_op.name)
+        pro = fused_view(tile)
+    except (AssertionError, ValueError):
+        return None
+    if pro is None:
+        return None
+    tree, free, stores = pro[0], (*tile.place.free, *pro[1]), pro[2]
+    groups = [cut for cut in cuttable_seams(tree, stores, free) if len(cut.members) == 2]
+    if len(groups) != 1:
+        return None
+    child_op, parent_op, _ = _cut_ops(tree, stores, free, groups[0], "__reuse_ws")
+    return child_op, parent_op
+
+
 def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: CutSite) -> Graph:
     """Split the recognized tree at ``site``'s seam into a two-kernel fragment: the CHILD piece
     computes the seam value into a workspace over its derived index space; the PARENT piece is
@@ -435,35 +458,13 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Cu
         output=Tensor(ws, tuple(a.extent for a in axes), ws_dtype),
         node_id=ws,
     )
-    old_outputs = root.buffer_names()
-    parent_outputs = (out.name, *(f"{out.name}__placed_out{i}" for i in range(1, len(old_outputs))))
-    output_rename = dict(zip(old_outputs, parent_outputs, strict=True))
-
-    def retarget(stmt):
-        if isinstance(stmt, Write) and stmt.output in output_rename:
-            return Write(
-                output=output_rename[stmt.output],
-                index=stmt.index,
-                values=stmt.values,
-                value_dtype=stmt.value_dtype,
-                atomic=stmt.atomic,
-                swizzle=stmt.swizzle,
-            )
-        return stmt
-
-    if len(old_outputs) > 1:
-        parent_op = LoopOp(body=parent_op.body.map(retarget), name=parent_op.name)
-    parent_tensors = tuple(Tensor(new, tensor.shape, tensor.dtype) for new, tensor in zip(parent_outputs, root.outputs, strict=True))
-    parent_op.outputs = dict(zip(parent_outputs, parent_tensors, strict=True))
     frag.add_node(
         op=parent_op,
         inputs=[*(i for i in root.inputs if i in parent_reads), ws],
-        outputs=parent_tensors,
+        output=Tensor(out.name, out.shape, out.dtype),
         node_id=out.name,
     )
-    frag.outputs = list(parent_outputs)
-    if len(old_outputs) > 1:
-        match.output = output_rename
+    frag.outputs = [out.name]
     # A cut CONSUMES the kernel it replaces: both pieces drop its schedule row and its structural
     # identity, so each arrives at the identity stamp / ``020_schedule`` as a
     # brand-new kernel stamped and scheduled from its OWN body. They are built fresh here, so this
@@ -481,4 +482,4 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Cu
     return frag
 
 
-__all__ = ["CutSite", "cuttable_seams", "placement_pins", "realize_cut", "route_cut"]
+__all__ = ["CutSite", "cuttable_seams", "realize_cut", "reusable_cut_pieces", "route_cut"]

@@ -44,19 +44,6 @@ def _kernel_ids(out) -> list[str]:
     return sorted(nid for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None))
 
 
-def _has_grouped_cut(loop) -> bool:
-    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
-
-    tile = recognized_tile(loop, name=loop.name)
-    view = fused_view(tile)
-    if view is None:
-        return False
-    tree, free, stores = view[0], (*tile.place.free, *view[1]), view[2]
-    return any(len(cut.members) == 2 for cut in cuttable_seams(tree, stores, free))
-
-
 def _inp(g: Graph, name: str, shape: tuple) -> None:
     g.add_node(op=InputOp(), inputs=[], output=Tensor(name, tuple(Dim(s) for s in shape), dtype=F16), node_id=name)
 
@@ -350,13 +337,14 @@ def test_maximal_sdpa_with_fused_producer_recovers_grouped_inverse() -> None:
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
 
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,128), torch.randn(1,2,8,128), torch.randn(1,2,8,128), is_causal=True)"
     )["graph"]
     graph = Pipeline.build(LOOP_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     attention = graph.nodes["scaled_dot_product_attention"]
-    assert isinstance(attention.op, LoopOp) and _has_grouped_cut(attention.op)
+    assert isinstance(attention.op, LoopOp) and reusable_cut_pieces(attention.op) is not None
 
     source = graph.nodes["x0"].output
     graph.rename_node("x0", "q_src")
@@ -366,25 +354,27 @@ def test_maximal_sdpa_with_fused_producer_recovers_grouped_inverse() -> None:
     fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph, ctx=Context.from_target((8, 0)))
     loops = [node for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1, "maximal fusion must consume the upstream producer"
-    assert _has_grouped_cut(loops[0].op), "placement must recover the grouped attention cut"
+    assert reusable_cut_pieces(loops[0].op) is not None, "placement must recover the grouped attention cut"
     attention = fused.nodes["scaled_dot_product_attention"]
-    assert _has_grouped_cut(attention.op)
+    assert reusable_cut_pieces(attention.op) is not None
 
 
 def test_output_flatten_preserves_the_gqa_sdpa_grouped_inverse() -> None:
     """Pure output layout must preserve attention's grouped placement inverse."""
     from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
 
     lowered = Pipeline.build(LOOP_PASSES).run(_gqa_sdpa_flatten_graph(), ctx=Context.from_target((8, 9)))
     loops = [node for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
     assert {node.id for node in loops} == {"flat"}
     attention = lowered.nodes["flat"]
-    assert _has_grouped_cut(attention.op)
+    assert reusable_cut_pieces(attention.op) is not None
 
 
 def test_output_flatten_keeps_an_ordinary_reduce_on_the_normal_fusion_path() -> None:
     """An equal-size layout after a plain fold does not mint grouped placement evidence."""
     from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
 
     g = Graph()
     _inp(g, "x", (2, 3, 8))
@@ -396,7 +386,7 @@ def test_output_flatten_keeps_an_ordinary_reduce_on_the_normal_fusion_path() -> 
     loops = [node for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1
     assert loops[0].id == "flat"
-    assert not _has_grouped_cut(loops[0].op)
+    assert reusable_cut_pieces(loops[0].op) is None
 
 
 # --- the realizer: pin-driven cuts, fuse-default, recursion ---------------------------------------

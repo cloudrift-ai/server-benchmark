@@ -465,10 +465,6 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
         raw = config.knobs_aggregate()
     applied: dict[str, str] = {}
     for key, value in parse_knob_spec(raw).items():
-        # Graph-value placement keys are read directly from the aggregate. Their reserved
-        # ``PLACE@=<value>`` spelling cannot be splatted into an environment-variable name.
-        if "=" in key:
-            continue
         # Individual per-knob env vars win — don't clobber an explicit
         # ``EMMY_BK=4`` with whatever the aggregate says.
         if config.set_knob(key, value, overwrite=False):
@@ -490,9 +486,7 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
             continue
         if "=" not in entry:
             raise ValueError(f"knob spec entry {entry!r} is missing '=' (expected KEY=VALUE)")
-        # ``PLACE@=<value>=cut`` reserves the first ``=`` as part of the key. Every other
-        # aggregate entry keeps the ordinary first-``=`` separator.
-        key, _, value = entry.rpartition("=") if "@=" in entry else entry.partition("=")
+        key, _, value = entry.partition("=")
         key = key.strip()
         if not key:
             raise ValueError(f"knob spec entry {entry!r} has empty KEY")
@@ -524,16 +518,6 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
-
-
-def active_schedule_pins() -> dict[str, str]:
-    """The live bare and addressed schedule pins, preserving explicit empty values."""
-    pins = {key: value for key, value in parse_knob_spec(config.knobs_aggregate()).items() if family_of(key) in SCHEDULE_FAMILIES}
-    for family in SCHEDULE_FAMILIES:
-        raw = config.knob_raw(family)
-        if raw is not None:
-            pins.setdefault(family, raw)
-    return pins
 
 
 def consume_kernel_row(knobs: dict) -> dict:

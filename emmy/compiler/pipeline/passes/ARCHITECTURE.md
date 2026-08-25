@@ -204,40 +204,29 @@ so a term has at most TWO views (`_schedule._views`):
 (The old mixed-A promotion "reading" is gone: a materialized edge whose dtype the atom cannot bind directly takes the
 CONVERTING smem compute fill on the one tree — a stage resolution, not a derivation.)
 
-**The stored tree is a CHAIN, never a demoted loop.** Canonical closure (`_closure.close_folds`) runs both while a
-composed reduce step is parsed and when its root is formed. A fold whose complete operand subtree reads a value an
-earlier pure stmt defines (a normalized row's scale, a sibling statistic's projected result) takes that value through
-a zero-axis PROJECTION EDGE — the producing pure stmts as the edge's body, the folds they read as its operands, any
-fold state the consumer also reads passed through as a result — bound positionally to a new lift param. λ stays
-closed; the edge is the `make_cone` prologue generalized. Independent blocks compare in one structural topological
-order at the parser's byte-identity gate, so moving a dependency cone under its consumer does not make recognition
-depend on fusion's incidental sibling order. A fold reading a boundary store's sweep axis runs once per swept
-element, so it stays the projection's fold BODY member — a stored node in place — rather than an operand (operands
-lower ahead of the sweep). Every node keeps its `PLACE` seam: the k-norm → RoPE → `Q·Kᵀ` region used to lose its
-statistic and dot to the raw-loop escape the moment one read the other's projected value, which no pin could then
-name. Edges that do not read the fold's axis lower ONCE ahead of the loop (`Fold.lower`, the reduce tier's `_emit`);
-the test is scope-aware, so a child reduction reusing the same axis name shadows rather than captures its parent.
-The captured loop therefore stays byte-exact.
-Algebra classification runs only after this structural closure and walks the Fold tree bottom-up. A nested producer
-is classified with the enclosing fold's output axis and the kernel's free axes; when it uniquely captures sibling
-producer results, those dependencies join the same algebraic read. Online-softmax pairing therefore compares the
-complete dependency cones, then binds its Q·K producer before the enclosing P·V reading. Moving the sibling group
-under a projection edge cannot change either recognition result.
+**The stored tree is a CHAIN, never a demoted loop.** Root formation (`_lift._form_root` / `_chain`) closes every
+fold over the values it reads from the cell: a fold whose λ reads a name a pure cell stmt defines (a normalized row's
+scale, a sibling statistic's projected result) takes that value through a zero-axis PROJECTION EDGE — the producing
+pure stmts as the edge's body, the folds they read as its operands, any fold state the consumer also reads passed
+through as a result — bound positionally to a new lift param. λ stays closed; the edge is the `make_cone` prologue
+generalized. A fold reading a boundary store's sweep axis runs once per swept element, so it stays the projection's
+fold BODY member — a stored node in place — rather than an operand (operands lower ahead of the sweep). Every node
+keeps its `PLACE` seam: the k-norm → RoPE → `Q·Kᵀ` region used to lose its statistic and dot to the raw-loop escape
+the moment one read the other's projected value, which no pin could then name. Edges that do not read the fold's
+axis lower ONCE ahead of the loop (`Fold.lower`, the reduce tier's `_emit`), so the captured loop stays byte-exact.
 The two readings above derive from the chain: `fused_view` reads a chained column (its edge's statistic and epilogue,
 the column minus the edge regenerating the raw column loop), and the per-cell reading is the chain UNDONE
 (`_classify.demoted_chain` — the statistic back at the root, the column as its captured loop), which is what the
 reduce tiers schedule and materialize. Cuts under a sweep are legal: the sweep axis is an iteration axis of the cut
 piece, not a captured value.
 
-A chained product with multiple computed producers binds by dependency, not operand count or position.
-`bind_bilinear` takes each side's backward cone, assigns every nonzero-axis producer wholly to the one side that
-consumes it, and recursively slices a zero-axis projection when independent results feed different sides. A producer
-shared by both sides declines rather than being duplicated. Normalized Q against normalized K and attention's P·V
-with normalized V are instances: A and B become computed cones, each carrying exactly its statistics and pure
-projection. The fill evaluates a computed B per slab cell (its statistic with it — the `b` children are fill-realized
-sites, never a partition of their own), so the fused form stands and is priced like any other; the `b` seam turns an
-inline producer into a materialized operand the mma tier streams. A seam standing in for a contraction operand holds
-what the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
+A chained column over TWO statistics (normalized Q against normalized K — attention's score fold) binds as one
+contraction whose A and B are BOTH computed cones, each sourcing its own statistic (`bind_bilinear`'s chained
+both-computed arm; `fused_view` reads the sweep column through it). The fill evaluates a computed B per slab cell
+(its statistic with it — the `b` children are fill-realized sites, never a partition of their own), so the fused
+form stands and is priced like any other; the `b` seam is the cut that turns the per-query replay of the key
+statistic into a materialized operand the mma tier streams. A seam standing in for a contraction operand holds what
+the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
 materialized B is a slab the warp atoms can copy.
 
 A row carries NO view ownership. In the MONOID-producer and COLLAPSE cases, the derived contraction view offers only
@@ -347,28 +336,6 @@ worklist's shared binding table emits an equal upstream demand once across every
 a shared producer or change the recognized computation. Merge order may temporarily place a contraction inside
 another reduction; the later legal merge is still taken. Every fused-versus-cut choice belongs to placement and the
 deploy evidence hierarchy.
-
-Repeated-compute detection reads the final fused Loop IR symbolically. Each pure SSA value expands to its exact
-external-load and elementwise expression; coordinate axes alpha-rename by first use, so equal computations placed
-under differently named loops join one value class while buffer identity, operations, dtypes, and index maps remain
-significant. Each occurrence records its consumer execution scope and the axes its producer coordinates actually
-depend on. A consumer-only axis proves replication even with symbolic extents; for fully static affine indices,
-`index_set_size` gives a conservative coordinate-count upper bound, so a larger execution domain is a second proof.
-Alpha-equivalent occurrences join one value class without enumerating tensor elements. Cyclic, effectful, unbound,
-or unsupported expressions produce no value class. A reduction is supported when its axes are bound in the value and
-its accumulator operation, base, dtype, and closed input expression are exact; an unbound or recursive reduction
-still declines. This analysis exposes facts to placement; it never inserts a fusion boundary or chooses between
-inline and materialized execution.
-
-A closed fused-value cut is the exact inverse over one such class. Its child evaluates one dependency-closed pure
-spelling over the producer coordinates and writes either an existing live output port or a typed workspace. Its
-parent replaces every equivalent spelling with a `Load`, retains every other output port with its original shape and
-dtype, and removes only definitions made dead by that replacement. When that dependency closure already contains an
-exact occurrence of another live output, the child transfers that port too and the parent loads it instead of
-recomputing the shared dependency. Construction declines when effects or unresolved captures enter the cone, an
-output has multiple or scope-mismatched writes, coordinates cannot represent the output shape, or the cut would
-transfer every output and leave no parent. The fragment is ordinary multi-output graph structure; it carries no
-schedule choice and does not alter fusion.
 
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
@@ -682,9 +649,7 @@ grammar it read).
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
   accumulates in place). Direct atomic finalization is legal only when it does not write each partial into f16/bf16
   output storage; low-precision output takes the deferred f32 workspace and rounds once after the combine. It runs
-  AFTER its decision — the `g` row was chosen FOR the split form. A multi-output kernel keeps every output port on
-  the atomic piece or deferred finalize; the partial exposes only its carrier workspace. Secondary ports take
-  temporary fragment names during the splice, then recover their original buffer identities with the other outputs.
+  AFTER its decision — the `g` row was chosen FOR the split form.
 
 **Every piece is a BRAND-NEW kernel.** A rewrite that returns DIFFERENT NODES is a kernel-set change, and the
 minting rule states it by consuming the replaced kernel's row on the pieces it builds
@@ -765,15 +730,12 @@ rides the engine's splice event, which every fragment goes through. (The histori
 
 **Placement (phase 4).** `PLACE@<child-path> = cut | fuse` is the per-seam edge property on the recognized
 tree — a `PLACE` site is every NON-ROOT node (the child names its parent↔child seam; a cone edge accepts the
-`PLACE@a` view-role spelling and canonicalizes to bare `PLACE` when it is the root contraction's shallowest seam;
-`PLACE@a` / `PLACE@b` keep selecting the unique root-most role edge when nested contractions add the same role),
+`PLACE@a` view-role spelling and canonicalizes to bare `PLACE` when it is the root contraction's shallowest seam),
 spelled/resolved by the same tree-path codec as the schedule families. Resolution is
 decided BEFORE any schedule fork exists (`010_recognize` consults `route_cut` right after the lift / prologue
 bind) and it is RECURSIVE. An authoritative `PLACE` pin decides outright; UNPINNED, placement is an enumerated
-STRUCTURAL fork — the fused form beside one cut fragment per legal seam and one closed fused-value fragment per
-proven repeated or live value. A value is pinned as `PLACE@=<value> = cut | fuse`; the leading `=` keeps graph SSA
-names separate from tree paths. Tune discovers every cut, and a compile prices them like any kernel-set choice.
-Nothing holds the fused side ahead of the cuts. A chosen
+STRUCTURAL fork — the fused form beside one cut fragment per legal seam, so tune discovers cuts and a compile
+prices them like any kernel-set choice. Nothing holds the fused side ahead of the cuts. A chosen
 cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, recording the decision as the exact pin that
 replays it; the realizer itself consults no deploy evidence. The
 realizer (`lowering/tile/_cut.py`) splits the tree there: the child
@@ -801,13 +763,6 @@ The one producer writes a common workspace, while each replacement `Load` retain
 This grouped inverse is a placement option over the maximally fused body; fusion does not consult it. Placement must
 recover useful boundaries from the final body. A multi-output parent keeps every live port across the cut; the splice
 restores both primary and secondary buffer identities after inserting the workspace producer.
-
-A live schedule pin can constrain which placement siblings survive only as a realizability check. `010_recognize`
-applies each fragment to a detached single-kernel graph, enumerates its direct schedule rows without ranking them, and
-keeps the siblings that realize every schedule pin realized anywhere in that fork. If no sibling realizes a pin, the
-whole fork remains so normal scheduling retains its pin diagnostics; with no schedule pins this check does not run.
-Placement ranking remains exclusively in the deploy evidence hierarchy.
-
 A piece is a RAW loop body: the tree's λ-local SSA names flatten
 into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused

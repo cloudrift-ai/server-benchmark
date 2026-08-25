@@ -11,6 +11,8 @@ a computed-A bilinear ``Fold`` fork sibling of the ``Map`` form.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from emmy.compiler.context import Context
@@ -764,6 +766,35 @@ def test_composed_producer_closes_over_an_earlier_statistic():
     (source,) = score.operands
     assert source.axis is None and source.operands[0].axis.name == "d"
     assert source.lift.results == ("scale",), "the statistic cone is a positional producer input"
+
+
+def test_root_closure_orders_a_new_edge_before_its_nested_consumer():
+    """A dependency routed from an outer cell precedes the existing operand that captures it."""
+    from emmy.compiler.pipeline.passes.lowering.tile._closure import close_folds
+
+    stat = fold_from_loop(
+        Loop(
+            axis=Axis("d", Dim(16)),
+            body=Body(
+                (
+                    Load(names=("xs",), input="x", index=(Var("m"), Var("d"))),
+                    Assign(name="sq", op="multiply", args=("xs", "xs")),
+                    Accum(name="ss", value="sq", op="add", axes=("d",)),
+                )
+            ),
+        )
+    )
+    consumer = fold_from_loop(_composed_rowmax())
+    assert stat is not None and consumer is not None
+    (producer,) = consumer.operands
+    producer = replace(
+        producer, lift=replace(producer.lift, body=Body((*producer.body, Assign(name="capture", op="copy", args=("scale",)))))
+    )
+    consumer = replace(consumer, operands=(producer,))
+
+    (closed,) = close_folds([stat, Assign(name="scale", op="rsqrt", args=("ss",)), consumer])
+    assert closed.operands[0].axis is None and closed.operands[1].axis.name == "d0"
+    assert closed.lift.params[1 : 1 + len(closed.operands[0].lift.results)] == closed.operands[0].lift.results
 
 
 def test_composed_step_ignores_independent_statement_order():

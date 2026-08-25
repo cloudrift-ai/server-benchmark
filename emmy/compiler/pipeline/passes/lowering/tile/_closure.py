@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, stmt_axis_names
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, stmt_axis_names
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
 
 
@@ -110,7 +110,16 @@ def close_folds(cell: list) -> list:
         else:
             lift = Lambda(params=(*fold.lift.params, *results), body=fold.lift.body, results=fold.lift.results)
         edge = Fold.projection(operands=operands, body=Body(body), results=results)
-        out[index] = replace(fold, operands=(*fold.operands, edge), lift=lift)
+        edge_at = next(
+            (operand_at for operand_at, operand in enumerate(fold.operands) if _captures(operand) & set(results)),
+            len(fold.operands),
+        )
+        before = sum(len(_operand_result_names(operand)) for operand in fold.operands[:edge_at])
+        lead = 1 if fold.axis is not None else 0
+        params = (*lift.params[: lead + before], *results, *lift.params[lead + before : -len(results)])
+        lift = replace(lift, params=params)
+        nested = (*fold.operands[:edge_at], edge, *fold.operands[edge_at:])
+        out[index] = replace(fold, operands=nested, lift=lift)
 
     in_edge = {
         id(member)

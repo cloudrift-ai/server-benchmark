@@ -158,6 +158,16 @@ class TileOp(Op):
     # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
     work: object = None
 
+    def __post_init__(self) -> None:
+        from emmy.compiler.ir.tile.normalize import normalize_fold_tree  # noqa: PLC0415
+
+        axes = [axis.name for axis in self.place.free]
+        axes.extend(store.sweep.name for store in self.stores if store.sweep is not None)
+        normalized = normalize_fold_tree(self.op, axes)
+        if self.schedule and normalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        self.op = normalized
+
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
         every presentation concern in the layer."""

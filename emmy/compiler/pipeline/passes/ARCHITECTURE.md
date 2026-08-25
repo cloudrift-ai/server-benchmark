@@ -187,16 +187,17 @@ The Tile IR boundary is one structural operation:
 1. peel the outer parallel loop chain into the unmapped placement;
 2. recursively replace every remaining reduction `Loop` with a `Fold`, in the same statement position;
 3. move the root `Write` or output sweep to `TileOp.stores`;
-4. reject any raw inner loop that remains.
+4. reject any raw inner loop that remains;
+5. let `TileOp.__post_init__` canonicalize the Fold tree through general local algebra and α-equivalence rules.
 
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
 without a placement or value-cut analysis.
 
-There is no Tile IR classification pass, derived fused view, or placement-cut realizer. `020_schedule` enumerates only
-the Fold tree stored by `010_lift`. Unsupported scheduling shapes remain unmapped; this is the intentional recovery
-boundary while schedule support is rebuilt over the complete tree.
+There is no Tile IR classification pass, SDPA matcher, derived fused view, or placement-cut realizer. `020_schedule`
+enumerates only the canonical Fold tree stored by `010_lift`. Unsupported scheduling shapes remain unmapped; this is
+the intentional recovery boundary while schedule support is rebuilt over the complete tree.
 
 ## The divide rule: `split` an iteration axis
 

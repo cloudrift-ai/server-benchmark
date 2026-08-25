@@ -1,8 +1,8 @@
 # Tile IR — a complete Fold tree
 
-`LoopOp → TileOp` is a structural lift. The boundary peels the outer parallel loop chain into
-`Placement.free`, then converts every remaining reduction loop into a `Fold`. It performs no algebra or kernel-shape
-recognition.
+`LoopOp → TileOp` first performs a structural lift. The boundary peels the outer parallel loop chain into
+`Placement.free`, then converts every remaining reduction loop into a `Fold`. `TileOp.__post_init__` subsequently
+canonicalizes the complete Fold tree before scheduling.
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
@@ -33,8 +33,18 @@ cell read the maximum, denominator, or nested QK result without extracting or re
 2. remove the current loop's `Accum` statements from its step body;
 3. build the `lift`, `init`, and `combine` directly from those accumulators.
 
-There is no classification pass, byte-identity recognition gate, softmax pairing, contraction binding, fused view,
-placement cut, or raw-loop fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
+There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, placement cut, or raw-loop
+fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
+
+## Canonicalization
+
+`normalize.py` owns the idempotent, bottom-up Fold-tree normalization invoked by `TileOp.__post_init__`. It contains
+only reusable local rules: scoped lambda alpha-canonicalization and clustering, semiring contraction
+canonicalization, and closed child-Fold extraction from a root projection. The contraction rule requires direct
+indexed operands and the registered distributive product/commutative-monoid laws; a Fold that does not prove those
+conditions remains planar.
+
+Whole-tree patterns such as SDPA are intentionally absent. They consume this canonical tree in a later pass.
 
 `pipeline/passes/lowering/tile/_lift.py` peels the outer free axes, invokes that conversion, separates root stores,
 checks the no-inner-loop invariant, and creates one zero-axis root `Fold` over the lifted cell.

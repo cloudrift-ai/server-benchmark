@@ -276,10 +276,9 @@ what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) ra
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
-operands) and contracts ≥ 2 distinct operand buffers (`x·x` is a squared reduce, not a
-contraction). Recognition stamps the `CONTRACTION` role on that form (keeping the matmul's
-`Accum` a loose `Accum` rather than degenerate-folding it like a plain reduce); the mma
-atom tier reads the operands off the annotated loop to pick the tensor-core cell.
+operands) and exposes two distinct free-axis operand roles (`x[m, k]·x[m, k]` is a squared reduce,
+not a contraction). Tile IR canonicalization constructs that form from a flat Fold when the
+semiring and operand roles prove it; the mma atom tier reads the resulting Fold operands.
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
 `Fold` node's flat `(init, combine)` pair, and everything else derives where it is consumed.
@@ -543,8 +542,10 @@ A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, s
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to
 the corresponding nested Loop IR.
 
-The total-lift invariant is that no raw inner `Loop` survives. There is no Tile IR classification or placement-cut
-phase. Scheduling annotates the stored Fold sites through `TileOp.schedule`; unsupported shapes remain unmapped.
+The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general local
+canonicalization, including semiring contractions and scoped lambda equivalence; it performs no whole-tree SDPA
+matching. There is no Tile IR classification or placement-cut phase. Scheduling annotates the canonical Fold sites
+through `TileOp.schedule`; unsupported shapes remain unmapped.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.
 

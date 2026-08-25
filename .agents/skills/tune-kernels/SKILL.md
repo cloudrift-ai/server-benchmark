@@ -258,8 +258,8 @@ Start with:
 ```bash
 emmy eval variants --kernel <substring>
 emmy eval failures
-emmy eval online --dataset nodes --kernel <substring>
-emmy eval online --dataset nodes --blame --ablate --kernel <substring>
+emmy eval prior --dataset nodes --kernel <substring>
+emmy eval prior --dataset nodes --blame --ablate --kernel <substring>
 ```
 
 For a serving golden, run the unified release audit on the pinned GPU; it validates that every structural target has
@@ -267,8 +267,7 @@ the exact config-derived realization matrix before reproducing and auditing it:
 
 ```bash
 emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
-emmy eval offline --kernel <substring>
-emmy eval online --dataset golden --kernel <substring>
+emmy eval prior --dataset golden --kernel <substring>
 ```
 
 Classify every meaningful loss:

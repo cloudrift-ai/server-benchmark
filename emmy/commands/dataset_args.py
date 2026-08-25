@@ -33,7 +33,7 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
         choices=["golden", "db", "nodes"],
         default=default,
         help="Measurement-data source: 'golden' (recorded golden configs), 'db' (tune DB perf rows), or 'nodes' "
-        f"(tune DB search-tree node store, for `eval online`). Default: {default}.",
+        f"(tune DB search-tree node store — or a measurement freeze — for `eval prior`). Default: {default}.",
     )
     parser.add_argument(
         "--db",

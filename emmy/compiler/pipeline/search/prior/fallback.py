@@ -61,7 +61,7 @@ class FallbackPrior(Prior):
 
     @property
     def fitted(self) -> bool:
-        # Reflects the ONLINE model (so diagnostics / `eval online` report whether
+        # Reflects the ONLINE model (so diagnostics / `eval prior` report whether
         # real tuning data exists). The policies no longer gate on this — they
         # always call score()/mean_score(), which fall back to offline when cold.
         return self.online.fitted
@@ -98,6 +98,9 @@ class FallbackPrior(Prior):
 
     def explain_features(self, feats: dict) -> dict[str, float] | None:
         return self._deploy.explain_features(feats)
+
+    def score_rows(self, group):
+        return self._deploy.score_rows(group)
 
     @property
     def masking_exact(self) -> bool:

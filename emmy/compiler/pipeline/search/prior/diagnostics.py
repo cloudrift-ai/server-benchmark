@@ -15,34 +15,12 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass
 
-from emmy.compiler.pipeline.search.data import Dataset, ShapeKey
+from emmy.compiler.pipeline.search.data import Dataset, ShapeKey, is_matmul, op_label
 from emmy.compiler.pipeline.search.metrics import spearman, topk_pick, topk_regret
 
 
 def _n_tunable(knobs: dict) -> int:
     return sum(1 for k in knobs if not k.startswith(("S_", "H_")))
-
-
-def _matmul_sig(d: dict) -> bool:
-    """Histogram heuristic for "this op group is a matmul": a product feeding a
-    reduce-add over ≥2 distinct inputs. ``S_n_mma`` is NOT usable as the marker:
-    the stamp pass runs at fusion end, before the tile tier emits ``Mma`` stmts,
-    so it is 0.0 on every stamped row — gating on it made golden coverage
-    permanently empty and dropped every fp16 golden from the rank/deploy joins
-    (see ``ShapeKey.from_s_features``)."""
-    return bool(d.get("S_reduce_add", 0) and d.get("S_pw_multiply", 0) and d.get("S_n_distinct_input", 0) >= 2)
-
-
-def _op_label(sig: tuple) -> str:
-    d = dict(sig)
-    if _matmul_sig(d):
-        kind = "matmul"
-    elif d.get("S_reduce_add", 0) or d.get("S_reduce_max", 0):
-        kind = "reduce"
-    else:
-        kind = "pointwise"
-    free, red = int(d.get("S_ext_free_max", 0)), int(d.get("S_ext_reduce_max", 0))
-    return f"{kind:9} free={free}" + (f" red={red}" if red else "")
 
 
 def reachability(prior, groups: dict) -> list[tuple]:
@@ -68,7 +46,7 @@ def reachability(prior, groups: dict) -> list[tuple]:
         best_us, picked = min(lats), topk_pick(preds, lats, 1)
         if best_us <= 0:  # a label that is not a latency; a ratio against it would be meaningless
             continue
-        out.append((_op_label(sig), best_us, lats[picked], lats[picked] / best_us, len(leaves)))
+        out.append((op_label(dict(sig)), best_us, lats[picked], lats[picked] / best_us, len(leaves)))
     return out
 
 
@@ -100,7 +78,7 @@ def _golden_coverage(groups: dict) -> tuple[int, int]:
     have = set()
     for sig in groups:
         d = dict(sig)
-        if _matmul_sig(d):
+        if is_matmul(d):
             have.add(ShapeKey.from_s_features(d))
     golden_keys = {g.shape_key for g in GOLDEN_RECORDS if g.is_matmul}
     covered = sum(1 for k in golden_keys if k in have)
@@ -138,7 +116,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     index: dict[ShapeKey, dict] = {}
     for sig in Dataset.from_prior(prior).group_by_op():
         d = dict(sig)
-        if not _matmul_sig(d):
+        if not is_matmul(d):
             continue
         index.setdefault(ShapeKey.from_s_features(d), {k: v for k, v in d.items() if k.startswith("S_")})
 
@@ -213,7 +191,7 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     index: dict[ShapeKey, list] = {}
     for sig, samples in Dataset.from_prior(prior).group_by_op().items():
         d = dict(sig)
-        if not _matmul_sig(d):
+        if not is_matmul(d):
             continue
         o3 = [s for s in samples if int(s.all_knobs().get("H_opt", 0)) == 3]
         if not o3:
@@ -365,7 +343,7 @@ def fork_records(prior, nodes) -> list[ForkRecord]:
         best_i = min(range(len(sibs)), key=lambda i: values[i])
         family = _fork_family(by_key.get(parent_key), sibs)
         records.append(
-            ForkRecord(_node_op_label(sibs[0].features), family, topk_regret(scores, values, 1), sibs, fvecs, scores, picked_i, best_i)
+            ForkRecord(op_label(sibs[0].features), family, topk_regret(scores, values, 1), sibs, fvecs, scores, picked_i, best_i)
         )
     return records
 
@@ -399,15 +377,6 @@ def _regret_lines(records: list[tuple[str, str, float, int]]) -> list[str]:
     agg = {f: [r for _, fam, r, _ in records if fam == f] for f in fams}
     lines.append(f"      {'ALL (median)':{w}}  " + "  ".join(cell(agg[f]) for f in fams) + f"  {len(records)}")
     return lines
-
-
-def _node_op_label(features: dict) -> str:
-    """The op label for a single ``node`` row — derived from its ``S_*`` features, the
-    same labels :func:`reachability` rows carry, so ``--kernel`` filters the node store
-    by op kind/shape (e.g. ``matmul`` / ``reduce`` / ``free=512``). All nodes of one op
-    share these features, so filtering keeps/drops a whole op atomically — parent and
-    children never split."""
-    return _op_label(tuple(sorted((k, v) for k, v in features.items() if k.startswith("S_"))))
 
 
 def _node_gpu_block(prior, gpu: str, gnodes: list) -> list[str]:
@@ -454,12 +423,12 @@ def _usable_nodes(nodes, kernel_filter: str | None) -> tuple[list, int, int]:
     nodes = [n for n in nodes if n.status == "ok" and n.feat_ver == FEATURIZER_VERSION]
     total = len(nodes)
     if kernel_filter:
-        nodes = [n for n in nodes if kernel_filter in _node_op_label(n.features)]
+        nodes = [n for n in nodes if kernel_filter in op_label(n.features)]
     return nodes, stale, total
 
 
 def node_report(prior, nodes, *, kernel_filter: str | None = None) -> str:
-    """The ``eval online --dataset nodes`` block. Groups the node store **by card**
+    """The ``eval prior --dataset nodes`` per-fork block. Groups the node store **by card**
     (``NodeRow.gpu``) and, per card, reports the fork sibling regret (the metric unique
     to this dataset — :func:`sibling_regret`) plus leaf reachability / calibration. Per-card grouping is what
     makes a cross-hardware dataset (H100, H200, …) evaluate correctly — same-die SKUs
@@ -706,7 +675,7 @@ def _golden_anchor_block(prior, gpu: str, gnodes: list, kernel_filter: str | Non
     for g in goldens:
         pin_suffix = "" if g.pin_map == {"FAST_MATH": False} else f" [{dict(g.pins)}]"
         name = g.name + pin_suffix
-        op_nodes = [n for n in gnodes if _matmul_sig(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key]
+        op_nodes = [n for n in gnodes if is_matmul(n.features) and ShapeKey.from_s_features(n.features) == g.shape_key]
         if not op_nodes:
             no_data += 1
             lines.append(f"      {name:{w}}  NO TREE DATA for this shape on this card")
@@ -850,7 +819,7 @@ def _ablation_lines(prior, records: list[ForkRecord], *, min_support: int = 5) -
 
 
 def attribution_report(prior, nodes, *, kernel_filter: str | None = None, blame: bool = True, ablate: bool = False) -> str:
-    """The ``eval online --dataset nodes --blame / --ablate`` block: per-feature
+    """The ``eval prior --dataset nodes --blame / --ablate`` block: per-feature
     regret attribution over the node store's fork records. Fork records are built
     per card (fork identity never crosses cards) but the tables POOL them: regret is
     a within-fork ratio, so cards and compile regimes pool safely — unlike

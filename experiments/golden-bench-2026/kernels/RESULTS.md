@@ -46,6 +46,19 @@ improvement; that is coverage illusion, and this file reports it only to warn ag
 5. Host notes: both cycle-3 hosts were clean (no driver/toolchain traps); Vast containers reap tmux/setsid on
    SSH resets — **supervisor** is the reliable launcher there.
 
+## V100 addendum (same cycle, host provided later)
+
+Full pipeline on a Tesla V100-SXM3-32GB (CloudRift, 374 GB disk, CUDA 12.9): rebench + retune of all four
+corpus models. Highlights:
+
+- **First-ever Qwen3.6-27B capture**: `masked_fill` now traces (fixed since cycle 2), so the 27B layer-0 s512
+  inventory landed — **196 kernel targets, 190 measured** (`qwen36-27b_v100.yaml`). Its decode-shape trace
+  stops at the next frontier op: `aten.pad` with non-zero-width padding (`trace/torch.py`); one op per cycle.
+- 32B-FP8 rejoined the corpus (disk fit): 26/38 measured.
+- 0.6B / 0.6B-FP8 mirror the other cards: measured majorities improved; the same over-budget fused forms are
+  the unmeasured rows.
+- Volta toolchain playbook held (cu126 torch, cupy 13.6.0, xet disabled); no new host traps.
+
 ## Files
 
 Goldens refreshed for rtx4090/rtx5090 (0.6B, 0.6B-FP8; the six over-budget 4090 rows carry single-repeat

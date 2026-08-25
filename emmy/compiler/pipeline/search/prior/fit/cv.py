@@ -50,8 +50,7 @@ import statistics
 
 from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
-
-TOP_KS = (1, 10, 25, 50, 100)
+from emmy.compiler.pipeline.search.prior.report import TOP_KS
 
 # The ``skipped`` reason for golden kinds the fitter has no case builder for
 # (attention / rms_norm / softmax) — counted per card as ``out_of_scope``, distinct from

@@ -10,9 +10,10 @@ description: >-
 
 The autotune `node` table (`SearchDB`, default `~/.cache/emmy/autotune.db`) is a **cross-hardware** dataset of
 search-tree value-of-position rows — the leaf measurements the future offline prior trains on, with the full feature
-dict the prior sees. It is read by `emmy eval prior --dataset nodes` (per-card fork sibling-ranking + leaf
-reachability) and feeds prior diagnostics. Because your dev box (and most of the fleet) has no local CUDA GPU, the
-data for any given card must be **measured on that card** and brought back.
+dict the prior sees. It is read by `emmy eval prior --dataset nodes` (Spearman + regret per card and compile
+regime, plus the per-card fork sibling-ranking and leaf reachability) and feeds prior diagnostics. Because your dev
+box (and most of the fleet) has no local CUDA GPU, the data for any given card must be **measured on that card** and
+brought back.
 
 This skill does exactly that for one GPU, in a single budgeted run on the box: get a server (an existing one the
 user provides, or rent one) → set up emmy → the golden sweep (`scripts/remote_node_collect.py`, driving

@@ -252,6 +252,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   option. Each step in that order is called a tier.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
+- **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was
+  the fastest one available, 1.40 that it runs forty percent slower than something that was there. Reported over a
+  set of candidates that were all actually measured, since the comparison needs the true best.
+- **Rank correlation** — How closely a model's ordering of candidates follows the measured one, on a scale from
+  +1 (identical order) through 0 (no relationship). It judges a whole set, where regret judges only the top of it.
+- **Golden rank** — Where a recorded golden configuration lands in the model's ordering of the candidates it
+  competed against. A screen rather than a measure of speed: it says the model found a good configuration late,
+  never how much slower the one it preferred actually runs.
 - **Quarantine** — The state in which an online model may continue learning but is not trusted to choose deployed
   schedules.
 - **CatBoost** — The machine-learning library Emmy uses for its online schedule-ranking model.

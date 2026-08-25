@@ -39,10 +39,14 @@ import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.metrics import spearman
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.data.group import Group
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +251,31 @@ class Prior(ABC):
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score_features`; override for a vectorized predict."""
         return [self.mean_score_features(f) for f in feats_list]
+
+    @abstractmethod
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """This model's ranking QUALITY for every row of a packed candidate pool — higher = predicted faster.
+        ``None`` when this model cannot score the pool at all (the linear model asked for a dynamic weight set
+        it never fit); a model with nothing fitted yet still answers, with a constant.
+
+        The pool-shaped scoring surface, and the third one this class has after :meth:`mean_scores` (knob dicts)
+        and :meth:`mean_scores_features` (feature dicts). It exists because the dict surfaces cannot be used on
+        the pools these questions are actually asked over: a matmul enumeration runs to ~10^5 rows, and the
+        per-row dict of ~63 floats that made the fit OOM would make an evaluation OOM for the same reason. The
+        packed matrix is that representation done once, and each implementation here projects it onto its OWN
+        column list with its OWN absent-value fill (see :meth:`Group.matrix`) — which is the whole reason this
+        cannot be one shared function over ``feat_names``.
+
+        Polarity is deliberately the opposite of :meth:`mean_score`'s. This returns quality because that is what
+        the fitted model classes compute and what the rank metrics take; the deployed score is the monotone
+        ``exp(-scale·quality)`` of it, and a caller wanting the cost family (:func:`~..metrics.topk_regret`,
+        :func:`~..metrics.spearman`) negates. Both orders are read as ORDER only, so the negation is exact.
+
+        The pool must carry every column the model reads. A group packed under a narrow feature view — the fit's
+        ``D_*`` view, say — answers the linear model correctly, because its weight names are inside that view,
+        while the online model's ``S_*`` / ``H_*`` columns would all fill absent and its predictions would be
+        about a kernel with no shape. Which columns a group carries is the BUILDER's decision, so an evaluation
+        that scores both halves builds its pools over the full featurization."""
 
     def explain_features(self, feats: dict) -> dict[str, float] | None:
         """Signed per-term decomposition of this model's opinion on a featurized row,

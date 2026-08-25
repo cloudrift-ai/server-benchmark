@@ -184,7 +184,7 @@ def _keep_sets(records) -> dict[tuple, frozenset]:
 
 
 def build_golden_groups(
-    features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
+    features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0, kernel: str | None = None
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, pinned rows,
@@ -202,7 +202,7 @@ def build_golden_groups(
     groups against positives in the metrics header.
 
     Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
-    pool ``eval offline`` and the greedy deploy rank over (fp32 → thread tier,
+    pool ``eval prior --dataset golden`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no
     scalar rows in the pool). A dynamic (``.dynM``) golden enumerates the pool of its
@@ -210,6 +210,12 @@ def build_golden_groups(
     (its own weight set). Reduce / pointwise goldens trace their snippet and capture the restored
     schedule fork's rows (``_snippet_rows``); a regime the live tree doesn't fork
     (pointwise) reports un-enumerable rather than reconstructing a search space that no longer exists.
+
+    ``kernel`` keeps only goldens whose name contains it — a narrowing VIEW of the corpus, for iterating on
+    one kernel without paying for the rest. Each retained golden's rank is unchanged by it: the keep-sets are
+    still computed over the whole corpus, so a pool retains the same rows under the same draw. What does change
+    is which goldens MERGE — a dropped sibling is one fewer verified row in the pool it shared — so a filtered
+    run's group and positive counts are its own, and only an unfiltered run compares against a fit.
 
     ``sample`` draws that many candidates per pool DURING enumeration (0 enumerates every row).
     The draw is a pure function of ``(pool size, sample, seed)`` and never looks at a row, so two
@@ -245,7 +251,8 @@ def build_golden_groups(
     # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
-        by_pool[g.pool_key].append(g)
+        if kernel is None or kernel in g.name:
+            by_pool[g.pool_key].append(g)
 
     for members in by_pool.values():
         g = members[0]  # the pool is a property of the KEY; every member spells it identically

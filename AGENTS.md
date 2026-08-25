@@ -82,7 +82,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
-| `emmy eval {knobs,online,offline,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the priors / tune DB |
+| `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the priors / tune DB |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
 Quick test models / scripts (for local iteration):

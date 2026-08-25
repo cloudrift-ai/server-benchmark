@@ -436,27 +436,17 @@ class SpliceReceipt:
     strategy threads op provenance from it). The graph itself carries no such knowledge.
 
     * ``redirected`` — ``{old buffer: final (post-promotion) buffer}`` per redirection.
-    * ``output_map`` — the ``{old_buffer: fragment_output_buffer}`` request as given.
     * ``output_owners`` — the old producing node for every redirected buffer.
     * ``new_compute_ids`` — post-promotion graph ids of the freshly added non-boundary fragment
       nodes. Orphan removal may since have dropped some; check membership before dereferencing.
     * ``consumed_hints`` — each consumed node's hints object, snapshotted before removal (hint
       merges mutate the surviving outputs' hints, never these).
-    * ``single`` — whether the splice was the single-output form.
     """
 
     redirected: dict[str, str]
-    output_map: dict[str, str]
     output_owners: dict[str, str]
     new_compute_ids: tuple[str, ...]
     consumed_hints: dict[str, Hints]
-    single: bool
-
-    @property
-    def output(self) -> str:
-        """The single-output form's new output id (post-rename)."""
-        assert self.single, "output is the single-output convenience; use redirected for multi"
-        return next(iter(self.redirected.values()))
 
 
 class Graph:
@@ -790,11 +780,9 @@ class Graph:
         self.remove_orphans()
         return SpliceReceipt(
             redirected=result,
-            output_map=output_map,
             output_owners=output_owners,
             new_compute_ids=tuple(renamed.get(nid, nid) for nid in new_compute),
             consumed_hints=consumed_hints,
-            single=single,
         )
 
     def remove_orphans(self) -> None:

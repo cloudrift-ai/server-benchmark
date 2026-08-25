@@ -23,9 +23,8 @@ def _make_fanout_graph() -> Graph:
     return g
 
 
-def test_splice_single_output_back_compat():
-    """``output`` as a str: one node redirected; the receipt's ``output``
-    carries the single new id."""
+def test_splice_single_output_redirects_consumer():
+    """``output`` as a str redirects one buffer to the fragment output."""
     g = _make_fanout_graph()
     frag = Graph()
     frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
@@ -33,8 +32,7 @@ def test_splice_single_output_back_compat():
     frag.outputs = ["fa"]
 
     receipt = g.splice(frag, consumed={"a"}, output="a")
-    assert receipt.single
-    assert receipt.output == "a"  # promoted back to the friendly output name
+    assert receipt.redirected == {"a": "a"}
     assert g.nodes["ua"].inputs == ["a"]  # downstream rewired to the new node
     assert g.nodes["a"].inputs == ["x"]  # the fragment node reads x directly
     assert "p" in g.nodes  # p not consumed here — still feeds b

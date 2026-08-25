@@ -11,9 +11,10 @@ Three public entry points wrap the same underlying ``_Splicer``:
   otherwise → external slot in first-seen order).
 
 Before seeding roots, ``splice_graph`` collapses each output equivalence
-cluster: a single-owner chain of same-dtype copies proven to preserve every
-flat address. The computed source's Write retargets to the live output shape,
-so a terminal reshape does not force reduction reconstruction at its loads.
+cluster: a single-owner chain of same-dtype copies proven to be reshape/axis-
+permutation bijections. The computed source's Write retargets through the
+layout chain, so a terminal layout does not force reduction reconstruction at
+its loads.
 
 Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
@@ -105,7 +106,7 @@ _BindKey = tuple[str, str, Scope, Sigma]
 
 @dataclass(frozen=True)
 class _OutputEquivalenceCluster:
-    """A single-owner chain of flat-address-identical output copies.
+    """A single-owner chain of bijective output-layout copies.
 
     ``buffers`` runs from the computed source to the live graph output;
     ``copy_nodes`` are the intervening LoopOp nodes in the same order.
@@ -217,9 +218,9 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     an external read, assigned a slot in first-seen order.
 
     Every graph output is a root, so separate terminal branches become one
-    multi-output LoopOp. A single-owner chain of flat-address-identical copies
+    multi-output LoopOp. A single-owner chain of bijective layout copies
     ending at a root is an output equivalence cluster: its source Write is
-    retargeted to the root shape before ordinary dependency reconstruction.
+    retargeted through the chain before ordinary dependency reconstruction.
     Returns ``(merged_op, external_buffer_ids)`` where the ids are the
     non-``LoopOp`` inputs in merged first-use order. Returns ``None`` if an
     output is not produced by a ``LoopOp`` or any splice edge hits an
@@ -237,7 +238,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
         source_node = graph.producer(source)
         if source_node is None:
             continue
-        retargeted = _retarget_equivalent_output(graph, loops[source_node.id], source, output)
+        retargeted = _retarget_equivalent_output(graph, loops[source_node.id], cluster)
         if retargeted is None:
             continue
         loops[source_node.id] = retargeted
@@ -304,7 +305,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
 
 
 def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[_OutputEquivalenceCluster, ...]:
-    """Find single-owner flat-address-copy chains ending at graph outputs."""
+    """Find single-owner bijective layout-copy chains ending at graph outputs."""
     clusters: list[_OutputEquivalenceCluster] = []
     for output in graph.outputs:
         if graph.buffer_users(output):
@@ -316,7 +317,7 @@ def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[
             copy = graph.producer(current)
             if copy is None or copy.id not in loop_nodes:
                 break
-            source = _flat_address_identity_source(graph, copy, current)
+            source = _layout_copy_source(graph, copy, current)
             if source is None or source in graph.outputs or graph.buffer_users(source) != {copy.id}:
                 break
             source_node = graph.producer(source)
@@ -335,8 +336,19 @@ def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[
     return tuple(clusters)
 
 
-def _flat_address_identity_source(graph, node, output: str) -> str | None:
-    """Return the source buffer when ``node`` is an exact flat-address copy to ``output``."""
+def _layout_copy_source(graph, node, output: str) -> str | None:
+    """Return the source buffer when ``node`` is a proven bijective layout copy."""
+    inverse = _layout_copy_inverse(graph, node, output)
+    return inverse[0] if inverse is not None else None
+
+
+def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]] | None:
+    """Return ``(source, destination-flat stride per source dimension)``.
+
+    A reshape/axis permutation spells every non-unit source coordinate as one mixed-radix digit
+    of the destination's dense flat address. Matching digits from the innermost stride outward
+    recovers that permutation symbolically; no tensor coordinates are enumerated.
+    """
     if not isinstance(node.op, LoopOp) or node.buffer_names() != (output,):
         return None
     if any(not isinstance(stmt, (Loop, Load, Write)) for stmt in node.op.body.iter()):
@@ -355,92 +367,143 @@ def _flat_address_identity_source(graph, node, output: str) -> str | None:
     destination = graph.buffer(output)
     if source is None or destination is None or source.dtype != destination.dtype:
         return None
-    source_strides = _static_strides(source.shape)
+    source_dims = tuple(dim.as_static() for dim in source.shape if dim.is_static)
     destination_strides = _static_strides(destination.shape)
-    if source_strides is None or destination_strides is None:
+    if len(source_dims) != len(source.shape) or destination_strides is None:
         return None
-    source_numel = math.prod(dim.as_static() for dim in source.shape)
+    source_numel = math.prod(source_dims)
     destination_numel = math.prod(dim.as_static() for dim in destination.shape)
     if source_numel != destination_numel:
         return None
     extents = _loop_extents(node.op)
     if extents is None or math.prod(extents.values()) != destination_numel:
         return None
-    if len(load.index) != len(source_strides) or len(write.index) != len(destination_strides):
+    if len(load.index) != len(source_dims) or len(write.index) != len(destination_strides):
         return None
 
-    source_flat = _canonical_flat_address(load.index, source_strides, extents)
-    destination_flat = _canonical_flat_address(write.index, destination_strides, extents)
-    return load.input if source_flat is not None and source_flat == destination_flat else None
+    ctx = _extent_ctx(extents)
+    destination_flat = _dense_flat_address(write.index, destination_strides, extents, ctx)
+    if destination_flat is None:
+        return None
+    actual = tuple(expr.simplify(ctx) for expr in load.index)
+    inverse = [0] * len(source_dims)
+    if any(actual[i] != Literal(0, "int") for i, dim in enumerate(source_dims) if dim == 1):
+        return None
+    remaining = {i for i, dim in enumerate(source_dims) if dim > 1}
+    stride = 1
+    while remaining:
+        matches = [i for i in remaining if actual[i] == _flat_digit(destination_flat, stride, source_dims[i], ctx)]
+        if len(matches) != 1:
+            return None
+        index = matches[0]
+        inverse[index] = stride
+        stride *= source_dims[index]
+        remaining.remove(index)
+    return load.input, tuple(inverse)
 
 
-def _canonical_flat_address(
-    index: tuple[Expr, ...],
-    strides: list[int],
-    extents: dict[str, int],
-) -> tuple[int, tuple[tuple[str, int], ...]] | None:
-    """Return an exact affine normal form for one row-major flat address."""
+def _extent_ctx(extents: dict[str, int]) -> SimplifyCtx:
+    """Build the static loop-range context used by layout proofs and retargeting."""
     ctx = SimplifyCtx.empty()
     for name, extent in extents.items():
         ctx = ctx.extend(name, Interval(0, extent - 1), Literal(extent, "int"))
+    return ctx
 
+
+def _flat_expr(index: tuple[Expr, ...], strides: list[int], ctx: SimplifyCtx) -> Expr:
+    """Flatten one row-major index and simplify it under ``ctx``."""
     flat: Expr = Literal(0, "int")
     for expression, stride in zip(index, strides, strict=True):
         term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
         flat = BinaryExpr("+", flat, term)
-    flat = flat.simplify(ctx)
+    return flat.simplify(ctx)
 
+
+def _dense_flat_address(index: tuple[Expr, ...], strides: list[int], extents: dict[str, int], ctx: SimplifyCtx) -> Expr | None:
+    """Return the flat address when it densely enumerates the loop domain."""
+    flat = _flat_expr(index, strides, ctx)
     affine = affine_form(flat, set(extents))
     if affine is None:
         return None
     anchor = affine[0].simplify(ctx)
-    if not isinstance(anchor, Literal) or not isinstance(anchor.value, int):
+    if not isinstance(anchor, Literal) or anchor.value != 0:
         return None
-    return anchor.value, tuple(sorted(affine[1].items()))
+    active = {name for name, extent in extents.items() if extent > 1}
+    coefficients = {name: coefficient for name, coefficient in affine[1].items() if coefficient}
+    if set(coefficients) != active or any(coefficient <= 0 for coefficient in coefficients.values()):
+        return None
+    stride = 1
+    for name in sorted(active, key=coefficients.get):
+        if coefficients[name] != stride:
+            return None
+        stride *= extents[name]
+    return flat
 
 
-def _retarget_equivalent_output(graph, op: LoopOp, source: str, output: str) -> LoopOp | None:
-    """Retarget ``source`` Writes to an equivalent output without rebuilding their computation."""
-    source_tensor = graph.buffer(source)
-    output_tensor = graph.buffer(output)
-    if source_tensor is None or output_tensor is None:
+def _flat_digit(flat: Expr, stride: int, extent: int, ctx: SimplifyCtx) -> Expr:
+    """Return one mixed-radix digit of ``flat``; unit dimensions are literal zero."""
+    if extent == 1:
+        return Literal(0, "int")
+    digit = flat if stride == 1 else BinaryExpr("/", flat, Literal(stride, "int"))
+    return BinaryExpr("%", digit, Literal(extent, "int")).simplify(ctx)
+
+
+def _unflatten(flat: Expr, shape, ctx: SimplifyCtx) -> tuple[Expr, ...] | None:
+    """Decompose ``flat`` into one static row-major coordinate tuple."""
+    strides = _static_strides(shape)
+    if strides is None:
         return None
-    source_strides = _static_strides(source_tensor.shape)
-    if source_strides is None or _static_strides(output_tensor.shape) is None:
-        return None
+    return tuple(_flat_digit(flat, stride, dim.as_static(), ctx) for stride, dim in zip(strides, shape, strict=True))
+
+
+def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCluster) -> LoopOp | None:
+    """Retarget the source Writes through a chain of equivalent output layouts."""
+    source, output = cluster.buffers[0], cluster.buffers[-1]
     extents = _loop_extents(op)
     if extents is None or any(isinstance(stmt, Load) and stmt.input == source for stmt in op.body.iter()):
         return None
+    source_tensor = graph.buffer(source)
     source_writes = [write for write in op.body.writes if write.output == source]
-    if not source_writes or any(not write.is_scalar or len(write.index) != len(source_strides) for write in source_writes):
+    if source_tensor is None or not source_writes:
+        return None
+    if any(not write.is_scalar or len(write.index) != len(source_tensor.shape) for write in source_writes):
         return None
 
+    steps: list[tuple[tuple[int, ...], object]] = []
+    current = source
+    for node_id, destination in zip(cluster.copy_nodes, cluster.buffers[1:], strict=True):
+        copy = graph.nodes.get(node_id)
+        inverse = _layout_copy_inverse(graph, copy, destination) if copy is not None else None
+        tensor = graph.buffer(destination)
+        if inverse is None or inverse[0] != current or tensor is None:
+            return None
+        steps.append((inverse[1], tensor.shape))
+        current = destination
+
+    ctx = _extent_ctx(extents)
     replacement: dict[int, Write] = {}
     for write in source_writes:
-        terms: dict[str, int] = {}
-        constant = 0
-        for expr, stride in zip(write.index, source_strides, strict=True):
-            affine = affine_form(expr, set(extents))
-            if affine is None:
+        coordinates = write.index
+        for inverse, shape in steps:
+            if len(coordinates) != len(inverse):
                 return None
-            anchor = affine[0].simplify(SimplifyCtx.empty())
-            if not isinstance(anchor, Literal) or not isinstance(anchor.value, int):
+            flat: Expr = Literal(0, "int")
+            for expression, stride in zip(coordinates, inverse, strict=True):
+                if not stride:
+                    continue
+                term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
+                flat = BinaryExpr("+", flat, term)
+            coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
+            if coordinates is None:
                 return None
-            for name, coefficient in affine[1].items():
-                terms[name] = terms.get(name, 0) + coefficient * stride
-            constant += anchor.value * stride
-        new_index = _decompose_flat(terms, constant, output_tensor.shape, extents)
-        if new_index is None:
-            return None
-        replacement[id(write)] = replace(write, output=output, index=tuple(new_index))
+        replacement[id(write)] = replace(write, output=output, index=coordinates)
 
-    retargeted = LoopOp(
+    return LoopOp(
         body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),
         name=op.name,
         source=op.source,
         knobs=dict(op.knobs),
     )
-    return retargeted
 
 
 def _static_strides(shape) -> list[int] | None:
@@ -468,50 +531,6 @@ def _loop_extents(op: LoopOp) -> dict[str, int] | None:
             return None
         extents[stmt.axis.name] = extent
     return extents
-
-
-def _decompose_flat(terms: dict[str, int], constant: int, output_shape, extents: dict[str, int]) -> list[Expr] | None:
-    """Partition an affine flat address into bounded row-major output indices."""
-    strides = _static_strides(output_shape)
-    if strides is None:
-        return None
-    dimensions: list[list[tuple[int, str | None]]] = [[] for _ in strides]
-    for name, coefficient in terms.items():
-        if coefficient < 0 or name not in extents:
-            return None
-        if coefficient == 0:
-            continue
-        for index, stride in enumerate(strides):
-            if coefficient % stride == 0:
-                dimensions[index].append((coefficient // stride, name))
-                break
-        else:
-            return None
-    if constant < 0:
-        return None
-    for index, stride in enumerate(strides):
-        quotient = constant // stride
-        if quotient:
-            dimensions[index].append((quotient, None))
-            constant -= quotient * stride
-    if constant:
-        return None
-
-    result: list[Expr] = []
-    for slot, dim in zip(dimensions, output_shape, strict=True):
-        high = sum(coefficient * (extents[name] - 1 if name is not None else 1) for coefficient, name in slot)
-        if high >= dim.as_static():
-            return None
-        expression: Expr = Literal(0, "int")
-        for coefficient, name in slot:
-            term: Expr = (
-                Literal(coefficient, "int")
-                if name is None
-                else (Var(name) if coefficient == 1 else BinaryExpr("*", Var(name), Literal(coefficient, "int")))
-            )
-            expression = term if isinstance(expression, Literal) and expression.value == 0 else BinaryExpr("+", expression, term)
-        result.append(expression)
-    return result
 
 
 def _ultimate_source(op):

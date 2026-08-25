@@ -360,16 +360,15 @@ def test_maximal_sdpa_with_fused_producer_recovers_grouped_inverse() -> None:
 
 
 def test_output_flatten_preserves_the_gqa_sdpa_grouped_inverse() -> None:
-    """Pure output layout must not erase attention's exact materialized sibling."""
+    """Pure output layout must preserve attention's grouped placement inverse."""
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.pipeline.passes.lowering.tile._cut import reusable_cut_pieces
 
     lowered = Pipeline.build(LOOP_PASSES).run(_gqa_sdpa_flatten_graph(), ctx=Context.from_target((8, 9)))
     loops = [node for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
-    assert {node.id for node in loops} == {"attention_reduce", "flat"}
-    attention = lowered.nodes["attention_reduce"]
+    assert {node.id for node in loops} == {"flat"}
+    attention = lowered.nodes["flat"]
     assert reusable_cut_pieces(attention.op) is not None
-    assert lowered.nodes["flat"].inputs == [attention.id]
 
 
 def test_output_flatten_keeps_an_ordinary_reduce_on_the_normal_fusion_path() -> None:

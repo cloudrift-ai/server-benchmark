@@ -490,11 +490,12 @@ selects all its Writes. Every `_NotSupported` carries a reason string, logged at
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
-destination flat-address expressions have the same affine normal form. Equal element count alone is insufficient;
-transposes, permutations, slices, broadcasts, and conversions remain ordinary edges. When a cluster has one live
-output, the splicer retargets the `Write` to that output shape with bounded affine indices and removes the copy roots
-from reconstruction. This handles a terminal reshape after a reduction without inlining that reduction independently
-at every reshaped load coordinate, without enumerating the output domain.
+destination coordinates are related by a reshape and axis permutation. Equal element count alone is insufficient;
+slices, broadcasts, and conversions remain ordinary edges. The proof compares each source coordinate with one
+mixed-radix digit of the destination's dense flat address, then composes those inverse layouts across the chain. The
+splicer retargets the computed source's `Write` through that inverse and removes the copy roots from reconstruction.
+This preserves the producer's loop geometry through terminal reshape/transpose chains without enumerating the output
+domain.
 
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen

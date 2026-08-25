@@ -371,26 +371,71 @@ def demoted_chain(op):
     return Fold.projection(operands=tuple(operands), body=Body(tuple(body)))
 
 
-def _split_chain(edge: Fold, a_cone: list, b_cone: list):
-    """Partition a chain edge between the two cones that read it: each side takes the backward
-    cone (within the edge body) of the edge results it reads, plus the ONE statistic fold those
-    stmts read. ``None`` when a side needs two statistics or the sides share one."""
-    from emmy.compiler.ir.pure.fold import deep_reads as _dr  # noqa: PLC0415
+def _edge_captures(edge: Fold) -> set[str]:
+    """SSA values an operand subtree reads from its enclosing Fold scope."""
+    lowered = edge.lower()
+    defined = {name for stmt in lowered for name in deep_defines(stmt)}
+    return deep_reads(lowered) - defined - stmt_axis_names(lowered)
 
-    results = set(edge.lift.results)
-    by_state = {n: e for e in edge.operands if isinstance(e, Fold) for n in (e.combine.results if e.combine is not None else ())}
-    out = []
-    taken: set[int] = set()
-    for cone in (a_cone, b_cone):
-        needs = _dr(cone) & results
-        members = list(Body(tuple(edge.body)).backward_cone(sorted(needs)).members) if needs else []
-        stats = {id(by_state[n]): by_state[n] for s in (*members,) for n in s.deps() if n in by_state}
-        stats.update({id(by_state[n]): by_state[n] for n in needs if n in by_state})
-        if len(stats) > 1 or any(i in taken for i in stats):
+
+def _partition_operand_cones(operands: tuple, reads: tuple[set[str], ...]) -> tuple[tuple, ...] | None:
+    """Partition producer operands among value cones by dependency.
+
+    A nonzero-axis producer belongs wholly to the one cone that consumes it. A zero-axis
+    projection may expose independent results to different cones; slice its body and operands
+    recursively by those demanded results. Sharing a producer or a pure statement across cones
+    declines because duplicating one structural edge would change the program.
+    """
+    pending = [set(names) for names in reads]
+    parts: list[dict[int, Fold]] = [dict() for _ in pending]
+    result_sets = [set(_operand_result_names(operand)) for operand in operands]
+
+    def slice_projection(edge: Fold, demanded: tuple[set[str], ...]) -> tuple[Fold | None, ...] | None:
+        body = Body(edge.body)
+        cones = [body.backward_cone(names) for names in demanded]
+        owners: dict[int, int] = {}
+        for side, cone in enumerate(cones):
+            for stmt in cone.members:
+                if id(stmt) in owners and owners[id(stmt)] != side:
+                    return None
+                owners[id(stmt)] = side
+        nested = _partition_operand_cones(edge.operands, tuple(set(cone.external_reads) for cone in cones))
+        if nested is None:
             return None
-        taken |= set(stats)
-        out.append((next(iter(stats.values()), None), members))
-    return out[0], out[1]
+        slices: list[Fold | None] = []
+        for names, cone, suboperands in zip(demanded, cones, nested, strict=True):
+            results = tuple(result for result in edge.lift.results if isinstance(result, str) and result in names)
+            slices.append(Fold.projection(operands=suboperands, body=Body(cone.members), results=results) if results else None)
+        return tuple(slices)
+
+    changed = True
+    while changed:
+        changed = False
+        for operand_at in range(len(operands) - 1, -1, -1):
+            operand = operands[operand_at]
+            demanded = tuple(names & result_sets[operand_at] for names in pending)
+            if not any(demanded):
+                continue
+            if isinstance(operand, Fold) and operand.axis is None:
+                sliced = slice_projection(operand, demanded)
+                if sliced is None:
+                    return None
+                for side, piece in enumerate(sliced):
+                    if piece is not None and operand_at not in parts[side]:
+                        parts[side][operand_at] = piece
+                        pending[side] |= _edge_captures(piece)
+                        changed = True
+                continue
+            users = [side for side, names in enumerate(demanded) if names]
+            if len(users) != 1:
+                return None
+            side = users[0]
+            if operand_at not in parts[side]:
+                parts[side][operand_at] = operand
+                if isinstance(operand, Fold):
+                    pending[side] |= _edge_captures(operand)
+                changed = True
+    return tuple(tuple(by_index[index] for index in sorted(by_index)) for by_index in parts)
 
 
 def _unchain(col: Fold) -> tuple[Fold, Fold | None]:
@@ -879,13 +924,21 @@ def _deep_idx_vars(stmts) -> set[str]:
     return out
 
 
-def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset, bound: frozenset = frozenset()) -> list | None:
+def _cone(
+    body: list,
+    arg: str,
+    avoid_name: str,
+    k_name: str,
+    axes: frozenset,
+    bound: frozenset = frozenset(),
+    operands: tuple = (),
+) -> list | None:
     """The backward cone of ``arg`` within a λ body, when it reads as a pure MAP producer for one
     contraction side: every member a ``Load`` / ``Assign`` / ``Select``, self-contained (no free
     SSA reads — a cross-operand read is another stage's shape; an AXIS var is an iteration
     coordinate, not a read), no member load indexed by the OTHER side's grid axis, and at least
-    one K-indexed load (a k-invariant value is a hoistable factor, not an operand). ``None`` when
-    the cone is not this shape."""
+    one K-indexed load or K-varying producer operand (a k-invariant value is a hoistable factor,
+    not an operand). ``None`` when the cone is not this shape."""
     cone = Body(tuple(body)).backward_cone([arg])
     stmts = list(cone.members)
     if not stmts or any(not isinstance(s, (Load, Assign, Select)) for s in stmts):
@@ -893,7 +946,11 @@ def _cone(body: list, arg: str, avoid_name: str, k_name: str, axes: frozenset, b
     if set(cone.external_reads) - axes - {k_name} - bound:
         return None
     loads = [s for s in stmts if isinstance(s, Load)]
-    if any(avoid_name in _idx_vars(ld) for ld in loads) or not any(k_name in _idx_vars(ld) for ld in loads):
+    by_result = {name: operand for operand in operands for name in _operand_result_names(operand)}
+    producers = {by_result[name] for name in cone.external_reads if name in by_result}
+    if any(avoid_name in _idx_vars(ld) for ld in loads):
+        return None
+    if not any(k_name in _idx_vars(ld) for ld in loads) and not any(edge_refs_axis(edge, k_name) for edge in producers):
         return None
     return stmts
 
@@ -928,29 +985,27 @@ def bind_bilinear(
     share ONE A value — sharing is the node's arity. Every λ body stmt must be consumed by a
     lift or a cone (:meth:`Fold.contraction` REGENERATES the lift, so an unaccounted stmt would
     be silently dropped — decline instead). ``None`` when any condition fails; the caller keeps
-    the PLANAR fold unchanged.
-
-    Deliberately not yet bound here: the both-computed decode pair and the k-invariant factor
-    hoist (the fp8 / W8A8 mul-hoist arm — the ``Σ a⊗(s⊗w) = s⊗Σ a⊗w`` reassociation, licensed
-    by the same distributivity/commutativity traits) — registered casualties until ported to
-    the λ body."""
+    the PLANAR fold unchanged. When both sides are computed, their body cones partition every
+    producer operand by dependency; a multi-result projection is sliced recursively so each side
+    carries only the results it consumes."""
     if f.axis is None or f.combine is None:
         return None
+    source_operands = f.operands
     stat = sweep = None
     edge = None
     bound_values: frozenset = frozenset()
     if f.operands:
         # The CHAIN form: root formation closed this fold over the values it reads through one
-        # projection edge (a statistic's projected epilogue, or two of them — one per side).
-        # Bind the bare fold and hang each side's statistic + epilogue on that side's cone as
-        # its source (``make_cone(stat=…)``) — the reading the demoted-loop form reached only
-        # through ``fused_view``.
-        chain = _chained_column(f)  # one statistic: its cone source; two: split per side below
+        # projection edge. One computed side may take that whole statistic source; when both are
+        # computed, dependency partitioning below slices the edge and the other producer operands.
+        chain = _chained_column(f)
         bare, edge = _unchain(f)
         if edge is None or any(isinstance(e, Fold) and e.axis is None for e in bare.operands):
             return None  # a fold composing other producers — another stage's shape
         f = bare
-        bound_values = frozenset(edge.lift.results)  # the edge's results — row-invariant values the cones may read
+        bound_values = frozenset(
+            name for operand in source_operands for name in _operand_result_names(operand)
+        )  # every producer result is a bound value the cones may read
         if chain is not None:
             stat, sweep, _ = chain
     ops = component_ops(f.combine)
@@ -1066,10 +1121,8 @@ def bind_bilinear(
         consumed.update(id(s) for s in cone)
         b_edges = [Fold.projection(body=Body(tuple(cone)))]
     elif edge is not None and len(reads) == 1:
-        # Both sides computed over a chained edge — attention's normalized Q and normalized K,
-        # each side's cone reading its own statistic's projected scale. Each cone hangs its
-        # statistic + epilogue as its source; the fill evaluates a computed B per slab cell,
-        # and the ``b`` seam is the cut that materializes the normalized keys.
+        # Both sides computed over producer operands: partition all structural nodes and any
+        # multi-result projection by the value cones that consume them.
         h = hoisted()
         if h is not None:
             return h
@@ -1080,20 +1133,22 @@ def bind_bilinear(
         rest = [s for s in body if id(s) not in consumed]
         a_cone = b_cone = None
         for a_try, b_try in ((a_arg, other), (other, a_arg)):
-            a_cone = _cone(rest, a_try, n_name, k_name, axes, bound_values)
-            b_cone = _cone(rest, b_try, m_name, k_name, axes, bound_values)
+            a_cone = _cone(rest, a_try, n_name, k_name, axes, bound_values, source_operands)
+            b_cone = _cone(rest, b_try, m_name, k_name, axes, bound_values, source_operands)
             if a_cone is not None and b_cone is not None:
                 break
         if a_cone is None or b_cone is None:
             return None
-        split = _split_chain(edge, a_cone, b_cone)
-        if split is None:
+        partition = _partition_operand_cones(source_operands, (set(deep_reads(a_cone)), set(deep_reads(b_cone))))
+        if partition is None:
             return None
-        (a_stat, a_epi), (b_stat, b_epi) = split
+        a_nodes, b_nodes = partition
+        if any(edge_refs_axis(node, n_name) for node in a_nodes) or any(edge_refs_axis(node, m_name) for node in b_nodes):
+            return None
         consumed.update(id(s) for s in a_cone)
         consumed.update(id(s) for s in b_cone)
-        a_edge = make_cone(a_cone, k_name, stat=a_stat, sweep=tuple(a_epi))
-        b_edges = [make_cone(b_cone, k_name, stat=b_stat, sweep=tuple(b_epi))]
+        a_edge = make_cone([*a_nodes, *a_cone], k_name)
+        b_edges = [make_cone([*b_nodes, *b_cone], k_name)]
     else:
         # Both sides computed with no chain — the W8A8 double-decode pair binds through the
         # mul-hoist alone.

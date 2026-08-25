@@ -1212,6 +1212,27 @@ def test_normed_q_k_scores_bind_both_computed_cones_with_a_cuttable_b_seam():
     assert "PLACE@b" in seams, seams
 
 
+def test_bilinear_binding_partitions_multiple_computed_producers():
+    """Each product side receives only the producer operands in its dependency cone."""
+    from emmy.compiler.ir.pure.fold import is_contraction
+    from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
+    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+
+    graph = Pipeline.build(LOOP_PASSES).run(_normed_sdpa_graph())
+    (cell,) = (node for node in graph.nodes.values() if isinstance(node.op, LoopOp))
+    tile = recognized_tile(cell.op, name=cell.id)
+    (column,) = (stmt for stmt in tile.op.body if isinstance(stmt, Fold))
+    n_axis = tile.stores[0].sweep
+    assert n_axis is not None
+    axes = frozenset({*(axis.name for axis in tile.place.free), n_axis.name})
+
+    bound = bind_bilinear(column, tile.place.free[-1].name, n_axis.name, axes, producer=True)
+    assert bound is not None and is_contraction(bound[0])
+    contraction, epilogue = bound
+    assert not epilogue and isinstance(contraction.a, Fold) and isinstance(contraction.b, Fold)
+    assert set(map(id, contraction.a.operands)).isdisjoint(map(id, contraction.b.operands))
+
+
 def _m1_norm_gate_up_body() -> Body:
     """One row of norm → gate/up → SiLU·up as loop fusion leaves it: the row statistic, its
     epilogue, the SiLU's fill constant (``one``) loaded ahead of the column sweep, and the

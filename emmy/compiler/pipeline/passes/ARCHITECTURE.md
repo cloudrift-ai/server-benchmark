@@ -224,13 +224,15 @@ the column minus the edge regenerating the raw column loop), and the per-cell re
 reduce tiers schedule and materialize. Cuts under a sweep are legal: the sweep axis is an iteration axis of the cut
 piece, not a captured value.
 
-A chained column over TWO statistics (normalized Q against normalized K — attention's score fold) binds as one
-contraction whose A and B are BOTH computed cones, each sourcing its own statistic (`bind_bilinear`'s chained
-both-computed arm; `fused_view` reads the sweep column through it). The fill evaluates a computed B per slab cell
-(its statistic with it — the `b` children are fill-realized sites, never a partition of their own), so the fused
-form stands and is priced like any other; the `b` seam is the cut that turns the per-query replay of the key
-statistic into a materialized operand the mma tier streams. A seam standing in for a contraction operand holds what
-the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
+A chained product with multiple computed producers binds by dependency, not operand count or position.
+`bind_bilinear` takes each side's backward cone, assigns every nonzero-axis producer wholly to the one side that
+consumes it, and recursively slices a zero-axis projection when independent results feed different sides. A producer
+shared by both sides declines rather than being duplicated. Normalized Q against normalized K and attention's P·V
+with normalized V are instances: A and B become computed cones, each carrying exactly its statistics and pure
+projection. The fill evaluates a computed B per slab cell (its statistic with it — the `b` children are fill-realized
+sites, never a partition of their own), so the fused form stands and is priced like any other; the `b` seam turns an
+inline producer into a materialized operand the mma tier streams. A seam standing in for a contraction operand holds
+what the fused slab stored — the contraction's 16-bit output dtype, not the f32 its cone computed in — so the
 materialized B is a slab the warp atoms can copy.
 
 A row carries NO view ownership. In the MONOID-producer and COLLAPSE cases, the derived contraction view offers only

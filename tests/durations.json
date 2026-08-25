@@ -204,6 +204,7 @@
  "tests/compiler/loader/test_quant.py::test_trace_model_unquantized_checkpoint_takes_existing_path": 0.08,
  "tests/compiler/passes/test_delegate_zero_init.py::test_oversized_accumulator_is_delegated_too": 0.37,
  "tests/compiler/passes/test_delegate_zero_init.py::test_oversized_accumulator_keeps_its_memset": 0.33,
+ "tests/compiler/passes/test_fp8_mma.py::test_w8a8_needs_the_gate_to_enumerate_cuda@cuda": 12.3,
  "tests/compiler/passes/test_move_catalog.py::test_a_cooperative_row_spells_its_own_inventory": 0.16,
  "tests/compiler/passes/test_move_catalog.py::test_option_zero_is_conservative_per_family": 0.22,
  "tests/compiler/passes/test_move_catalog.py::test_schedule_leaf_set_equals_catalog": 0.46,

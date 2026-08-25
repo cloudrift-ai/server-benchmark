@@ -52,6 +52,16 @@ def _sum(*, dtype=F16) -> Graph:
     return g
 
 
+def _multi_output_matmul() -> Graph:
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (Dim(128), Dim(512)), dtype=F16), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (Dim(512), Dim(512)), dtype=F16), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(128), Dim(512)), dtype=F16), node_id="o")
+    g.add_node(ElementwiseOp("negative"), ["o"], Tensor("o_neg", (Dim(128), Dim(512)), dtype=F16), node_id="o_neg")
+    g.inputs, g.outputs = ["a", "b"], ["o", "o_neg"]
+    return g
+
+
 def _resolve(passes, graph=None):
     """Option-0 resolution — the no-evidence emission-order pick, so the assertions are about what
     the pipeline BUILDS rather than about what a prior happens to rank first."""
@@ -71,6 +81,18 @@ def test_the_split_returns_two_kernels(monkeypatch) -> None:
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o", "o__partial"}
     monkeypatch.setenv("EMMY_REDUCE", "g2a")
     assert set(_kernels(_resolve(CUDA_PASSES, _matmul(out_dtype=F32))[0])) == {"o"}
+
+
+def test_split_preserves_every_fused_output(monkeypatch) -> None:
+    """The finalize kernel retains all ports of the fused kernel, not only its primary output."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    out, _ = _resolve(TILE_PASSES, _multi_output_matmul())
+    assert out.outputs == ["o", "o_neg"]
+    owner = out.producer("o")
+    assert owner is not None and owner is out.producer("o_neg")
+    assert set(owner.buffer_names()) == {"o", "o_neg"}
+    assert f"{owner.id}__partial" in out.nodes
+    out.validate()
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16])

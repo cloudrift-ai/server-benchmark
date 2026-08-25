@@ -660,7 +660,9 @@ grammar it read).
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
   accumulates in place). Direct atomic finalization is legal only when it does not write each partial into f16/bf16
   output storage; low-precision output takes the deferred f32 workspace and rounds once after the combine. It runs
-  AFTER its decision — the `g` row was chosen FOR the split form.
+  AFTER its decision — the `g` row was chosen FOR the split form. A multi-output kernel keeps every output port on
+  the atomic piece or deferred finalize; the partial exposes only its carrier workspace. Secondary ports take
+  temporary fragment names during the splice, then recover their original buffer identities with the other outputs.
 
 **Every piece is a BRAND-NEW kernel.** A rewrite that returns DIFFERENT NODES is a kernel-set change, and the
 minting rule states it by consuming the replaced kernel's row on the pieces it builds

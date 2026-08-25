@@ -158,15 +158,40 @@ def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
 
-def _one(frag: Graph, root: Node, piece: LoopOp) -> Graph:
+def _retarget_writes(body: Body, outputs: dict[str, str]) -> Body:
+    """Retarget every boundary write in a minted piece, including output sweeps."""
+
+    def rewrite(stmt):
+        if isinstance(stmt, Write):
+            return replace(stmt, output=outputs.get(stmt.output, stmt.output))
+        nested = stmt.nested()
+        return stmt.with_bodies(tuple(_retarget_writes(part, outputs) for part in nested)) if nested else stmt
+
+    return Body(rewrite(stmt) for stmt in body)
+
+
+def _add_output_piece(match: Match, frag: Graph, root: Node, piece: LoopOp, inputs: list[str]) -> Graph:
+    """Add a fresh piece with every output port and arrange their splice identities."""
+    buffers = root.buffer_names()
+    renamed = {name: f"{name}__split" for name in buffers}
+    piece = replace(piece, body=_retarget_writes(piece.body, renamed))
+    tensors = (
+        replace(root.outputs[0], name=buffers[0]),
+        *(replace(tensor, name=renamed[name]) for name, tensor in zip(buffers[1:], root.outputs[1:], strict=True)),
+    )
+    frag.add_node(op=piece, inputs=inputs, outputs=tensors, node_id=renamed[buffers[0]])
+    frag.outputs = list(renamed.values())
+    match.output = renamed
+    return frag
+
+
+def _one(match: Match, frag: Graph, root: Node, piece: LoopOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
     further", so it merges the replaced op's knobs forward and does not restart the pass scan. The
     atomic partial is a different kernel — its own placement, its own body — and it has to reach
     ``020_schedule`` carrying nothing of the one it replaced."""
-    frag.add_node(op=piece, inputs=list(root.inputs), output=root.output, node_id=root.output.name)
-    frag.outputs = [root.output.name]
-    return frag
+    return _add_output_piece(match, frag, root, piece, list(root.inputs))
 
 
 def _piece(body, free, *, stores: tuple = ()) -> LoopOp:
@@ -238,7 +263,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         p_body, p_stores = _boundary(atomic_epi)
-        return _one(frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
+        return _one(match, frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
 
     # --- deferred kernel finalize: partial writes each raw state to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -293,14 +318,7 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_body = Body((fin_loop, *fin_proj))
     fin_tile = _piece(fin_body, grid, stores=fin_stores)
-    frag.add_node(
-        op=fin_tile,
-        inputs=_piece_inputs(root, fin_body, ws_name),
-        output=Tensor(out.name, out.shape, out.dtype),
-        node_id=out.name,
-    )
-    frag.outputs = [out.name]
-    return frag
+    return _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_body, ws_name))
 
 
 def rewrite(match: Match, root: Node) -> Graph:
@@ -393,7 +411,7 @@ def rewrite(match: Match, root: Node) -> Graph:
         atomic_body = Body((*before, sliced_loop, *proj_body))
         frag = _frag(match, root)
         piece = _piece(atomic_body, (split, *grid), stores=proj_stores)
-        return _one(frag, root, piece)
+        return _one(match, frag, root, piece)
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis dropped for a single-component additive carrier, so the
@@ -449,11 +467,4 @@ def rewrite(match: Match, root: Node) -> Graph:
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(fin_body, grid, stores=fin_stores)
-    frag.add_node(
-        op=fin_tile,
-        inputs=_piece_inputs(root, fin_body, ws_name),
-        output=Tensor(out.name, out.shape, out.dtype),
-        node_id=out.name,
-    )
-    frag.outputs = [out.name]
-    return frag
+    return _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_body, ws_name))

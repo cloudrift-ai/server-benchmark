@@ -545,12 +545,14 @@ the corresponding nested Loop IR.
 
 The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general contextual
 canonicalization, including maximal pure operand-cone factoring into semiring contractions and closed-child
-extraction. Scoped lambda equivalence is an analysis over the canonical Folds. A separate pre-scheduling rewrite
-joins equivalent maximum and exp-weighted sibling Folds into the general `(maximum, denominator, expectations…)`
-twisted carrier, including when contraction canonicalization has nested the statistics inside a computed probability
-edge; softmax and masked or unmasked SDPA are arity variants, not separate matchers. There is no Tile IR classification
-or placement-cut phase. Scheduling annotates the rewritten Fold sites through `TileOp.schedule`; unsupported shapes
-remain unmapped.
+extraction. Commutative products place their shared argument in the contraction's canonical shared operand slot;
+overlapping producer cones become one multi-result operand edge. Scoped lambda equivalence is an analysis over the
+canonical Folds. A separate pre-scheduling rewrite joins equivalent maximum and exp-weighted sibling Folds into the
+general `(maximum, denominator, expectations…)` twisted carrier, including when contraction canonicalization has
+nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not
+separate matchers. There is no Tile IR classification or placement-cut phase. Scheduling annotates the rewritten Fold
+sites through `TileOp.schedule`; independent roots combine only schedules with equal physical output-axis tile widths
+and unit counts, and unsupported shapes remain unmapped.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.
 

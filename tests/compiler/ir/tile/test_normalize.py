@@ -75,6 +75,63 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     assert contraction.a.input == "x"
 
 
+def test_contraction_orients_a_shared_commutative_argument_first() -> None:
+    axis = Axis("k", Dim(32))
+    body = Body(
+        (
+            Load(name="left0", input="x0", index=(Var("m"), Var("k"))),
+            Load(name="left1", input="x1", index=(Var("m"), Var("k"))),
+            Load(name="right", input="w", index=(Var("k"), Var("n"))),
+            Assign(name="product0", op="multiply", args=("left0", "right")),
+            Assign(name="product1", op="multiply", args=("left1", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
+    planar = Fold(
+        axis=axis,
+        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        init=init,
+        combine=combine,
+    )
+
+    tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert tuple(op.name for op in tile.op.semiring) == ("multiply", "add")
+    assert tile.op.a.input == "w"
+    assert [channel.b.input for channel in tile.op.channels] == ["x0", "x1"]
+    assert TileOp(op=tile.op, place=tile.place).op is tile.op
+
+
+def test_semiring_merges_overlapping_operand_cones_into_one_multi_result_edge() -> None:
+    axis = Axis("k", Dim(32))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Var("m"), Var("k"))),
+            Load(name="scale", input="s", index=(Var("k"),)),
+            Assign(name="scaled", op="multiply", args=("left", "scale")),
+            Load(name="right0", input="w0", index=(Var("k"), Var("n"))),
+            Load(name="right1", input="w1", index=(Var("k"), Var("n"))),
+            Assign(name="product0", op="multiply", args=("left", "right0")),
+            Assign(name="product1", op="multiply", args=("scaled", "right1")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
+    planar = Fold(
+        axis=axis,
+        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        init=init,
+        combine=combine,
+    )
+
+    tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
+
+    shared = next(edge for edge in tile.op.operands if isinstance(edge, Fold) and edge.lift.results == ("left", "scaled"))
+    assert tuple(shared.lift.results) == ("left", "scaled")
+    assert tuple(tile.op.lift.params) == ("k", "right0", "left", "scaled", "right1")
+    assert sum(isinstance(stmt, Load) and stmt.input == "x" for stmt in tile.op.loop.body) == 1
+
+
 def _computed_matmul(*, computed_a: bool, computed_b: bool) -> TileOp:
     axis = Axis("k", Dim(32))
     body = []

@@ -304,27 +304,6 @@ def paired_fragment_register_budget(node: Fold, tile: TilePlan, stage: Stage | N
     )
 
 
-def splitk_computed_b_site(node: Fold) -> str | None:
-    """Whether a COMPUTED B cone survives the split's σ-reindex with its schedule intact.
-
-    The split rewrites every edge to absolute k. A materialized edge rewrites its gmem index in
-    place; a computed cone is rewritten BODY AND ALL, which replaces the nodes inside it — and a
-    schedule slice is keyed by NODE IDENTITY, so a cone carrying a scheduling site of its own (a
-    fold over its own axis) would lose the value the row decided for it and stamp a knob no kernel
-    realizes. The ordinary decode / map cone carries no such fold and rewrites cleanly. A computed
-    ``a``'s sites are the compute fill's own statistic prologue, which the fill realizes itself,
-    so they hold no slice to lose."""
-    for ch in node.channels:
-        if isinstance(ch.b, Load):
-            continue
-        if ch.b.axis is not None or ch.b.body.iter_of_type(Fold):
-            return (
-                "split-K rewrites a computed B cone's coordinates, which would drop the schedule slice of a "
-                "fold nested in it; pin the serial fold on this edge"
-            )
-    return None
-
-
 def splitk_width(k_axis: Axis, width: int) -> str | None:
     """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
     absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
@@ -624,7 +603,13 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting_a
 
 
 def resolve_fill_stage(
-    c: Fold, tile: TilePlan, budget: int, want_depth: int = 1, inputs=None, why: list[str] | None = None
+    c: Fold,
+    tile: TilePlan,
+    budget: int,
+    want_depth: int = 1,
+    inputs=None,
+    why: list[str] | None = None,
+    seam: tuple | None = None,
 ) -> Stage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
@@ -659,7 +644,7 @@ def resolve_fill_stage(
         return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
-    _, _, stats = cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
+    _, _, stats = seam if seam is not None else cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
     a_bytes = tile.m.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * tile.m.tile * 4
     sync_bytes = stat_bytes
@@ -757,7 +742,6 @@ __all__ = [
     "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
-    "splitk_computed_b_site",
     "splitk_width",
     "stage_target",
     "strip_width",

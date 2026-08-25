@@ -139,15 +139,14 @@ def _wrap(side: Side, coord: Expr) -> Expr:
     return BinaryExpr("%", coord, side.ext) if side.mask else coord
 
 
-def _row_dim(index: tuple, m_name: str) -> int | None:
-    """The INNERMOST output-index position carrying the M (row) coordinate — read off the pre-σ
-    ``Write`` template, where the row is still the ``m`` axis Var. ``RegStore`` derives its auto
-    ``ldm`` (the fragment row stride) from this dim's trailing extents. The innermost occurrence
-    is the one whose stride IS ``∂addr/∂m``: a re-fused split store spells the row as
-    ``[…, m/P, m%P, …]``, and the recomposition that makes the flat address affine in ``m``
-    gives it exactly the ``m%P`` dim's stride as coefficient. An N-side split (``[…, m, n/Q,
-    n%Q]``) has one m dim either way, whose trailing extents span the whole fused N."""
-    dims = [d for d, e in enumerate(index) if m_name in e.free_vars()]
+def _axis_dim(index: tuple, axis_name: str) -> int | None:
+    """The innermost output-index position carrying ``axis_name``, before cell substitution.
+
+    ``RegStore`` derives each fragment-axis stride from this dimension. The innermost occurrence
+    is load-bearing for a re-fused split axis spelled ``[…, f/P, f%P, …]``: its trailing extents
+    give the coefficient of the reconstructed flat ``f`` coordinate.
+    """
+    dims = [d for d, e in enumerate(index) if axis_name in e.free_vars()]
     return dims[-1] if dims else None
 
 
@@ -268,11 +267,11 @@ def _mma_c_base(atom, i: int, j: int) -> str:
     return f"_ch{i}_{j}" if _f16acc(atom) else f"_c{i}_{j}"
 
 
-def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int) -> list[Stmt]:
+def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
     """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
     shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
     return [
-        FragmentPromote(dst=_fold_frag(f"_c{i}_{j}", f), src=_fold_frag(f"_ch{i}_{j}", f))
+        FragmentPromote(dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f))
         for f in range(n_folds)
         for i in range(m_reg)
         for j in range(n_reg)
@@ -292,6 +291,7 @@ def _staged_inner_atom_loop(
     trans=None,
     byte_slabs=None,
     pads=None,
+    frag_ns: str = "",
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -342,9 +342,23 @@ def _staged_inner_atom_loop(
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
-    specs = [(lambda x: f"_a{x}", "a", a_slab, bk_elems + pads[0], True, m.reg, m.unit, atom_m, offs[0], swizzles[0], byte_slabs[0])]
+    specs = [
+        (
+            lambda x: f"{frag_ns}_a{x}",
+            "a",
+            a_slab,
+            bk_elems + pads[0],
+            True,
+            m.reg,
+            m.unit,
+            atom_m,
+            offs[0],
+            swizzles[0],
+            byte_slabs[0],
+        )
+    ]
     for f, bs in enumerate(b_slabs):
-        frag_of = (lambda ff: lambda x: _fold_frag(f"_b{x}", ff))(f)
+        frag_of = (lambda ff: lambda x: _fold_frag(f"{frag_ns}_b{x}", ff))(f)
         tr = trans[1 + f]
         ldm_b = (bk_elems if tr else n.tile) + pads[1 + f]
         specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f]))
@@ -378,9 +392,9 @@ def _staged_inner_atom_loop(
     def mmas(suffix):  # every fold channel × (i, j) cell's mma.sync over the `suffix`-slotted operand fragments
         return [
             MmaSyncPtx(
-                c_frag=_fold_frag(_mma_c_base(atom, i, j), f),
-                a_frag=f"_a{i}{suffix}",
-                b_frag=f"{_fold_frag(f'_b{j}', f)}{suffix}",
+                c_frag=_fold_frag(f"{frag_ns}{_mma_c_base(atom, i, j)}", f),
+                a_frag=f"{frag_ns}_a{i}{suffix}",
+                b_frag=f"{_fold_frag(f'{frag_ns}_b{j}', f)}{suffix}",
                 shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
@@ -1750,9 +1764,10 @@ class _MmaOps(_AtomOps):
             trans=tuple(getattr(op, "trans", False) for op in operands),
             byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
             pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            frag_ns=self.frag_ns,
         )
         if _f16acc(self.tile.atom):
-            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels))]
+            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
         return stmts
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
@@ -1948,7 +1963,7 @@ class _MmaOps(_AtomOps):
                 # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
                 # the loop unrolls), plus the unconditional final fold after the loop — it also
                 # covers a symbolic / non-multiple K's partial last chunk.
-                promotes = _f16acc_promotes(m.reg, n.reg, 1)
+                promotes = _f16acc_promotes(m.reg, n.reg, 1, self.frag_ns)
                 period = atom.atom_k * _F16ACC_STEPS
                 fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
@@ -1964,7 +1979,6 @@ class _MmaOps(_AtomOps):
         """Store cell ``(i, j)``'s ``_c`` fragment to the output, folding the projection ``tail`` into a
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
-        c = self.c
         atom = self.tile.atom
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
@@ -1974,46 +1988,35 @@ class _MmaOps(_AtomOps):
         accs = tuple(acc for _, acc in chans)
         frags = (self.frag(f"_c{i}_{j}"), *(_fold_frag(self.frag(f"_c{i}_{j}"), f) for f in range(1, len(chans))))
         writes = [s for s in tail if isinstance(s, Write)]
-        if len(chans) > 1 and len(tail) == len(writes) == len(chans) and {w.value for w in writes} == set(accs):
-            # RAW per-channel stores — the split-K partial's epilogue is one workspace ``Write``
-            # per accumulator, NO ⊗-combine (the finalize applies the projection once after the
-            # cross-partition sums): each channel's C fragment stores to its own ws slice.
-            by_acc = {w.value: w for w in writes}
-            return [
+        body = Body(tail)
+        out = []
+        for write in writes:
+            cone = body.backward_cone((write.value,))
+            used = [f for f, acc in enumerate(accs) if acc in cone.external_reads]
+            if not used:
+                from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+                raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator")
+            primary = used[0]
+            extra = tuple((accs[f], frags[f]) for f in used[1:])
+            epi = _warp_epilogue([*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=extra)
+            out.append(
                 RegStore(
-                    dst_buffer=by_acc[acc].output,
-                    dst_index=tuple(sigma.apply(e) for e in by_acc[acc].index),
-                    frag=frag,
+                    dst_buffer=write.output,
+                    dst_index=tuple(sigma.apply(e) for e in write.index),
+                    frag=frags[primary],
                     shape=atom.shape,
-                    epilogue=None,
+                    epilogue=epi,
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
-                    atomic=by_acc[acc].atomic,
-                    swizzle=by_acc[acc].swizzle,
+                    atomic=write.atomic,
+                    swizzle=write.swizzle,
                     fragment_layout=atom.fragment_layout,
-                    row_dim=_row_dim(by_acc[acc].index, m.axis.name),
+                    row_dim=_axis_dim(write.index, m.axis.name),
+                    col_dim=_axis_dim(write.index, n.axis.name),
                 )
-                for acc, frag in zip(accs, frags, strict=True)
-            ]
-        write = next(s for s in writes)
-        extra = tuple((acc, _fold_frag(self.frag(f"_c{i}_{j}"), f)) for f, (_, acc) in enumerate(chans[1:], 1))
-        epi = _warp_epilogue(tail, c.acc, m.axis.name, n.axis.name, sigma, extra_accs=extra)
-        assert len(chans) == 1 or epi is not None, "a fused sibling group's projection must combine the accumulators"
-        return [
-            RegStore(
-                dst_buffer=write.output,
-                dst_index=tuple(sigma.apply(e) for e in write.index),
-                frag=self.frag(f"_c{i}_{j}"),
-                shape=atom.shape,
-                epilogue=epi,
-                m_guard=_guard(m, mcell),
-                n_guard=_guard(n, ncell),
-                atomic=write.atomic,
-                swizzle=write.swizzle,
-                fragment_layout=atom.fragment_layout,
-                row_dim=_row_dim(write.index, m.axis.name),
             )
-        ]
+        return out
 
 
 class _ScalarOps(_AtomOps):
@@ -2154,21 +2157,30 @@ def _atom_ops(
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
 
 
-def reduce_codegen(c: Fold, tile: TilePlan, stage: Stage | None = None, inputs=None, workers=None, seam=None, lead: tuple = ()):
+def reduce_codegen(
+    c: Fold,
+    tile: TilePlan,
+    stage: Stage | None = None,
+    inputs=None,
+    workers=None,
+    seam=None,
+    lead: tuple = (),
+    frag_ns: str = "",
+):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
     :func:`_contract_kloop` spine gmem-direct, the shared :func:`_staged` fill→drain skeleton staged).
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead)
+    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns)
     return ops.state, ops.reduce
 
 
-def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = ()):
+def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). ``factorize(c, store=…)`` swaps the
     sink (a flash sink that bridges the accumulator into the streaming-softmax twist), reusing the
     shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead).store
+    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns).store

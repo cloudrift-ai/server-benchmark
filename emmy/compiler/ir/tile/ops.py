@@ -35,7 +35,7 @@ from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile.ir import TileOp, effect_tail
 from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters
-from emmy.compiler.ir.tile.path import sites, spell
+from emmy.compiler.ir.tile.path import resolve, sites, spell
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -242,8 +242,9 @@ class Sched:
         THREE site shapes, one rule each — the geometry the retired ``Contraction`` node used to
         carry as stamped fields, now read off the tree instead:
 
-        - the ROOT contraction tiles the kernel grid's trailing pair (``Placement.root_mn``, the
-          same reading the scheduler binds through at option assembly);
+        - a ROOT contraction, including one directly under a zero-axis projection that groups
+          several kernel outputs, tiles the kernel grid's trailing pair (``Placement.root_mn``,
+          the same reading the scheduler binds through at option assembly);
         - a DERIVED site (flash's synthesized PV) tiles the placement's trailing free pair — it
           lives below the seam lattice, so the grid says nothing about it;
         - any other nested contraction (flash's hoisted QK edge) takes the free m axis and its
@@ -254,17 +255,31 @@ class Sched:
         site = next((s for s in self._all_sites() if s.node is node), None)
         if site is None:
             return None
-        if site.depth == 1:
-            return self.place.root_mn
+        ancestors = tuple(
+            candidate
+            for candidate in self._all_sites()
+            if len(candidate.segments) < len(site.segments) and site.segments[: len(candidate.segments)] == candidate.segments
+        )
+
+        def orient(mn):
+            if mn is None or not is_contraction(node):
+                return mn
+            first, second = mn
+            first_refs = edge_refs_axis(node.a, first.name)
+            second_refs = edge_refs_axis(node.a, second.name)
+            return (second, first) if second_refs and not first_refs else mn
+
+        if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
+            return orient(self.place.root_mn)
         if len(free) < 2:
             return None
         if site.derived:
-            return (free[-2], free[-1])
+            return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
         ax = getattr(parent.node, "axis", None) if parent is not None else None
         if ax is None:
             return None
-        return (free[-2], ax.window.parent if ax.window is not None else ax)
+        return orient((free[-2], ax.window.parent if ax.window is not None else ax))
 
 
 def sched_of(tile) -> Sched:
@@ -283,11 +298,15 @@ def scheduled(op, *, name: str, place, knobs: dict, stores: tuple = (), slices=(
     ``slices`` are ``(family, node, value)`` triples keyed on the way in; ``schedule`` is an
     ALREADY-KEYED dict (``030_split_reduce`` re-keys against the partial's own tree before it gets
     here). ``None`` slice values are skipped, so a resolver that declined needs no guard."""
+    source = Sched(op, {}, place=place)
     out = TileOp(op=op, name=name, place=place, workers=workers, knobs=knobs, schedule=dict(schedule or {}), stores=tuple(stores))
     sched = sched_of(out)
     for family, node, value in slices:
         if value is not None:
-            sched.put(family, node, value)
+            key = source.key(family, node)
+            if key is None:
+                raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
+            sched.put(family, resolve(out.op, key).node, value)
     seal_workers(out)
     return out
 

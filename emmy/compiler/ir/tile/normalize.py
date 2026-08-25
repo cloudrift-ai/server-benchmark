@@ -8,7 +8,7 @@ rewrite passes.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
@@ -130,18 +130,26 @@ def _extract_operand(body: Body, name: str):
     return (edge, cone.members) if operand_name(edge) == name else None
 
 
-def _canonical_contraction(fold: Fold, axes: tuple[str, ...]) -> Fold:
-    """Factor a semiring Fold's operand cones and form its canonical contraction."""
+@dataclass(frozen=True)
+class _SemiringForm:
+    plus: object
+    product: object
+    products: tuple[Assign, ...]
+    arguments: tuple[tuple[str, str], ...]
+
+
+def _semiring_form(fold: Fold) -> _SemiringForm | None:
+    """Recognize the componentwise semiring law without imposing an operand-sharing shape."""
     if fold.axis is None or fold.operands or is_contraction(fold) or fold.combine is None:
-        return fold
+        return None
     pluses = component_ops(fold.combine)
     if not pluses or len(set(pluses)) != 1:
-        return fold
+        return None
     plus = pluses[0]
     if not (plus.associative and plus.commutative and plus.has_identity):
-        return fold
+        return None
     if fold.init != (plus.identity,) * len(pluses) or fold.lift.params != (fold.axis.name,):
-        return fold
+        return None
 
     body = fold.lift.body
     defs = body.definitions
@@ -151,34 +159,88 @@ def _canonical_contraction(fold: Fold, axes: tuple[str, ...]) -> Fold:
     for result in fold.lift.results:
         product = defs.get(result) if isinstance(result, str) else None
         if not isinstance(product, Assign) or len(product.args) != 2:
-            return fold
+            return None
         if not product.op.distributes_over(plus) or (product_op is not None and product.op != product_op):
-            return fold
+            return None
         argument_names.append(product.args)
         products.append(product)
         product_op = product.op
 
     if not products or len(fold.combine.results) != len(products):
+        return None
+    return _SemiringForm(plus=plus, product=product_op, products=tuple(products), arguments=tuple(argument_names))
+
+
+def _merge_operand_cones(body: Body, extracted: dict[str, tuple]) -> tuple[tuple, dict[str, object]]:
+    """Hoist maximal overlapping producer cones once, returning unique operand edges and roots."""
+    roots = tuple(extracted)
+    groups: list[list[str]] = []
+    member_ids = {name: {id(stmt) for stmt in extracted[name][1]} for name in roots}
+    for name in roots:
+        touching = [i for i, group in enumerate(groups) if any(member_ids[name] & member_ids[other] for other in group)]
+        if not touching:
+            groups.append([name])
+            continue
+        first, *rest = touching
+        groups[first].append(name)
+        for index in reversed(rest):
+            groups[first].extend(groups.pop(index))
+
+    operands = []
+    by_root = {}
+    for group in groups:
+        if len(group) == 1:
+            edge = extracted[group[0]][0]
+        else:
+            ids = set().union(*(member_ids[name] for name in group))
+            members = tuple(stmt for stmt in body if id(stmt) in ids)
+            nested = tuple(stmt for stmt in members if isinstance(stmt, Fold))
+            edge = Fold.projection(
+                operands=nested,
+                body=Body(stmt for stmt in members if not isinstance(stmt, Fold)),
+                results=tuple(group),
+            )
+        operands.append(edge)
+        by_root.update((name, edge) for name in group)
+    return tuple(operands), by_root
+
+
+def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[tuple]:
+    """Put a product argument shared by every channel first when commutativity permits it."""
+    if len(pairs) < 2 or not product.commutative:
+        return pairs
+
+    candidates = tuple(edge for pair in pairs for edge in pair)
+    clusters = lambda_equivalent_clusters(_operand_lambda(edge, axes) for edge in candidates)
+    complete = [cluster for cluster in clusters if {index // 2 for index in cluster} == set(range(len(pairs)))]
+    if not complete:
+        return pairs
+
+    # Prefer literal reuse over merely equivalent duplicate cones. Ties retain the geometric
+    # orientation already chosen below, which keeps an ordinary one-channel matmul unchanged.
+    shared = min(complete, key=lambda cluster: (len({id(candidates[index]) for index in cluster}), cluster[0]))
+    positions = set(shared)
+    return [pair if 2 * index in positions else (pair[1], pair[0]) for index, pair in enumerate(pairs)]
+
+
+def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
+    """Factor every operand cone and orient a shared commutative argument as contraction A."""
+    form = _semiring_form(fold)
+    if form is None:
         return fold
 
+    body = fold.lift.body
     all_axes = (*axes, fold.axis.name)
     extracted = {}
-    for name in dict.fromkeys(arg for pair in argument_names for arg in pair):
+    for name in dict.fromkeys(arg for pair in form.arguments for arg in pair):
         operand = _extract_operand(body, name)
         if operand is None:
             return fold
         extracted[name] = operand
 
-    # Factoring must not duplicate a shared subgraph between distinct operand values. Exact
-    # repeated roots (the shared A of a multi-channel product) reuse their one extracted edge.
-    member_sets = {name: {id(stmt) for stmt in members} for name, (_, members) in extracted.items()}
-    names = tuple(member_sets)
-    if any(member_sets[names[i]] & member_sets[names[j]] for i in range(len(names)) for j in range(i + 1, len(names))):
-        return fold
-
     pairs = []
     axis_position = {name: i for i, name in enumerate(axes)}
-    for left_name, right_name in argument_names:
+    for left_name, right_name in form.arguments:
         left, right = extracted[left_name][0], extracted[right_name][0]
         if not edge_refs_axis(left, fold.axis.name) or not edge_refs_axis(right, fold.axis.name):
             return fold
@@ -190,29 +252,50 @@ def _canonical_contraction(fold: Fold, axes: tuple[str, ...]) -> Fold:
         pair = (left, right) if axis_position[left_axis] < axis_position[right_axis] else (right, left)
         pairs.append(pair)  # A (earlier output axis), B (later output axis)
 
-    a = pairs[0][0]
-    a_clusters = lambda_equivalent_clusters(_operand_lambda(candidate, all_axes) for candidate, _ in pairs)
-    if a_clusters != (tuple(range(len(pairs))),):
-        return fold
+    pairs = _orient_shared(pairs, form.product, all_axes)
 
-    consumed = {id(stmt) for stmt in products}
+    consumed = {id(stmt) for stmt in form.products}
     consumed.update(id(stmt) for _, members in extracted.values() for stmt in members)
     if any(id(stmt) not in consumed for stmt in body):
         return fold
-    roots = tuple(dict.fromkeys(arg for pair in argument_names for arg in pair))
-    members = tuple(stmt for stmt in body if id(stmt) in consumed and id(stmt) not in {id(product) for product in products})
-    if not body.defs_die_at(members, roots=roots, allowed=products):
+    roots = tuple(extracted)
+    members = tuple(stmt for stmt in body if id(stmt) in consumed and id(stmt) not in {id(product) for product in form.products})
+    if not body.defs_die_at(members, roots=roots, allowed=form.products):
         return fold
 
-    if not product_op.commutative:
-        for index, (product, (candidate_a, b)) in enumerate(zip(products, pairs, strict=True)):
-            canonical_args = (operand_name(b), operand_name(candidate_a)) if index == 0 else (operand_name(candidate_a), operand_name(b))
-            if product.args != canonical_args:
-                return fold
+    a_clusters = lambda_equivalent_clusters(_operand_lambda(candidate, all_axes) for candidate, _ in pairs)
+    member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
+    names = tuple(member_sets)
+    overlap = any(member_sets[names[i]] & member_sets[names[j]] for i in range(len(names)) for j in range(i + 1, len(names)))
+    if a_clusters == (tuple(range(len(pairs))),) and not overlap:
+        if not form.product.commutative:
+            for index, (product, (candidate_a, b)) in enumerate(zip(form.products, pairs, strict=True)):
+                canonical_args = (
+                    (operand_name(b), operand_name(candidate_a)) if index == 0 else (operand_name(candidate_a), operand_name(b))
+                )
+                if product.args != canonical_args:
+                    return fold
+        a = pairs[0][0]
+        channels = tuple(Channel(b=b, acc=acc) for (_, b), acc in zip(pairs, fold.combine.results, strict=True))
+        canonical = Fold.contraction(k_axis=fold.axis, a=a, channels=channels, product=form.product, fold_op=form.plus)
+        return replace(canonical, unroll=fold.unroll)
 
-    channels = tuple(Channel(b=b, acc=acc) for (_, b), acc in zip(pairs, fold.combine.results, strict=True))
-    canonical = Fold.contraction(k_axis=fold.axis, a=a, channels=channels, product=product_op, fold_op=plus)
-    return replace(canonical, unroll=fold.unroll)
+    operands, by_root = _merge_operand_cones(body, extracted)
+    # Order unique edges by the contraction-role traversal (B then A per product), retaining one
+    # occurrence of every shared edge. This agrees with ``Fold.contraction`` for its shared-A
+    # subset while keeping a shared B or overlapping multi-result cone singular.
+    ordered = []
+    for a, b in pairs:
+        for edge in (by_root[operand_name(b)], by_root[operand_name(a)]):
+            if not any(edge is current for current in ordered):
+                ordered.append(edge)
+    ordered.extend(edge for edge in operands if not any(edge is current for current in ordered))
+    lift = Lambda(
+        params=(fold.axis.name, *(name for edge in ordered for name in _operand_result_names(edge))),
+        body=Body(form.products),
+        results=fold.lift.results,
+    )
+    return replace(fold, operands=tuple(ordered), lift=lift)
 
 
 def _normalize_body(body: Body, axes: tuple[str, ...]) -> Body:
@@ -334,7 +417,7 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     body = _normalize_body(node.lift.body, body_axes)
     if body != node.lift.body:
         node = node.with_bodies((body,))
-    node = _canonical_contraction(node, axes)
+    node = _canonical_semiring(node, axes)
     if node.axis is not None:
         return node
     node = _close_projection(node, axes)

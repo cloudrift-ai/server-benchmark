@@ -1,11 +1,12 @@
-"""The factorizer — the recursive ``TileOp``-root emitter and the ONE root binder every kernel
-seals through. The per-atom codegen **strategies** it drives live in ``_atom.py``, and the
+"""The factorizer — the recursive ``TileOp`` emitter and the ONE root-binding pipeline every
+scheduled Fold seals through. Compatible independent roots each use that pipeline, then share one
+physical grid. The per-atom codegen **strategies** it drives live in ``_atom.py``, and the
 axis-realization layer it seals through in ``_tiling.py``.
 
 :func:`factorize` is the entry ``010_materialize`` calls once per kernel: it builds the ambient
 :class:`Ctx` and dispatches ``tile.op`` through the recursion :func:`_factorize`, which walks the
 ``Fold`` node node tree. A :class:`~...ir.Fold` with a ``source``
-**recurses** (its projection walked into the ``tail``); the leaf binds to the grid via the single
+**recurses** (its projection walked into the ``tail``); each leaf binds to the grid via the single
 :func:`_bind` pipeline, whose form is read off the node's SCHEDULE — which axes are tiled — never a
 kernel kind: a tiled :class:`~...ir.bilinear fold` tiles its OUTPUT ``(m, n)`` axes (register / warp
 cells), a cooperating :class:`~...ir.Fold` tiles its REDUCE axis (:func:`_tile_reduce_axis` —
@@ -73,7 +74,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_
 # divergent codegen path). :func:`_emit` walks a ``Fold`` node tree —
 # through ``source`` AND ``step`` — threading a :class:`Ctx` down (the ambient cell environment)
 # and returning a :class:`Frag` up (the per-cell loop-IR body + the produced :class:`Handle` wire +
-# the reduce ``carrier`` when the node folds one). The ONE root binder (:func:`_bind`) consumes the
+# the reduce ``carrier`` when the node folds one). The ONE root-binding pipeline (:func:`_bind`) consumes the
 # recursion: the output-tiled contraction arm splices the atom's codegen through ``grid_tile``,
 # and the reduce partitioner (:func:`_tile_reduce_axis`) builds its per-cell reduce loop via
 # :func:`_emit`, so a nested contraction is reached AS A NODE — scalar-nested at block=1.
@@ -227,8 +228,8 @@ def factorize(tile, root, store=None) -> Tile:
 
 
 def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tuple = ()) -> Tile:
-    """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind the leaf to the grid via
-    the ONE binder. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
+    """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
+    the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
     ``stores`` reconstituted into it (``effect_tail`` — 1q: the root ``Write``\\ s / output sweep
     left the term for ``TileOp.stores``, so the tail downstream sees is byte-identical to the
@@ -240,10 +241,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
     today; a nested warp-tiled contraction routes through the ``_emit`` contraction seam). A
     bespoke emitter would be a divergent codegen path the mandate forbids."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        proj = _emit_body(op.body, ctx)
+        tiled = [edge for edge in op.operands if is_contraction(edge) and ctx.sched.tile_of(edge) is not None]
+        if len(tiled) > 1:
+            return _bind_roots(op, ctx, stores)
+        root = tiled[0] if tiled else op.operands[0]
+        siblings = [stmt for edge in op.operands if edge is not root for stmt in _emit(edge, ctx).body]
+        proj = [*siblings, *_emit_body(op.body, ctx)]
         if stores:
             proj = effect_tail(proj, stores)
-        return _factorize(op.operands[0], ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store)
     if stores and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its boundary stores only after that body is emitted so an output sweep wraps every stmt
@@ -254,6 +260,73 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tupl
         assert all(st.sweep is None for st in stores), "sweep stores ride a projecting zero-axis fold"
         tail = (*tail, *(st.write for st in stores))
     return _bind(op, ctx, tail, out_val, store)
+
+
+def _root_regions(op: Fold, stores: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
+    """Partition an independent projection's pure tail and stores by producing root."""
+    roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
+    by_name = {name: root for root in roots for name in root.defines()}
+    members: dict[int, set] = {id(root): set() for root in roots}
+    grouped: dict[int, list] = {id(root): [] for root in roots}
+    for store in stores:
+        cone = op.body.backward_cone((store.write.value,))
+        used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
+        if len(used) != 1:
+            raise ValueError("an output-tiled root must own each boundary store independently")
+        owner = used.pop()
+        members[owner].update(cone.members)
+        grouped[owner].append(store)
+
+    claimed: set = set().union(*members.values()) if members else set()
+    if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
+        raise ValueError("an output-tiled root forest must cover the complete projection")
+    if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
+        raise ValueError("output-tiled root projections may not share tail statements")
+    return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
+
+
+def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
+    """Merge independently bound regions that use one physical grid and worker inventory."""
+    first = tiles[0]
+    axes = {axis.name: axis for axis in first.axes}
+    for tile in tiles[1:]:
+        current = {axis.name: axis for axis in tile.axes}
+        if current != axes:
+            raise ValueError("output-tiled roots disagree on their physical grid")
+        if (tile.block_threads, tile.aux_threads) != (first.block_threads, first.aux_threads):
+            raise ValueError("output-tiled roots disagree on their worker inventory")
+
+    local = {}
+    body = []
+    top_defs = set()
+    for tile in tiles:
+        for stmt in tile.body:
+            declarations = stmt.local_decls()
+            if declarations:
+                prior = tuple(local.get(name) for name in declarations)
+                if any(previous is not None and previous != stmt for previous in prior):
+                    conflict = next(name for name, previous in zip(declarations, prior, strict=True) if previous not in (None, stmt))
+                    raise ValueError(f"output-tiled roots require incompatible local buffer {conflict!r}")
+                if all(previous is not None for previous in prior):
+                    continue
+                for name in declarations:
+                    local[name] = stmt
+            overlap = top_defs & set(stmt.defines())
+            if overlap:
+                raise ValueError(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
+            top_defs.update(stmt.defines())
+            body.append(stmt)
+    return replace(first, body=Body(body))
+
+
+def _bind_roots(op: Fold, ctx: Ctx, stores: tuple) -> Tile:
+    """Bind compatible independent contraction roots separately, then share their physical grid."""
+    regions = _root_regions(op, stores)
+    tiles = []
+    for index, (root, body, owned_stores) in enumerate(regions):
+        tail = tuple(effect_tail(body, owned_stores))
+        tiles.append(_bind(root, ctx, tail, root.out, frag_ns=f"_r{index}"))
+    return _merge_root_tiles(tuple(tiles))
 
 
 def has_write(stmts: list[Stmt]) -> bool:
@@ -294,7 +367,7 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
         or len(op.combine.results) < 3
     ):
         return None
-    pair = tuple(stmt for stmt in op.step_stmts() if isinstance(stmt, Fold) and stmt.semiring is not None)
+    pair = tuple(stmt for stmt in op.step_stmts() if is_contraction(stmt))
     if len(pair) != 2:
         return None
     score, value = pair
@@ -376,7 +449,7 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
     return contraction, value_tile, stage, epilogue
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_stores: tuple = ()) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_stores: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -421,8 +494,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
         lead = grid[:-2]
-        state_decls, reduce_region = reduce_codegen(c, tile, stage, ctx.inputs, ctx.workers, seam, lead)
-        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead)
+        state_decls, reduce_region = reduce_codegen(c, tile, stage, ctx.inputs, ctx.workers, seam, lead, frag_ns)
+        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead, frag_ns)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:

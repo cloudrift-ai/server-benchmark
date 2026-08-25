@@ -32,6 +32,7 @@ tests/compiler/passes/
 ├── test_partition_planner_rules.py # partition-planner pass
 ├── test_partition_planner_forks.py # partition-planner fork generation
 ├── test_launch_geometry_rules.py   # launch-geometry pass
+├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_stage_inputs_classify.py   # Stage-input classifier
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy
@@ -107,8 +108,10 @@ numpy backends in three places:
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
 sites through the CUDA pipeline. `test_pool_space.py` checks that the two child sites receive compatible MMA schedule
-rows. The generated carrier's numerical laws are covered independently by `tests/compiler/ir/pure/test_carrier_gen.py`
-and `test_lambda_monoid.py`; end-to-end softmax and attention accuracy remain covered by the e2e suites.
+rows. `test_move_catalog.py` checks that independent roots with reversed M/N readings combine only when their tile
+widths and unit counts match on the physical output axes. The generated carrier's numerical laws are covered
+independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
+attention accuracy remain covered by the e2e suites.
 
 ## Adding a New Rule Test
 

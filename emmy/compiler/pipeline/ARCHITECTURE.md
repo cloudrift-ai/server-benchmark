@@ -1450,12 +1450,14 @@ comparing two fits is running the same eval against two files and diffing the re
 
 `lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
 axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
-complete tree, including maximal pure operand-cone factoring for semiring contractions. No Tile IR classifier runs.
-Root stores and output sweeps live at the `TileOp` boundary.
+complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
+orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Root stores and output sweeps
+live at the `TileOp` boundary.
 
 `015_twisted` rewrites the exp-family composition over that canonical tree. `020_schedule` then enumerates schedules
-over the stored Fold tree only, and `030_split_reduce` realizes a selected cross-CTA reduction partition. There is no
-placement-cut phase or alternate fused view.
+over the stored Fold tree only. Independent roots stay fused and combine only schedules with matching physical
+output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition. There
+is no placement-cut phase or alternate fused view.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in

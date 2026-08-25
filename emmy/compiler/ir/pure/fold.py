@@ -46,8 +46,8 @@ def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...
         return stmts
     at: dict[int, list] = {}
     for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
-        name = operand_name(edge)
-        idx = next((i for i, st in enumerate(stmts) if name in deep_reads([st])), len(stmts))
+        names = set(_operand_result_names(edge))
+        idx = next((i for i, st in enumerate(stmts) if names & deep_reads([st])), len(stmts))
         at.setdefault(idx, []).append(edge)
     out: list[Stmt] = []
     for i, st in enumerate((*stmts, None)):
@@ -168,8 +168,8 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     # different program.
     steps: list[Stmt] = [*lam.body, *merge]
     for edge in reversed([e for e in fold.operands if isinstance(e, Fold)]):
-        nm = operand_name(edge)
-        steps.insert(next((i for i, st in enumerate(steps) if nm in deep_reads([st])), 0), edge)
+        names = set(_operand_result_names(edge))
+        steps.insert(next((i for i, st in enumerate(steps) if names & deep_reads([st])), 0), edge)
     return tuple(steps)
 
 
@@ -351,11 +351,10 @@ class Fold:
         one :meth:`Fold.contraction` builds, so ``a`` / ``channels`` / ``b_trans`` read back
         off any fold recognition stored as a contraction.
 
-        The A/B split rides the OPERAND ORDER — ``(b₀, a, b₁…)`` — not the accesses. That is not
-        a shortcut: node-locally the two are symmetric (matmul's ``A[m,k]`` and ``B[k,n]`` both
-        carry ``k`` plus one free axis), and telling M from N needs the PLACEMENT, which is a
-        caller fact living on the ``TileOp`` and deliberately absent here. Order is what
-        ``as_fold`` always used and what the byte-identity gate pins.
+        The shared/channel split rides the OPERAND ORDER — ``(b₀, a, b₁…)`` — not the
+        accesses. Node-locally the two sides are symmetric: each carries the reduction axis plus
+        one free axis. Telling physical M from N needs the PLACEMENT, which is a caller fact living
+        on the ``TileOp`` and deliberately absent here.
 
         The reading is SEMIRING-GENERIC, by the traits and never by op name: the carrier must be a
         product of ONE commutative-monoid ⊕ and every lift stmt one shared two-arg ⊗ with
@@ -365,43 +364,56 @@ class Fold:
         tier gates on the ``(·, +)`` instance via :attr:`semiring`)."""
         if self.axis is None or len(self.operands) < 2 or self.combine is None:
             return None
-        ops = component_ops(self.combine)
+        ring = self.semiring
         n = len(self.combine.results)
-        if ops is None or len(set(ops)) != 1 or len(self.operands) != n + 1:
+        if ring is None or len(self.operands) != n + 1:
             return None
-        plus = ops[0]
-        if not (plus.associative and plus.commutative and plus.has_identity):
-            return None
-        body = tuple(self.lift.body)
+        product, _ = ring
+        defs = self.lift.body.definitions
+        body = tuple(defs.get(result) for result in self.lift.results if isinstance(result, str))
         if len(body) != n or tuple(self.lift.results) != tuple(f"{r}__v" for r in self.combine.results):
             return None
         names = [operand_name(e) for e in self.operands]
         b0, a, rest = names[0], names[1], names[2:]
         want = [(b0, a), *((a, b) for b in rest)]
-        muls = set()
         for stmt, (x, y) in zip(body, want, strict=True):
-            if not isinstance(stmt, Assign) or not stmt.op.distributes_over(plus):
+            if not isinstance(stmt, Assign) or stmt.op != product:
                 return None
             expected = tuple(sorted((x, y))) if stmt.op.commutative else (x, y)
             if stmt.args != expected:
                 return None
-            muls.add(stmt.op)
-        if len(muls) != 1:
-            return None  # the channels must share ONE ⊗ — a mixed-product body is not a bilinear form
         chans = tuple(Channel(b=e, acc=acc) for e, acc in zip((self.operands[0], *self.operands[2:]), self.combine.results, strict=True))
         return self.operands[1], chans
 
-    @property
+    @cached_property
     def semiring(self) -> tuple | None:
-        """The bilinear reading's ``(⊗, ⊕)`` instance — the :class:`ElementwiseImpl` pair the
-        node's algebra instantiates (``(multiply, add)`` is the matmul; the admissible pairs are
-        ``ElementwiseImpl._SEMIRING``'s) — or ``None`` when the fold is not a contraction. The
-        trait consumers gate on: the tensor-core (mma) tier realizes ONLY the ``(·, +)``
-        instance, and a rebuild of an existing node threads this pair rather than assuming the
-        constructor default."""
-        if self._contraction is None:
+        """The componentwise ``(⊗, ⊕)`` instance carried by this Fold, independent of operand sharing.
+
+        A semiring Fold has one distributive binary product per lift result and one shared
+        commutative-monoid combine. Whether those products share the A operand shape required by
+        the current MMA emitter is the narrower :attr:`_contraction` reading; it is deliberately
+        not part of this algebraic question.
+        """
+        if self.axis is None or self.combine is None:
             return None
-        return (self.lift.body[0].op, component_ops(self.combine)[0])
+        pluses = component_ops(self.combine)
+        if pluses is None or not pluses or len(set(pluses)) != 1:
+            return None
+        plus = pluses[0]
+        if not (plus.associative and plus.commutative and plus.has_identity):
+            return None
+        if self.init != (plus.identity,) * len(pluses):
+            return None
+        defs = self.lift.body.definitions
+        products = [defs.get(result) if isinstance(result, str) else None for result in self.lift.results]
+        if len(products) != len(pluses) or any(not isinstance(stmt, Assign) or len(stmt.args) != 2 for stmt in products):
+            return None
+        product = products[0].op
+        if any(stmt.op != product or not stmt.op.distributes_over(plus) for stmt in products):
+            return None
+        if {id(stmt) for stmt in products} != {id(stmt) for stmt in self.lift.body}:
+            return None
+        return product, plus
 
     @property
     def composed(self) -> Fold | None:
@@ -424,7 +436,10 @@ class Fold:
 
     @property
     def a(self):
-        """The shared M-resident operand edge of the bilinear reading (``operands[1]``)."""
+        """The shared operand edge of the bilinear reading (``operands[1]``).
+
+        Placement resolves which physical output axis this edge carries.
+        """
         v = self._contraction
         assert v is not None, f"not a contraction fold (role={self.role.value}) — no `a` reading"
         return v[0]
@@ -470,9 +485,9 @@ class Fold:
         table). A caller REBUILDING an existing node (a σ-sliced split, a decode-boundary cone
         rewrap) must thread the node's own :attr:`semiring`, never assume the default.
 
-        Arity N ≥ 2 is the fused sibling edge (gate⊗up): N matrices over ONE shared A, scheduled
-        and lowered as one unit. Sharing is the arity — the shared edge simply appears in every
-        lift term; there is no privileged slot and no let table.
+        Arity N ≥ 2 is the fused sibling edge (gate⊗up): N channel operands over ONE shared
+        operand, scheduled and lowered as one unit. Sharing is the arity — the shared edge simply
+        appears in every lift term; there is no let table beyond its canonical operand slot.
 
         Placement and schedule live nowhere here: the ``(m, n)`` axes ride ``TileOp.place`` and the
         slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
@@ -708,9 +723,9 @@ def stmt_axis_names(stmts) -> set[str]:
 
 def operand_body(op) -> tuple[Stmt, ...]:
     """An operand edge's producing stmts — the singleton gmem ``Load``, or the inline node
-    flattened (:meth:`Fold.lower`). A free function, not a per-role ``a_body`` / ``b_body`` pair on
-    the node: an edge is an edge, and which ROLE it plays (A vs B) is the caller's reading of the
-    operand order, not a property of the edge itself."""
+    flattened (:meth:`Fold.lower`). A free function, not a per-role helper on the node: an edge is
+    an edge, and whether it is the shared or a channel operand is the Fold's reading of operand
+    order, not a property of the edge itself."""
     return (op,) if isinstance(op, Load) else tuple(op.lower())
 
 

@@ -279,20 +279,10 @@ def test_bare_reduce_forks_the_coop_catalog():
     assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
 
 
-# --- the TWO-SITE product: what a flat builder structurally could not enumerate ------------------ #
-#
-# Every term in the live corpus has ONE scheduling site, so the recursion's merge — the key spelling
-# at a NON-primary site, the shared inventory both sites resolve against, the per-site row-count
-# equation — would otherwise land untested and only be found wrong when the fused cone and the flash
-# streaming pair arrive. This fixture is the cheapest term with two sites: a contraction whose B
-# channel is a COMPUTED edge (an inline fold), so the parent enumerates tile × stage × reduce and
-# the edge enumerates its own reduce partition, under one WORK.
-
-
-def _two_site_term():
+def _computed_b_term():
     """A contraction ``sum_k a[m, k] · b_k`` whose B edge is COMPUTED — an inline ``Fold`` over its
-    own axis. Two scheduling sites: the contraction (``TILE`` / ``STAGE`` / ``REDUCE``) and the
-    edge (``REDUCE`` / ``STAGE``), the edge keyed by its own axis."""
+    own axis. The parent fill realizes the computed edge, so only the contraction is a schedule
+    site."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure.fold import Channel, Fold
@@ -316,110 +306,32 @@ def _two_site_term():
     return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))))
 
 
-def test_two_site_term_merges_both_sites_under_one_inventory():
-    """The recursion's merge, asserted on the smallest two-site term:
+def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
+    """Reversed algebraic m/n readings may share a grid only at equal physical axis widths."""
+    from types import SimpleNamespace
 
-    - every row spells BOTH sites — the contraction's families at the bare (primary) keys and the
-      computed edge's at its own axis-suffixed ones, so no leaf is missing a key another leaf has.
-      An addressed key NO row decides is not spelled at all (``_decided``): the edge's ``STAGE@j``
-      is absent because a nested fold has no transport of its own to choose, and spelling it empty
-      everywhere would fabricate a second node group for the featurizer to pool;
-    - both sites resolve against the SAME ``WORK`` entry (one kernel, one inventory), which is what
-      the work-first order buys — a coop edge and a tiled parent are simply never combined;
-    - the row count is the PER-SITE product, not a flat one.
-    """
-    from emmy.compiler.context import Context
+    from emmy.compiler.ir.axis import Axis
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
-    tile = _two_site_term()
-    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, keys, _total = sch._enumerate([term])
-    assert rows, "the two-site term enumerated nothing"
+    first = SimpleNamespace(keys={"TILE": "TILE@first"}, site=SimpleNamespace(node="first"))
+    second = SimpleNamespace(keys={"TILE": "TILE@second"}, site=SimpleNamespace(node="second"))
+    first_plan = TilePlan(regs=(1, 2))  # physical m=1, n=2
+    compatible = TilePlan(regs=(2, 1))  # under (n, m): physical n=2, m=1
+    incompatible = TilePlan(regs=(1, 2))  # under (n, m): physical n=1, m=2
+    rows = {
+        "first": [sch._Row(knobs={"TILE@first": first_plan.spell()}, plans={"TILE@first": first_plan})],
+        "second": [
+            sch._Row(knobs={"TILE@second": compatible.spell()}, plans={"TILE@second": compatible}),
+            sch._Row(knobs={"TILE@second": incompatible.spell()}, plans={"TILE@second": incompatible}),
+        ],
+    }
 
-    # Two sites, and the deeper one is keyed by its own axis — the primary keeps the bare spelling
-    # the stored corpus uses.
-    assert keys == ["TILE", "STAGE", "REDUCE", "REDUCE@j"], keys
-    assert all(set(r) >= set(keys) for r in rows), "a leaf is missing a key its siblings spell"
+    monkeypatch.setattr(sch, "_rows_at", lambda _term, root, _work, **_kwargs: rows[root.site.node])
+    axes = (Axis("m", 8), Axis("n", 8))
+    sched = SimpleNamespace(placed=lambda node, plan: plan.at(*(axes if node == "first" else tuple(reversed(axes)))))
+    term = SimpleNamespace(tree=(first, second), sched=sched)
 
-    # One inventory: every row's edge REDUCE resolves against the row's own WORK, and a cooperative
-    # edge is only co-representable with a per-cell parent tile.
-    from emmy.compiler.ir.schedule import ReducePlan, Workers
-
-    for r in rows:
-        work = Workers.parse(r["WORK"] or None)
-        edge = ReducePlan.parse(r["REDUCE@j"], work)
-        if edge.coop > 1:
-            assert work is not None and work.kind == "thread" and work.count == edge.coop, r
-            assert r["TILE"] == "", r  # a tiled parent claims the same threads — never both
-
-    # The row count is the product ACROSS sites, per inventory — the equation a flat builder over one
-    # node's families cannot state — pruned by the ONE inventory validation, which is a JOINT fact
-    # over the pair (a coop edge and a tiled parent claim the same threads) and so cannot factor per
-    # site.
-    def claim(*blocks):
-        """The pair's joint inventory claim, or ``None`` when the two sites want different
-        cooperative widths — since a ``REDUCE`` value spells no width and the kernel has exactly
-        one ``WORK`` entry to carry it.
-
-        Asked through the PRODUCTION rule (``_Row.union``) rather than restated here. A local copy
-        of it would drift with the enumerator it is checking, and this equation is only worth
-        stating if the two sides can disagree."""
-        parts = [
-            sch._Row(
-                knobs={},
-                plans={i: b.values["TILE"]} if b.values.get("TILE") is not None else {},
-                coop=b.values["REDUCE"].coop if b.values.get("REDUCE") is not None else 1,
-            )
-            for i, b in enumerate(blocks)
-        ]
-        return sch._Row.union(parts)
-
-    by_work: dict[str, int] = {}
-    for r in rows:
-        by_work[r["WORK"]] = by_work.get(r["WORK"], 0) + 1
-    for work_spell, n in by_work.items():
-        work = Workers.parse(work_spell or None)
-        parent = sch._contraction_blocks(term, term.tree[0].site.node, work)
-        edge = sch._site_blocks(term, term.tree[0].children[0].site, work, term.tree[0])
-        pairs = [(p, e) for p in parent for e in edge if (c := claim(p, e)) is not None and sch._work_holds(c, work)]
-        # NOT `len(pairs) <= len(parent) * len(edge)` — `pairs` is a filtered comprehension over
-        # exactly that product, so the bound cannot fail. What the equation below tests is the
-        # RECURSION: that the enumerator's row count for this inventory is the site product. A pair
-        # is a rectangle, not a row: the parent site's transport axis is still open on it, so the
-        # pair contributes `len(p.stages)` rows and each of those `len(rasters)` candidates.
-        assert pairs, f"{work_spell!r}: no legal pair"
-        want = sum(len(p.stages) for p, _ in pairs) * len(sch._raster_values(term))
-        assert n == want, f"{work_spell!r}: {n} != {want} (pairs x stages x rasters)"
-
-
-def test_two_site_rows_are_distinct_and_materialize_both_sites():
-    """The two halves of "enumeration recurses, materialization must too", on the same fixture.
-
-    A row is its SPELLED knob dict, so two candidate combinations that spell identically are one
-    row, not two. Since step 7 a ``REDUCE`` value carries no coop width — it lives once in ``WORK``
-    — so folding the sites' claims with ``max`` admitted four child widths under one ``t32`` parent
-    as four byte-identical rows (180 of them here). The claim is a consistency instead.
-
-    And every site the walk DECIDES must reach the op: the enumeration keys ``REDUCE@j``, so the
-    materialized ``TileOp`` must carry a slice there. Stamping the root alone made a nested key a
-    knob no kernel realized — the row said ``r2`` and ``op.schedule`` came back empty."""
-    from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.knob import canonical_row_key
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
-
-    tile = _two_site_term()
-    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _total = sch._enumerate([term])
-
-    seen = [canonical_row_key(r) for r in rows]
-    assert len(seen) == len(set(seen)), f"{len(seen) - len(set(seen))} rows spell identically"
-
-    decided = [r for r in rows if r.get("REDUCE@j")]
-    assert decided, "the fixture must decide its nested site on some row"
-    for row in decided:
-        op = sch._materialize(term, row, "k", {})
-        assert "REDUCE@j" in op.schedule, f"row spells REDUCE@j={row['REDUCE@j']!r} but the op carries {sorted(op.schedule)}"
-        assert op.schedule["REDUCE@j"].spell() == row["REDUCE@j"], (op.schedule["REDUCE@j"].spell(), row["REDUCE@j"])
+    assert sch._term_rows(term, None) == [sch._Row.union((rows["first"][0], rows["second"][0]))]
 
 
 # --- the WORK pin's one non-narrowing branch ----------------------------------------------------- #
@@ -455,7 +367,7 @@ def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatc
 
     def inventories() -> list[str]:
         term = sch._Term(tile, tile.place.on_grid(), ctx)
-        return [w.spell() if w is not None else "" for w in sch._inventories([term])]
+        return [w.spell() if w is not None else "" for w in sch._inventories(term)]
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
     offered = inventories()
@@ -479,7 +391,7 @@ def _rows_of(tile) -> list[dict]:
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
     term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _total = sch._enumerate([term])
+    rows, _keys, _total = sch._enumerate(term)
     assert rows, "the term enumerated nothing"
     return rows
 
@@ -514,7 +426,7 @@ def test_the_all_off_row_is_always_offered(monkeypatch):
     from emmy.compiler.pipeline.knob import is_off_value, stamp_schedule_families
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
-    for label, tile in {"bare reduce": _reduce_term(), "two-site contraction": _two_site_term()}.items():
+    for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
         stamped = [stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")}) for row in _rows_of(tile)]
         assert any(all(is_off_value(family_of(fam), value) for fam, value in row.items()) for row in stamped), (
             f"{label}: no row spells every family's OFF value"
@@ -528,7 +440,7 @@ def test_a_cooperative_row_spells_its_own_inventory(monkeypatch):
     one wire format while naming different kernels is the defect, and it has nothing to do with
     which of them the walk emitted first."""
     monkeypatch.delenv("EMMY_WORK", raising=False)
-    for label, tile in {"bare reduce": _reduce_term(), "two-site contraction": _two_site_term()}.items():
+    for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
         for row in _rows_of(tile):
             work = str(row.get("WORK", ""))
             coop = [v for k, v in row.items() if family_of(k) == "REDUCE" and isinstance(v, str) and "coop" in v]

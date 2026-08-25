@@ -1897,6 +1897,11 @@ class RegStore(Stmt):
     stores (a pair shares a row); an ``n_guard`` forces per-element scalar
     stores (the pair straddles the column bound).
 
+    ``row_dim`` / ``col_dim`` identify the output-index dimensions carrying the mma fragment's
+    algebraic M/N axes. Their row-major strides may be either physical orientation: a contraction
+    whose shared operand varies along the output's trailing axis stores a transposed fragment with
+    scalar strided writes, while the ordinary contiguous-N case keeps packed pairs.
+
     ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
     plain assign — ``030_split_reduce``'s atomic finalize on the mma tier: every
     split partition's C fragment adds into the (per-launch zero-init'd) output.
@@ -1928,6 +1933,7 @@ class RegStore(Stmt):
     # (``[…, m, n/Q, n%Q]``) spans N over the trailing dims, so ``shape[-1]`` under-strides the
     # fragment row offset. ``None`` keeps the legacy inner-extent resolution.
     row_dim: int | None = None
+    col_dim: int | None = None
 
     def deps(self) -> tuple[str, ...]:
         extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
@@ -2082,17 +2088,26 @@ class RegStore(Stmt):
             vals.append(env[epi.result])
         return per_elem, vals
 
+    @staticmethod
+    def _offset(term: str, stride: int | str) -> str:
+        return term if stride == 1 else f"({term}) * {stride}"
+
+    def _addr(self, flat: str, row: str, col: str, row_stride: int | str, col_stride: int | str) -> str:
+        """Flat address of one fragment element under its independently derived M/N strides."""
+        return f"{flat} + {self._offset(row, row_stride)} + {self._offset(col, col_stride)}"
+
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
 
         flat = render_index(self.dst_buffer, self.dst_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
+        ldn = _dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1
         dst_dt = ctx.buffer_dtypes.get(self.dst_buffer, "f32")
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
         pre, vals = self._element_values(ctx)
         if self.fragment_layout == "m8n8k4":
-            return self._render_m8n8k4(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt, pre=pre, vals=vals)
+            return self._render_m8n8k4(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
         # C is 16×8: lane owns (row g, cols 2t,2t+1) and (row g+8, cols 2t,2t+1)
         # with g = lane/4, t = lane%4. The two cols per row are CONTIGUOUS, so
         # each row's pair is one vectorized 4-byte store (``__half2`` / ``float2``)
@@ -2102,7 +2117,7 @@ class RegStore(Stmt):
         # 4-/8-byte aligned. The ``{ }`` block scopes _g/_t (and the per-element
         # epilogue temps) per RegStore.
         if self.m_guard is not None or self.n_guard is not None:
-            return self._render_guarded(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt, pre=pre, vals=vals)
+            return self._render_guarded(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
         lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"
         if self.epilogue is None:
             # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
@@ -2115,7 +2130,7 @@ class RegStore(Stmt):
             head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
         body = [f"{base}{ln}" for group in pre for ln in group]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if vec2 is not None and not (self.atomic and dst_dt == "f32"):  # no packed f32 atomicAdd pre-sm90
+        if ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):  # no packed f32 atomicAdd pre-sm90
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             lo = f"{flat} + _g * {ldm} + _t * 2"
             hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
@@ -2124,17 +2139,15 @@ class RegStore(Stmt):
                 f"{base}{self._pair_store(hi, vals[2], vals[3], vec2, packer)}",
             ]
         else:  # per-element scalar stores (dtypes without a 2-vector packer; atomic f32)
+            coords = (("_g", "_t * 2 + 0"), ("_g", "_t * 2 + 1"), ("(_g + 8)", "_t * 2 + 0"), ("(_g + 8)", "_t * 2 + 1"))
             body += [
-                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 0', vals[0], dst_dt)}",
-                f"{base}{self._elem_store(f'{flat} + _g * {ldm} + _t * 2 + 1', vals[1], dst_dt)}",
-                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 0', vals[2], dst_dt)}",
-                f"{base}{self._elem_store(f'{flat} + (_g + 8) * {ldm} + _t * 2 + 1', vals[3], dst_dt)}",
+                f"{base}{self._elem_store(self._addr(flat, row, col, ldm, ldn), vals[i], dst_dt)}" for i, (row, col) in enumerate(coords)
             ]
         if close:
             body[-1] += close
         return head + body
 
-    def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
+    def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Store the four m8n8k4 computation groups arranged as one logical 16x16 cell."""
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
@@ -2161,14 +2174,14 @@ class RegStore(Stmt):
                 lines.append(f"{indent}if ({' && '.join(preds)}) {{")
                 indent += "  "
             lines.extend(f"{indent}{ln}" for ln in pre[i])
-            addr = f"{flat} + {row} * {ldm} + {col}"
+            addr = self._addr(flat, row, col, ldm, ldn)
             lines.append(f"{indent}{self._elem_store(addr, vals[i], dst_dt)}")
             if preds:
                 lines.append(f"{pad}  }}")
         lines.append(f"{pad}}}")
         return lines
 
-    def _render_guarded(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
+    def _render_guarded(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Masked-tile store: each fragment element's store (and its epilogue
         gmem reads, which index the same possibly-out-of-range coordinates)
         runs under that element's own boundary check. With only an ``m_guard``
@@ -2192,7 +2205,7 @@ class RegStore(Stmt):
             ]
         lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if self.n_guard is None and vec2 is not None and not (self.atomic and dst_dt == "f32"):
+        if self.n_guard is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
             # Row-guarded vectorized pairs: elements {0,1} share row _g,
             # {2,3} share row _g+8; each pair's preamble + store sit inside
             # the pair's row check.
@@ -2209,7 +2222,7 @@ class RegStore(Stmt):
         for i in range(4):
             row = "_g" if i < 2 else "(_g + 8)"
             preds = " && ".join(p for p in (m_pred[i], n_pred[i]) if p is not None)
-            addr = f"{flat} + {row} * {ldm} + _t * 2 + {i & 1}"
+            addr = self._addr(flat, row, f"_t * 2 + {i & 1}", ldm, ldn)
             lines.append(f"{pad}  if ({preds}) {{")
             lines += [f"{pad}    {ln}" for ln in pre[i]]
             lines.append(f"{pad}    {self._elem_store(addr, vals[i], dst_dt)}")

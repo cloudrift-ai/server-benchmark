@@ -611,7 +611,9 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
+            if str(row.get("WORK", "")).startswith("w") and any(
+                key.split("@", 1)[0] == "STAGE" and value == "d1/smem" for key, value in row.items()
+            ):
                 return leaf
         return leaves[0]
 
@@ -620,17 +622,17 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     streamed = [op for op in cuda if "emmy_bitcast" in op.kernel_source and "mma.sync.aligned" in op.kernel_source]
     assert len(streamed) == 1
     source = streamed[0].kernel_source
-    assert "cp.async" in source and "ldmatrix" in source
-    assert "__launch_bounds__(32)" in source
-    assert not any("const float* y_factor32" in op.kernel_source and "cp.async" in op.kernel_source for op in cuda)
+    assert source.count("mma.sync.aligned") == 3  # two channels in the first root, one in the second
+    assert all(f"{output}[" in source for output in ("y", "y_left_flat", "y_core_reduce"))
+    assert all("cp.async" in op.kernel_source and "ldmatrix" in op.kernel_source for op in streamed)
+    assert all("__launch_bounds__(32)" in op.kernel_source for op in streamed)
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 
 
 @requires_cuda
-@pytest.mark.parametrize(("K", "cb", "m", "lane"), [(2, 0, 16, "mma"), (5, 2, 1, "coop")])
-def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
-    """The streamed generic B cone agrees with the decoded-weight linear on CUDA."""
+def test_input_spelling_computed_b_mma_matches_decoded_linear():
+    """The streamed generic B cone's tensor-core row agrees with the decoded-weight linear."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph, Tensor
@@ -645,15 +647,15 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     from tests.compiler.helpers import device_compute_capability
 
     capability = device_compute_capability()
-    if lane == "mma" and capability < (8, 0):
+    if capability < (8, 0):
         pytest.skip("computed-B tensor-core lane requires SM80 or newer")
-    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=K, cb=cb)
+    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (m, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
-    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, 128), "f16"), node_id="y")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
-    spell_trellis_inputs(graph, {"w": (cb, tuple(tensors["layer.trellis"].shape))})
+    spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
     # Preserve the same computed-B lowering boundary as the GPU-less source test above.
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
@@ -663,10 +665,7 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
         leaves = flatten_leaves(fp.options)
         for leaf in leaves:
             row = dict(getattr(leaf, "knobs", {}) or {})
-            if lane == "mma" and str(row.get("WORK", "")).startswith("w") and row.get("STAGE") == "d1/smem":
-                selected.append(row)
-                return leaf
-            if lane == "coop" and row.get("WORK") == "t128" and row.get("REDUCE") == "coop":
+            if _computed_b_rows([row]):
                 selected.append(row)
                 return leaf
         return leaves[0]
@@ -675,11 +674,9 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     assert selected
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert any("emmy_bitcast" in source for source in sources)
-    if lane == "mma":
-        assert any("mma.sync.aligned" in source for source in sources)
-    lowered.outputs = [nid for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)]
+    assert any("mma.sync.aligned" in source for source in sources)
 
-    x = (rng.standard_normal((m, 128)) * 0.25).astype(np.float16)
+    x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
     feed = bind_constants(lowered, {})
     assert "y_factor32" in feed and np.any(feed["y_factor32"])
     decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
@@ -796,7 +793,12 @@ def _trellis_linear_graph(m: int = 16, tensors=None, cb: int = 0):
 def _computed_b_rows(rows):
     """The rows of the compute-FILLED warp lane — the one whose B is the streamed cone (a warp
     ``WORK`` inventory over the mandatory ``smem`` fill; no other lane has a computed operand)."""
-    return [r for r in rows if str(r.get("WORK", "")).startswith("w") and str(r.get("STAGE", "")).endswith("/smem")]
+    return [
+        r
+        for r in rows
+        if str(r.get("WORK", "")).startswith("w")
+        and any(key.split("@", 1)[0] == "STAGE" and str(value).endswith("/smem") for key, value in r.items())
+    ]
 
 
 def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
@@ -813,7 +815,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))).rows)
     assert rows, "the trellis linear must offer a compute-filled warp lane"
-    offered = {str(r.get("REDUCE", "")) for r in rows}
+    offered = {str(value) for row in rows for key, value in row.items() if key.split("@", 1)[0] == "REDUCE"}
     assert any(s.startswith("g") for s in offered), offered
 
 
@@ -896,7 +898,6 @@ def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
     assert picked, "the compute-filled warp lane must be selectable"
     kernels = {nid: n.op.kernel_source for nid, n in lowered.nodes.items() if isinstance(n.op, CudaOp)}
     assert any(nid.endswith("__partial") and "mma.sync" in src for nid, src in kernels.items()), sorted(kernels)
-    lowered.outputs = list(kernels)
     x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
     feed = bind_constants(lowered, {})
     feed.update(

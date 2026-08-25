@@ -40,15 +40,17 @@ fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
 
 `Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
-Structural identity therefore reads the stored order directly. Contraction A/B roles remain on the Fold operand
-edges, not the product argument order.
+Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
+arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
+Physical M/N orientation remains a placement fact rather than part of the Fold algebra.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
 contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
-cone into a zero-axis Fold edge. Enclosing free-axis order determines A/B position; overlapping cones or an unproved
-registered semiring leave the Fold planar. Canonicalization runs entirely in `TileOp.__post_init__`, including the
-output-sweep-to-free-axis adjustment exposed when factoring makes a contraction the root compute node.
+cone into a zero-axis Fold edge. Overlapping cones become one multi-result operand edge so shared computation remains
+single; a semiring without one shared product argument remains a general planar Fold. Canonicalization runs entirely
+in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed when factoring makes a
+contraction the root compute node.
 
 Scoped lambda equivalence uses that normalized order. It therefore ignores SSA spelling and harmless interleaving
 without weakening buffer or axis identity. The emit-side same-score legality query uses this same mechanism rather
@@ -80,4 +82,7 @@ stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 Scheduling sees only the rewritten stored Fold tree. It does not derive alternate classified views. A shape for which
 the current scheduler has no row remains unmapped. When an exp-family Fold directly contains its score and value
 contractions, scheduling assigns compatible MMA tiles to those two child sites; it does not replace or annotate the
-Fold tree.
+Fold tree. Independent root contractions remain in the same maximally fused TileOp. Their schedule catalogs combine
+only rows that assign equal tile widths and unit counts to the same physical output axes, including when the roots'
+algebraic M/N readings are reversed. Each compatible root binds through the ordinary Fold binder and the resulting
+regions share one grid; incompatible root tiles never reach materialization.

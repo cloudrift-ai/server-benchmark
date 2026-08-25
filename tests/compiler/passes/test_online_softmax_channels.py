@@ -327,12 +327,15 @@ def _sdpa_graph(heads: int = 1, seq: int = 32, head_dim: int = 128):
 
 def test_fill_rejects_a_pinned_byte_transport_by_naming_its_own_ring(monkeypatch) -> None:
     """A computed operand can only ride the smem compute fill, so a pin naming a byte transport must
-    be refused rather than silently read as its depth alone. The fill IS asynchronous on its B slabs,
-    but that ring is its own ``d2/smem`` depth, so the refusal names that spelling."""
+    be refused rather than silently read as its depth alone. ``PLACE=fuse`` keeps the computed edge
+    in the subject kernel; otherwise placement may materialize it and make a byte transport legal.
+    The fill IS asynchronous on its B slabs, but that ring is its own ``d2/smem`` depth, so the
+    refusal names that spelling."""
     from emmy.compiler import target as target_mod
     from emmy.compiler.backend.cuda.backend import CUDA_PASSES
 
-    monkeypatch.setenv("EMMY_STAGE", "d1/smem-async")  # the per-knob var: the aggregate splats at import time
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem-async")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     target_mod.set_target((8, 0))
     try:
         with pytest.raises(ValueError) as excinfo:

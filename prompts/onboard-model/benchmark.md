@@ -1,11 +1,12 @@
 # Practical Model Benchmarking
 
 Use this guidance when onboarding or verification reproduces, compares, or substantiates model performance. For
-generative text serving, choose the canonical workload matrix for the target GPU class so results stay comparable
-across recipes and platforms. Apply the capacity adjustment instead of inventing a different grid. Omit a row only
-when the model's validated context, modality, or serving path makes that workload inapplicable, and explain the
-omission. The onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requirements remain
-authoritative.
+generative text serving, use the applicable workload matrix as a set of comparable measurement anchors. GPU class
+selects a useful workload profile, not the final serving configuration. Choose concurrency, memory policy, scheduler
+settings, and parallelism from the model, hardware, intended traffic, and measured behavior. Omit a row when it does
+not inform the deployment decision or when the model's validated context, modality, or serving path makes it
+inapplicable, and explain the omission. The onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup
+requirements remain authoritative.
 
 ## Make the comparison interpretable
 
@@ -24,10 +25,14 @@ authoritative.
 Use the consumer matrix for GeForce and ordinary single-GPU workstation onboarding. Use the datacenter matrix for
 server accelerators and multi-GPU server systems. For an ambiguous professional GPU, choose based on the intended
 deployment; when that is unspecified, use the consumer matrix for a single-GPU target and the datacenter matrix for a
-multi-GPU target. Record which matrix was selected.
+multi-GPU target. Record which matrix was selected. Treat this classification as a workload-profile choice, not a
+claim that every GPU in that class should use the same concurrency or deployment strategy.
 
 Use exact random-token input and output lengths, and begin with the selected target concurrency, request-count, and
-repeat values.
+repeat values when those rows are relevant. Consumer serving is commonly single-user or interactive, so treat the
+concurrency-`1` row as its primary operating point. The higher-concurrency consumer rows are recommended scaling
+checks when the intended service expects concurrent traffic; do not require a separate capacity sweep for an ordinary
+single-user deployment.
 
 ### Consumer GPUs
 
@@ -36,8 +41,8 @@ repeat values.
 | 4096 | 4096 | 1 | 8 | 3 | Single-stream long-context latency and decode. |
 | 4096 | 4096 | 4 | 32 | 1 | Moderate batch scaling. |
 | 4096 | 4096 | 8 | 64 | 1 | Higher batch scaling. |
-| 8192 | 256 | 4 | 16 | 1 | Long-input, short-output prefill and retrieval-style serving. |
-| 256 | 256 | 64 | 256 | 1 | Saturated short-turn API, agent, classification, or extraction traffic. |
+| 8192 | 256 | 4 | 20 | 1 | Long-input, short-output prefill and retrieval-style serving. |
+| 256 | 256 | 64 | 320 | 1 | Saturated short-turn API or agent traffic. |
 
 ### Datacenter GPUs
 
@@ -46,8 +51,9 @@ repeat values.
 | 4096 | 4096 | 1 | 8 | 3 | Single-stream long-context latency and decode. |
 | 4096 | 4096 | 16 | 128 | 1 | Moderate datacenter batch scaling. |
 | 4096 | 4096 | 32 | 256 | 1 | Higher datacenter batch scaling. |
-| 8192 | 256 | 16 | 64 | 1 | Long-input, short-output prefill and retrieval-style serving. |
-| 256 | 256 | 256 | 1024 | 1 | Saturated short-turn API, agent, classification, or extraction traffic. |
+| 8192 | 256 | 16 | 80 | 1 | Long-input, short-output prefill and retrieval-style serving. |
+| 1024 | 1024 | 64 | 320 | 1 | Balanced shared-service traffic. |
+| 256 | 256 | 256 | 1280 | 1 | Saturated short-turn API or agent traffic. |
 
 Use seed `0`, temperature `0`, ignore EOS, unique seeded prompts, and no prefix-cache reuse. Use the same generated
 inputs, client, and benchmark controls across every lane. Configure the server for at least 8,448 total tokens before
@@ -55,23 +61,50 @@ running this matrix; if the model's validated context is smaller, retain the row
 as inapplicable rather than shortening them. Embedding and materially different multimodal workloads need an analogous
 task-specific matrix instead of pretending that token generation measures them.
 
-### Adjust concurrency for capacity
+### Select a serving configuration
 
-Treat the concurrency values as targets. If any compared lane cannot admit or complete a row because of VRAM, KV cache
-capacity, or an out-of-memory failure, repeatedly halve that row's concurrency until every compared lane succeeds or
-concurrency `1` is reached. Keep input and output lengths unchanged. Use the same reduced concurrency for all lanes on
-that platform. Record the selected GPU class, target and actual concurrency, and the first capacity failure. If
-concurrency `1` cannot run, preserve the failure and omit the row.
+Treat matrix concurrency values as starting targets, not universal limits or required final settings. Before selecting
+the final configuration, inspect the engine's reported KV-cache or token capacity, scheduler admission limit, memory
+headroom, and behavior under load. Consider the engine controls that materially affect the result, such as vLLM's
+sequence and batched-token limits or SGLang's running-request, memory-pool, and chunked-prefill settings. Use current
+engine guidance and the relevant runtime repository from the README project map rather than prescribing one setting
+for every model.
 
-After reducing concurrency, keep the original number of steady-state waves: use `requests = concurrency × 8` for
-the 4,096-input / 4,096-output rows and `requests = concurrency × 4` for the other two rows. Use three repeats for a
-single-stream 4,096 / 4,096 row and one repeat otherwise.
+For a normal capacity or comparison row, align client concurrency with the server's request-admission limit so the
+measurement represents the intended batch rather than an accidental queue. A separately labeled overload row may
+exceed the server limit when queueing behavior is the question. If a row cannot run cleanly because of memory, KV
+capacity, preemption, request retraction, sustained queue growth, or an out-of-memory failure, choose a lower load or
+different serving configuration and preserve the evidence. Keep the input and output lengths unchanged when comparing
+lanes, and use the same supported concurrency across those lanes.
+
+Choose the recommended configuration from useful throughput under the intended latency objective, not merely from
+successful completion or the highest concurrency. When no latency objective is supplied, explain the balance selected
+from throughput, TTFT, TPOT or inter-token latency, queueing, and capacity evidence. Stop exploring once the retained
+measurements support a clear decision; a fixed sweep is not required. Consumer onboarding normally needs no additional
+concurrency search beyond the applicable recommended rows. For datacenter deployment, consider whether tensor,
+pipeline, expert, or data parallelism, or independent replicas, better match model fit, interconnect, throughput, and
+per-user latency. Let measured evidence determine the strategy rather than assuming that the smallest fitting tensor
+parallel size is the final deployment.
+
+Use at least five steady-state waves for a throughput row. The table request counts already meet that requirement.
+One run is enough for an exploratory point; repeat the selected configuration and its decision-relevant comparison
+lane at least three times, balancing run order when practical. Preserve variability rather than reporting only the
+best run.
 
 Report output throughput together with time to first token (TTFT), time per output token (TPOT) or inter-token
 latency, failure count, and useful latency percentiles. Separate prefill-dominated and decode-dominated conclusions.
-For the short-turn saturation row, use the table's four-wave run for throughput and TPOT. Measure TTFT separately with
-`requests = concurrency` so every request belongs to the first admitted wave; do not present later queued requests as
-pure prefill time.
+When they affect the recommendation, also report observed running requests, queue depth, KV usage, and
+preemption or retraction evidence rather than only the requested client load.
+
+Use concurrency `1` to measure intrinsic prefill latency. At higher concurrency, report TTFT as end-to-end TTFT that
+may include admission and queueing; do not describe it as pure prefill time. If a first-admitted-batch measurement is
+useful, bound it by the engine's observed admission capacity and state how that capacity was established.
+
+The unique-prompt, no-cache matrix is the reproducible baseline. When the final recipe enables prefix or radix caching,
+or the intended traffic has shared system prompts or documents, add a separate representative cache-reuse lane and
+record its prefix shape or observed hit rate. Do not mix cached and uncached results in one comparison. Use a
+task-specific shorter-output workload when classification or extraction is an intended deployment rather than
+describing the 256-output-token row as that task.
 
 ## Measure kernels when they inform the serving result
 

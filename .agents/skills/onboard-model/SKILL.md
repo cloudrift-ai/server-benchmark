@@ -115,9 +115,10 @@ Read `emmy/recipe/ARCHITECTURE.md` before authoring YAML; named recipe fields mu
 
 ## 2. Create and validate a conservative baseline
 
-Create or update the shared experiment recipe under the model's serving experiment root. Start with the smallest
-tensor-parallel size that fits the weights on the requested GPU count, conservative memory utilization and
-concurrency, and a short benchmark. Keep the current target matrix row exact and preserve the other platform rows.
+Create or update the shared experiment recipe under the model's serving experiment root. Start with a conservative
+feasible baseline and a short benchmark. The smallest tensor-parallel size that fits is a useful single-replica
+baseline, but it is not necessarily the final strategy for a datacenter deployment. Keep the current target matrix row
+exact and preserve the other platform rows.
 
 Deploy before benchmarking:
 
@@ -257,8 +258,11 @@ finish within the remaining budget.
 Before designing the final experiment, read
 [`prompts/onboard-model/benchmark.md`](../../../prompts/onboard-model/benchmark.md) completely. Apply its benchmarking
 guidance when the run reproduces, compares, or substantiates performance, using only the lanes relevant to this model,
-platform, and decision. Select its consumer or datacenter serving matrix for the target GPU class, follow its
-VRAM-capacity adjustment, and document rows that are inapplicable or cannot finish within the deadline.
+platform, and decision. Select its consumer or datacenter workload profile, follow its serving-configuration guidance,
+and document rows that are inapplicable or cannot finish within the deadline. For an ordinary consumer deployment,
+prioritize the recommended concurrency-`1` measurement and run the higher-concurrency anchors only when they inform
+the intended use. Let model fit, engine capacity, hardware topology, latency needs, and measured behavior determine the
+final concurrency, scheduler and memory settings, and parallelism; do not force a fixed search procedure.
 
 When Emmy is eligible and the image was verified, the final experiment must compare on the same model, target GPU
 count, workload, context, request count, client concurrency, warm-up, and precision policy:
@@ -270,8 +274,9 @@ When Emmy is ineligible, run only the pinned mainstream lane. The experiment may
 needed to justify the recommended recipe, but it must not contain a dummy Emmy lane.
 
 Use comparison lanes to select and explain the recommended configuration. Benchmark the precision lane selected in
-section 5. Include the comparisons that matter for this model's decision and clearly identify the engine and
-configuration selected by `recipes/<model>/recipe.yaml`; do not force unrelated models into one table layout.
+section 5. Include only the comparisons needed to support this model's decision, including a representative
+cache-reuse lane when caching materially affects the intended deployment. Clearly identify the engine and configuration
+selected by `recipes/<model>/recipe.yaml`; do not force unrelated models into one table layout.
 
 Commit the canonical experiment `recipe.yaml` when the comparison configuration remains useful. Follow the
 repository's `run-experiment` skill for the final measurement. Store the run as

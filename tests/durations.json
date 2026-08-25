@@ -80,6 +80,8 @@
  "tests/compiler/cli/test_eval.py::test_pre_rename_cli_aliases": 0.21,
  "tests/compiler/cli/test_eval.py::test_prior_db_reachability_smoke": 0.21,
  "tests/compiler/cli/test_eval.py::test_prior_nodes_smoke": 9.48,
+ "tests/compiler/cli/test_eval.py::test_prior_reports_both_halves_over_benched_pools": 10.5,
+ "tests/compiler/cli/test_eval.py::test_prior_writes_the_report_as_json": 11.2,
  "tests/compiler/cli/test_eval.py::test_strict_serving_golden_flags_are_in_model_only_and_validate_widths": 2.91,
  "tests/compiler/cli/test_eval.py::test_variants_counts_bench_fail_rows": 0.22,
  "tests/compiler/cli/test_eval.py::test_variants_golden_dataset_rejected": 0.21,

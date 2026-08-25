@@ -1,10 +1,10 @@
 """The fit's rank table — the one rendering both trainers log and write into artifact provenance.
 
-Apart from :mod:`~..metrics` because that module is defined as string-free, and apart from the report cells
+Apart from :mod:`~..metrics` because that module is defined as string-free, and apart from the report summaries
 (``prior/report.py``) on purpose. This is trainer TELEMETRY, not a report: it is printed per fit round while a
 trainer converges, and carries ``mean_log2`` — the fit's own objective, which no report cell wants — plus a
 ``k=5`` rung a report has no use for and a converging trainer does. The JSON twin that used to live in
-``fit/cv.py`` is gone: a fit's metrics file now carries report cells, built by ``report.rank_metrics``.
+``fit/cv.py`` is gone: a fit's metrics file now carries report summaries, built by ``report.rank_metrics``.
 """
 
 from __future__ import annotations

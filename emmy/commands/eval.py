@@ -354,7 +354,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
     return f"{fmt.format(value)} ({block['groups']})" if "groups" in block else fmt.format(value)
 
 
-# Per dataset: the axis columns, then ``(header, summaries(summary))`` for each metric column. The axes are the ones the
+# Per dataset: the axis columns, then ``(header, render(summary))`` for each metric column. The axes are the ones the
 # report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {

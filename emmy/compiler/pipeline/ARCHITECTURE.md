@@ -405,11 +405,11 @@ What a newcomer needs to know about the fit:
   `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
   fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
   the metrics header, along with the loss — two fits are only comparable under the same one.
-- **A case is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
+- **A group is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
   set of rows in that pool a golden verified: usually one, several when the builder matched
   several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
   goldens share a pool is settled before any group is built, so a group's labels are final at construction.
-  The per-case term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  The per-group term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
   config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
   At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
@@ -422,7 +422,7 @@ What a newcomer needs to know about the fit:
   raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
   so a full-pool refit reproduces byte for byte.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  each case counting once — plus an L2 penalty in
+  each group counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
   the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
@@ -1364,7 +1364,7 @@ over the goldens, the tune DB's `node` table, or a measurement freeze, and it re
 prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
-(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same cells into its `metrics.json`, through
+(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
 the same `report.rank_metrics`. The report computes nothing itself:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
 both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
@@ -1376,12 +1376,12 @@ where a score comes from.
   keep the measured best). This is the half that tracks deployed speed.
 - A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
-  aggregate is dominated by pools small enough to rank by accident, so golden cells are stratified by pool size.
+  aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
 
-**Every cell publishes what it covered.** Cells carry the axes they were keyed on as a dict — measured: `gpu` ×
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
 `H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
 many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
-cell holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
+summary holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
 so on the v3 freeze's 336 pools those counts are 297, 216 and 90. An aggregate that averaged the excluded pools in
 would be reporting mostly arithmetic.
 
@@ -1418,9 +1418,9 @@ the one that gates, and the strictly-better **optimistic** rank is reported besi
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**Golden evaluations build their features for the golden's own GPU.** They go through ONE case builder — `emmy fit`'s
-`build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the same corpus, the
-same sampling draw and the same rows. Each golden's compile context is rebuilt as
+**Golden evaluations build their features for the golden's own GPU.** They go through ONE golden group builder —
+`emmy fit`'s `build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the
+same corpus, the same sampling draw and the same rows. Each golden's compile context is rebuilt as
 `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
 count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
 because the occupancy features then describe tiles for a GPU that is not the one the row came from.
@@ -1438,7 +1438,7 @@ far a golden's path was covered by the explored tree), and per-feature blame / a
 Two reasons, and the second is why nothing replaced them in kind. They answered questions about a SEARCH TREE, and
 the stores no longer hold one: every row in the current node table and in the v3 freeze is a parentless `depth=0`
 bench leaf, so the fork metrics had nothing to group by `parent_key` and degraded to leaf-level numbers that
-`eval prior`'s cells now compute directly. And the ablation half rested on hiding one feature at a time, which
+`eval prior`'s summaries now compute directly. And the ablation half rested on hiding one feature at a time, which
 attributes an effect among correlated features with no unique answer — hiding any one of a redundant block of
 geometry features costs the same Δ.
 

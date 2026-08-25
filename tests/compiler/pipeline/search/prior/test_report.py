@@ -65,7 +65,7 @@ def test_a_pool_the_model_cannot_score_is_counted_not_dropped():
     assert summary.metrics["regret1"]["groups"] == 1
 
 
-def test_measured_cells_key_on_card_and_compile_regime():
+def test_measured_summaries_key_on_card_and_compile_regime():
     """Cards never pool, and neither do nvcc regimes — ``-O1`` and ``-O3`` reorder the same candidates."""
     groups = [
         _measured("a", [20.0, 10.0], gpu="card-a", h_opt=3.0),
@@ -78,7 +78,7 @@ def test_measured_cells_key_on_card_and_compile_regime():
     assert all(c.axes["half"] == "offline" for c in summaries)
 
 
-def test_golden_cells_stratify_by_pool_size():
+def test_golden_summaries_stratify_by_pool_size():
     """A rank is only readable against the pool it was scored over: a corpus whose small pools rank
     perfectly and whose large ones rank at chance must not report one flattering middle number."""
     assert [pool_bucket(n) for n in (5, 99, 100, 999, 1_000, 9_999, 10_000, 10**6)] == [

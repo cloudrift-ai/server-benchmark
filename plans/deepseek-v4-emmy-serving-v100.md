@@ -73,22 +73,41 @@ CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in t
 - The emmy wheel + `cupy-cuda12x` install into the image cleanly beside vLLM's pins, and `emmy.serving.register` is
   importable there.
 
-## Stage 0 — unblock the `post` twin (compiler; hard prerequisite)
+## Stage 0 — unblock the `post` twin (compiler; hard prerequisite) — **DONE, fixed upstream**
 
-The `post` twin (and any fresh DeepSeek V4 layer trace, per `recipes/DeepSeek-V4-Flash-0731/RESULTS.md`) does not
-terminate in the Loop splicer's merge-region dependency resolution (`ir/loop/splicer.py::_ensure_dep` under
-`build_merged_region`, reached from `prefusion/010_dissolve_narrowing`): a single-profile lowering at the real dims
-(hc 4, hidden 4096) ran 3 days at 100 % CPU on the target host without emitting the inventory (2026-08-21 → 08-25).
-Serving cannot exist without a compiled `post` program, and no release gate can pass without its golden realization.
+The stall was never in the graph: it was a compiler pathology that main fixed while this plan was being written.
 
-1. Profile one stalled lowering (py-spy dump already localizes it) → identify the quadratic/exponential resolution.
-   → verify: a written note naming the complexity driver (region size × dependency re-resolution?).
-2. Fix or bound it (memoize `_ensure_dep`, cap merge-region candidates, or an ordering change) without changing
-   emitted Loop IR for the existing test corpus. → verify: `make test` green; the DeepSeek `post` twin lowers in
-   minutes; the legacy full-layer golden stays regression-green (its 279/279 is NOT evidence the post twin exists).
-3. Rerun `emmy trace --serving-twins`; `emmy run --golden` the full twin set on sm_70; the serving-twin golden now
-   contains every `pre`/`post`/`expert` target of the release realization matrix.
-   → verify: every `post` realization (m1/m32/m4096/dynamic) compiles and runs finite, exit 0.
+**Diagnosis (2026-08-25).** A parameterized repro (capture + lower the `post` twin, `sm_70` forced) isolated it by
+elimination: hidden size 32→1024 flat at 2.3 s, `hc_sinkhorn_iters` 2→20 linear (+0.13 s/iter), `hc_mult` 2/3/4 flat,
+live CUDA device present or absent identical. The graph is byte-for-byte the same everywhere (644 IR nodes). What
+differed was the compiler revision: at `5646a0796` (pre-merge) the lowering does not terminate (>240 s locally, 3 days
+on the host); at merged main it takes 2.3 s locally and **7.3 s on the V100**. Reverting `71dfa184d` (#595, fresh-name
+scans) and `4443f5d98` (#597, memoized splicer walks) leaves it fast, so the fix is `1ee503099` — **Bound fusion
+construction work (#602)**, which rewrites exactly `merge_region` / `build_merged_region`, the two frames directly
+above the stalled `_ensure_dep` / `fresh` calls in every py-spy sample. It cannot be reverted in isolation because
+later commits build on it.
+
+**Realization (2026-08-25, on the target host at merged main).**
+
+| step | result |
+| --- | --- |
+| `emmy trace --serving-twins` (real checkpoint, pinned serving env) | ~60 s → **12 graphs, 380 distinct kernels** |
+| `emmy run --golden` over the inventory | **1520/1520** (380 × m1/m32/m4096/dynamic), exit 0, 550 s |
+| errors / tracebacks | none |
+| non-finite fragment outputs | 10 / 1520 (0.66 %), all `post` at the widest width |
+
+The non-finite outputs are a property of random-input fragment replay for this checkpoint, not a regression: the
+already-qualified, published golden (`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml`) replays 279/279 exit 0
+with **4 / 279 (1.4 %)** non-finite under the same harness — a higher rate than the new inventory's. `run --strict`
+cannot adjudicate a Loop-IR fragment either way (no Torch twin and no independent greedy reference; it reports
+"same-input greedy reference is unavailable"), so real correctness evidence comes from the CPU seam equivalence test
+today and from real-weight parity at Stage 3.
+
+Two environment notes for later stages: the host venv's torch pulls NVRTC 13, which cannot target sm_70 — the main
+process works around it with `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12`, but an isolated **bench worker**
+does not inherit the workaround and dies with "invalid value for --gpu-architecture", so any `--bench` / `tune` work
+must run inside the 1Cat image (NVRTC 12.9 native, verified) or in a venv without the NVRTC-13 pin. The inventory is
+untuned (no knobs or timings) and is therefore NOT promoted to the canonical path; it regenerates in ~60 s.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable)
 
@@ -211,7 +230,7 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 
 ## Effort
 
-Stage −1: 1–2 days. Stage 0: 2–7+ days (genuinely open-ended; the observed stall is 3 days without terminating).
+Stage −1: DONE (~2 h). Stage 0: DONE (fixed upstream by #602; verification ~2 h).
 Stage 1: 2–4 days. Stage 2: 3–5 days. Stage 3: 5–10 days (the risk pool). Stage 4: 2–4 days on-host. Stage 5:
 1–2 days. A measured eager fp8 A/B is realistically 3–5 engineering weeks; adding stage 6 (MXFP4 + tuning,
 1–3 weeks) makes ~5–8 weeks, with stage 0 and the fork ABI as the dominant uncertainty.

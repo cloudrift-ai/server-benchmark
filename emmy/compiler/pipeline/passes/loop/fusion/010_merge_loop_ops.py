@@ -19,7 +19,7 @@ PATTERN = [Pattern("producer", LoopOp)]
 
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
     """Return the maximal downstream ``LoopOp`` region and its live buffers."""
-    if not isinstance(producer.op, LoopOp) or "__cut_" in producer.id:
+    if "__cut_" in producer.id:
         return None
 
     region: set[str] = set()
@@ -27,9 +27,6 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
     while pending:
         nid = pending.pop()
         if nid in region:
-            continue
-        node = graph.nodes.get(nid)
-        if node is None or not isinstance(node.op, LoopOp):
             continue
         region.add(nid)
         if "__cut_" in nid:
@@ -51,22 +48,19 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
 
 def _build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str, ...]) -> LoopOp | None:
     """Splice one maximal region, sharing equal upstream demands across roots."""
-    if any(not isinstance(graph.nodes[nid].op, LoopOp) for nid in region):
-        return None
     order = [nid for nid in graph.topological_order() if nid in region]
     sub = Graph()
     external: list[str] = []
     for nid in order:
         for inp in graph.nodes[nid].inputs:
             producer = graph.producer(inp)
-            producer_id = producer.id if producer is not None else inp
-            if producer_id not in region and inp not in external:
+            assert producer is not None
+            if producer.id not in region and inp not in external:
                 external.append(inp)
     for ext_id in external:
         ext_t = graph.buffer(ext_id)
-        shape = ext_t.shape if ext_t is not None else ()
-        dtype = ext_t.dtype if ext_t is not None else "f32"
-        sub.add_node(InputOp(), [], Tensor(ext_id, shape, dtype), node_id=ext_id)
+        assert ext_t is not None
+        sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
     for nid in order:
         node = graph.nodes[nid]
         sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
@@ -112,9 +106,8 @@ def _wrap_multi_output_fragment(
     frag = Graph()
     for inp_id in merged.inputs:
         ext_t = graph.buffer(inp_id)
-        shape = ext_t.shape if ext_t is not None else ()
-        dtype = ext_t.dtype if ext_t is not None else "f32"
-        frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
+        assert ext_t is not None
+        frag.add_node(InputOp(), [], ext_t, node_id=inp_id)
     frag.add_node(merged, list(merged.inputs), outputs=tensors, node_id=node_id)
     frag.outputs = list(new_buffers)
     return frag, rename

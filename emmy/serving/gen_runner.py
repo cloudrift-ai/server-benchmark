@@ -196,7 +196,19 @@ class _Program:
             return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 
-def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
+def local_expert_slice(expert: int, expert_range):
+    """This rank's own index for a GLOBAL expert id, or ``None`` when another rank owns it.
+
+    A tensor-parallel rank loads one contiguous expert shard (``load_quantized_split``'s
+    ``expert_range``) and stacks it from index 0, so the router's global selection has to be
+    translated before it can index the rank's own expert table."""
+    if expert_range is None:
+        return expert
+    lo, hi = expert_range
+    return expert - lo if lo <= expert < hi else None
+
+
+def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, expert_range=None):
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
@@ -205,7 +217,14 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     return fp32 scores, and ``index_add_`` requires matching dtypes. A router whose scaled
     weights can overflow individual fp16 partials requests ``accumulate_float32``; that lane
     returns the float32 weighted sum so its caller can combine every marked MoE contribution
-    before one final model-dtype cast. Ordinary routers keep the fp16 hot path."""
+    before one final model-dtype cast. Ordinary routers keep the fp16 hot path.
+
+    ``expert_range`` is one tensor-parallel rank's expert shard. Every rank runs the SAME router
+    over the whole expert space (the router is replicated, so its selection is identical) and
+    contributes only the hits it owns, indexed rank-locally; summing the ranks' partials — the
+    all-reduce the caller issues — reproduces the unsharded result exactly, because each routed
+    contribution belongs to exactly one shard. A rank that wins no token returns zeros, which is
+    why the reduction stays correct without any special case."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
@@ -213,8 +232,11 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     scores = scores.to(accumulate_dtype)
     out = torch.zeros_like(xn, dtype=accumulate_dtype)
     for e in indices.unique().tolist():
+        local = local_expert_slice(e, expert_range)
+        if local is None:
+            continue  # another rank owns this expert and adds its contribution to the same sum
         tok, pos = torch.where(indices == e)
-        partial = run_expert(e, xn[tok]).to(accumulate_dtype)
+        partial = run_expert(local, xn[tok]).to(accumulate_dtype)
         out.index_add_(0, tok, partial * scores[tok, pos, None])
     return out
 
@@ -793,6 +815,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
+        expert_range=None,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
@@ -845,6 +868,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
+                expert_range=expert_range,
             )
             with torch.device("cpu"):
                 return cls.from_model(
@@ -857,6 +881,7 @@ class EmmyGenRunner:
                     layer_range=layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
+                    expert_range=expert_range,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
@@ -886,6 +911,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
+        expert_range=None,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
@@ -1290,6 +1316,9 @@ class EmmyGenRunner:
                         "num_experts": int(next(iter(einputs.values())).shape[0]),
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
+                        # This rank's expert shard, if any: the router selects over the GLOBAL expert
+                        # space on every rank, so the combine translates and filters against it.
+                        "expert_range": expert_range,
                         "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
                     }
                 )
@@ -2024,6 +2053,7 @@ class EmmyGenRunner:
                 gated,
                 lambda e, rows: self._launch_expert(moe, e, rows),
                 accumulate_float32=moe.get("accumulate_float32", False),
+                expert_range=moe.get("expert_range"),
             )
 
     def _moe_combine_slots(self, moe, xn):

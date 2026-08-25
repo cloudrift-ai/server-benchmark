@@ -219,7 +219,15 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
-  `h`. The expert layout (orientation / interleave / bias — gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
+  `h`. **Tensor-parallel expert sharding** rides that same combine: one rank loads a contiguous expert shard
+  (`load_quantized_split`'s `expert_range`, stacked rank-locally) and `combine_routed_experts` filters the router's
+  GLOBAL selection against it via `local_expert_slice`, translating each owned hit to the rank's own index and
+  skipping the rest. The router is replicated so every rank selects identically; each routed contribution therefore
+  belongs to exactly one shard, and summing the ranks' partials — the caller's all-reduce — reproduces the unsharded
+  result exactly. A rank that wins no token returns zeros, so the reduction needs no special case. This is what makes
+  a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts are ~9.4 GB sharded eight ways against a 32
+  GB card that also carries attention, arenas and the KV cache. The expert layout (orientation / interleave / bias —
+  gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
   layers are

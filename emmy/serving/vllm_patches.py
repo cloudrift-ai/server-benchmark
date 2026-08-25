@@ -1,7 +1,7 @@
 """Runtime workarounds for vLLM defects, applied from the plugin ``register`` hook.
 
-Each patch documents the upstream defect and the pinned vLLM version it targets; drop the
-patch when the pin moves to a release that ships the fix.
+Each patch documents the upstream defect, the upstream issue tracking it, and the pinned vLLM
+version it targets; drop the patch when the pin moves to a release that closes that issue.
 """
 
 import logging
@@ -31,6 +31,10 @@ def clamp_dummy_run_seq_lens() -> None:
     stock Llama/Mistral/Qwen3 only, and its dummy batches use legal per-request seq lens).
     Verified end to end on the default runner: a 4128-token capture with max-model-len 4096
     warms up and captures cleanly with the clamp, greedy output correct.
+
+    Reported upstream as vllm-project/vllm#53658 (with the standalone kernel repro); still open
+    against vLLM main as of 2026-08-25. Drop this patch once the vllm pin reaches a release
+    that closes it.
     """
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 

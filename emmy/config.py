@@ -33,6 +33,7 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
+FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
@@ -170,6 +171,27 @@ def tune_db_path() -> Path:
     advisory — the engine only opens it when the file exists."""
     override = os.environ.get(TUNE_DB)
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
+
+
+def freeze_path() -> Path:
+    """The measurement freeze the prior is evaluated against: ``EMMY_FREEZE_DIR`` → the
+    repo-checked ``search/freezes/``.
+
+    A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
+    digest-pinned (``manifest.sha256``), stamped with the featurizer / knob / encoding versions
+    its rows are spelled in, and identical row-for-row on any machine that has it — so two
+    evaluations of two models are a fair comparison, and a number in a report is one someone
+    else can reproduce. The tune DB and the online prior's reservoir are neither: both are
+    machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
+    bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
+    score the same. They stay reachable through ``--db`` for looking at a specific machine's
+    data; they are not what a reported number should mean.
+
+    Advisory, like :func:`tune_db_path`: callers check it exists."""
+    override = os.environ.get(FREEZE_DIR)
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
 
 
 def golden_identity_cache_path() -> Path:

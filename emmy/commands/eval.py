@@ -236,6 +236,22 @@ def _prior_halves():
     return halves
 
 
+def _freeze_provenance(path: Path) -> dict:
+    """A freeze's ``sha256`` and the versions its rows are spelled in, for the report header.
+
+    Empty for anything that is not a freeze directory (a live tune DB), so the header shows what
+    a reader can act on rather than a placeholder. Read straight from the manifest — ``load_freeze``
+    has already verified the digest by the time a report is built, so this does not re-verify."""
+    manifest = path / "manifest.json"
+    if not manifest.is_file():
+        return {}
+    try:
+        m = json.loads(manifest.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: m[k] for k in ("sha256", "freeze_ver", "feat_ver", "knob_ver", "encoding_ver") if k in m}
+
+
 def _measured_report(args, halves):
     """``eval prior --dataset nodes`` — the report over benched pools.
 
@@ -246,13 +262,14 @@ def _measured_report(args, halves):
     ``--kernel`` matches the op LABEL, since the store's own op identity is a digest with nothing readable in
     it. The label is a function of the row's ``S_*`` features, which every node of one op shares, so a filter
     keeps or drops a whole op atomically — a pool is never split against its own siblings."""
+    from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data import load_node_rows, op_label  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells  # noqa: PLC0415
 
-    db_path = Path(args.db) if args.db else resolve_tune_db()
+    db_path = Path(args.db) if args.db else config.freeze_path()
     if not db_path.exists():
-        logger.error("no tune DB or measurement freeze at %s — pass --db or run `emmy tune` first.", db_path)
+        logger.error("no measurement freeze or tune DB at %s — pass --db to point at one.", db_path)
         sys.exit(2)
     rows = load_node_rows(db_path)
     if args.kernel:
@@ -261,6 +278,10 @@ def _measured_report(args, halves):
     header = {
         "dataset": "nodes",
         "source": str(db_path),
+        # A freeze's identity travels with the numbers: two reports are comparable only when
+        # they were computed over the same rows, and the digest is what says so. Absent for a
+        # live DB, which has no such identity — that is the point of preferring a freeze.
+        **_freeze_provenance(db_path),
         "kernel": args.kernel,
         "rows": len(rows),
         "groups": len(groups),

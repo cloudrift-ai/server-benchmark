@@ -28,6 +28,12 @@ manifest, a ``freeze_ver`` mismatch, a manifest-listed file missing, or a per-fi
 mismatch. There is deliberately
 NO load-time ``feat_ver`` gate (the v1 rule): features are re-derived by live code, so the
 stored ``feat_ver`` / ``knob_ver`` / ``encoding_ver`` are provenance, not a contract.
+One freeze is CHECKED IN, at ``search/freezes/``, and is what ``config.freeze_path()`` resolves
+to: the prior's evaluation corpus should be an artifact, not whatever a machine happens to hold.
+Its payload YAML is tracked in git LFS (multi-MB per card); its manifest is plain git so the
+digest and the version stamps stay diffable. It is deliberately not wheel package-data — a wheel
+install never fits or evaluates a prior.
+
 :func:`load_node_rows` is the interchange seam: it sniffs a path and yields ``NodeRow``s
 from either a live sqlite DB (file) or a freeze (directory), so the nodes-dataset
 consumers (``eval prior --dataset nodes``, ``Dataset.fold_node_rows``) accept both. Loaded rows

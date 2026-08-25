@@ -77,6 +77,7 @@ def normalize_body(
         stmts = split_invariant_divides(stmts)
         stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
+    stmts = dedup_loads(stmts)
     stmts = rename_ssa_sequential(stmts)
     if canonical_buffers:
         stmts = canonicalize_buffer_names(stmts)
@@ -310,7 +311,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
 # bodies into one Loop so the reduce axis is traversed once instead of
-# twice. Downstream ``dedup_loads`` then collapses the duplicate Loads
+# twice. Later normalization by ``dedup_loads`` collapses the duplicate Loads
 # both halves share — e.g. ``load x[0, a0, k]`` in the gated-MLP
 # pattern ``silu(x@Wg) * (x@Wu)`` where both matmuls reduce over the
 # same K and share x as a Load source. Symmetric staging follows: once

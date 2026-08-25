@@ -65,10 +65,8 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-import numpy as np
-
 from emmy.compiler.dtype import F32, DataType
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
     Accum,
@@ -103,10 +101,6 @@ class _NotSupported(Exception):
 # restricted to the stmt's own enclosing axis names — the only bindings that
 # affect its rewrite (Load.index / Select.select) or its dep resolution.
 _BindKey = tuple[str, str, Scope, Sigma]
-
-# Exact flat-address comparison is finite. This covers the largest intended
-# output reshape while bounding temporary numpy grids during graph analysis.
-_OUTPUT_EQUIVALENCE_VERIFY_CAP = 1 << 25
 
 
 @dataclass(frozen=True)
@@ -367,7 +361,7 @@ def _flat_address_identity_source(graph, node, output: str) -> str | None:
         return None
     source_numel = math.prod(dim.as_static() for dim in source.shape)
     destination_numel = math.prod(dim.as_static() for dim in destination.shape)
-    if source_numel != destination_numel or destination_numel > _OUTPUT_EQUIVALENCE_VERIFY_CAP:
+    if source_numel != destination_numel:
         return None
     extents = _loop_extents(node.op)
     if extents is None or math.prod(extents.values()) != destination_numel:
@@ -375,15 +369,34 @@ def _flat_address_identity_source(graph, node, output: str) -> str | None:
     if len(load.index) != len(source_strides) or len(write.index) != len(destination_strides):
         return None
 
-    axes = tuple(extents)
-    grids = np.meshgrid(*(np.arange(extents[name]) for name in axes), indexing="ij", sparse=True)
-    env = dict(zip(axes, grids, strict=True))
-    try:
-        source_flat = sum(np.asarray(expr.eval(env)) * stride for expr, stride in zip(load.index, source_strides, strict=True))
-        destination_flat = sum(np.asarray(expr.eval(env)) * stride for expr, stride in zip(write.index, destination_strides, strict=True))
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+    source_flat = _canonical_flat_address(load.index, source_strides, extents)
+    destination_flat = _canonical_flat_address(write.index, destination_strides, extents)
+    return load.input if source_flat is not None and source_flat == destination_flat else None
+
+
+def _canonical_flat_address(
+    index: tuple[Expr, ...],
+    strides: list[int],
+    extents: dict[str, int],
+) -> tuple[int, tuple[tuple[str, int], ...]] | None:
+    """Return an exact affine normal form for one row-major flat address."""
+    ctx = SimplifyCtx.empty()
+    for name, extent in extents.items():
+        ctx = ctx.extend(name, Interval(0, extent - 1), Literal(extent, "int"))
+
+    flat: Expr = Literal(0, "int")
+    for expression, stride in zip(index, strides, strict=True):
+        term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
+        flat = BinaryExpr("+", flat, term)
+    flat = flat.simplify(ctx)
+
+    affine = affine_form(flat, set(extents))
+    if affine is None:
         return None
-    return load.input if bool(np.all(source_flat == destination_flat)) else None
+    anchor = affine[0].simplify(ctx)
+    if not isinstance(anchor, Literal) or not isinstance(anchor.value, int):
+        return None
+    return anchor.value, tuple(sorted(affine[1].items()))
 
 
 def _retarget_equivalent_output(graph, op: LoopOp, source: str, output: str) -> LoopOp | None:

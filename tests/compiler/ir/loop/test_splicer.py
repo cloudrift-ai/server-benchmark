@@ -758,7 +758,7 @@ def test_separate_roots_share_upstream_definition():
     assert _elementwise_fns(merged).count("exp") == 1
 
 
-def test_output_equivalence_cluster_retargets_reduce_through_copy_chain():
+def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypatch):
     """Flat-address-identical output copies collapse without inlining the reduction at their loads."""
     i, j, k = Var("i"), Var("j"), Var("k")
     producer = LoopOp(
@@ -831,6 +831,14 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain():
     graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
     graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
     graph.outputs = ["out"]
+    eval_expr = BinaryExpr.eval
+
+    def reject_coordinate_evaluation(expression, env):
+        if env:
+            pytest.fail("output equivalence must not enumerate coordinates")
+        return eval_expr(expression, env)
+
+    monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
 
     result = splice_graph(graph)
 

@@ -339,9 +339,10 @@ deploy evidence hierarchy.
 
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
-flat addresses agree over the finite domain. The splicer retargets the computed source's `Write` to the live output
-shape; equal element count without address equality does not qualify. This preserves a reduction's existing loop
-structure through a terminal flatten instead of reconstructing the reduction at div/mod-indexed copy loads.
+flat-address expressions have the same affine normal form. The splicer retargets the computed source's `Write` to the
+live output shape; equal element count without address equality does not qualify. This preserves a reduction's
+existing loop structure through a terminal flatten instead of reconstructing the reduction at div/mod-indexed copy
+loads, and the proof cost scales with expression size rather than output size.
 
 **Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's

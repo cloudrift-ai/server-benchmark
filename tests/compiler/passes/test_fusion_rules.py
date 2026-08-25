@@ -753,7 +753,7 @@ def test_shared_transpose_correctness():
 # or the second read's index dangles and the canonical renamer collapses it into
 # a self-referential Load (``in4 = load w[(int)in4]``) — silently reading a
 # constant row instead of ``idx[pos]``. ``Load.deps()`` reporting index SSA +
-# ``dedup_loads`` rewiring kept Loads' indices is what makes this correct.
+# Body normalization rewiring kept Loads' indices is what makes this correct.
 # ===================================================================
 
 

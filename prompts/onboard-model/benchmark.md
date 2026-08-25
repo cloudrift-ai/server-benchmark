@@ -1,10 +1,11 @@
 # Practical Model Benchmarking
 
 Use this guidance when onboarding or verification reproduces, compares, or substantiates model performance. For
-generative text serving, start with the canonical workload matrix below so results stay comparable across recipes and
-platforms. Apply the capacity adjustment instead of inventing a different grid. Omit a row only when the model's
-validated context, modality, or serving path makes that workload inapplicable, and explain the omission. The
-onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requirements remain authoritative.
+generative text serving, choose the canonical workload matrix for the target GPU class so results stay comparable
+across recipes and platforms. Apply the capacity adjustment instead of inventing a different grid. Omit a row only
+when the model's validated context, modality, or serving path makes that workload inapplicable, and explain the
+omission. The onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requirements remain
+authoritative.
 
 ## Make the comparison interpretable
 
@@ -18,10 +19,17 @@ onboarding skill's deadlines, artifact rules, accuracy gates, and cleanup requir
 - Warm each lane before recording it and repeat measurements when time permits. Preserve failures and variability
   instead of reporting only the best attempt.
 
-## Run the canonical serving matrix
+## Choose the serving matrix
 
-Use exact random-token input and output lengths, and begin with these target concurrency, request-count, and repeat
-values:
+Use the consumer matrix for GeForce and ordinary single-GPU workstation onboarding. Use the datacenter matrix for
+server accelerators and multi-GPU server systems. For an ambiguous professional GPU, choose based on the intended
+deployment; when that is unspecified, use the consumer matrix for a single-GPU target and the datacenter matrix for a
+multi-GPU target. Record which matrix was selected.
+
+Use exact random-token input and output lengths, and begin with the selected target concurrency, request-count, and
+repeat values.
+
+### Consumer GPUs
 
 | Input tokens | Output tokens | Target concurrency | Requests | Repeats | Purpose |
 | ---: | ---: | ---: | ---: | ---: | --- |
@@ -30,6 +38,16 @@ values:
 | 4096 | 4096 | 8 | 64 | 1 | Higher batch scaling. |
 | 8192 | 256 | 4 | 16 | 1 | Long-input, short-output prefill and retrieval-style serving. |
 | 256 | 256 | 64 | 256 | 1 | Saturated short-turn API, agent, classification, or extraction traffic. |
+
+### Datacenter GPUs
+
+| Input tokens | Output tokens | Target concurrency | Requests | Repeats | Purpose |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 4096 | 4096 | 1 | 8 | 3 | Single-stream long-context latency and decode. |
+| 4096 | 4096 | 16 | 128 | 1 | Moderate datacenter batch scaling. |
+| 4096 | 4096 | 32 | 256 | 1 | Higher datacenter batch scaling. |
+| 8192 | 256 | 16 | 64 | 1 | Long-input, short-output prefill and retrieval-style serving. |
+| 256 | 256 | 256 | 1024 | 1 | Saturated short-turn API, agent, classification, or extraction traffic. |
 
 Use seed `0`, temperature `0`, ignore EOS, unique seeded prompts, and no prefix-cache reuse. Use the same generated
 inputs, client, and benchmark controls across every lane. Configure the server for at least 8,448 total tokens before
@@ -40,10 +58,10 @@ task-specific matrix instead of pretending that token generation measures them.
 ### Adjust concurrency for capacity
 
 Treat the concurrency values as targets. If any compared lane cannot admit or complete a row because of VRAM, KV cache
-capacity, or an out-of-memory failure, halve that row's concurrency until every compared lane succeeds. Starting with
-the row's target, follow `64 → 32 → 16 → 8 → 4 → 2 → 1` from that point. Keep input and output lengths
-unchanged. Use the same reduced concurrency for all lanes on that platform. Record both the target and actual
-concurrency plus the first capacity failure. If concurrency `1` cannot run, preserve the failure and omit the row.
+capacity, or an out-of-memory failure, repeatedly halve that row's concurrency until every compared lane succeeds or
+concurrency `1` is reached. Keep input and output lengths unchanged. Use the same reduced concurrency for all lanes on
+that platform. Record the selected GPU class, target and actual concurrency, and the first capacity failure. If
+concurrency `1` cannot run, preserve the failure and omit the row.
 
 After reducing concurrency, keep the original number of steady-state waves: use `requests = concurrency × 8` for
 the 4,096-input / 4,096-output rows and `requests = concurrency × 4` for the other two rows. Use three repeats for a

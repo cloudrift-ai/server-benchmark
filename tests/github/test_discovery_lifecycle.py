@@ -485,6 +485,10 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
         "| 4096 | 4096 | 8 | 64 | 1 |",
         "| 8192 | 256 | 4 | 16 | 1 |",
         "| 256 | 256 | 64 | 256 | 1 |",
+        "| 4096 | 4096 | 16 | 128 | 1 |",
+        "| 4096 | 4096 | 32 | 256 | 1 |",
+        "| 8192 | 256 | 16 | 64 | 1 |",
+        "| 256 | 256 | 256 | 1024 | 1 |",
     ):
         assert row in benchmark
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):

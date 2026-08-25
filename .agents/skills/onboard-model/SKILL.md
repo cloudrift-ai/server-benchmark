@@ -257,8 +257,8 @@ finish within the remaining budget.
 Before designing the final experiment, read
 [`prompts/onboard-model/benchmark.md`](../../../prompts/onboard-model/benchmark.md) completely. Apply its benchmarking
 guidance when the run reproduces, compares, or substantiates performance, using only the lanes relevant to this model,
-platform, and decision. Start from its canonical serving matrix, follow its VRAM-capacity adjustment, and document
-rows that are inapplicable or cannot finish within the deadline.
+platform, and decision. Select its consumer or datacenter serving matrix for the target GPU class, follow its
+VRAM-capacity adjustment, and document rows that are inapplicable or cannot finish within the deadline.
 
 When Emmy is eligible and the image was verified, the final experiment must compare on the same model, target GPU
 count, workload, context, request count, client concurrency, warm-up, and precision policy:

@@ -68,7 +68,7 @@ class ProvenanceStrategy(PipelineStrategy):
             consumed_prov=consumed_prov,
             new_compute_ids=[nid for nid in r.new_compute_ids if nid in e.graph.nodes],
             new_by_old=new_by_old,
-            output_map=r.output_map,
+            output_owners=r.output_owners,
             mint_pieces=e.pass_name in self.MINTING_PASSES,
         )
 
@@ -79,7 +79,7 @@ def _propagate(
     consumed_prov: dict[str, dict],
     new_compute_ids: list[str],
     new_by_old: dict[str, str],
-    output_map: dict[str, str],
+    output_owners: dict[str, str],
     mint_pieces: bool,
 ) -> None:
     """Thread provenance across one ``Graph.splice``.
@@ -91,7 +91,8 @@ def _propagate(
     ``consumed_prov`` is ``{consumed_node_id: prov}`` snapshotted before the
     consumed nodes were removed; ``new_compute_ids`` are the graph ids of the
     freshly-added non-boundary fragment nodes; ``new_by_old`` maps each
-    redirected consumed node to its fragment output's producing NODE id.
+    redirected old buffer to its fragment output's producing node, while
+    ``output_owners`` maps that buffer to its old producing node.
 
     - **mint** (``mint_pieces=True``, decomposition): each new fragment node
       becomes a fresh piece of the consumed origins — one op expanding into
@@ -99,7 +100,7 @@ def _propagate(
     - **aggregate** (otherwise — fusion / lifting / optimization folds): each
       fragment output inherits its own consumed node's pieces unioned with the
       ``shared`` pieces of every *dissolved* consumed node (those not in
-      ``output_map`` — e.g. a producer inlined into all its consumers), so no
+      ``output_owners`` — e.g. a producer inlined into all its consumers), so no
       origin is dropped at a multi-output splice.
 
     A fragment output that is a boundary sentinel (e.g. a fold collapsing a
@@ -120,11 +121,15 @@ def _propagate(
                 provenance.put(node, provenance.mint(origins_kind, nid))
         return
 
-    shared = provenance.union(*[p for cid, p in consumed_prov.items() if cid not in output_map])
-    for old_id, new_out in new_by_old.items():
+    redirected_owners = set(output_owners.values())
+    shared = provenance.union(*[p for cid, p in consumed_prov.items() if cid not in redirected_owners])
+    per_output_node: dict[str, list[dict]] = {}
+    for old_buf, new_out in new_by_old.items():
+        per_output_node.setdefault(new_out, []).append(consumed_prov.get(output_owners.get(old_buf), {}))
+    for new_out, inherited in per_output_node.items():
         node = graph.nodes.get(new_out)
         if node is not None:
-            provenance.put(node, provenance.union(consumed_prov.get(old_id, {}), shared))
+            provenance.put(node, provenance.union(*inherited, shared))
     outputs = set(new_by_old.values())
     for nid in new_compute_ids:
         node = graph.nodes.get(nid)

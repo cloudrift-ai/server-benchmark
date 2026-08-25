@@ -714,6 +714,50 @@ def test_chain_three_loops():
 # ---------------------------------------------------------------------------
 
 
+def test_separate_roots_share_upstream_definition():
+    """Two terminal loops seed one worklist, so their common producer emits once."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="x", input="X", index=(Var("a0"),)),
+                    Assign(name="p", op="exp", args=("x",)),
+                    Write(output="P", index=(Var("a0"),), value="p"),
+                ),
+            ),
+        )
+    )
+
+    def consumer(output: str, op: str) -> LoopOp:
+        return LoopOp(
+            body=(
+                Loop(
+                    axis=A0,
+                    body=(
+                        Load(name="p", input="P", index=(Var("a0"),)),
+                        Assign(name="out", op=op, args=("p",)),
+                        Write(output=output, index=(Var("a0"),), value="out"),
+                    ),
+                ),
+            )
+        )
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("X", (4,)), node_id="X")
+    graph.add_node(producer, ["X"], Tensor("P", (4,)), node_id="P")
+    graph.add_node(consumer("LEFT", "negative"), ["P"], Tensor("LEFT", (4,)), node_id="LEFT")
+    graph.add_node(consumer("RIGHT", "abs"), ["P"], Tensor("RIGHT", (4,)), node_id="RIGHT")
+    graph.outputs = ["LEFT", "RIGHT"]
+
+    result = splice_graph(graph)
+    assert result is not None
+    merged, external = result
+    assert external == ["X"]
+    assert {write.output for write in merged.writes} == {"LEFT", "RIGHT"}
+    assert _elementwise_fns(merged).count("exp") == 1
+
+
 def test_multi_output_root_preserves_all_writes():
     """A root whose body contains Writes at multiple output indices should
     seed each of them — the merged kernel carries all Writes."""

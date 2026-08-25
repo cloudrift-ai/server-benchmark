@@ -325,13 +325,17 @@ tier, or faster than its parts. Nested reductions, multi-statistic compounds, an
 cut shape are therefore not fusion gates. A downstream failure to recognize or cut a maximally fused body is a
 lowering or placement coverage gap; it must not be repaired by retaining an early graph boundary.
 
-Only three boundaries remain: the region must be closed and owned, the splicer must preserve semantics, and an already
-realized `__cut_` workspace must not be fused back. These are correctness or termination constraints. Fusion does not
-estimate arithmetic work and has no recognition-dependent exception.
+Only three boundaries remain: internal nodes must be owned and every escape must be an explicit live output, the
+splicer must preserve semantics, and an already realized `__cut_` workspace must not be fused back. These are
+correctness or termination constraints. Fusion does not estimate arithmetic work and has no recognition-dependent
+exception.
 
-There is one fusion pass and one fixpoint. Merge order may temporarily place a contraction inside another reduction;
-the later legal merge that closes the consumer is still taken. Every fused-versus-cut choice belongs to placement and
-the deploy evidence hierarchy.
+There is one fusion pass and one fixpoint. One rewrite takes the maximal downstream Loop region: non-reconvergent
+consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The
+worklist's shared binding table emits an equal upstream demand once across every port, so fusion order cannot duplicate
+a shared producer or change the recognized computation. Merge order may temporarily place a contraction inside
+another reduction; the later legal merge is still taken. Every fused-versus-cut choice belongs to placement and the
+deploy evidence hierarchy.
 
 **Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's
@@ -749,7 +753,8 @@ normalized child Loop bodies are equal. That alpha-equivalence preserves externa
 so same-shaped computations over different values never alias; a class with more than two uses stays ungrouped.
 The one producer writes a common workspace, while each replacement `Load` retains its member's contextual index axes.
 This grouped inverse is a placement option over the maximally fused body; fusion does not consult it. Placement must
-recover useful boundaries from the final body.
+recover useful boundaries from the final body. A multi-output parent keeps every live port across the cut; the splice
+restores both primary and secondary buffer identities after inserting the workspace producer.
 A piece is a RAW loop body: the tree's λ-local SSA names flatten
 into one scope,
 so each piece is minted under canonical sequential names, and a second spelling of the same stmts — the fused

@@ -215,37 +215,47 @@ class LoopOp(BodyOp):
             raise ValueError(f"LoopOp.forward: expected {len(bufs)} inputs (matching input_bufs={list(bufs)}), got {len(inputs)}")
         input_arrays = {name: np.asarray(x, dtype=np.float32) for name, x in zip(bufs, inputs, strict=True)}
         loop = _specialize_symbolic_axes(self, input_arrays)
-        out_shape = loop._infer_write_shape()
-        return execute_loop_op_cpp(loop, input_arrays, out_shape)
+        out_shapes = loop._infer_write_shapes()
+        return execute_loop_op_cpp(loop, input_arrays, out_shapes)
 
     def _infer_write_shape(self) -> tuple[int, ...]:
-        """Derive the output buffer shape from the kernel's ``Write`` index.
+        """Derive the first output's shape; convenience for single-output callers."""
+        return next(iter(self._infer_write_shapes().values()))
+
+    def _infer_write_shapes(self) -> dict[str, tuple[int, ...]]:
+        """Derive every output buffer shape from its own ``Write`` scope.
 
         Evaluates each dim's index Expr over the full iteration space; the
         per-dim extent is ``max(value) + 1``. Handles plain ``Var(axis)`` (→
         axis extent), ``Literal(c)`` (→ 1), and affine combinations uniformly.
-        Falls back to the free-axis extents when no ``Write`` is present.
+        Per-Write scopes matter for MIMO sibling nests that reuse axis names
+        with different extents.
         """
         import numpy as np
 
-        writes = [s for s in self if isinstance(s, Write)]
-        if not writes:
-            reduce_names = self.reduce_axis_names
-            return tuple(a.extent for a in self.axes if a.name not in reduce_names)
-        w = writes[0]
-        env: dict[str, object] = {}
-        for i, a in enumerate(self.axes):
-            shape = [1] * len(self.axes)
-            shape[i] = a.extent.as_static()
-            env[a.name] = np.arange(a.extent.as_static()).reshape(shape)
-        dims: list[int] = []
-        for e in w.index:
-            vals = e.eval(env)
-            if isinstance(vals, np.ndarray):
-                dims.append(int(vals.max()) + 1)
-            else:
-                dims.append(int(vals) + 1)
-        return tuple(dims)
+        by_output: dict[str, list[tuple[Write, Scope]]] = {}
+        for write, scope in self.analyze().writes:
+            by_output.setdefault(write.output, []).append((write, scope))
+        shapes: dict[str, tuple[int, ...]] = {}
+        for output in self.outputs:
+            candidates = by_output.get(output, [])
+            if not candidates:
+                raise ValueError(f"LoopOp output {output!r} has no Write")
+            candidate_shapes: list[tuple[int, ...]] = []
+            for write, scope in candidates:
+                axes = scope.enclosing
+                env: dict[str, object] = {}
+                for i, axis in enumerate(axes):
+                    shape = [1] * len(axes)
+                    shape[i] = axis.extent.as_static()
+                    env[axis.name] = np.arange(axis.extent.as_static()).reshape(shape)
+                dims: list[int] = []
+                for expr in write.index:
+                    values = expr.eval(env)
+                    dims.append(int(values.max() if isinstance(values, np.ndarray) else values) + 1)
+                candidate_shapes.append(tuple(dims))
+            shapes[output] = tuple(max(dims) for dims in zip(*candidate_shapes, strict=True))
+        return shapes
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +311,12 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
             new.append(s)
         return Body(tuple(new))
 
-    return LoopOp(body=_sub_body(loop.body))
+    specialized = LoopOp(body=_sub_body(loop.body), name=loop.name)
+    specialized.inputs = dict(loop.inputs)
+    specialized.outputs = dict(loop.outputs)
+    specialized.knobs = dict(loop.knobs)
+    specialized.source = loop.source
+    return specialized
 
 
 # ---------------------------------------------------------------------------

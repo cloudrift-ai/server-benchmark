@@ -39,7 +39,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp | Graph | list | None:
     # The matcher re-populates io when a later pass matches the op; seeding the output here makes
     # the UNMAPPED tile self-describing before any match has run (``deploy_identity`` folds the
     # output dtype).
-    map_tile.outputs = {root.output.name: root.output}
+    map_tile.outputs = dict(zip(root.buffer_names(), root.outputs, strict=True))
     # PLACEMENT — resolved FIRST, before any schedule fork exists. The fused (computed-A) view is
     # the reference tree when it binds; its seams are the ones a ``PLACE`` key spells.
     pro = fused_view(map_tile)

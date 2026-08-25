@@ -435,9 +435,9 @@ class SpliceReceipt:
     cares about what the splice MEANT (the engine emits it as ``SplicedEvent``; the provenance
     strategy threads op provenance from it). The graph itself carries no such knowledge.
 
-    * ``redirected`` — ``{consumed node id: final (post-promotion) buffer id}`` per redirected
-      node (the multi-output splice's old return value).
-    * ``output_map`` — the ``{graph_node_id: fragment_output_id}`` redirection request as given.
+    * ``redirected`` — ``{old buffer: final (post-promotion) buffer}`` per redirection.
+    * ``output_map`` — the ``{old_buffer: fragment_output_buffer}`` request as given.
+    * ``output_owners`` — the old producing node for every redirected buffer.
     * ``new_compute_ids`` — post-promotion graph ids of the freshly added non-boundary fragment
       nodes. Orphan removal may since have dropped some; check membership before dereferencing.
     * ``consumed_hints`` — each consumed node's hints object, snapshotted before removal (hint
@@ -447,6 +447,7 @@ class SpliceReceipt:
 
     redirected: dict[str, str]
     output_map: dict[str, str]
+    output_owners: dict[str, str]
     new_compute_ids: tuple[str, ...]
     consumed_hints: dict[str, Hints]
     single: bool
@@ -601,6 +602,36 @@ class Graph:
         self.outputs = [new_id if o == old_id else o for o in self.outputs]
         node.op = _rename_buf_in_op(node.op, old_id, new_id)
 
+    def rename_buffer(self, old_buf: str, new_buf: str) -> None:
+        """Rename one non-primary output buffer and every reference to it."""
+        if old_buf == new_buf:
+            return
+        entry = self._producers.get(old_buf)
+        if entry is None:
+            raise KeyError(f"Buffer {old_buf!r} not found")
+        if new_buf in self._producers or new_buf in self.nodes:
+            raise ValueError(f"Buffer name {new_buf!r} already has a producer")
+        nid, slot = entry
+        if slot == 0:
+            self.rename_node(old_buf, new_buf)
+            return
+        node = self.nodes[nid]
+        outs = list(node.outputs)
+        tensor = outs[slot]
+        outs[slot] = Tensor(new_buf, tensor.shape, tensor.dtype, constant=tensor.constant, value=tensor.value)
+        node.outputs = tuple(outs)
+        users = self._users.pop(old_buf, set())
+        self._users[new_buf] = users
+        self._producers.pop(old_buf)
+        self._producers[new_buf] = (nid, slot)
+        for consumer_id in users:
+            consumer = self.nodes[consumer_id]
+            consumer.inputs = [new_buf if inp == old_buf else inp for inp in consumer.inputs]
+            consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+        self.inputs = [new_buf if buf == old_buf else buf for buf in self.inputs]
+        self.outputs = [new_buf if buf == old_buf else buf for buf in self.outputs]
+        node.op = _rename_buf_in_op(node.op, old_buf, new_buf)
+
     def replace_node(self, old_id: str, new_id: str) -> None:
         """Rewire all references from buffer ``old_id`` to buffer ``new_id``.
 
@@ -660,24 +691,28 @@ class Graph:
         when it doesn't collide, otherwise a fresh id.
 
         ``consumed`` is the set of node ids the rewriter declares the match
-        owns. ``output`` selects which graph node(s) get their consumers
-        redirected onto fragment output(s):
+        owns. ``output`` selects which graph buffer(s) get their consumers
+        redirected onto fragment output buffers:
 
         - **single** (``str``) — the one node whose consumers redirect to
           the fragment's sole output (``fragment.outputs[0]``). The receipt's
           ``output`` is the new output's id (post-rename). Hints from every
           consumed node merge onto that output.
-        - **multi** (``dict[str, str]``) — a ``{graph_node_id:
-          fragment_output_id}`` map redirecting several graph nodes to
-          distinct fragment outputs in one splice. Used to inline one
-          producer into *all* its consumers at once (``005_split_shared_indexmap``):
-          each consumer is replaced by its own fused fragment node. The
-          receipt's ``redirected`` maps ``{old_id: new_id}`` (post-rename).
-          Each redirected node's hints merge onto its own new output; other
-          consumed nodes' hints (e.g. the dissolved shared producer) are
-          dropped."""
+        - **multi** (``dict[str, str]``) — a ``{graph_buffer:
+          fragment_output_buffer}`` map redirecting several values at once.
+          Keys may name primary or secondary outputs. Each old output's hints
+          merge onto its replacement; if all replacements belong to one MIMO
+          node, dissolved nodes' hints merge there as well."""
         consumed = list(consumed)
         consumed_hints = {nid: self.nodes[nid].hints for nid in consumed if nid in self.nodes}
+        single = isinstance(output, str)
+        output_map = {output: fragment.outputs[0]} if single else dict(output)
+        output_owners: dict[str, str] = {}
+        for old_buf in output_map:
+            owner = self.producer(old_buf)
+            if owner is None:
+                raise KeyError(f"Redirected buffer {old_buf!r} has no producer")
+            output_owners[old_buf] = owner.id
         new_compute: list[str] = []
         id_map: dict[str, str] = {}
         buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
@@ -709,9 +744,6 @@ class Graph:
             for t in frag_node.outputs[1:]:
                 buf_map[t.name] = t.name  # non-primary buffers keep their names on add
 
-        single = isinstance(output, str)
-        output_map = {output: fragment.outputs[0]} if single else dict(output)
-
         # Redirect each old buffer's consumers onto its fragment buffer.
         new_by_old: dict[str, str] = {}
         for old_id, frag_out in output_map.items():
@@ -719,10 +751,9 @@ class Graph:
             self.replace_node(old_id, new_out)
             new_by_old[old_id] = new_out
 
-        # Merge consumed-node hints, then remove consumed. Single-output keeps
-        # the legacy behavior (every consumed node's hints land on the one
-        # output); multi-output routes each redirected node's hints to its own
-        # new output and drops the rest (the shared producer is dissolved).
+        # Merge consumed-node hints, then remove consumed nodes. A MIMO
+        # fragment is one compute owner, so every consumed hint belongs there.
+        target_nodes = {self.producer(buf).id for buf in new_by_old.values()}
         for nid in consumed:
             orig = self.nodes.get(nid)
             if orig is None:
@@ -730,34 +761,37 @@ class Graph:
             if orig.hints:
                 if single:
                     self.producer(new_by_old[output]).hints.merge(orig.hints)
-                elif nid in new_by_old:
-                    self.producer(new_by_old[nid]).hints.merge(orig.hints)
-            if nid not in output_map:
-                self.remove_node(nid)
-        for old_id in output_map:
-            if old_id in self.nodes:
-                self.remove_node(old_id)
+                else:
+                    owners = {self.producer(new_by_old[old_buf]).id for old_buf, owner_id in output_owners.items() if owner_id == nid}
+                    if not owners and len(target_nodes) == 1:
+                        owners = target_nodes
+                    for owner_id in owners:
+                        self.nodes[owner_id].hints.merge(orig.hints)
+            self.remove_node(nid)
 
-        # Promote each new node's id to its friendly output.name once consumed
-        # nodes are gone — keeps kernel buf names (which embed the node id)
-        # readable. Falls back silently if the friendly name is taken. A
-        # non-primary redirected buffer keeps its own name — nothing to promote.
+        # Restore every redirected buffer's old identity once its consumed
+        # producer is gone. Primary buffers rename their node; secondary ports
+        # rename only that port.
         result: dict[str, str] = {}
         renamed: dict[str, str] = {}
-        for old_id, new_out in new_by_old.items():
-            node = self.nodes.get(new_out)
-            if node is not None:
-                desired = node.output.name
-                if desired and desired != new_out and desired not in self.nodes and desired not in self._producers:
-                    self.rename_node(new_out, desired)
-                    renamed[new_out] = desired
-                    new_out = desired
-            result[old_id] = new_out
+        for old_buf, new_out in new_by_old.items():
+            if old_buf not in self.nodes and old_buf not in self._producers:
+                producer_entry = self._producers.get(new_out)
+                if producer_entry is not None:
+                    producer_id, slot = producer_entry
+                    if slot == 0:
+                        self.rename_node(producer_id, old_buf)
+                        renamed[producer_id] = old_buf
+                    else:
+                        self.rename_buffer(new_out, old_buf)
+                    new_out = old_buf
+            result[old_buf] = new_out
 
         self.remove_orphans()
         return SpliceReceipt(
             redirected=result,
             output_map=output_map,
+            output_owners=output_owners,
             new_compute_ids=tuple(renamed.get(nid, nid) for nid in new_compute),
             consumed_hints=consumed_hints,
             single=single,
@@ -1285,12 +1319,33 @@ def _rename_buf_in_op(op, old: str, new: str):
 
     def fn(s):
         if isinstance(s, Load) and s.input == old:
-            return Load(name=s.name, input=new, index=s.index)
+            return Load(names=s.names, input=new, index=s.index, dtype=s.dtype)
         if isinstance(s, Write) and s.output == old:
-            return Write(output=new, index=s.index, value=s.value)
+            return Write(
+                output=new,
+                index=s.index,
+                values=s.values,
+                value_dtype=s.value_dtype,
+                atomic=s.atomic,
+                swizzle=s.swizzle,
+            )
         return s
 
+    def renamed_io(io: dict[str, Tensor]) -> dict[str, Tensor]:
+        return {
+            (new if buf == old else buf): Tensor(
+                new if tensor.name == old else tensor.name,
+                tensor.shape,
+                tensor.dtype,
+                constant=tensor.constant,
+                value=tensor.value,
+            )
+            for buf, tensor in io.items()
+        }
+
     renamed = LoopOp(body=op.body.map(fn))
+    renamed.inputs = renamed_io(op.inputs)
+    renamed.outputs = renamed_io(op.outputs)
     renamed.name = op.name
     renamed.knobs = dict(op.knobs)
     renamed.source = op.source

@@ -420,6 +420,17 @@ def test_norm_linear_cone_cut_recurses_to_the_full_cascade(monkeypatch) -> None:
     assert "y" in kernels, "the residue matmul keeps the original output"
 
 
+def test_cut_preserves_every_multi_output_parent_port(monkeypatch) -> None:
+    graph = _norm_linear_graph(S=1, H=16, inter=16)
+    graph.outputs = ["y", "xn"]
+
+    out = _compile(graph, "PLACE=cut", monkeypatch)
+
+    assert out.outputs == ["y", "xn"]
+    assert all(out.buffer(buf) is not None for buf in out.outputs)
+    assert any("__cut_" in kernel for kernel in _kernel_ids(out))
+
+
 def test_scoped_place_pin_from_replay_context_cuts_the_cone(monkeypatch) -> None:
     """The replay context publishes ``PLACE@a`` through the aggregate consumed by routing."""
     from emmy.compiler.pipeline.search.pins import pinned_knobs

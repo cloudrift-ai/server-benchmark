@@ -122,6 +122,11 @@ finalize, the split partial), which dies as recognition approaches totality.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
 
+Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
+input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
+`010_recognize` copies every port onto Tile IR, and Kernel/CUDA lowering renders every boundary Store and output
+pointer. Independent body placement may reorder sibling Writes without changing the ABI.
+
 `Op.source` is the rewrite-chain predecessor — the engine's
 `_apply_one` stamps it on every 1:1 in-place rebind, so a fully
 lowered `CudaOp` carries the full chain back to its originating
@@ -469,19 +474,15 @@ Symbolic-extent axes get `[0, sentinel]` ranges (non-negativity for the inner
 
 ### `loop/splicer.py` — LoopOp merger
 
-The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to
-splice adjacent `LoopOp` pairs. `Sigma` (from `ir/sigma.py`) is the
-axis-substitution bookkeeping threaded through the merge.
+The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to splice a DAG of `LoopOp` nodes. `Sigma`
+(from `ir/sigma.py`) is the axis-substitution bookkeeping threaded through the merge.
 
-`splice_graph` derives splice edges as `(node_id, node_id)` — it **assumes a
-producer LoopOp's sole `Write.output` buf is its node id** (the buf-name ==
-node-id invariant the whole graph maintains). A rule that emits a LoopOp whose
-`Write.output` doesn't match its node id silently breaks every later fold of
-that node: the edge points at a Write that doesn't exist, so the splicer raises
-`_NotSupported` and the node survives as its own kernel. Rules that rename a
-node must rename its body `Write.output` to match (`fusion/_helpers.py::rename_write_output`).
-Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops`
-— `compile -vv` shows which pattern a rejected edge hit.
+`splice_graph` resolves each internal Load through `Graph.producer(buffer)`, so primary and secondary output buffers
+use the same path. Every graph output supplies an explicit `(loop tag, Write.output)` root. Separate terminal loops
+therefore seed one worklist; its one binding table shares equal upstream demands across output ports instead of
+inlining a shared producer per consumer. The single-sink convenience form still derives the unique terminal loop and
+selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
+`compile -vv` shows which pattern a rejected edge hit.
 
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
@@ -506,11 +507,12 @@ reformats deep coordinate trees nor retains duplicate canonical strings.
 
 ### `loop/runner.py` — C++ JIT executor
 
-`execute_loop_op_cpp(loop, input_arrays, out_shape) → ndarray` renders the
-LoopOp body to a C++ source string and JIT-compiles it in-process via cppyy /
-Cling (cached by the rendered source), then calls it with raw pointers to the
-input arrays. Powers `LoopOp.forward` — so post-fusion graphs run through the
-default `Backend.run` topo-walk like any pre-fusion graph.
+`execute_loop_op_cpp(loop, input_arrays, out_shapes)` renders the LoopOp body to a C++ source string and JIT-compiles
+it in-process via cppyy / Cling (cached by the rendered source), then calls it with raw pointers to the input and every
+output array. One output returns an array; multiple outputs return a tuple in the operation's graph-populated ABI
+order. Each Write's own scope determines its output shape, so independent sibling nests may reuse axis names with
+different extents. This powers `LoopOp.forward`, so post-fusion graphs run through the default `Backend.run` topo-walk
+like any pre-fusion graph.
 
 ### `loop/builder.py` — fluent construction
 

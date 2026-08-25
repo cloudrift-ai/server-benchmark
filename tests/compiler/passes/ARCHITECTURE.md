@@ -22,7 +22,7 @@ tests/compiler/passes/
 ├── conftest.py                     # RecordingDump fixture for rule-fired assertions
 ├── test_decompose_rules.py         # decomposition rules (structural + correctness)
 ├── test_optimization_rules.py      # optimization rules (structural + correctness)
-├── test_fusion_rules.py            # fusion rules (structural — LoopOp not numpy-executable)
+├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
 ├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
@@ -70,12 +70,11 @@ lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/
 
 ### Fusion (`passes/loop/lifting/` + `passes/loop/fusion/`)
 
-Lifting wraps each surviving tensor primitive (elementwise / reduce / scan /
-indexmap / gather) in a trivial single-op `LoopOp`. Fusion then splices
-adjacent `LoopOp` pairs by inlining the producer body at each consumer
-`Load` that reads it. `test_fusion_rules.py` runs lifting followed by
-fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the worklist and scope rules directly, while
-the pass tests exercise the resulting graph end to end.
+Lifting wraps each surviving tensor primitive (elementwise / reduce / scan / indexmap / gather) in a trivial
+single-op `LoopOp`. Fusion takes a maximal downstream region; separate terminal branches become output ports, and
+one splicer worklist inlines common producers once across all roots. `test_fusion_rules.py` runs lifting followed by
+fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
+directly, while the pass tests exercise the resulting graph through Loop and CUDA lowering.
 
 | Rule file                              | Op                         | Tested via                                                                         |
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|

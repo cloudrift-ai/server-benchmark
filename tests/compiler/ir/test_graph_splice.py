@@ -1,10 +1,8 @@
 """Tests for ``Graph.splice`` — single- and multi-output forms.
 
-``splice`` is the engine's only graph-rewrite primitive (every rule that
-returns a ``Graph`` fragment is applied through it). The single-output form
-redirects one node's consumers to ``fragment.outputs[0]``; the multi-output
-form (``output={old_id: frag_output_id}``) redirects several at once — used to
-inline one producer into all its consumers in a single rewrite.
+``splice`` is the engine's only graph-rewrite primitive. The single-output form redirects one buffer's consumers to
+``fragment.outputs[0]``; the multi-output form (``output={old_buffer: fragment_buffer}``) redirects several primary
+or secondary buffers at once, onto either separate fragment nodes or ports of one MIMO node.
 """
 
 from emmy.compiler.graph import Graph, Tensor
@@ -70,3 +68,25 @@ def test_splice_multi_output_redirects_each_consumer():
     assert g.nodes["b"].inputs == ["x"]
     # Graph outputs unchanged in identity (ua/ub kept their ids).
     assert g.outputs == ["ua", "ub"]
+
+
+def test_splice_restores_secondary_output_buffer_identity():
+    """Two old values may redirect to two ports of one MIMO fragment node."""
+    g = _make_fanout_graph()
+    frag = Graph()
+    frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    frag.add_node(
+        ElementwiseOp("negative"),
+        ["x"],
+        outputs=(Tensor("a", (8,)), Tensor("fm__out1", (8,))),
+        node_id="fm",
+    )
+    frag.outputs = ["fm", "fm__out1"]
+
+    receipt = g.splice(frag, consumed={"p", "a", "b"}, output={"a": "fm", "b": "fm__out1"})
+
+    assert receipt.redirected == {"a": "a", "b": "b"}
+    assert g.nodes["a"].buffer_names() == ("a", "b")
+    assert g.nodes["ua"].inputs == ["a"]
+    assert g.nodes["ub"].inputs == ["b"]
+    g.validate()

@@ -50,6 +50,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
   the producing node's ID), one or more output tensors, and optional hints.
+- **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal
+  branches may fuse into one MIMO kernel while retaining one output port per observable value.
 - **Intermediate representation (IR)** — A compiler's internal description of a program. Emmy uses several IR
   stages. Early stages resemble PyTorch; later stages explicitly describe loops, GPU threads, memory, and CUDA
   source.

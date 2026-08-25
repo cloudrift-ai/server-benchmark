@@ -29,6 +29,7 @@ from emmy.compiler.ir.pure.fold import (
     _operand_result_names,
     deep_defines,
     deep_reads,
+    edge_refs_axis,
     is_contraction,
     refs_axis,
     stmt_axis_names,
@@ -703,16 +704,16 @@ def _cone_value_key(name: str, defs: dict) -> tuple:
 def _bound_producer(e: Fold, free: tuple, n_name: str) -> Fold | None:
     """A producer the cone / statistic composes, re-read as a MATERIALIZED-operand contraction —
     or ``None`` when it is not one. Tried against each free axis in turn as the row (its columns
-    are the enclosing contraction's ``n_name``); an axis whose bind lands on a COMPUTED operand
-    is skipped, not fatal — which axis plays m is a property of the producer's own operand
-    indices, and a partition axis the producer never reads can bind spuriously as a broadcast
-    cone."""
+    are the enclosing contraction's ``n_name``). The chosen A edge must actually vary with that
+    row axis; this rejects a broadcast-axis bind without requiring A and B to be raw loads, so a
+    fused pointwise producer on either operand does not change recognition."""
     axes = frozenset(a.name for a in free) | {n_name, e.axis.name}
     for ax in free:
         if ax.name == n_name:
             continue
-        b = bind_bilinear(e, ax.name, n_name, axes, producer=True, unit_m=ax.name == "_um" and ax.extent == Dim(1))
-        if b is not None and not b[1] and isinstance(b[0].a, Load) and isinstance(b[0].b, Load):
+        unit_m = ax.name == "_um" and ax.extent == Dim(1)
+        b = bind_bilinear(e, ax.name, n_name, axes, producer=True, unit_m=unit_m)
+        if b is not None and not b[1] and (unit_m or edge_refs_axis(b[0].a, ax.name)):
             return b[0]  # an edge carries no projection epilogue — a hoisted producer declines
     return None
 

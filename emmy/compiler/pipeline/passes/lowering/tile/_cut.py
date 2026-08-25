@@ -21,6 +21,8 @@ workspace rule; a value seam keeps its leaf operand dtype — the same bytes the
 slab stored), and the piece bodies from ``Fold.lower`` with loop-invariant stmts placed at the
 shallowest level that defines their reads. Legality is structural (edge-iff-closed holds by
 construction); an open seam cannot be spelled because ``PLACE`` sites are tree children.
+When the parent is multi-output, every live port stays on the parent fragment and the graph splice restores each
+primary or secondary buffer identity after the cut.
 """
 
 from __future__ import annotations
@@ -457,13 +459,35 @@ def realize_cut(match, root: Node, tile_op, free: tuple, stores: tuple, site: Cu
         output=Tensor(ws, tuple(a.extent for a in axes), ws_dtype),
         node_id=ws,
     )
+    old_outputs = root.buffer_names()
+    parent_outputs = (out.name, *(f"{out.name}__placed_out{i}" for i in range(1, len(old_outputs))))
+    output_rename = dict(zip(old_outputs, parent_outputs, strict=True))
+
+    def retarget(stmt):
+        if isinstance(stmt, Write) and stmt.output in output_rename:
+            return Write(
+                output=output_rename[stmt.output],
+                index=stmt.index,
+                values=stmt.values,
+                value_dtype=stmt.value_dtype,
+                atomic=stmt.atomic,
+                swizzle=stmt.swizzle,
+            )
+        return stmt
+
+    if len(old_outputs) > 1:
+        parent_op = LoopOp(body=parent_op.body.map(retarget), name=parent_op.name)
+    parent_tensors = tuple(Tensor(new, tensor.shape, tensor.dtype) for new, tensor in zip(parent_outputs, root.outputs, strict=True))
+    parent_op.outputs = dict(zip(parent_outputs, parent_tensors, strict=True))
     frag.add_node(
         op=parent_op,
         inputs=[*(i for i in root.inputs if i in parent_reads), ws],
-        output=Tensor(out.name, out.shape, out.dtype),
+        outputs=parent_tensors,
         node_id=out.name,
     )
-    frag.outputs = [out.name]
+    frag.outputs = list(parent_outputs)
+    if len(old_outputs) > 1:
+        match.output = output_rename
     # A cut CONSUMES the kernel it replaces: both pieces drop its schedule row and its structural
     # identity, so each arrives at the identity stamp / ``020_schedule`` as a
     # brand-new kernel stamped and scheduled from its OWN body. They are built fresh here, so this

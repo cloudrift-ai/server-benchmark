@@ -5,13 +5,12 @@ Three public entry points wrap the same underlying ``_Splicer``:
 - :func:`splice_loop_ops` — pairwise producer / consumer helper.
 - :func:`splice_loops` — tag-generic N-way: caller supplies ``loops``
   (tag → ``LoopOp``), ``splice_edges`` ((origin_tag, src) →
-  (target_tag, target_output)), and ``input_remap``. Sink is derived
-  as the one tag that never appears as a splice target.
+  (target_tag, target_output)), and optional output roots.
 - :func:`splice_graph` — consumes a ``Graph`` fragment directly;
   classifies each Load by its node.inputs edge (LoopOp → splice,
   otherwise → external slot in first-seen order).
 
-Algorithm. Seed: every ``Write`` of the sink loop. Each iteration pops
+Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
 Resolution dispatches on stmt kind:
 
@@ -144,6 +143,7 @@ def splice_loops(
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
     splice_dtypes: dict[tuple[str, str], DataType] | None = None,
+    roots: tuple[tuple[str, str], ...] | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -158,23 +158,27 @@ def splice_loops(
     cannot bypass its tensor boundary.
 
     Non-splice Loads keep their original ``source`` buf names — buf
-    identity is global, no remap needed. The sink — the loop whose Writes
-    seed the traversal — is derived from ``splice_edges``: it's the
-    unique tag in ``loops`` that never appears as a splice target.
-    Returns ``None`` if the sink is ambiguous (cycle or multiple sinks)
-    or if any splice edge hits an unsupported pattern.
+    identity is global, no remap needed. ``roots`` selects the observable
+    Writes as ``(loop_tag, output_buffer)`` pairs. When omitted, every Write
+    of the unique loop that never appears as a splice target is selected.
+    Returns ``None`` if roots cannot be derived or any splice edge hits an
+    unsupported pattern.
     """
-    target_tags = {tag for tag, _out in splice_edges.values()}
-    candidates = [tag for tag in loops if tag not in target_tags]
-    if len(candidates) != 1:
+    if roots is None:
+        target_tags = {tag for tag, _out in splice_edges.values()}
+        candidates = [tag for tag in loops if tag not in target_tags]
+        if len(candidates) != 1:
+            return None
+        root_tag = candidates[0]
+        roots = tuple((root_tag, write.output) for write in loops[root_tag].writes)
+    if not roots:
         return None
-    root = candidates[0]
     try:
         return _Splicer(
             loops={tag: op.analyze() for tag, op in loops.items()},
             splice_edges=splice_edges,
             splice_dtypes=splice_dtypes or {},
-            root=root,
+            roots=roots,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -194,18 +198,22 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     source points at a non-``LoopOp`` node (e.g. ``InputOp``) becomes
     an external read, assigned a slot in first-seen order.
 
-    Returns ``(merged_op, external_node_ids)`` where ``external_node_ids``
-    is the list of non-``LoopOp`` input node ids in merged-slot order.
-    Returns ``None`` if the graph has zero / multiple outputs, the sink
-    is not a ``LoopOp``, or any splice edge hits an unsupported pattern.
+    Every graph output is a root, so separate terminal branches become one
+    multi-output LoopOp. Returns ``(merged_op, external_buffer_ids)`` where
+    the ids are the non-``LoopOp`` inputs in merged first-use order. Returns
+    ``None`` if an output is not produced by a ``LoopOp`` or any splice edge
+    hits an unsupported pattern.
     """
-    if len(graph.outputs) != 1:
-        return None
-    root_node = graph.producer(graph.outputs[0])
-    if root_node is None or not isinstance(root_node.op, LoopOp):
+    if not graph.outputs:
         return None
 
     loop_nodes = {n.id: n for n in graph.nodes.values() if isinstance(n.op, LoopOp)}
+    roots: list[tuple[str, str]] = []
+    for output in graph.outputs:
+        root_node = graph.producer(output)
+        if root_node is None or root_node.id not in loop_nodes:
+            return None
+        roots.append((root_node.id, output))
     splice_edges: dict[tuple[str, str], tuple[str, str]] = {}
     splice_dtypes: dict[tuple[str, str], DataType] = {}
     external_order: list[str] = []
@@ -219,16 +227,18 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
             # (Load.source is the producing node's id), not a positional input
             # index — so a single edge entry covers every Load that reads the
             # same producer.
-            if inp in loop_nodes:
-                splice_edges[(node.id, inp)] = (inp, inp)  # producer's Write.output is its node id
+            input_producer = graph.producer(inp)
+            if input_producer is not None and input_producer.id in loop_nodes:
+                producer_id = input_producer.id
+                splice_edges[(node.id, inp)] = (producer_id, inp)
                 producer = graph.buffer(inp)
-                producer_meta = loop_nodes[inp].op.analyze()
+                producer_meta = loop_nodes[producer_id].op.analyze()
                 producer_write = next((write for write, _ in producer_meta.writes if write.output == inp), None)
                 producer_value = producer_meta.defs.get(producer_write.value) if producer_write is not None else None
-                producer_origin = _ultimate_source(loop_nodes[inp].op)
+                producer_origin = _ultimate_source(loop_nodes[producer_id].op)
                 same_origin = producer_origin is _ultimate_source(node.op)
                 origin_outputs = getattr(producer_origin, "outputs", {})
-                private_output = producer_origin is not loop_nodes[inp].op and bool(origin_outputs) and inp not in origin_outputs
+                private_output = producer_origin is not loop_nodes[producer_id].op and bool(origin_outputs) and inp not in origin_outputs
                 if (
                     not same_origin
                     and not private_output
@@ -245,6 +255,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
         loops={nid: n.op for nid, n in loop_nodes.items()},
         splice_edges=splice_edges,
         splice_dtypes=splice_dtypes,
+        roots=tuple(roots),
     )
     if merged is None:
         return None
@@ -270,8 +281,7 @@ class _Splicer(LoopBuilder):
     Each registered loop has a tag (opaque string). ``splice_edges``
     identifies which Loads are inlined from another registered loop;
     all other Loads are re-indexed into the merged kernel's external
-    input list via ``input_remap``. ``root`` names the tag whose Writes
-    seed the traversal — typically the chain's final consumer.
+    input list. ``roots`` names the exact Writes that seed the traversal.
 
     Inherits body building (``insert`` / ``fresh`` / ``finish``) from
     ``LoopBuilder``; adds the worklist of pending demands and the dedup
@@ -287,7 +297,7 @@ class _Splicer(LoopBuilder):
         loops: dict[str, LoopMeta],
         splice_edges: dict[tuple[str, str], tuple[str, str]],
         splice_dtypes: dict[tuple[str, str], DataType],
-        root: str,
+        roots: tuple[tuple[str, str], ...],
     ) -> None:
         used: set[str] = set()
         for meta in loops.values():
@@ -296,7 +306,7 @@ class _Splicer(LoopBuilder):
         self.loops = loops
         self.splice_edges = splice_edges
         self.splice_dtypes = splice_dtypes
-        self.root = root
+        self.roots = roots
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
         # emit scope it lands at in the merged body, and the σ restricted
@@ -318,7 +328,7 @@ class _Splicer(LoopBuilder):
         # at construction time, not here.
         return LoopOp(body=self.finish())
 
-    # -- Seed: every root Write, with its value queued ----------------------
+    # -- Seed: every selected root Write, with its value queued -------------
 
     @staticmethod
     def _write_observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
@@ -328,12 +338,28 @@ class _Splicer(LoopBuilder):
         return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
 
     def _seed(self) -> None:
-        root = self.loops[self.root]
-        for w, scope in root.writes:
+        for root_tag, output in self.roots:
+            root = self.loops.get(root_tag)
+            if root is None:
+                raise _NotSupported(f"root names unknown loop {root_tag!r}")
+            found = next(((write, scope) for write, scope in root.writes if write.output == output), None)
+            if found is None:
+                raise _NotSupported(f"root loop {root_tag!r} has no Write to {output!r}")
+            w, scope = found
             if self._write_observes_running_accumulator(root, w, scope):
                 raise _NotSupported(f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced")
-            v_bound = self._ensure_dep(w.value, self.root, Sigma(), scope)
-            self.insert(Write(output=w.output, index=w.index, value=v_bound), scope)
+            v_bound = self._ensure_dep(w.value, root_tag, Sigma(), scope)
+            self.insert(
+                Write(
+                    output=w.output,
+                    index=w.index,
+                    value=v_bound,
+                    value_dtype=w.value_dtype,
+                    atomic=w.atomic,
+                    swizzle=w.swizzle,
+                ),
+                scope,
+            )
 
     # -- Dep binding: look up or queue --------------------------------------
 

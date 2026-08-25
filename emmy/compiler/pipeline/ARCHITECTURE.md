@@ -183,7 +183,7 @@ Multi-node patterns only fire when each intermediate node has exactly one consum
 `match_pattern(graph, pattern) → list[Match]` walks every topo-ordered seed. Overlapping matches are allowed — the
 rewriter exits after the first successful rewrite per iteration, so overlap is just candidate enumeration.
 `Match.nodes` maps each pattern entry's name to the matched `Node`. `Match.consumed` and `Match.output` are
-overridable by the rewrite function, to control which nodes the splicer removes and which node's edges get rewired.
+overridable by the rewrite function, to control which nodes the splicer removes and which buffer edges get rewired.
 Matches retain the watched node objects themselves, so `Match.is_alive()` rejects removal followed by a different
 node at the same graph id even when the Python allocator would otherwise recycle an integer object address.
 
@@ -271,7 +271,8 @@ the kernel's measured mma rows because the warp atom gate read placeholder dtype
 The return type discriminates the rewrite flavor:
 
 - **Functional** — returns a `Graph` fragment, spliced in place of `match.output` (defaults to `match.root_node_id`).
-  Fragment `InputOp` nodes reference existing graph nodes by id; non-Input nodes get fresh ids.
+  A dictionary maps several old buffers, including secondary outputs, to fragment output buffers in one splice.
+  Fragment `InputOp` nodes reference existing graph buffers by id; non-Input nodes get fresh ids.
 - **In-place** — returns an `Op`. The engine assigns it to `root.op` directly, preserving the node id, inputs list,
   output Tensor and hints. The lowering rules use this because `KernelOp.arg_order` / `CudaOp.arg_order` embed the
   original node id as the output buffer name — a fresh id would break the generated kernel's buffer binding.
@@ -289,12 +290,12 @@ Most rules satisfy this implicitly via op-type changes (`LoopOp` → `TileOp`); 
 
 ### How fragments are spliced in (`engine._apply_replacement`)
 
-1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph node (external reference);
-   non-Input nodes are added with fresh ids.
-2. `replace_node(match.output or match.root_node_id, new_output)` rewires all consumers (and `graph.outputs` slots)
-   from the old output to the fragment's output id.
-3. Merge hints from every consumed node into the new output.
-4. Remove consumed nodes and run `_remove_orphans` to drop any now-dangling constants / inputs.
+1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph buffer (external
+   reference); non-Input nodes are added with fresh ids.
+2. Rewire each requested old buffer's consumers and `graph.outputs` slots to its fragment output buffer.
+3. Merge redirected owners' hints onto their new producers; when all ports belong to one multi-output node, merge
+   the dissolved internal nodes there too.
+4. Remove consumed nodes, restore each redirected primary or secondary buffer's old identity, and drop orphans.
 
 ## Part 2: Forks — how choices are represented
 
@@ -1686,7 +1687,7 @@ of algebraic rewrites they may apply are documented there too.
 | `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
-| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` maximally splices adjacent pairs and closed reconvergent producer DAGs without consulting recognition, estimated work, or schedule support. Only structural legality and decided-cut preservation stop a merge; placement owns every later fused-versus-cut choice. `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
+| `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting recognition, estimated work, or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality and decided-cut preservation stop a merge; placement owns every later fused-versus-cut choice. `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/recognize/`         | Empty (retired) — recognition is classification of the lifted Fold tree (`lowering/tile/_classify`), so the loop dialect carries no pattern recognizers. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |

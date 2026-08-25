@@ -543,9 +543,11 @@ folds may consume its result without hoisting it to an operand edge. `Fold.loop`
 the corresponding nested Loop IR.
 
 The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general local
-canonicalization, including semiring contractions and scoped lambda equivalence; it performs no whole-tree SDPA
-matching. There is no Tile IR classification or placement-cut phase. Scheduling annotates the canonical Fold sites
-through `TileOp.schedule`; unsupported shapes remain unmapped.
+canonicalization, including semiring contractions and scoped lambda equivalence. A separate pre-scheduling rewrite
+joins equivalent maximum and exp-weighted sibling Folds into the general `(maximum, denominator, expectations…)`
+twisted carrier; softmax and masked or unmasked SDPA are arity variants, not separate matchers. There is no Tile IR
+classification or placement-cut phase. Scheduling annotates the rewritten Fold sites through `TileOp.schedule`;
+unsupported shapes remain unmapped.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.
 

@@ -71,10 +71,10 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_schedule` maps the free axes and enumerates schedule slices over the Fold sites stored by total lift. It first
-chooses the kernel's worker inventory, then forms the product of the legal `TILE`, `REDUCE`, `STAGE`, and `RASTER`
-values for those sites. Keys use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in
-`TileOp.schedule`.
+`015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `020_schedule` then
+maps the free axes and enumerates schedule slices over the resulting stored Fold sites. It chooses the kernel's worker
+inventory, then forms the product of the legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values for those sites. Keys use
+the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
@@ -195,8 +195,10 @@ classify a shape, extract a contraction, pair softmax statistics, hoist a nested
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
 without a placement or value-cut analysis.
 
-There is no Tile IR classification pass, SDPA matcher, derived fused view, or placement-cut realizer. `020_schedule`
-enumerates only the canonical Fold tree stored by `010_lift`. Unsupported scheduling shapes remain unmapped; this is
+`015_twisted` is a separate algebraic rewrite over the canonical tree. It clusters equivalent score lambdas and joins
+a maximum with additive exp-weighted components into the one `(maximum, denominator, expectations…)` twisted monoid.
+Softmax, SDPA, and causal SDPA differ only in carrier arity and score/value lambdas; there is no operation-family
+matcher. `020_schedule` enumerates the rewritten stored tree. Unsupported scheduling shapes remain unmapped; this is
 the intentional recovery boundary while schedule support is rebuilt over the complete tree.
 
 ## The divide rule: `split` an iteration axis

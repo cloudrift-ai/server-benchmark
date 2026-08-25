@@ -25,6 +25,7 @@ tests/compiler/passes/
 ├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
 ├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
+├── test_twisted_rewrite.py         # general exp-family Tile rewrite: softmax and masked/unmasked SDPA
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
 ├── test_register_tile_rules.py     # register-tile lowering rules
@@ -100,6 +101,13 @@ numpy backends in three places:
   for the CUDA lane) compiled end-to-end and compared against PyTorch
   eager. The `_cpu` variant runs `LoopBackend` + CPU eager (always
   on, ~3s); the `_cuda` variants are gated by `@requires_cuda`.
+
+### Tile lowering (`passes/lowering/tile/`)
+
+`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
+then checks the resulting carrier arity and the derived contraction sites. The generated carrier's numerical laws are
+covered independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax
+and attention accuracy remain covered by the e2e suites.
 
 ## Adding a New Rule Test
 

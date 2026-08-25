@@ -1,8 +1,8 @@
 """Canonical forms for Tile IR Fold trees.
 
 Normalization is a construction invariant of :class:`TileOp`, like body normalization is for
-Loop IR.  The rewrites here are local algebra and binding rules; graph shapes such as SDPA belong
-to later recognition passes.
+Loop IR. The rewrites here are local algebra and binding rules; nonlocal Fold clustering belongs
+to later algebraic rewrite passes.
 """
 
 from __future__ import annotations
@@ -14,8 +14,68 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, component_ops, is_contraction
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Assign, Body, Load, sort_commutative_args
 from emmy.compiler.ir.stmt.body import _member_reads
+
+
+def canonical_body_order(body: Body) -> Body:
+    """Return a deterministic dependency-respecting order for a pure ANF body.
+
+    Independent statements are ordered by a name-independent structural token.  This makes
+    alpha-equivalence insensitive to harmless interleaving and gives structural identity the
+    same canonical ordering rule.
+    """
+    stmts = tuple(body)
+    if len(stmts) <= 1:
+        return body
+
+    def token(stmt) -> tuple:
+        op = getattr(stmt, "op", None)
+        return (
+            type(stmt).__name__,
+            getattr(op, "name", "") if op is not None else "",
+            stmt.input if isinstance(stmt, Load) else "",
+            len(getattr(stmt, "args", ()) or ()),
+        )
+
+    def reads(stmt) -> set[str]:
+        out = set(stmt.deps())
+        for nested in stmt.nested():
+            for child in nested:
+                out |= reads(child)
+        return out
+
+    definitions = [
+        set(stmt.defines()) | {name for nested in stmt.nested() for child in nested for name in child.defines()} for stmt in stmts
+    ]
+    dependencies = [reads(stmt) for stmt in stmts]
+    placed = []
+    remaining = list(range(len(stmts)))
+    while remaining:
+        remaining_definitions = {name for index in remaining for name in definitions[index]}
+        ready = [index for index in remaining if not dependencies[index] & (remaining_definitions - definitions[index])]
+        if not ready:
+            return body
+        selected = min(ready, key=lambda index: (token(stmts[index]), index))
+        placed.append(stmts[selected])
+        remaining.remove(selected)
+    return Body(placed)
+
+
+def _lambda_members(body: Body):
+    """Walk every binding inside a lambda, including Fold operand edges and algebra bodies."""
+    for stmt in canonical_body_order(body):
+        yield stmt
+        if isinstance(stmt, Fold):
+            for edge in stmt.operands:
+                if isinstance(edge, Fold):
+                    yield from _lambda_members(Body((edge,)))
+                else:
+                    yield edge
+            yield from _lambda_members(stmt.lift.body)
+        else:
+            for nested in stmt.nested():
+                yield from _lambda_members(nested)
 
 
 def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
@@ -28,9 +88,12 @@ def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
     if any(not stmt.pure for stmt in fn.body):
         raise ValueError("lambda canonicalization requires a pure body")
 
-    reads = set().union(*(_member_reads(stmt) for stmt in fn.body)) if fn.body else set()
-    axis_order = tuple(dict.fromkeys(axes))
-    active_axes = tuple(name for name in axis_order if name in reads or name in fn.params)
+    body = canonical_body_order(fn.body)
+    members = tuple(_lambda_members(body))
+    reads = {name for stmt in members for name in _member_reads(stmt)}
+    bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
+    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
+    active_axes = tuple(name for name in axis_order if name in reads or name in fn.params or name in bound_axes)
     names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
 
     p = 0
@@ -39,7 +102,7 @@ def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
             names[name] = f"_p{p}"
             p += 1
     v = 0
-    for stmt in fn.body.iter():
+    for stmt in members:
         for name in stmt.defines():
             if name not in names:
                 names[name] = f"_v{v}"
@@ -54,9 +117,11 @@ def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
         name = names.get(axis.name)
         return replace(axis, name=name) if name is not None else axis
 
+    renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in body)
+    canonical = Body(stmt if isinstance(stmt, Fold) else sort_commutative_args(Body((stmt,)))[0] for stmt in renamed)
     return Lambda(
         params=tuple(rename(name) for name in fn.params),
-        body=Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in fn.body),
+        body=canonical,
         results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
     )
 
@@ -198,6 +263,7 @@ def normalize_fold_tree(root, axes: Iterable[str] = ()):
 
 
 __all__ = [
+    "canonical_body_order",
     "lambda_equivalent_clusters",
     "normalize_fold_tree",
 ]

@@ -31,55 +31,12 @@ from emmy.compiler.ir.pure.algebra import rename_combine
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.tile.normalize import canonical_body_order
 from emmy.compiler.structural import digest
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the
 #: ``cached_property`` entries, set via ``object.__setattr__`` like they are).
 _CACHE_ATTR = "_structural_cache"
-
-
-def _canon_order(stmts: tuple) -> tuple:
-    """A DETERMINISTIC dependency-respecting order for an ANF stmt sequence — the hash-time
-    body-order canonicalization: Kahn's algorithm over the def/use edges, ready stmts
-    picked by a NAME-INDEPENDENT token (stmt kind, op spelling, buffer, arity), ties keeping the
-    original relative order. Two α-equivalent lift bodies that differ only in the interleaving of
-    independent stmts canonicalize to one order; the stored term itself is never reordered — the
-    lowered nest depends on storage order, identity does not."""
-    stmts = tuple(stmts)
-    if len(stmts) <= 1:
-        return stmts
-
-    def token(s) -> tuple:
-
-        op = getattr(s, "op", None)
-        return (
-            type(s).__name__,
-            getattr(op, "name", "") if op is not None else "",
-            s.input if isinstance(s, Load) else "",
-            len(getattr(s, "args", ()) or ()),
-        )
-
-    def reads(s) -> set:
-        out = set(s.deps())
-        for b in s.nested():
-            for c in b:
-                out |= set(reads(c))
-        return out
-
-    defs_of = [set(s.defines()) | {d for b in s.nested() for c in b for d in c.defines()} for s in stmts]
-    read_of = [reads(s) for s in stmts]
-    placed: list = []
-    done: set = set()
-    remaining = list(range(len(stmts)))
-    while remaining:
-        ready = [i for i in remaining if not (read_of[i] & {n for j in remaining if j != i for n in defs_of[j]} - done)]
-        if not ready:
-            return stmts  # a cycle (state-reading merge material) — keep the stored order
-        pick = min(ready, key=lambda i: (token(stmts[i]), i))
-        placed.append(stmts[pick])
-        done |= defs_of[pick]
-        remaining.remove(pick)
-    return tuple(placed)
 
 
 def structural_key(root) -> str:
@@ -145,7 +102,7 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
     if node._contraction is None:
         # The bilinear reading's lift is generated, so only the EDGES canonicalize (reordering a
         # contraction's multiply stmts would be meaningless and would move the key).
-        body = _canon_order(body)
+        body = tuple(canonical_body_order(Body(body)))
     if node.axis is None:
         # The zero-axis reading names its binder first, then walks the sources — the order the
         # projection wrapper always used.

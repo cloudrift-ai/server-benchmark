@@ -18,9 +18,8 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
-import re
-
 from emmy.compiler.ir.axis import AxisRole
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
@@ -126,40 +125,16 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
 
 
-def _cone_names(stmts: list, mapping: dict) -> None:
-    """Number every name a cone BINDS, deep — the stmts' defs plus each nested loop's iteration
-    var — in walk order. A composed cone's producer node carries its own axis and temps, and two
-    separately-traced copies of one score differ in exactly those, so identity has to see through
-    them (the key digest cannot: axis names are recognition-canonical and part of it)."""
-    for s in stmts:
-        if isinstance(s, Loop):
-            mapping.setdefault(s.axis.name, f"_c{len(mapping)}")
-        for n in s.defines():
-            mapping.setdefault(n, f"_c{len(mapping)}")
-        for b in s.nested():
-            _cone_names(list(b), mapping)
-
-
-def _cone_canon(stmts: list, result: str, axis_name: str) -> str:
-    """An α-renamed rendering of a score cone — every bound name canonicalizes in walk order
-    (:func:`_cone_names`), the loop axis to a fixed placeholder, free names verbatim — so two
-    recomputed score cones compare by content. A producer NODE in the cone renders through its own
-    lowered nest, so a composed score compares like any other."""
-    flat = [t for s in stmts for t in (s.lower() if isinstance(s, Fold) else [s])]
-    mapping = {axis_name: "_ax"}
-    _cone_names(flat, mapping)
-    text = repr(tuple(flat)) + "|" + mapping.get(result, result)
-    for old, new in mapping.items():
-        text = re.sub(f"'{re.escape(old)}'", f"'{new}'", text)
-    return text
-
-
 def same_score_cone(a, b, a_axis: str, b_axis: str) -> bool:
     """Whether two score cones are the SAME program modulo their own bound names and the axis each
     streams — asked of two nodes that reached lowering separately (a split-K partition re-indexes
     the weight's keys while the statistic keeps spanning the whole axis, and a lowering that folds
     the two passes into one sweep may only do so while they still read the same keys)."""
-    return _cone_canon([a], operand_name(a), a_axis) == _cone_canon([b], operand_name(b), b_axis)
+    from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters  # noqa: PLC0415
+
+    left = Lambda(params=(a_axis,), body=Body((a,)), results=(operand_name(a),))
+    right = Lambda(params=(b_axis,), body=Body((b,)), results=(operand_name(b),))
+    return lambda_equivalent_clusters(((left, (a_axis,)), (right, (b_axis,)))) == ((0, 1),)
 
 
 def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:

@@ -1,0 +1,194 @@
+# DeepSeek V4 Flash 0731 through `emmy serve` on 16× V100 (TP8 × PP2)
+
+Goal: boot `deepseek-ai/DeepSeek-V4-Flash-0731` through the Emmy vLLM plugin on the 16× V100 SXM3 host — Emmy compiled
+kernels for the hyper-connection stream mixing, norms, shared expert and routed experts; the pinned 1Cat sm_70 fork
+(`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608`) supplying paged MLA attention and the serving shell —
+then A/B against the plain 1Cat container at an equal serving envelope.
+
+**Expectation setting, up front.** At this seam the Emmy arm replaces the fork's already-fused mHC kernels and its
+TurboMind MXFP4 MoE. With fp8 experts (2× the bytes, no fp8 tensor cores on Volta) and per-hit-expert dispatch, the
+first working arm should be expected to LOSE the A/B. The deliverable of stages 1–5 is a *working, measured* lane and
+the integration machinery; a *competitive* lane additionally needs stage 6 (MXFP4 expert inputs), and even that is a
+hypothesis until profiled. The A/B must rerun the 1Cat baseline at the same shorter context — the published
+30.79 tok/s was measured at a 1M-token envelope the Emmy arm cannot hold.
+
+## Current state (already landed on this branch)
+
+- The attention-sublayer seam: `pre(streams[T, hc·H]) → x[T, H]`, `post(attn_out[T, H], streams) → (mixed, xn,
+  mix[T, hc])`, routed experts on the MoE third seam, closed by `place_routed_streams`. CPU-proven against the eager
+  HF layer (sliding/HCA/CSA × hash/top-k). One twin profile per model (attention and routing are outside the twins).
+- Serving-twin capture + `eval golden` audit accept DeepSeek V4; on the target host the `pre` and `expert` twins
+  realize 20/20 (m1 / m32 / m4096 / dynamic) on sm_70.
+- Checkpoint facts: DeepSeek-native names (`layers.N.attn.wq_a` …), trunk fp8-e4m3 with `F8_E8M0` [128, 128] block
+  `.scale` siblings, routed experts MXFP4 (`I8 [out, in/2]` nibbles + e8m0 per-32 scales), `hc_mult` 4, 43 layers,
+  256 experts × top-6 + 1 shared, 3 hash-router layers. The snapshot ships a lossless MXFP4 → fp8+e8m0[128,128] cast
+  (`inference/convert.py`).
+- Fork facts: `DeepseekV4Attention.forward(positions, normed_x[T, H]) → [T, H]` is one self-contained sublayer whose
+  projections, compressors, indexer, FP8 paged insert and grouped output projection are fused with its own paged
+  caches (SWA + compressor + indexer cache layers registered by prefix); sm_70 requires `--dtype half` and the
+  `VLLM_SM70_*` env. There is no API accepting externally computed compressed latents.
+
+## Memory budget per GPU (32 GB; TP8 × PP2 ⇒ 21/22 layers per stage; 256 experts sharded 8-way per TP group)
+
+Worst (22-layer) stage, 32 experts/rank/layer, `w1+w2+w3` = 25.17 MB values per expert:
+
+| item | fp8 experts | MXFP4 experts (+e8m0 per-32 scales) |
+| --- | ---: | ---: |
+| routed experts (sharded) | ~17.7 GB | ~9.4 GB |
+| shared experts + hc/norm params (replicated) | ~0.6 GB | ~0.6 GB |
+| fork attention weights (TP-sharded + replicated parts) | ~1.0 GB | ~1.0 GB |
+| PP0 embedding (full vocab, fp16, runner-resident today) | ~1.1 GB | ~1.1 GB |
+| Emmy activation arenas (capacity 4096 × hc·H carrier) | ~1.5 GB | ~1.5 GB |
+| vLLM + CUDA context + fork workspaces | ~2–3 GB | ~2–3 GB |
+
+KV capacity is NOT derivable from a bytes/token constant: sliding layers cache a 128-token window and HCA/CSA layers
+cache compressed entries, which is how the recorded MXFP4 baseline allocates 4.2M tokens of KV per stage. Measure at
+the first full boot (weight bytes, arenas, non-Torch allocations, GPU blocks, KV tokens per stage). Qualify initially
+at 4K–32K `--max-model-len`; attempt the recipe's 1M only after that measurement proves capacity on both stages.
+
+## Stage −1 — freeze and probe the pinned fork contract (cheap; before everything)
+
+Resolve the base image to an immutable digest and record its source SHA. Inside that exact image: contract-test the
+attention class (constructor args, forward signature, cache-layer registration and prefix rules, `topk_indices_buffer`
+and aux-stream ownership, parameter `weight_loader`s, `WeightsMapper`, quantization config); install the Emmy wheel +
+`cupy-cuda12x`; probe `nvrtcVersion` and compile a trivial sm_70 kernel through the same cupy path Emmy uses (add the
+CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in the image); confirm the unchanged plain
+1Cat model still boots. Stop the plan here if a required fork API is absent.
+
+## Stage 0 — unblock the `post` twin (compiler; hard prerequisite)
+
+The `post` twin (and any fresh DeepSeek V4 layer trace, per `recipes/DeepSeek-V4-Flash-0731/RESULTS.md`) does not
+terminate in the Loop splicer's merge-region dependency resolution (`ir/loop/splicer.py::_ensure_dep` under
+`build_merged_region`, reached from `prefusion/010_dissolve_narrowing`): a single-profile lowering at the real dims
+(hc 4, hidden 4096) ran 3 days at 100 % CPU on the target host without emitting the inventory (2026-08-21 → 08-25).
+Serving cannot exist without a compiled `post` program, and no release gate can pass without its golden realization.
+
+1. Profile one stalled lowering (py-spy dump already localizes it) → identify the quadratic/exponential resolution.
+   → verify: a written note naming the complexity driver (region size × dependency re-resolution?).
+2. Fix or bound it (memoize `_ensure_dep`, cap merge-region candidates, or an ordering change) without changing
+   emitted Loop IR for the existing test corpus. → verify: `make test` green; the DeepSeek `post` twin lowers in
+   minutes; the legacy full-layer golden stays regression-green (its 279/279 is NOT evidence the post twin exists).
+3. Rerun `emmy trace --serving-twins`; `emmy run --golden` the full twin set on sm_70; the serving-twin golden now
+   contains every `pre`/`post`/`expert` target of the release realization matrix.
+   → verify: every `post` realization (m1/m32/m4096/dynamic) compiles and runs finite, exit 0.
+
+## Stage 1 — loader lane: read the published checkpoint (CPU-testable)
+
+Extend the quantized split loader (`load_quantized_split` + `loader/quant.py`) with one DeepSeek-native lane:
+
+1. Key translation native → HF (`attn.wq_a` → `self_attn.q_a_proj` etc.) — reuse transformers' checkpoint
+   conversion mapping for `deepseek_v4`, not a hand-rolled copy. `.scale` joins `_scale`/`_scale_inv` as a sibling
+   form.
+2. e8m0 scales: `F8_E8M0` reads as f32 `2^(e−127)` (torch's `.float()` on `float8_e8m0fnu` is the conversion).
+3. Routed experts: per-expert `w1/w3` (gate/up) and `w2` (down) stack into the E-leading store the expert programs
+   feed from. Bootstrap route: apply the snapshot's lossless fp4 → fp8+e8m0[128,128] cast per expert AT LOAD (no
+   converted checkpoint copy on disk) into the existing fp8 expert-input lane. Keep the cast byte-exact with the
+   reference `cast_e2m1fn_to_e4m3fn`.
+4. `expert_range=(lo, hi)` filter so a rank reads only its expert shard (a PP stage's full fp8 expert set is
+   ~138 GB of host RAM otherwise), alongside the existing `layer_range`.
+5. Trunk fp8: dequantize to fp16 values at load (existing lane), including the grouped `wo_a`'s [128,128] blocks.
+
+→ verify: a synthetic tiny native-format checkpoint (tests, mirroring `test_load_quantized_split_*`) loads to a twin
+whose eager forward matches `load_dequantized_state_dict` values; the fp4→fp8 cast matches the reference converter in
+raw fp8 payload bytes AND raw e8m0 scale bytes across every fp4 nibble code, block-boundary exponents, and random
+tensors; `expert_range` applies before stacking/conversion and peak host memory proves no rank materializes non-local
+experts; on the host, one real layer's loaded expert slice matches the reference converter's output.
+
+## Stage 2 — runner: DeepSeek widths + TP expert sharding
+
+1. Seam plumbing in `EmmyGenRunner.from_model`: DeepSeek `_meta` (no `q_proj`; carrier `hc·H`, attention width `H`),
+   the 3-output post program (`mixed`, `xn`, `mix`) routed through `_route_post_device` (per-output dest shapes —
+   the rider path currently assumes residual-width outputs), `place_routed_streams` as the combine closer,
+   `input_ids` reaching the hash-router layers' gate, embed broadcast to `hc_mult` streams before layer 0, and
+   `final_norm` = `hc_head` collapse + RMSNorm. The carrier contract is explicit: `runner.carrier_size = hc_mult·H`
+   sizes the activation arenas AND the plugin's PP intermediate-tensor factory (which today allocates
+   `config.hidden_size`); every PP boundary transports the flattened carrier; only the last rank applies `hc_head`.
+2. TP expert sharding: `moe["inputs"]` holds the local expert slice + a global→local index map; the router runs
+   replicated (same weights, deterministic); `combine_routed_experts` skips non-local experts; the plugin all-reduces
+   the routed `[T, H]` partial (vLLM's tensor-parallel all-reduce) before `place_routed_streams`. `mixed`/`xn` stay
+   replicated compute. Eager routed path only at first; the fixed-slot capture tier (per-rank tables) is a follow-up,
+   so the first boots serve `--enforce-eager`.
+
+→ verify: a 2-rank CPU/GPU unit test proving sharded-combine + all-reduce equals the single-rank oracle
+(`combine_routed_experts` full set); a PP2 test asserting the intermediate-tensor factory, send/receive tensors and
+residual arenas all use `hc_mult·H` while attention and expert inputs stay `H`; the existing gen_runner GPU stitch
+tests stay green; a single-GPU tiny-config DeepSeek stitch test (seam programs + torch attention stand-in) matches
+eager.
+
+## Stage 3 — plugin: host the fork's attention inside `EmmyGenModel`
+
+1. A DeepSeek branch that constructs the fork's `DeepseekV4Attention` per layer (needs `vllm_config`, the shared
+   `topk_indices_buffer`, aux streams, unique prefixes so its SWA/compressor/indexer cache layers register in the
+   static forward context and get KV allocations), instead of vLLM `Attention` + RoPE.
+2. Weight routing: an explicit ownership table over checkpoint keys — fork attention (via the pinned fork's
+   `WeightsMapper` + each destination's own `weight_loader`: `fused_wqa_wkv` ← `wq_a`+`wkv`, `compressor.
+   fused_wkv_wgate` ← `wkv`+`wgate`, `attn_sink` head-narrowing, indexer params), Emmy trunk/shared/routed programs,
+   `lm_head` ← `head.weight`, embedding ← `embed.weight`. Loading fails loudly if a fork-owned attention parameter is
+   missing, double-loaded, or an attention checkpoint key stays unclaimed. Fork attention keeps its pinned fp8 quant
+   config; Emmy owns trunk/expert conversion. Speculative/MTP serving is rejected at boot.
+3. Forward: carrier `[T, hc·H]` as the PP intermediate tensor; per layer `pre → fork attention (positions, x) →
+   post → local routed combine → all-reduce → place`; `hc_head` + norm on the last rank.
+4. Optional de-risk hybrid, decided UP FRONT (it must be algebraically exact): Emmy `post` already places the
+   shared expert, so a hybrid may only call a fork operation of the form `native_routed(xn, input_ids) → routed[T,H]`
+   — the fork's routed experts WITHOUT its shared expert and mHC placement. If the pinned fork only exposes the full
+   `DeepseekV4MoE` (shared expert included), either add a verified Emmy `post` variant that omits the shared expert,
+   or drop the hybrid. Silently keeping both double-counts the shared expert.
+
+→ verify, in grades: (a) a one-process attention contract test — unique absolute layer prefixes, every fork cache
+spec registered; (b) a TP2×PP2 small-config distributed test; (c) the TP8×PP2 target-host boot serving mixed
+prefill/decode requests (not just `/health`); (d) layer-level numerical agreement vs the eager seam at predefined
+atol/rtol, then deterministic greedy token-ID agreement on a fixed corpus spanning HCA/CSA/hash layers, multiple
+expert destinations, PP transport, and mixed scheduling — token IDs either agree or they do not. Also verify
+`emmy serve`'s MoE probe recognizes `n_routed_experts` (or pin capture sizes + eager in the release config).
+
+## Stage 4 — image + release plumbing
+
+1. Build the plugin image FROM the immutable 1Cat digest with `cupy-cuda12x`, with its own image identity — do not
+   inherit the Makefile's default `v0.23.0` version/tag for a 1Cat 1.2.3 base. Label the 1Cat digest + source SHA,
+   Emmy SHA, checkpoint revision, and CUDA/NVRTC versions. The stage −1 NVRTC probe decides whether the serve
+   entrypoint needs the CUDA-12 `libnvrtc` preload for sm_70.
+2. Env passthrough: the serve image/env-file plumbing gains the fork's `VLLM_SM70_*` variables and
+   `--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp` in `SERVE_EXTRA_ARGS`.
+3. Headroom sweep on the host seals `docker/vllm-emmy-serve/models/deepseek-v4-flash-0731.env` (the sweep creates
+   it; do not author widths off-host); record the serving golden; warm → bake → verify per the release skill.
+
+→ verify: `make serve-config / serve-goldens / serve-warm / serve-image / serve-verify` pass on the host; the baked
+TP8×PP2 image cold-starts offline and EVERY one of the 16 workers reports its pack hit (today's verify accepts one
+`pack hit` line — insufficient for 16 workers), the cubin set is unchanged, and no request-time Triton JIT occurs.
+Build/bake/verify only; registry publication is a separate approval.
+
+## Stage 5 — A/B
+
+`emmy bench` two arms at the SAME envelope (same `--max-model-len`, mnbt, concurrency, KV dtype, warmups,
+immutable image digests and checkpoint revision; the existing serving_v100_sxm3 protocol, shorter context; one
+priming repeat + three steady repeats): the Emmy image vs plain 1Cat. Profile in a separate run — profiling the
+fork's multi-stream execution perturbs the A/B. Report output tok/s, TTFT,
+TPOT with repeat spread; archive per the experiment conventions (no credentials or VM identifiers). Publish the
+honest conclusion even if (as expected) the Emmy arm loses; include a per-phase profile (expert dispatch vs
+attention vs mHC) so stage 6's hypothesis is grounded.
+
+## Stage 6 (performance, optional) — MXFP4 expert inputs
+
+An input-sourced fp4 spelling in the compiler (`spell_quantized_inputs` fmt "fp4x2": nibble unpack + e8m0 per-32 scale
+fused into the expert contraction; only the checkpoint's actual merged layout, clamp preserved), halving expert bytes
+back to the fork's footprint. Only worth building if stage 5's profile shows expert weight streaming dominates and the
+fused-unpack GEMM can plausibly beat TurboMind's on Volta. Tune with `emmy tune` against the twin inventory.
+
+## Risks
+
+- Stage 0 is open-ended compiler work; nothing below it ships without it.
+- The fork's attention inside a foreign model class is the largest integration unknown (cache registration,
+  metadata, capture breaks, `VLLM_MULTI_STREAM_GEMM` aux streams); mitigated by the stage-3 hybrid boot.
+- Per-hit-expert dispatch at top-6 × 43 layers is a known latency wall (~0.23 ms/launch framing); the fixed-slot
+  tier only covers T=1 and needs per-rank tables under sharding.
+- Replicated mHC/norm/shared-expert compute across 8 TP ranks wastes ~7/8 of that compute; acceptable at first
+  (it is small next to experts), but it caps the ceiling.
+- vLLM/fork version drift: everything pins to the one 1Cat image; a fork bump reopens the weight-mapper and
+  attention-API assumptions.
+
+## Effort
+
+Stage −1: 1–2 days. Stage 0: 2–7+ days (genuinely open-ended; the observed stall is 3 days without terminating).
+Stage 1: 2–4 days. Stage 2: 3–5 days. Stage 3: 5–10 days (the risk pool). Stage 4: 2–4 days on-host. Stage 5:
+1–2 days. A measured eager fp8 A/B is realistically 3–5 engineering weeks; adding stage 6 (MXFP4 + tuning,
+1–3 weeks) makes ~5–8 weeks, with stage 0 and the fork ABI as the dominant uncertainty.

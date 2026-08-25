@@ -7,10 +7,8 @@ compiles and verifies on sm_89 AND sm_120; ptxas refuses the Blackwell ``.kind::
 on both). Enumeration is precision-gated (``FP8_MMA`` / the ``FAST_MATH`` umbrella — accumulation
 precision is arch-dependent, reduced on sm_89) and structurally gated (materialized f8 A, every
 channel at the same f8 dtype, static K); a ``TILE`` pin naming the atom bypasses the precision
-gate only. The W8A8 form arrives by graph algebra: ``to_f8e4m3`` (the encode twin of the M2b
-decode) materializes the quantized activation, and ``bind_bilinear``'s mul-hoist — now
-side-generic — binds BOTH decode cones as raw f8 loads with the two scale factors composed on the
-f32 accumulator epilogue.
+gate only. The W8A8 form arrives by graph algebra after ``to_f8e4m3`` materializes the quantized
+activation.
 """
 
 from __future__ import annotations
@@ -23,33 +21,19 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, decode_f8, encode_f8
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Placement, TilePlan, Workers
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
-from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 from tests.compiler.helpers import requires_cuda
-
-
-def _bind(loop, m: str = "m", n: str = "n"):
-    """The tree-native bind: the loop lifts through the ONE parser, then the semiring binder —
-    ``(contraction, projection epilogue)`` (asserted non-None here; the mul-hoist shapes bind)."""
-    fold = fold_from_loop(_stamp_axes(loop))
-    assert fold is not None, "the dequant loop must lift"
-    r = bind_bilinear(fold, m, n, frozenset({m, n}))
-    assert r is not None, "the mul-hoist shape must bind"
-    con, epi = r
-    return con.a, con.b, con.acc, epi
-
 
 K32 = "mma_m16n8k32_e4m3_f32"
 
@@ -120,64 +104,6 @@ def test_to_f8_op_registered_with_numpy_forward():
     got = op(np.array([1.0, -0.4375, 448.0], dtype=np.float32))
     assert got.dtype == np.uint8
     np.testing.assert_array_equal(decode_f8(got, "f8e4m3"), [1.0, -0.4375, 448.0])
-
-
-# ===================================================================
-# bind_contraction: the side-generic mul-hoist (A-side + double-cone)
-# ===================================================================
-
-
-def _w8a8_loop(*, a_scale=True, b_scale=True):
-    """The fused W8A8 matmul loop body: ``acc += (sa · from_f8(a[m,k])) · (sb[n] · from_f8(w[k,n]))``
-    — a storage-decode cone on EACH operand, each times a k-invariant scale factor."""
-    k = Axis("k", Dim(64))
-    stmts: list = [
-        Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        Assign(name="adq", op="from_f8e4m3", args=("ab",)),
-        Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
-        Assign(name="wdq", op="from_f8e4m3", args=("wb",)),
-    ]
-    a_val, b_val = "adq", "wdq"
-    if a_scale:
-        stmts += [Load(name="sa", input="act_scale", index=(Literal(0), Literal(0))), Assign(name="asc", op="multiply", args=("sa", "adq"))]
-        a_val = "asc"
-    if b_scale:
-        stmts += [Load(name="sb", input="w_scale", index=(Literal(0), Var("n"))), Assign(name="wsc", op="multiply", args=("sb", "wdq"))]
-        b_val = "wsc"
-    stmts += [
-        Assign(name="v", op="multiply", args=(a_val, b_val)),
-        Accum(name="acc", value="v", op=ElementwiseImpl("add")),
-    ]
-    return Loop(axis=k, body=Body(tuple(stmts)), role=AxisRole.CONTRACTION)
-
-
-def test_a_side_decode_scale_binds_raw_with_hoist():
-    """A decode-times-factor cone on the A side (B direct would be the mirror of M2b; here B is a
-    bare decode) binds A as the RAW f8 load with the activation scale hoisted to the epilogue."""
-    a, b, acc, epi = _bind(_w8a8_loop(b_scale=False))
-    assert isinstance(a, Load) and a.input == "a_bits"
-    assert isinstance(b, Load) and b.input == "w_bits"
-    assert acc == "acc__mh"
-    tail = [s for s in epi if isinstance(s, Assign)][-1]
-    assert tail.name == "acc" and tail.op.name == "multiply"
-
-
-def test_double_cone_hoists_both_scales():
-    """The W8A8 shape: BOTH operands ride decode-times-factor cones — both bind raw, and the two
-    scale factors compose into one epilogue chain on the accumulator."""
-    a, b, acc, epi = _bind(_w8a8_loop())
-    assert isinstance(a, Load) and a.input == "a_bits"
-    assert isinstance(b, Load) and b.input == "w_bits"
-    assert acc == "acc__mh"
-    assigns = [s for s in epi if isinstance(s, Assign)]
-    assert assigns[-1].name == "acc" and {s.op.name for s in assigns} == {"multiply"}
-    assert {s.input for s in epi if isinstance(s, Load)} == {"act_scale", "w_scale"}
-
-
-def test_bare_double_decode_binds_raw_without_epilogue():
-    a, b, acc, epi = _bind(_w8a8_loop(a_scale=False, b_scale=False))
-    assert isinstance(a, Load) and a.input == "a_bits" and isinstance(b, Load) and b.input == "w_bits"
-    assert acc == "acc" and not len(epi)
 
 
 # ===================================================================

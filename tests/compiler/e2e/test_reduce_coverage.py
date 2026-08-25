@@ -14,11 +14,11 @@ Sections:
   sizes (the strided ``< seq_len`` bound IS the masked tail).
 - **flash carrier + cross-CTA finalize** — the twisted ``(m, l, O)`` combine, split-KV / split-K,
   atomic vs deferred-kernel finalize, and the projection-epilogue distributivity guard.
-- **online-softmax fusion** — the two-pass → one-pass streaming recognizer (IR-unit + GPU).
+- **online-softmax fusion** — the two-pass → one-pass streaming rewrite (GPU).
 - **2D segmented coop** — a pinned ``BN>1`` × ``BR>1`` reduce, segmented shuffle per row.
 
 Pure GPU accuracy (no ``-O1`` numerics change), so it runs in the correctness lane. The
-fusion-recognizer IR-unit tests need no GPU and stay ungated.
+exp-family generator unit test needs no GPU and stays ungated.
 """
 
 from __future__ import annotations
@@ -27,14 +27,7 @@ import numpy as np
 import pytest
 import torch
 
-from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.loop.ir import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
-from emmy.compiler.pipeline.passes.lowering.tile._classify import pair_softmax
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
 from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import requires_cuda
 
@@ -379,52 +372,16 @@ def test_split_reduce_projection_epilogue(op, finalize, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Online-softmax fusion — the two-pass → one-pass streaming recognizer.
+# Online-softmax fusion — the two-pass → one-pass streaming rewrite.
 # --------------------------------------------------------------------------- #
 # The standalone two-pass softmax (row-max reduce + ``Σ exp(x − max)`` reduce + normalize) fuses
 # into a single streaming online-softmax ``(m, d)`` ``Monoid`` pass (3 reads of ``x`` → 2). The
-# IR-unit tests pin the recognition (3 loops → 2 + the monoid); the GPU test pins numerics vs
-# torch and that the recognizer fired.
+# The Tile rewrite has its own unit tests; this GPU test pins numerics and emitted structure.
 
 
 class _Softmax(torch.nn.Module):
     def forward(self, x):
         return torch.softmax(x, dim=-1)
-
-
-def _softmax_body() -> Body:
-    # The decomposed two-pass softmax over reduce axis a1: a row-max reduce then a Σ exp(x − max) reduce.
-    idx = (Var("a0"), Var("a1"))
-    rowmax = Loop(
-        axis=Axis(name="a1", extent=Dim(128)),
-        body=Body.coerce((Load(name="in0", input="x", index=idx), Accum(name="acc0", value="in0", op=ElementwiseImpl("maximum")))),
-    )
-    sumexp = Loop(
-        axis=Axis(name="a1", extent=Dim(128)),
-        body=Body.coerce(
-            (
-                Load(name="in1", input="x", index=idx),
-                Assign(name="v0", op="subtract", args=("in1", "acc0")),
-                Assign(name="v1", op="exp", args=("v0",)),
-                Accum(name="acc1", value="v1", op=ElementwiseImpl("add")),
-            )
-        ),
-    )
-    return Body.coerce((rowmax, sumexp))
-
-
-def _unrelated_reduce_pair() -> Body:
-    # A row-max followed by a plain sum (no exp(x − max)) — must NOT fuse.
-    idx = (Var("a0"), Var("a1"))
-    rowmax = Loop(
-        axis=Axis(name="a1", extent=Dim(128)),
-        body=Body.coerce((Load(name="in0", input="x", index=idx), Accum(name="acc0", value="in0", op=ElementwiseImpl("maximum")))),
-    )
-    plainsum = Loop(
-        axis=Axis(name="a1", extent=Dim(128)),
-        body=Body.coerce((Load(name="in1", input="x", index=idx), Accum(name="acc1", value="in1", op=ElementwiseImpl("add")))),
-    )
-    return Body.coerce((rowmax, plainsum))
 
 
 def test_exp_family_generator_builds_asymmetric_monoid() -> None:
@@ -436,24 +393,6 @@ def test_exp_family_generator_builds_asymmetric_monoid() -> None:
     reads = {r for st in merge for r in st.deps()} - {st.name for st in merge} - {"m", "d"}
     assert reads == {"s"}
     assert exp_combine_states(("m", "d"), ("m__o", "d__o")), "combine_states must be derived for the asymmetric LSE monoid"
-
-
-@pytest.mark.parametrize("kind,should_fuse", [("softmax_pair", True), ("unrelated_pair", False)])
-def test_fuse_collapses_only_the_online_softmax_pair(kind, should_fuse) -> None:
-    """The pairing collapses the decomposed two-pass softmax (row-max + ``Σ exp(x − max)``) into
-    ONE TWISTED fold (the carrier keeps the original ``acc`` names), and is a no-op on an
-    unrelated row-max + plain-sum pair — read off the lifted Fold tree."""
-    from emmy.compiler.ir.pure.fold import Fold
-
-    body = _softmax_body() if should_fuse else _unrelated_reduce_pair()
-    folds = tuple(fold_from_loop(_stamp_axes(s)) for s in body)
-    assert all(f is not None for f in folds)
-    node = pair_softmax(Fold.projection(body=Body(()), operands=folds))
-    assert (len(node.operands) == 1) == should_fuse
-    if should_fuse:
-        tw = node.operands[0]
-        assert tw.role is AxisRole.TWISTED, "the pair is the TWISTED carrier"
-        assert set(tw.combine.results) == {"acc0", "acc1"}, "the carrier keeps the original acc names"
 
 
 @requires_cuda

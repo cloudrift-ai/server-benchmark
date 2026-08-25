@@ -16,6 +16,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
@@ -120,14 +121,25 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     """The PLANAR/TWISTED half of the role is the stored combine's twist family — a fold whose
     body is the dissolved exp-family (online-softmax) merge derives ``TWISTED``; no stored role
     field, no side-band algebra (``from_loop`` reconstructs it from the body alone)."""
-    from emmy.compiler.ir.pure.carrier import exp_merge
+    from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
 
+    names = ("m_i", "l_i")
+    other = tuple(f"{name}__o" for name in names)
     loop = Loop(
         axis=Axis("k", 1024),
         body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x_e", 1.0), key="m_i"))),
         role=AxisRole.TWISTED,
     )
-    red = fold_from_loop(loop)
+    red = Fold(
+        axis=loop.axis,
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))),)),
+            results=("x_e", 1.0),
+        ),
+        init=(-1e30, 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
     assert red.role is AxisRole.TWISTED
     assert red.loop == loop  # the derivation reproduces the recognizer's annotation exactly
     assert axis_role(red) is AxisRole.TWISTED
@@ -173,41 +185,6 @@ def test_a_projection_rides_the_map_wrapper_not_the_node() -> None:
     assert c.lower() == [c.loop]
     assert node.lower() == [c.loop, *proj]
     assert reduce_loop(node).role is AxisRole.CONTRACTION  # the projection doesn't hide the contraction
-
-
-# --- nodify_reduce: the coop-K / split partial flat-Map → Fold node lift ------------------ #
-
-
-def test_nodify_reduce_lifts_a_bare_loop_in_body_map_to_a_reduction() -> None:
-    """A flat ``Map`` holding just the annotated reduce loop nodifies to a **bare** ``Fold`` node
-    carrying the partition — ``lower`` byte-identical, ``reduce_plan`` reading the node."""
-    from emmy.compiler.ir.tile.ops import sched_of
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
-
-    loop = _sum_loop()
-    flat = Fold.projection(body=(loop,))
-    plan = ReducePlan.of(coop=4)
-    node, fold = nodify_reduce(flat)
-    assert isinstance(node, Fold) and fold is node
-    assert node.lower() == flat.lower()  # bit-identical lowering
-    t = _tile(node)
-    sched_of(t).put("REDUCE", fold, plan)
-    assert reduce_plan(t) is plan
-
-
-def test_nodify_reduce_keeps_a_projection_tail_as_a_wrapping_map() -> None:
-    """A fused-epilogue reduce (loop then projection) nodifies to ``Fold.projection(body=proj,
-    source=Fold)`` — the tail rides the wrapping ``Map``, the partition the ``Fold``."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import nodify_reduce
-
-    loop = _sum_loop()
-    proj = (Assign(name="y", op="relu", args=("acc",)), Write(output="out", index=(Var("m"),), value="y"))
-    flat = Fold.projection(body=(loop, *proj))
-    node, fold = nodify_reduce(flat)
-    assert (isinstance(node, Fold) and node.axis is None) and node.operands[0] is fold and isinstance(fold, Fold)
-    assert tuple(node.body) == proj
-    assert node.lower() == flat.lower()  # bit-identical
-    assert axis_role(node) is AxisRole.PLANAR
 
 
 # --- split-K: Fold ⊃ bilinear fold (E1) --------------------------------------------------- #

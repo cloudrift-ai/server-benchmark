@@ -6,8 +6,7 @@ binding (the trailing free pair reads the wrong row and the weight load carries 
 axis). The canonicalization restores the single-axis spelling; these tests pin the fuse cases
 (N split, M split, the pair across an intervening free loop — the transposed projection, the
 permuted split store), the decline case (an axis addressed alone), the downstream classification
-of the canonical nest, the warp tier's split-store addressability, and the binder's per-expr
-role purity."""
+of the canonical nest, and the warp tier's split-store addressability."""
 
 from __future__ import annotations
 
@@ -20,9 +19,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._classify import bind_bilinear
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile
+from emmy.compiler.pipeline.passes.lowering.tile._lift import lift_tile
 
 M, H, D, K = 8, 3, 4, 16  # N = H*D = 12
 
@@ -208,7 +205,7 @@ def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
     make the fused axis ``m`` and the stride-``D`` ``s`` the column — the mma store's ``+ col``
     would then address the wrong element (and did: a hang on the GPU)."""
     op = _run(_graph(_transposed_body(), (1, H, M, D)))
-    tile = recognized_tile(op)
+    tile = lift_tile(op)
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.role is AxisRole.CONTRACTION
@@ -242,97 +239,11 @@ def test_canonical_nest_classifies_as_contraction():
         value="acc",
     )
     body = Body((Loop(axis=Axis("a0", Dim(M)), body=Body((Loop(axis=n, body=Body((kloop, wr))),))),))
-    tile = recognized_tile(LoopOp(body=body))
+    tile = lift_tile(LoopOp(body=body))
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.role is AxisRole.CONTRACTION
     assert isinstance(node.b, Load) and node.b.input == "w"
-
-
-def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply"):
-    loop = Loop(
-        axis=Axis("k", Dim(K)),
-        body=Body(
-            (
-                Load(name="wv", input="w", index=w_index),
-                Load(name="xv", input="x", index=x_index),
-                Assign(name="prod", op=ElementwiseImpl(product), args=("wv", "xv")),
-                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
-            )
-        ),
-    )
-    return fold_from_loop(_stamp_axes(loop))
-
-
-def test_bind_bilinear_batched_operand_still_binds():
-    """Per-expr role purity must not over-reach: a batch axis riding a SEPARATE dim of the A
-    load (batched GEMM) binds exactly as before."""
-    f = _bilinear_fold((Var("n"), Var("k")), (Var("b"), Var("a0"), Var("k")))
-    r = bind_bilinear(f, "a0", "n", frozenset({"b", "a0", "n"}))
-    assert r is not None
-    con, epi = r
-    assert isinstance(con.a, Load) and con.a.input == "x" and not epi
-
-
-def test_bind_bilinear_declines_composite_role_expr():
-    """A third free axis composed into the SAME index expr as the role axis (the split-axis
-    composite) must not bind as the direct B load — the mma slab template cannot address it.
-    Before the per-expr purity check this bound and emitted code referencing an undefined
-    iteration var."""
-    comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("n"))
-    f = _bilinear_fold((comp, Var("k")), (Var("b"), Var("a0"), Var("k")))
-    r = bind_bilinear(f, "a0", "n", frozenset({"b", "a1", "a0", "n"}))
-    if r is not None:
-        con, _ = r
-        for ch in con.channels:
-            assert not isinstance(ch.b, Load), "the impure composite must not become a direct slab load"
-
-
-def test_bind_bilinear_accepts_grouped_computed_b_independent_of_product_order():
-    """A flattened GQA value row is a computed B cone when the query-head group and channel
-    share one index expression. The multiply's commutative argument order cannot decide whether
-    that cone is discovered: fusion emits the value load first in the deployed attention cell."""
-    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
-    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
-    f = _bilinear_fold(
-        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
-        (Var("h"), Var("m"), Var("k")),
-    )
-
-    r = bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"}))
-
-    assert r is not None
-    con, epi = r
-    assert not epi
-    assert isinstance(con.a, Load) and con.a.input == "x"
-    assert all(not isinstance(channel.b, Load) for channel in con.channels), "the flattened grouped value must use a computed B cone"
-
-
-def test_bind_bilinear_rejects_grouped_b_that_changes_with_the_row():
-    """A grouped value address that also reads the output row is not one B slab per tile.
-    Trying the commutative product's other orientation must still fail closed."""
-    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
-    row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
-    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
-    f = _bilinear_fold(
-        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
-        (Var("h"), Var("m"), Var("k")),
-    )
-
-    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
-
-
-def test_bind_bilinear_does_not_reorder_a_noncommutative_product():
-    """Trying the opposite direct/computed role is licensed only for a commutative product."""
-    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
-    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
-    f = _bilinear_fold(
-        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
-        (Var("h"), Var("m"), Var("k")),
-        product="subtract",
-    )
-
-    assert bind_bilinear(f, "m", "n", frozenset({"h", "m", "n"})) is None
 
 
 # --- the warp tier's split-store addressability --------------------------------------------------- #

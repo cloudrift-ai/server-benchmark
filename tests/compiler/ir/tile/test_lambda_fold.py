@@ -2,20 +2,16 @@
 ``(init, combine)`` pair (the ``Monoid`` wrapper dissolved at 1r) and
 DERIVE the serial step, the ``Accum`` forms, and the ``carrier`` annotation.
 
-The contract these pin: (a) :meth:`Fold.from_loop` keeps the λ spelling ONLY when the derived
-loop reproduces the captured one byte-identically (the construction-time gate) — recognition's
-canonical dissolved shapes migrate, a non-reproducible shape returns ``None`` (the raw-loop-IR
-escape; the retired ``step`` fallback is gone);
-(b) the retired ``Contraction.as_fold`` stores λ-spelled and round-trips through
-``as_fold`` with a byte-identical derived loop; (c) the rewrite canonicalizer renames
-lift / monoid / derived carrier in lockstep."""
+The contract these pin: mechanical Loop-to-Fold lifting, direct twisted Fold construction, and
+canonical rewriting of lift and monoid state in lockstep."""
 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import component_ops, degenerate
+from emmy.compiler.ir.pure import Lambda, component_ops, degenerate
+from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -49,12 +45,10 @@ def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     assert fold.role is AxisRole.PLANAR  # loads inline, no operand edges — the demoted shape
 
 
-def test_from_loop_declines_a_non_reproducible_shape() -> None:
-    # An un-stamped Accum (axes=()) is not the canonical dissolved shape — the derived Accum
-    # carries axes=(axis,), so the byte-identity gate declines and ``from_loop`` returns ``None``:
-    # the raw-loop-IR escape replaced the retired step fallback.
+def test_from_loop_stamps_an_unstamped_accumulator() -> None:
     loop = _dissolved_loop(axes_stamped=False)
-    assert fold_from_loop(loop) is None
+    fold = fold_from_loop(loop)
+    assert fold.loop == _dissolved_loop(axes_stamped=True)
 
 
 def _view(arity: int = 2) -> Fold:
@@ -71,17 +65,31 @@ def _view(arity: int = 2) -> Fold:
 
 def _softmax_loop() -> Loop:
     """The recognized online-softmax shape — ``[Load x, *dissolved merge]`` over the (m, l)
-    exp-family state, exactly as ``_classify.pair_softmax`` builds it."""
+    exp-family state, exactly as the Tile twisted rewrite builds it."""
     from emmy.compiler.ir.pure.carrier import exp_merge
 
     body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))
     return Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED)
 
 
-def test_twisted_from_loop_stores_the_true_monoid() -> None:
+def _softmax_fold() -> Fold:
+    names = ("m_i", "l_i")
+    other = tuple(f"{name}__o" for name in names)
+    return Fold(
+        axis=Axis("k", 2048),
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)),
+            results=("x0", 1.0),
+        ),
+        init=(ElementwiseImpl("maximum").identity, 0.0),
+        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+    )
+
+
+def test_twisted_fold_stores_the_true_monoid() -> None:
     loop = _softmax_loop()
-    fold = fold_from_loop(loop)
-    assert fold is not None and fold.lift is not None
+    fold = _softmax_fold()
     assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
     # The pivot seeds the max op's finite IDENTITY (−1e30), never −inf: an all-masked carrier
     # slice (a coop strided lane, a split-KV chunk) would rescale ``subtract(−inf, −inf)`` — NaN.
@@ -95,7 +103,7 @@ def test_twisted_from_loop_stores_the_true_monoid() -> None:
 
 
 def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
-    fold = fold_from_loop(_softmax_loop())
+    fold = _softmax_fold()
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("m2", "l2")

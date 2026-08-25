@@ -42,10 +42,6 @@ def _grow(items: list, end: int, members: set[int], frontier: list[str]) -> None
             break
 
 
-def _renamer(mapping: dict[str, str]):
-    return lambda name: mapping.get(name, name)
-
-
 def close_folds(cell: list) -> list:
     """Close every sibling Fold over earlier pure values and Fold states it consumes.
 
@@ -98,7 +94,10 @@ def close_folds(cell: list) -> list:
             if shared
             else {}
         )
-        rewrite = _renamer(rename)
+
+        def rewrite(name, mapping=rename):
+            return mapping.get(name, name)
+
         results = tuple(rewrite(name) for name in (*sorted(needed), *passthrough))
         if rename:
             body = tuple(stmt.rewrite(rewrite) for stmt in body)

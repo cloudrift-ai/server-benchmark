@@ -1,4 +1,4 @@
-"""Standalone tests for ``splice_loop_ops``.
+"""Standalone tests for the Loop IR splicer.
 
 Each test builds producer/consumer ``LoopOp``s by hand and splices them
 directly, asserting on the merged body structure. This skips the usual
@@ -24,7 +24,6 @@ from emmy.compiler.ir.loop import (
     LoopOp,
     Write,
     splice_graph,
-    splice_loop_ops,
     splice_loops,
 )
 from emmy.compiler.tensor import Tensor
@@ -40,6 +39,17 @@ def _count_kind(op: LoopOp, cls: type) -> int:
 
 def _elementwise_fns(op: LoopOp) -> list[str]:
     return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
+
+
+def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
+    """Pairwise fixture over the production N-way entry point."""
+    writes = producer.writes
+    if len(writes) != 1:
+        return None
+    return splice_loops(
+        loops={"producer": producer, "consumer": consumer},
+        splice_edges={("consumer", source): ("producer", writes[0].output)},
+    )
 
 
 # Fixtures — shared axes
@@ -124,7 +134,7 @@ def test_pointwise_chain():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     fns = _elementwise_fns(merged)
     # exp from producer + copy alias for the Load + add from consumer.
@@ -173,7 +183,7 @@ def test_shared_intermediate_deduped():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Only one exp in the merged body (producer chain materializes once).
     assert _elementwise_fns(merged).count("exp") == 1
@@ -227,7 +237,7 @@ def test_different_indices_emit_twice():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Two distinct σs ({a0:a0,a1:a1}, {a0:a1,a1:a0}) → exp materializes twice.
     assert _elementwise_fns(merged).count("exp") == 2
@@ -270,7 +280,7 @@ def test_reduction_producer():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # The Accum survives in the merged body.
     assert _count_kind(merged, Accum) == 1
@@ -533,7 +543,7 @@ def test_ordered_prefix_root_declines_splice():
         ),
     )
 
-    assert splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
+    assert _splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
 
 
 def test_ordered_prefix_producer_declines_splice():
@@ -556,7 +566,7 @@ def test_ordered_prefix_producer_declines_splice():
         ),
     )
 
-    assert splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
+    assert _splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +604,7 @@ def test_consumer_extra_input_source_remap():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     loads = {s.name: s for s in merged.body.iter() if isinstance(s, Load)}
     # Producer's Load survives at source 0; consumer's unrelated Load shifts to 1.
@@ -935,7 +945,7 @@ def test_multi_output_root_preserves_all_writes():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="out_0")
+    merged = _splice_loop_ops(producer, consumer, source="out_0")
     assert merged is not None
     writes = [s for s in merged.body.iter() if isinstance(s, Write)]
     assert {w.output for w in writes} == {"C0", "C1"}
@@ -1047,7 +1057,7 @@ def test_shared_load_dedup_into_reduce():
             ),
         ),
     )
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
     # Reduce + full silu chain + final multiply should all materialize once.
     assert _count_kind(merged, Accum) == 1
@@ -1084,7 +1094,7 @@ def test_literal_producer_write_index():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
     assert "negative" in _elementwise_fns(merged)

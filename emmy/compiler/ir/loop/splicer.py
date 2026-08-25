@@ -1,8 +1,7 @@
 """Worklist-driven splicer for a DAG of ``LoopOp``s.
 
-Three public entry points wrap the same underlying ``_Splicer``:
+Two entry points wrap the same underlying ``_Splicer``:
 
-- :func:`splice_loop_ops` — pairwise producer / consumer helper.
 - :func:`splice_loops` — tag-generic N-way: caller supplies ``loops``
   (tag → ``LoopOp``), ``splice_edges`` ((origin_tag, src) →
   (target_tag, target_output)), and optional output roots.
@@ -134,28 +133,8 @@ class _Demand:
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoint
+# Public entrypoints
 # ---------------------------------------------------------------------------
-
-
-def splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
-    """Pairwise splicer: inline ``producer`` into every ``consumer`` Load
-    whose ``source`` (buf name) matches the producer's output. Returns
-    ``None`` when the pattern isn't supported.
-
-    Thin wrapper over ``splice_loops``. The merged kernel's Loads keep
-    their original buf names — no remap needed since names are stable
-    across kernels. The producer's output buf name comes from its (sole)
-    Write.
-    """
-    prod_writes = [s for s in producer if isinstance(s, Write)]
-    if len(prod_writes) != 1:
-        return None
-    prod_buf = prod_writes[0].output
-    return splice_loops(
-        loops={"producer": producer, "consumer": consumer},
-        splice_edges={("consumer", source): ("producer", prod_buf)},
-    )
 
 
 def splice_loops(

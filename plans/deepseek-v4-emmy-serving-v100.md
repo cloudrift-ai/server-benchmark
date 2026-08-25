@@ -55,6 +55,24 @@ and aux-stream ownership, parameter `weight_loader`s, `WeightsMapper`, quantizat
 CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in the image); confirm the unchanged plain
 1Cat model still boots. Stop the plan here if a required fork API is absent.
 
+### Stage −1 findings (2026-08-25, executed on the target host)
+
+- Image pinned: `cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6
+  b03d6df188e5c65bc1`, labels confirm build commit `d76126608…` / model revision `7872f01b…` / target GPU V100 SXM3.
+- Source integrity: all 69 files of `vllm/models/deepseek_v4` + the MLA backends + the attention layer package are
+  byte-identical to the `d76126608` checkout (per-file sha256) — the studied API is the shipped API.
+- In-image stack: python 3.12.13, vLLM `1.2.3.dev87+gd76126608`, torch `2.10.0+cu129` — NVRTC in-image is **12.9**,
+  which still targets sm_70 (deprecation warning only), so the host-venv NVRTC-13 preload problem does NOT apply
+  inside the image.
+- Contract confirmed: `DeepseekV4Attention.__init__(vllm_config, prefix, topk_indices_buffer, aux_stream_list)`,
+  `forward(positions, hidden_states, llama_4_scaling)`; `DeepseekV4MLAModules` fields as studied;
+  `_is_exact_sm70_cuda()` True on the card; `DeepseekV4SWACache(head_dim, window_size, dtype, prefix, cache_config)`;
+  MLA attention + indexer cache are `AttentionLayerBase` (prefix-registered KV specs); the fp4/fp8 `WeightsMapper`
+  builders exist; `VLLM_SM70_*` env keys and `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` (1024) present;
+  `ModelRegistry.register_model` (the OOT plugin hook) available.
+- The emmy wheel + `cupy-cuda12x` install into the image cleanly beside vLLM's pins, and `emmy.serving.register` is
+  importable there.
+
 ## Stage 0 — unblock the `post` twin (compiler; hard prerequisite)
 
 The `post` twin (and any fresh DeepSeek V4 layer trace, per `recipes/DeepSeek-V4-Flash-0731/RESULTS.md`) does not
@@ -169,10 +187,15 @@ attention vs mHC) so stage 6's hypothesis is grounded.
 
 ## Stage 6 (performance, optional) — MXFP4 expert inputs
 
-An input-sourced fp4 spelling in the compiler (`spell_quantized_inputs` fmt "fp4x2": nibble unpack + e8m0 per-32 scale
-fused into the expert contraction; only the checkpoint's actual merged layout, clamp preserved), halving expert bytes
-back to the fork's footprint. Only worth building if stage 5's profile shows expert weight streaming dominates and the
-fused-unpack GEMM can plausibly beat TurboMind's on Volta. Tune with `emmy tune` against the twin inventory.
+Largely landed upstream since this plan was drafted: main now spells native MXFP4 expert twins
+(`spell_mxfp4_inputs`, `decode_mxfp4`, `…@mxfp4` twin names — uint8 nibble blocks + uint8 e8m0 scales as program
+inputs). What remains for THIS checkpoint: its declaration is `quant_method: fp8` + `expert_dtype: fp4` (not
+`quant_method: mxfp4`), and its packing is `w1.weight I8 [out, in/2]` + `.scale [out, in/32]` (not the gpt-oss
+`_blocks`/`_scales` layout the profile recognizes) — so a DeepSeek declaration/orientation mapping onto the existing
+spelling, plus the loader keeping the fp4 store, plus tuning. NOTE: with the fp8 declaration, the expert twin already
+spells `@f8e4m3` today, which is exactly the stage-1 cast lane's deployed form (test:
+`test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane`). Only worth building if stage 5's profile
+shows expert weight streaming dominates and the fused-unpack GEMM can plausibly beat TurboMind's on Volta.
 
 ## Risks
 

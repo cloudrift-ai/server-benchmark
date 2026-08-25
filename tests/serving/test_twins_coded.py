@@ -240,6 +240,58 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
+def test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane(tmp_path):
+    """The pinned checkpoint declares an fp8 trunk while storing its routed experts as MXFP4
+    (``expert_dtype: fp4``). The snapshot's converter casts those experts LOSSLESSLY into exactly the
+    declared fp8 [128, 128]-block form, so the ``@f8e4m3`` expert twin records the program the
+    fp8-cast serving lane deploys; the hyper-connection pre/post twins keep their value constants."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = transformers.DeepseekV4Config(
+        vocab_size=64,
+        hidden_size=32,
+        moe_intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        head_dim=8,
+        q_lora_rank=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        n_shared_experts=1,
+        o_groups=1,
+        o_lora_rank=16,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=2,
+        hc_mult=2,
+        hc_sinkhorn_iters=2,
+        layer_types=["sliding_attention", "heavily_compressed_attention"],
+        mlp_layer_types=["hash_moe", "moe"],
+        compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+        sliding_window=4,
+        swiglu_limit=10.0,
+        max_position_embeddings=64,
+    )
+    config.quantization_config = {
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "quant_method": "fp8",
+        "scale_fmt": "ue8m0",
+        "weight_block_size": [128, 128],
+    }
+    config.expert_dtype = "fp4"
+    config.save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert4@f8e4m3", "expert-sym@f8e4m3"}
+    expert = graphs["expert4@f8e4m3"]
+    by_id = {i: expert.nodes[i].output for i in expert.inputs}
+    assert {out.dtype.name for i, out in by_id.items() if i in ("w_gate_up", "w_down")} == {"f8e4m3"}
+    assert {i for i in expert.inputs} >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
+
+
 def test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile():
     torch = pytest.importorskip("torch")
     import torch.nn as nn

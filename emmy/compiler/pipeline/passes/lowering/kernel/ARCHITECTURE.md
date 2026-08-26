@@ -101,10 +101,12 @@ may contain several independent tiled roots. Their projection cones are disjoint
 the resulting regions merge only when their physical grid axes and worker inventories agree. Fragment names carry a
 root-local prefix, while identical shared-memory declarations are reused between the sequential regions.
 
-When the scheduler tiles both contractions directly inside an exp-family Fold, `_bind` applies only the distributive
-codegen reading needed by the existing contraction factorization: the first child supplies score fragments and the
-normalized weight becomes the computed A edge of the second child. The stored Fold tree is unchanged, and
-`reduce_codegen` plus `store_sink` remain the only MMA realization path for both ordinary contractions and SDPA.
+When the scheduler tiles contractions directly inside an exp-family Fold, `_bind` applies only the distributive
+codegen reading needed by the existing contraction factorization. With two children, the first supplies score
+fragments and the normalized weight becomes the computed A edge of the second. With only the derived expectation
+child, the enclosing Fold supplies the materialized score and its sweep axis becomes the contraction K. The stored
+Fold tree is unchanged, and `reduce_codegen` plus `store_sink` remain the only MMA realization path for ordinary
+contractions, SDPA, and softmax followed by a value contraction.
 
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
 variant, and **no per-atom geometry object**. It expands any contraction-shaped `Fold` by tiling a **leaf atom**

@@ -80,7 +80,8 @@ The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive a
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
 rows is recovery over Fold-tree structure, not another recognition layer. A Fold step containing two contractions
 may therefore offer compatible tiles for both child sites directly; the parent only checks their shared blocked-axis
-geometry.
+geometry. A sole derived expectation contraction keeps its child output tile but resolves the staged K chunk over the
+enclosing exp-family Fold's sweep axis; the derived singleton axis is only the stored blocked-step marker.
 
 ## No shape-specific pattern matching
 
@@ -206,11 +207,12 @@ It reads both equivalent canonical spellings: sibling planar folds, and the cont
 canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
 in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the rewritten
 stored tree. Its blocked-composition rule can assign compatible MMA tiles to two direct contraction children without
-rewriting the tree. Independent root contractions also remain in the same TileOp: their catalogs combine only rows
-whose tile widths and unit counts agree on each physical output axis, even when the roots reverse their algebraic M/N
-readings. Materialization binds each root through the ordinary Fold binder and merges the compatible regions on one
-grid. Unsupported scheduling shapes remain unmapped; this is the intentional recovery boundary while schedule support
-is rebuilt over the complete tree.
+rewriting the tree. With a materialized score and one derived expectation contraction, the same rule assigns the
+child's output tile while using the enclosing exp-family sweep as contraction K. Independent root contractions also
+remain in the same TileOp: their catalogs combine only rows whose tile widths and unit counts agree on each physical
+output axis, even when the roots reverse their algebraic M/N readings. Materialization binds each root through the
+ordinary Fold binder and merges the compatible regions on one grid. Unsupported scheduling shapes remain unmapped;
+this is the intentional recovery boundary while schedule support is rebuilt over the complete tree.
 
 ## The divide rule: `split` an iteration axis
 

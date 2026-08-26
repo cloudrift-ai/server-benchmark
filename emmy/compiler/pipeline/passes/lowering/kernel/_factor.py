@@ -356,8 +356,9 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
     """Reassociate a tiled ``Fold ⊃ Fold`` step into the contraction codegen already realizes.
 
     The stored Tile IR remains the canonical Fold tree.  This is only the distributive codegen
-    reading: a two-state exp-family statistic supplies a normalized computed A edge to the second
-    contraction, while its first contraction supplies the score blocks.
+    reading: an exp-family statistic supplies a normalized computed A edge to its value
+    contraction. The score is either another contraction in the same step (attention) or the
+    enclosing Fold's materialized lift value (softmax followed by a value contraction).
     """
     if (
         not isinstance(op, Fold)
@@ -367,22 +368,30 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
         or len(op.combine.results) < 3
     ):
         return None
-    pair = tuple(stmt for stmt in op.step_stmts() if is_contraction(stmt))
-    if len(pair) != 2:
+    step = op.step_stmts()
+    pair = tuple(stmt for stmt in step if is_contraction(stmt))
+    if len(pair) not in (1, 2):
         return None
-    score, value = pair
-    score_tile, value_tile = (ctx.sched.tile_of(node) for node in pair)
-    if not (
-        score_tile is not None
-        and value_tile is not None
-        and score_tile.is_warp
-        and value_tile.is_warp
-        and score_tile.atom == value_tile.atom
-        and score_tile.units == value_tile.units
-        and score_tile.reg_m == value_tile.reg_m
-        and score_tile.tile_n == value_tile.bk * value_tile.atom.atom_k
+    score = pair[0] if len(pair) == 2 else None
+    value = pair[-1]
+    if score is None and not any(
+        isinstance(stmt, Accum) and stmt.name in op.combine.results[2:] and stmt.value == value.out for stmt in step
     ):
         return None
+    value_tile = ctx.sched.tile_of(value)
+    if value_tile is None or not value_tile.is_warp:
+        return None
+    if score is not None:
+        score_tile = ctx.sched.tile_of(score)
+        if not (
+            score_tile is not None
+            and score_tile.is_warp
+            and score_tile.atom == value_tile.atom
+            and score_tile.units == value_tile.units
+            and score_tile.reg_m == value_tile.reg_m
+            and score_tile.tile_n == value_tile.bk * value_tile.atom.atom_k
+        ):
+            return None
 
     states = tuple(op.combine.results[:2])
     if len(states) != 2 or tuple(op.lift.results[1:2]) != (1.0,):
@@ -416,8 +425,12 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
     other = tuple(f"{name}__o" for name in states)
     statistic = Fold(
         axis=op.axis,
-        operands=(score,),
-        lift=Lambda(params=(op.axis.name, score.out), body=score_body, results=(op.lift.results[0], 1.0)),
+        operands=() if score is None else (score,),
+        lift=Lambda(
+            params=(op.axis.name,) if score is None else (op.axis.name, score.out),
+            body=score_body,
+            results=(op.lift.results[0], 1.0),
+        ),
         init=op.init[:2],
         combine=Lambda(params=(*states, *other), body=Body(exp_combine_states(states, other)), results=states),
     )
@@ -425,7 +438,7 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
     projection = Fold.projection(operands=(statistic,), body=Body((*free, inverse_stmt)), results=(states[0], inverse, *free_defs))
     delta, weight, normalized = f"{out_val}__delta", f"{out_val}__weight", f"{out_val}__normalized"
     cone = Fold.projection(
-        operands=(projection, score),
+        operands=(projection,) if score is None else (projection, score),
         body=Body(
             (
                 *prefix,
@@ -444,7 +457,9 @@ def _blocked_contraction(op, ctx: Ctx, tail: tuple, out_val: str):
         product=product,
         fold_op=plus,
     )
-    stage = Stage(depth=1, transport="smem", bk_elems=score_tile.tile_n)
+    stage = Stage(depth=1, transport="smem", bk_elems=score_tile.tile_n) if score is not None else ctx.sched.get("STAGE", value)
+    if stage is None:
+        return None
     epilogue = tuple(stmt for stmt in tail if not isinstance(stmt, Assign))
     return contraction, value_tile, stage, epilogue
 

@@ -99,7 +99,7 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Placement, Store, TileOp
@@ -353,30 +353,41 @@ def _site_tree(op, key) -> tuple[_Node, ...]:
     return tuple(freeze(record) for record in roots)
 
 
-def _step_contractions(node) -> tuple[Fold, ...]:
-    """The direct bilinear children in one Fold step, in evaluation order."""
-    if not isinstance(node, Fold) or node.axis is None:
+def _twisted_contractions(node) -> tuple[Fold, ...]:
+    """The score/value contractions in an exp-family Fold's derived blocked step."""
+    if not isinstance(node, Fold) or node.axis is None or node.combine is None:
         return ()
-    return tuple(stmt for stmt in node.step_stmts() if is_contraction(stmt))
-
-
-def _blocked_pair(node) -> tuple[Fold, ...]:
-    """The two contractions in an exp-family Fold's blocked step, if present."""
-    pair = _step_contractions(node)
+    step = node.step_stmts()
+    children = tuple(stmt for stmt in step if is_contraction(stmt))
+    sole_expectation = len(children) == 1 and any(
+        isinstance(stmt, Accum) and stmt.name in node.combine.results[2:] and stmt.value == children[0].out for stmt in step
+    )
     if (
-        len(pair) == 2
+        (len(children) == 2 or sole_expectation)
         and component_ops(node.combine) is None
         and len(node.init) >= 3
         and len(node.combine.results) >= 3
         and tuple(node.lift.results[1:2]) == (1.0,)
     ):
-        return pair
+        return children
     return ()
+
+
+def _blocked_pair(node) -> tuple[Fold, ...]:
+    """The score and value contractions in a fully composed exp-family step, if present."""
+    children = _twisted_contractions(node)
+    return children if len(children) == 2 else ()
+
+
+def _derived_expectation(node) -> Fold | None:
+    """The sole derived value contraction when the score is already materialized."""
+    children = _twisted_contractions(node)
+    return children[0] if len(children) == 1 else None
 
 
 def _keeps_children(site: Site) -> bool:
     """Whether a site's nested algebra remains independently schedulable."""
-    return is_contraction(site.node) or bool(_blocked_pair(site.node))
+    return is_contraction(site.node) or bool(_twisted_contractions(site.node))
 
 
 def _kids(node: _Node) -> tuple[_Node, ...]:
@@ -862,7 +873,16 @@ def _band_of(plan: ReducePlan) -> Workers | None:
 # --- the contraction: tile x stage x reduce ---
 
 
-def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: list[str] | None = None) -> Stage | None:
+def _resolve_stage(
+    term: _Term,
+    node,
+    tile: TilePlan,
+    want: Stage | None,
+    why: list[str] | None = None,
+    *,
+    k_axis: Axis | None = None,
+    seam: tuple | None = None,
+) -> Stage | None:
     """The ONE transport-resolver dispatch — which operand edges and tier select.
 
     Any COMPUTED contraction operand and every multi-channel product take the smem compute fill,
@@ -898,7 +918,8 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: l
             want.depth if want is not None else 1,
             inputs=term.tile.inputs,
             why=why,
-            seam=term.seam(node),
+            seam=term.seam(node) if seam is None else seam,
+            k_axis=k_axis,
         )
     if want is None or (want.transport == "smem-tma" and not term.ctx.has_tma):
         return None
@@ -927,7 +948,14 @@ def _resolved(moves, resolve, *, gmem_direct: bool = True) -> list[Stage | None]
     return out
 
 
-def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
+def _fill_values(
+    term: _Term,
+    node,
+    tile: TilePlan,
+    *,
+    k_axis: Axis | None = None,
+    seam: tuple | None = None,
+) -> list[Stage | None]:
     """The RESOLVED compute-fill stages a computed operand or multi-channel product offers — its
     depths, and nothing else: the fill is MANDATORY (there is no gmem-direct ``None`` sibling and
     no byte transport can evaluate a cone or carry several B/C channels), so a ``STAGE`` pin can
@@ -952,7 +980,7 @@ def _fill_values(term: _Term, node, tile: TilePlan) -> list[Stage | None]:
 
     def resolve(st: Stage) -> Stage | None:
         why: list[str] = []
-        r = _resolve_stage(term, node, tile, st, why=why)
+        r = _resolve_stage(term, node, tile, st, why=why, k_axis=k_axis, seam=seam)
         if r is None:  # per DECLINED depth, so a pin that fits no depth names the gate it hit
             legal.enforce(
                 f"the smem compute fill does not resolve at depth {st.depth}: "
@@ -1120,6 +1148,25 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     return out
 
 
+def _expectation_projection(term: _Term, parent: Fold) -> tuple[Assign, Assign] | None:
+    """The reciprocal and normalized expectation in the enclosing projection."""
+    projected = list(term.proj)
+    states = tuple(parent.combine.results)
+    reciprocal = next(
+        (stmt for stmt in projected if isinstance(stmt, Assign) and stmt.op.name == "reciprocal" and stmt.args == (states[1],)), None
+    )
+    normalize = projected[-1] if projected else None
+    if (
+        reciprocal is None
+        or len(projected) != 2
+        or not isinstance(normalize, Assign)
+        or normalize.op.name != "multiply"
+        or set(normalize.args) != {states[2], reciprocal.name}
+    ):
+        return None
+    return reciprocal, normalize
+
+
 def _blocked_plans(term: _Term, parent, node, work: Workers | None) -> list[TilePlan]:
     """Tiles for a contraction evaluated as one block of its enclosing Fold.
 
@@ -1132,18 +1179,7 @@ def _blocked_plans(term: _Term, parent, node, work: Workers | None) -> list[Tile
         return []
     if work is None or work.kind != "warp":
         return [TilePlan()]
-    projected = list(term.proj)
-    states = tuple(parent.combine.results)
-    reciprocal = next(
-        (stmt for stmt in projected if isinstance(stmt, Assign) and stmt.op.name == "reciprocal" and stmt.args == (states[1],)), None
-    )
-    if (
-        reciprocal is None
-        or len(projected) != 2
-        or not isinstance(projected[-1], Assign)
-        or projected[-1].op.name != "multiply"
-        or set(projected[-1].args) != {states[2], reciprocal.name}
-    ):
+    if _expectation_projection(term, parent) is None:
         return []
     if work.units[1] != 1 or not parent.axis.extent.is_static:
         return []
@@ -1207,6 +1243,47 @@ def _blocked_child_blocks(term: _Term, site: Site, work: Workers | None, parent:
     return [Block({"TILE": plan}, (None,)) for plan in plans]
 
 
+def _expectation_child_blocks(term: _Term, node: Fold, work: Workers | None, parent: Fold) -> list[Block]:
+    """Tile the sole derived expectation while the enclosing twisted Fold owns its K sweep."""
+    if _expectation_projection(term, parent) is None:
+        return []
+    if work is None:
+        return [Block({"TILE": TilePlan()}, (None,))]
+    if work.kind != "warp":
+        return []
+
+    plans = list(term.tiles(node).get(work.spell(), ()))
+    pin = term.pin("TILE", node)
+    if pin is not None:
+        try:
+            wanted = resolve_site_tile(pin, work)
+        except ValueError as e:
+            term.pin_error = e
+            return []
+        term.pin_spelled = True
+        plans = [plan for plan in plans if plan == wanted]
+    if plans:
+        term.warp_eligible = True
+
+    out = []
+    for plan in plans:
+        tile = term.sched.placed(node, plan)
+        stages = tuple(
+            stage
+            for stage in _fill_values(
+                term,
+                node,
+                tile,
+                k_axis=parent.axis,
+                seam=((), (), tuple(parent.combine.results[:2])),
+            )
+            if legal.enforce(legal.paired_fragment_register_budget(node, plan, stage), pinned=pin is not None)
+        )
+        if stages:
+            out.append(Block({"TILE": plan, "REDUCE": ReducePlan()}, stages))
+    return out
+
+
 def _blocked_tiles(node: _Node, combo: tuple[_Row, ...]) -> tuple[TilePlan | None, TilePlan | None]:
     pair = _blocked_pair(node.site.node)
     found = {
@@ -1259,6 +1336,8 @@ def _site_blocks(
     site, node = current.site, current.site.node
     if parent is not None and _blocked_pair(parent.site.node):
         return _blocked_child_blocks(term, site, work, parent)
+    if parent is not None and _derived_expectation(parent.site.node) is node:
+        return _expectation_child_blocks(term, node, work, parent.site.node)
     if _fill_realized(parent, site):
         # The parent form realizes this nested fold's partition itself.
         return [Block({"REDUCE": ReducePlan()}, (None,))]
@@ -1911,6 +1990,16 @@ def _stage_of(term: _Term, node, plan: TilePlan, spec: str) -> Stage | None:
         return _row_stage(term, node)
     if not plan.is_tiled:
         return None
+    parent = next((site.node for site in term.sched._all_sites() if _derived_expectation(site.node) is node), None)
+    if parent is not None:
+        return _resolve_stage(
+            term,
+            node,
+            term.sched.placed(node, plan),
+            Stage.parse(spec),
+            k_axis=parent.axis,
+            seam=((), (), tuple(parent.combine.results[:2])),
+        )
     return _resolve_stage(term, node, plan.placed_on(term.place), Stage.parse(spec))
 
 

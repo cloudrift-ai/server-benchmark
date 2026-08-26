@@ -21,7 +21,6 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
-    deep_defines,
     deep_reads,
     edge_refs_axis,
     is_contraction,
@@ -51,16 +50,18 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
     carries the single row-invariant edge, so its seam reads exactly as it always did.
 
-    ``stats`` are the prologue defs the cell reads — the values bridged through the stat smem rows;
-    a prologue whose defs go unread is dropped (nothing to bridge). The ONE seam both sides read:
-    the scheduler sizes the stat rows into the sync stage's smem budget, the materializer fills
-    them (``sync_stat_fill``)."""
+    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
+    rows. Internal definitions are excluded: the prologue and cell may independently use the same
+    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
+    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
+    materializer fills them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
     varying = [edge_refs_axis(e, k_name) for e in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
     cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
-    stats = tuple(sorted({nm for s in pro for nm in deep_defines(s)} & deep_reads(list(cell))))
+    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
+    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
 
 

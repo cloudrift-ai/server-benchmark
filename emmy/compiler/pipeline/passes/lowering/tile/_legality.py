@@ -610,6 +610,7 @@ def resolve_fill_stage(
     inputs=None,
     why: list[str] | None = None,
     seam: tuple | None = None,
+    k_axis: Axis | None = None,
 ) -> Stage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
@@ -626,20 +627,23 @@ def resolve_fill_stage(
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape.
 
-    ``why`` collects the decline reason when the tier refuses, so a PINNED caller reports the gate it
-    actually hit instead of one catch-all sentence."""
+    ``k_axis`` overrides the stored contraction axis when the contraction is a derived singleton
+    marker whose enclosing Fold owns the actual K sweep. ``why`` collects the decline reason when
+    the tier refuses, so a PINNED caller reports the gate it actually hit instead of one catch-all
+    sentence."""
     atom = tile.atom
+    k_axis = k_axis or c.axis
     if atom.operand_dtype("a").nbytes < 2:
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
         return None
     bk_elems = tile.bk * atom.atom_k
-    if c.axis.extent.is_static and c.axis.extent.as_static() % bk_elems:
+    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
         decline(
             why,
             f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
-            f"does not divide the contraction K={c.axis.extent.as_static()}",
+            f"does not divide the contraction K={k_axis.extent.as_static()}",
         )
         return None
     a_nbytes = atom.operand_dtype("a").nbytes

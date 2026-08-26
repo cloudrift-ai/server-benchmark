@@ -13,7 +13,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, refs_axis
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction, refs_axis
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import edge_dtypes
@@ -141,6 +141,14 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
     inferred = (F32,) * len(names) if child.axis is not None else edge_dtypes(child, tile.inputs)
+    contraction_operand = any(
+        is_contraction(site.node) and (site.node.a is child or any(channel.b is child for channel in site.node.channels))
+        for site in sites(tile.op)
+    )
+    if contraction_operand and root.output.dtype.nbytes == 2:
+        # A materialized contraction operand holds the element type the fused slab stored.  The
+        # f32 accumulator type of a normalize cone is not the B slab's storage type.
+        inferred = (root.output.dtype,) * len(names)
     if len(inferred) != len(names):
         inferred = (F32,) * len(names)
     dtypes = tuple(dtype or F32 for dtype in inferred)

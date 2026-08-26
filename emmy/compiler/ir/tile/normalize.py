@@ -250,7 +250,7 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
     return [pair if 2 * index in positions else (pair[1], pair[0]) for index, pair in enumerate(pairs)]
 
 
-def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
+def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str] = frozenset()) -> Fold:
     """Factor operand cones, coalesce an equivalent shared argument, and orient it as contraction A."""
     form = _semiring_form(fold)
     if form is None:
@@ -273,6 +273,11 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
             return fold
         left_roles, right_roles = _operand_roles(left, axes), _operand_roles(right, axes)
         left_only, right_only = left_roles - right_roles, right_roles - left_roles
+        unused_implicit = implicit_axes - left_roles - right_roles
+        if not left_only and len(right_only) == 1 and len(unused_implicit) == 1:
+            left_only = unused_implicit
+        elif not right_only and len(left_only) == 1 and len(unused_implicit) == 1:
+            right_only = unused_implicit
         if len(left_only) != 1 or len(right_only) != 1:
             return fold
         left_axis, right_axis = next(iter(left_only)), next(iter(right_only))
@@ -330,18 +335,18 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
     return replace(fold, operands=tuple(ordered), lift=lift)
 
 
-def _normalize_body(body: Body, axes: tuple[str, ...]) -> Body:
+def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Body:
     out = []
     for stmt in body:
         if isinstance(stmt, Fold):
-            out.append(_normalize_fold(stmt, axes))
+            out.append(_normalize_fold(stmt, axes, implicit_axes))
             continue
         nested = stmt.nested()
         if not nested:
             out.append(stmt)
             continue
         child_axes = (*axes, *stmt.binds_axes())
-        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes) for child in nested)))
+        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes, implicit_axes) for child in nested)))
     return Body(out)
 
 
@@ -628,14 +633,14 @@ def _hoist_decode_operands(root: Fold) -> Fold:
     return Fold.projection(operands=root.operands, body=Body(tuple(members)), results=root.lift.results)
 
 
-def _normalize_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
-    operands = tuple(_normalize_fold(edge, axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
+def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Fold:
+    operands = tuple(_normalize_fold(edge, axes, implicit_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes
-    body = _normalize_body(node.lift.body, body_axes)
+    body = _normalize_body(node.lift.body, body_axes, implicit_axes)
     if body != node.lift.body:
         node = node.with_bodies((body,))
-    node = _canonical_semiring(node, axes)
+    node = _canonical_semiring(node, axes, implicit_axes)
     if node.axis is not None:
         return node
     node = _hoist_decode_operands(node)
@@ -643,11 +648,11 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     return _hoist_closed_folds(node, axes)
 
 
-def normalize_fold_tree(root, axes: Iterable[str] = ()):
+def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = ()):
     """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through."""
     if not isinstance(root, Fold):
         return root
-    normalized = _normalize_fold(root, tuple(axes))
+    normalized = _normalize_fold(root, tuple(axes), frozenset(implicit_axes))
     # A contraction reached as the whole tree has no projection to host hoisted factors, so the
     # hoist creates one here. Nested contractions are handled by their own projection, which keeps
     # the common shape flat.

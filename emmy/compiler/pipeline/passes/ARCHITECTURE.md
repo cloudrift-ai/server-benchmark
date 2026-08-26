@@ -206,6 +206,10 @@ The Tile IR boundary is one structural operation:
    contraction's shared argument, merge overlapping cones into multi-result edges, and apply the closed-child rules
    over the complete tree.
 
+When every output specification proves that an otherwise planar one-free-axis reduction writes `[0, n]`, post-init
+restores the elided extent-one row axis before applying the same contraction rule. This is output-boundary evidence,
+not a schedule view or shape matcher; without the common proof the Fold remains planar.
+
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
@@ -229,8 +233,9 @@ that canonical input:
 - **`018_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. The new producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same
-  ordinary passes.
+  are not. A cut that materializes a contraction operand preserves the operand slab's storage dtype rather than the
+  f32 accumulator dtype of a surrounding normalization Fold. The new producer and consumer are fresh unmapped
+  TileOps, so further legal cuts and schedules use the same ordinary passes.
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that

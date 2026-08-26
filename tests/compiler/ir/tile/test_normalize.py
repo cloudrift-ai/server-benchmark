@@ -4,7 +4,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
@@ -42,6 +42,28 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
     assert tile.op.a.input == "x"
     assert tile.op.b.input == "w"
     assert TileOp(op=tile.op, place=tile.place).op == tile.op
+
+
+def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
+    axis = Axis("k", Dim(16))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
+            Load(name="right", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="product", op="multiply", args=("left", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+
+    tile = TileOp(
+        op=planar,
+        place=Placement(free=(Axis("n", 16),)),
+        output_specs=(OutputSpec(Write(output="out", index=(Literal(0, "int"), Var("n")), value="acc")),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
+    assert tile.op.role is AxisRole.CONTRACTION
 
 
 def test_contraction_promotes_a_shared_store_sweep_once() -> None:

@@ -28,7 +28,7 @@ mutation of a possibly-shared knob dict.
 from __future__ import annotations
 
 from collections import Counter
-from math import prod
+from sys import float_info
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
@@ -197,12 +197,22 @@ def _extents(body: Body) -> dict[str, float]:
             n_symbolic += 1
             continue
         (reduce_ if loop.is_reduce else free).append(ext.as_static())
+
+    def bounded_product(values: list[int]) -> float:
+        """Multiply extent features without constructing an unbounded Python integer."""
+        value = 1.0
+        for extent in values:
+            if extent and value > float_info.max / extent:
+                return float_info.max
+            value *= extent
+        return value
+
     return {
         "S_ext_n_free_axis": float(len(free)),
-        "S_ext_free_prod": float(prod(free)) if free else 1.0,
+        "S_ext_free_prod": bounded_product(free),
         "S_ext_free_max": float(max(free)) if free else 0.0,
         "S_ext_n_reduce_axis": float(len(reduce_)),
-        "S_ext_reduce_prod": float(prod(reduce_)) if reduce_ else 1.0,
+        "S_ext_reduce_prod": bounded_product(reduce_),
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
     }

@@ -278,6 +278,11 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
     axis_part = f".{site.axis}" if site.axis is not None else ""
     if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
         return f"{family}@{site.axis}"
+    identical = [s for s in fam_sites if s.segments == site.segments and s.axis == site.axis]
+    if len(identical) > 1:
+        # No subsequence can distinguish identical full paths.  Skip the exponential search and
+        # use the ordinal arm directly; this is precisely the arm ordinals exist for.
+        return f"{family}@{'.'.join(site.segments)}{axis_part}{site.ordinal}"
     # Path forms: shortest anchored subsequence unique among the family's sites; among equal-length
     # candidates prefer EDGE LABELS, then the deepest anchors (``a.fold`` over ``fold.fold`` /
     # ``map.fold`` for the cone stat — the label names the seam a reader recognizes).

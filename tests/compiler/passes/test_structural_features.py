@@ -10,9 +10,11 @@ attention-like) through the loop passes and checks the stamped features.
 
 from __future__ import annotations
 
+from sys import float_info
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
@@ -127,6 +129,28 @@ def test_extents_split_free_vs_reduce():
     assert feats["S_ext_reduce_max"] == 64.0
     assert feats["S_ext_n_reduce_axis"] == 1.0
     assert feats["S_ext_n_symbolic_axis"] == 0.0
+
+
+def test_extent_products_saturate_without_building_unbounded_integers():
+    body = Body(
+        (
+            Loop(
+                axis=Axis("outer", 10**200),
+                body=(
+                    Loop(
+                        axis=Axis("middle", 10**200),
+                        body=(Loop(axis=Axis("inner", 10**200), body=(), role=AxisRole.PLANAR),),
+                        role=AxisRole.PLANAR,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    feats = structure_features(body)
+
+    assert feats["S_ext_free_prod"] == 1e200
+    assert feats["S_ext_reduce_prod"] == float_info.max
 
 
 def test_symbolic_axis_counted_and_excluded_from_prod():

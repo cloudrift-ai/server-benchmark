@@ -34,8 +34,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -183,6 +185,18 @@ def _projection_results(body) -> set[str]:
     return out
 
 
+def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
+    """Recover an elided matrix row when every boundary write proves ``[0, n]``."""
+    if len(free) != 1 or not specs or any(spec.sweep is not None for spec in specs):
+        return None
+    n_name = free[0].name
+    for spec in specs:
+        index = spec.write.index
+        if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
+            return None
+    return Axis("_um", Dim(1))
+
+
 def lower_with_output_specs(op, specs) -> list[Stmt]:
     """Lower one pure Tile term and attach every output specification at its owning scope."""
     specs = tuple(specs)
@@ -328,6 +342,14 @@ class TileOp(Op):
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         normalized = normalize_fold_tree(self.op, axes)
+        unit_row = _implicit_unit_row(self.output_specs, self.place.free)
+        if unit_row is not None:
+            candidate_free = (unit_row, *self.place.free)
+            candidate_axes = tuple(axis.name for axis in candidate_free)
+            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,))
+            if is_contraction(head(candidate)):
+                normalized = candidate
+                self.place = replace(self.place, free=candidate_free)
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
         self.op = normalized

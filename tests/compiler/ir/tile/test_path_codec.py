@@ -14,7 +14,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
+from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -210,6 +210,14 @@ def test_true_same_path_collision_emits_ordinals() -> None:
     assert resolve(root, "REDUCE@map.fold.k2").node is f2
     with pytest.raises(ValueError, match="ambiguous"):
         resolve(root, "REDUCE@map.fold.k")
+
+
+def test_deep_identical_paths_take_the_ordinal_without_subsequence_search() -> None:
+    path = ("map", *("fold" for _ in range(1000)))
+    first = Site(node=object(), axis="k", segments=path, ordinal=1)
+    second = Site(node=object(), axis="k", segments=path, ordinal=2)
+
+    assert _spellings("REDUCE", second, (first, second)) == f"REDUCE@{'.'.join(path)}.k2"
 
 
 def test_literal_axis_name_wins_over_an_ordinal_reading() -> None:

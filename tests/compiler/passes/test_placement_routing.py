@@ -145,19 +145,12 @@ def test_contraction_operand_seam_takes_the_output_dtype() -> None:
 
     RESTORED: typed f32 (an f32-computing norm over f16 keys), the materialized B could feed no
     warp atom, since only the ``a`` edge has a converting fill."""
-    from emmy.commands.trace import graph_from_code
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES
 
-    graph, _, _ = graph_from_code(
-        "F.scaled_dot_product_attention("
-        "torch.randn(1, 1, 8, 8, dtype=torch.float16), "
-        "torch.nn.functional.rms_norm(torch.randn(1, 1, 8, 8, dtype=torch.float16), (8,)), "
-        "torch.randn(1, 1, 8, 8, dtype=torch.float16))"
-    )
-    with pinned_knobs({"PLACE@b": "cut"}):
-        out = Pipeline.build(TILE_PASSES).run(graph, ctx=_CTX)
+    with pinned_knobs({"PLACE@a": "cut"}):
+        out = Pipeline.build(TILE_PASSES).run(_norm_linear_graph(), ctx=_CTX)
     workspaces = [node for node in out.nodes.values() if "_place_" in node.id and isinstance(node.op, (LoopOp, TileOp))]
     assert workspaces, [node.id for node in out.nodes.values()]
     assert any(node.output.dtype == F16 for node in workspaces), [(n.id, str(n.output.dtype)) for n in workspaces]

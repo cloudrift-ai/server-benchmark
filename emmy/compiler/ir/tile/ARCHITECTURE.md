@@ -79,6 +79,11 @@ Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy o
 exposed when factoring makes a contraction the root compute node. Multiple output specifications owned by one
 projection region reconstitute one loop.
 
+A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
+specification writes `[0, n]`. Post-init restores that proven unit free axis before contraction canonicalization. The
+rule is boundary-derived and general: it does not recognize a model or operation family, and it does not alter a term
+whose output specifications disagree about the missing coordinate.
+
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
 scalar. The stored Fold tree therefore lowers to the same dependency order as the canonical Loop IR input.
@@ -123,6 +128,10 @@ shapes and the output specifications were missing from both identities, so a `(1
 `(4, 32, 128)` one over the same iteration space collided: the split form spells its coordinate as
 a dim pair the fragment store can address only under a divisibility rule, and a golden measured on
 the flat kernel joined a kernel that could not realize its row.
+
+Static extent products used as structural features saturate at the largest finite float. Feature extraction therefore
+stays bounded even for a deeply nested symbolic-model fixture whose exact integer product is too large to convert,
+while retaining exact values throughout the ordinary extent range.
 
 ## TileOp and scheduling
 

@@ -13,8 +13,8 @@ Phase 1 surface (this file): the protocol that lets every
 ``tuple[Stmt, ...]`` site accept Body, plus :meth:`iter` / :meth:`map`
 as method-shaped wrappers around the existing free functions.
 
-Phase 2 surface: def-use queries (``definitions``, ``deps_closure``,
-``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
+Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
+``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
 (:class:`Cone`, :meth:`Body.backward_cone` / :meth:`Body.forward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
@@ -311,6 +311,55 @@ class Body(tuple[Stmt, ...]):
             for child in stmt.nested():
                 out.update(child._all_ssa_uses)
         return frozenset(out)
+
+    @cached_property
+    def axis_dependencies(self) -> dict[str, frozenset[str]]:
+        """Map each SSA definition to the axes that its value depends on.
+
+        Unlike :attr:`deps_closure`, this summary never retains transitive
+        SSA names. Its total size is bounded by definitions × axes, which is
+        the representation normalization needs for invariant motion.
+
+        An Accum exported from a Loop loses that Loop's reduction axis. A
+        StridedLoop keeps its axis because the partial value still varies by
+        partition. These are the same outside-the-loop semantics as
+        :attr:`deps_closure`.
+        """
+        from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
+
+        dependencies: dict[str, frozenset[str]] = {}
+        axis_names = self.axis_names
+
+        def _immediate_axes(stmt: Stmt) -> frozenset[str]:
+            reads: set[str] = set(stmt.deps())
+            for expr in stmt.exprs():
+                reads.update(expr.free_vars())
+            axes = reads & axis_names
+            for name in reads:
+                axes.update(dependencies.get(name, frozenset()))
+            return frozenset(axes)
+
+        def walk(body: Body) -> None:
+            for stmt in body:
+                for child in stmt.nested():
+                    walk(child)
+                if isinstance(stmt, Loop):
+                    for child in stmt.body:
+                        if isinstance(child, Accum):
+                            dependencies[child.name] = dependencies.get(child.value, frozenset()) - {stmt.axis.name}
+                    continue
+                if isinstance(stmt, StridedLoop):
+                    for child in stmt.body:
+                        if isinstance(child, Accum):
+                            dependencies[child.name] = dependencies.get(child.value, frozenset())
+                    continue
+                axes = _immediate_axes(stmt)
+                for name in stmt.defines():
+                    dependencies[name] = axes
+
+        walk(self)
+        return dependencies
 
     @cached_property
     def deps_closure(self) -> dict[str, frozenset[str]]:

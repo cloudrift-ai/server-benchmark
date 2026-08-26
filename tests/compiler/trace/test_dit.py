@@ -53,7 +53,7 @@ def test_dit_adapter_traces_tiny_block_and_binds_weights():
     assert all(node_id in bound for node_id, _op in graph.loadable_constants())
 
 
-@pytest.mark.skip(reason="full DiT LoopBackend accuracy is blocked by pathological Loop normalization")
+@pytest.mark.skip(reason="full DiT LoopBackend accuracy is blocked by Cling compilation of the 3.7K-statement fused body")
 def test_dit_adapter_tiny_block_matches_loop_backend():
     """The fully decomposed/fused CPU path agrees with the same normalized DiT block."""
     from emmy.commands.run import _bind_inputs

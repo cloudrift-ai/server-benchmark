@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import LoopOp, Write, splice_graph
+from emmy.compiler.ir.loop import LoopOp, splice_graph
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
 PATTERN = [Pattern("producer", LoopOp)]
@@ -76,24 +76,12 @@ def _wrap_multi_output_fragment(
     new_buffers = (node_id, *(f"{node_id}__out{i}" for i in range(1, len(live_outputs))))
     rename = dict(zip(live_outputs, new_buffers, strict=True))
 
-    def retarget(stmt):
-        if isinstance(stmt, Write) and stmt.output in rename:
-            return Write(
-                output=rename[stmt.output],
-                index=stmt.index,
-                values=stmt.values,
-                value_dtype=stmt.value_dtype,
-                atomic=stmt.atomic,
-                swizzle=stmt.swizzle,
-            )
-        return stmt
-
     tensors: list[Tensor] = []
     for i, (old, new) in enumerate(zip(live_outputs, new_buffers, strict=True)):
         tensor = graph.buffer(old)
         assert tensor is not None
         tensors.append(Tensor(tensor.name if i == 0 else new, tensor.shape, tensor.dtype))
-    merged = LoopOp(body=merged.body.map(retarget), name=merged.name)
+    merged = merged.rename_buffers(rename)
     # Root insertion may reorder sibling loop nests. Kernel ABI order follows
     # graph liveness, not incidental body order.
     merged.outputs = dict(zip(new_buffers, tensors, strict=True))

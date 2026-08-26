@@ -396,6 +396,39 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
     assert nested.lift.body.loads[0].input == "renamed_x"
 
 
+def test_rename_node_does_not_renormalize_a_loop_body(monkeypatch) -> None:
+    import emmy.compiler.ir.stmt as stmt
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
+    loop = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="value", input="x", index=(Var("a"),)),
+                    Write(output="out", index=(Var("a"),), value="value"),
+                ),
+            ),
+        )
+    )
+    graph.add_node(loop, ["x"], Tensor("out", (4,)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    def reject_renormalization(*_args, **_kwargs):
+        raise AssertionError("buffer renaming must preserve the normalized Loop body")
+
+    monkeypatch.setattr(stmt, "normalize_body", reject_renormalization)
+    graph.rename_node("x", "renamed_x")
+
+    renamed = graph.nodes["out"].op
+    assert renamed.body.loads[0].input == "renamed_x"
+    assert tuple(renamed.inputs) == ("renamed_x",)
+
+
 def test_mimo_remove_orphans_keeps_producer_alive_via_aux_edge():
     """A consumer reading ONLY the aux buffer still keeps the producer alive."""
     g = Graph()

@@ -9,8 +9,9 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants
+from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants, split_invariant_divides
 
 
 def test_hoists_invariant_load_above_loop() -> None:
@@ -203,3 +204,25 @@ def test_nested_axis_dependency_summary_does_not_rescan_each_loop(monkeypatch) -
     hoist_loop_invariants(body)
 
     assert calls < len(axes)
+
+
+def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
+    body = Body(
+        (
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="x", input="X", index=(Var("a"),)),
+                    Load(name="scale", input="scale", index=()),
+                    Assign(name="value", op="divide", args=("x", "scale")),
+                    Write(output="out", index=(Var("a"),), value="value"),
+                ),
+            ),
+        )
+    )
+
+    split = split_invariant_divides(body)
+    hoist_loop_invariants(split)
+
+    assert "deps_closure" not in body.__dict__
+    assert "deps_closure" not in split.__dict__

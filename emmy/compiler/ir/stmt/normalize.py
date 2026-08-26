@@ -472,20 +472,20 @@ def split_invariant_divides(stmts: Body) -> Body:
     """Rewrite ``divide(x, y)`` → ``reciprocal(y) + multiply(x, recip)``
     when ``y``'s axis-dependency set is a strict subset of ``x``'s.
 
-    Invariance is queried via :meth:`Body.deps_closure` over the
-    pre-rewrite body, filtered to axis names. The strict-subset check
-    means there's at least one axis ``x`` depends on that ``y``
-    doesn't — splitting moves the rcp out of that axis's Loop while
-    the multiply stays. Generates fresh SSA names for the rcp; the
-    trailing :func:`rename_ssa_sequential` pass renumbers them into
-    ``vN`` form.
+    Invariance is queried via :attr:`Body.axis_dependencies` over the
+    pre-rewrite body. The strict-subset check means there's at least one
+    axis ``x`` depends on that ``y`` doesn't — splitting moves the rcp out
+    of that axis's Loop while the multiply stays. Generates fresh SSA names
+    for the rcp; the trailing :func:`rename_ssa_sequential` pass renumbers
+    them into ``vN`` form.
     """
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
 
     stmts = Body.coerce(stmts)
-    closure = stmts.deps_closure
-    axes = stmts.axis_names
-    ssa_names: set[str] = set(closure.keys())
+    if not any(isinstance(stmt, Assign) and stmt.op.name == "divide" for stmt in stmts.iter()):
+        return stmts
+    axis_dependencies = dict(stmts.axis_dependencies)
+    ssa_names: set[str] = set(axis_dependencies)
     fresh_counter = [0]
 
     def _fresh(prefix: str) -> str:
@@ -497,7 +497,7 @@ def split_invariant_divides(stmts: Body) -> Body:
                 return n
 
     def _axes_of(name: str) -> frozenset[str]:
-        return closure.get(name, frozenset()) & axes
+        return axis_dependencies.get(name, frozenset())
 
     def walk(body: Body) -> Body:
         out: list[Stmt] = []
@@ -516,11 +516,11 @@ def split_invariant_divides(stmts: Body) -> Body:
                     recip_name = _fresh(f"recip_{y_name}")
                     recip = Assign(name=recip_name, op=ElementwiseImpl("reciprocal"), args=(y_name,))
                     mult = Assign(name=s.name, op=ElementwiseImpl("multiply"), args=(x_name, recip_name))
-                    # Patch closure for the freshly-introduced rcp so a
+                    # Patch dependencies for the freshly-introduced rcp so a
                     # later divide reading the same y in the same body
                     # still sees the correct axis set.
-                    closure[recip_name] = closure.get(y_name, frozenset())
-                    closure[mult.name] = closure.get(x_name, frozenset()) | closure[recip_name]
+                    axis_dependencies[recip_name] = axis_dependencies.get(y_name, frozenset())
+                    axis_dependencies[mult.name] = axis_dependencies.get(x_name, frozenset()) | axis_dependencies[recip_name]
                     out.append(recip)
                     out.append(mult)
                     continue
@@ -553,7 +553,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     check is needed.
     """
     stmts = Body.coerce(stmts)
-    closure = stmts.deps_closure
+    name_axes = stmts.axis_dependencies
     axis_names = stmts.axis_names
     axis_deps: dict[int, tuple[Stmt, frozenset[str]]] = {}
 
@@ -568,7 +568,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
             reads.update(expr.free_vars())
         deps = reads & axis_names
         for name in reads:
-            deps.update(closure.get(name, frozenset()) & axis_names)
+            deps.update(name_axes.get(name, frozenset()))
         for child in (child for body in s.nested() for child in body):
             deps.update(_axis_deps(child))
         result = frozenset(deps - s.binds_axes())

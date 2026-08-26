@@ -160,12 +160,12 @@ def _assert_accuracy(emmy, eager, max_threshold=3.0, mean_threshold=0.4):
     "backend_kind,seq_len",
     [
         # CPU lane: ``LoopBackend`` + CPU eager over the full block. Keep the minimal
-        # seq_len=8 case for when pathological Loop normalization is repaired.
+        # seq_len=8 case for when Cling can compile the maximally fused body promptly.
         pytest.param(
             "loop",
             8,
             id="cpu",
-            marks=pytest.mark.skip(reason="whole-block CPU accuracy is blocked by pathological Loop normalization"),
+            marks=pytest.mark.skip(reason="whole-block LoopBackend accuracy is blocked by Cling compilation time"),
         ),
         # CUDA lane: ``CudaBackend`` + GPU eager. Uses the full ``seq_len=32``.
         pytest.param(

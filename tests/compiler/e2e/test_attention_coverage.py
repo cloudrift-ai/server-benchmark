@@ -1070,7 +1070,7 @@ def test_full_self_attn_tinyllama():
 
 
 @requires_cuda
-@pytest.mark.skip(reason="seq_len=512 full-attention accuracy is blocked by pathological Loop normalization")
+@pytest.mark.skip(reason="seq_len=512 accuracy needs a per-kernel schedule manifest; the fused scalar pin exceeds the watchdog")
 def test_full_self_attn_tinyllama_seq512(_chain_tile_pins):
     """Same at seq_len=512 — the shape that makes the SDPA P@V kernel the dominant cost (32 MB
     materialized score matrix, one CTA per output element). Pins correctness so future fusion /

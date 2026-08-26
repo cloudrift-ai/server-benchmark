@@ -430,8 +430,9 @@ canonicalized before validation:
   inner loop and the per-iter cost drops from XU divide to FMA
   multiply.
 - `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
-  Loops. Effect summaries are cached on immutable statements, and the pass computes transitive axis dependencies
-  bottom-up once per body; neither query recursively rediscovers the same leaf through every enclosing loop.
+  Loops. Effect summaries are cached on immutable statements, and `Body.axis_dependencies` retains only the axes
+  reachable from each definition. Long SSA chains therefore remain linear in definitions × loop depth instead of
+  materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for
   each identical `(input, index)` read in a scope and rewire its users.
   This is canonicalization for every Loop / Tile body, not a fusion

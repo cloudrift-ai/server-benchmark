@@ -33,7 +33,8 @@ Free-function companions (used by passes that work on raw
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -52,6 +53,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     pretty_body,
 )
 from emmy.compiler.ir.stmt.ir import BodyOp
+from emmy.compiler.tensor import Tensor
 
 # ---------------------------------------------------------------------------
 # Scope — a path of enclosing axes
@@ -112,6 +114,32 @@ class LoopOp(BodyOp):
         # than the now-gone ``body_outputs`` property.
         self._seed_io_placeholders()
         _validate(self)
+
+    def rename_buffers(self, rename: dict[str, str]) -> LoopOp:
+        """Return this canonical LoopOp with only external buffer names changed.
+
+        Buffer identity is outside Loop-body canonicalization. Renaming cannot
+        change SSA order, axis order, motion, or load deduplication because graph
+        renames require every destination buffer to be fresh. Preserve the
+        normalized body instead of running every normalization pass again.
+        """
+
+        def rename_stmt(stmt: Stmt) -> Stmt:
+            if isinstance(stmt, Load) and stmt.input in rename:
+                return replace(stmt, input=rename[stmt.input])
+            if isinstance(stmt, Write) and stmt.output in rename:
+                return replace(stmt, output=rename[stmt.output])
+            return stmt
+
+        def rename_io(io: dict[str, Tensor]) -> dict[str, Tensor]:
+            return {rename.get(buffer, buffer): replace(tensor, name=rename.get(tensor.name, tensor.name)) for buffer, tensor in io.items()}
+
+        renamed = copy(self)
+        renamed.body = self.body.map(rename_stmt)
+        renamed.inputs = rename_io(self.inputs)
+        renamed.outputs = rename_io(self.outputs)
+        renamed.knobs = dict(self.knobs)
+        return renamed
 
     @property
     def axes(self) -> tuple[Axis, ...]:
@@ -353,11 +381,10 @@ class LoopMeta:
 def _compute_live_axes(body: Body) -> dict[str, frozenset[str]]:
     """Axes reachable through Expr subtrees rooted at each SSA name.
 
-    Thin wrapper over :attr:`Body.deps_closure` filtered to axis names —
-    Accums already have their reduce axis subtracted by ``deps_closure``.
+    Accums already have their reduce axis subtracted by
+    :attr:`Body.axis_dependencies`.
     """
-    axes = body.axis_names
-    return {name: closure & axes for name, closure in body.deps_closure.items()}
+    return body.axis_dependencies
 
 
 # ---------------------------------------------------------------------------

@@ -1346,7 +1346,7 @@ def _rename_buf_in_op(op, old: str, new: str):
         }
 
     if isinstance(op, LoopOp):
-        renamed = LoopOp(body=op.body.map(fn))
+        renamed = op.rename_buffers({old: new})
     else:
 
         def rename_body(body):

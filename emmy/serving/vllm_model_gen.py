@@ -234,6 +234,30 @@ def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
     logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
 
 
+def _fork_attention_dest(rel):
+    """A checkpoint attention key, relative to ``layers.N.attn.`` → ``(module-relative param name,
+    shard_id)``, spelled the way the fork's own loader spells it: the published ``.scale`` sibling
+    is the fp8 block scale (``weight_scale_inv``), the attention-level compressor lives under the
+    fork's ``mla_attn`` submodule (the indexer's own compressor does not), and the two fused pairs
+    load as shards of their merged projections — ``wq_a``+``wkv`` into ``fused_wqa_wkv``, and each
+    compressor's ``wkv``+``wgate`` into its ``fused_wkv_wgate`` (matched by substring, so the
+    indexer's compressor fuses the same way, exactly as the fork's substring matching does)."""
+    if rel.endswith(".scale"):
+        rel = rel[: -len(".scale")] + ".weight_scale_inv"
+    if rel.startswith("compressor."):
+        rel = "mla_attn." + rel
+    for source, fused, shard in (
+        ("compressor.wkv.", "compressor.fused_wkv_wgate.", 0),
+        ("compressor.wgate.", "compressor.fused_wkv_wgate.", 1),
+    ):
+        if source in rel:
+            return rel.replace(source, fused), shard
+    for source, fused, shard in (("wq_a.", "fused_wqa_wkv.", 0), ("wkv.", "fused_wqa_wkv.", 1)):
+        if rel.startswith(source):
+            return fused + rel[len(source) :], shard
+    return rel, None
+
+
 def _build_fork_attention(vllm_config, runner, n_layers, prefix):
     """One engine-owned attention sublayer per local decoder layer (DeepSeek V4).
 
@@ -738,7 +762,16 @@ class EmmyGenModel(nn.Module, SupportsPP):
         own strict check waives any parameter whose quant method defines
         ``process_weights_after_loading``, which the head's does, so nothing downstream would
         notice a head left at its construction garbage and the server would serve noise while
-        looking healthy."""
+        looking healthy.
+
+        A hyper-connection model adds a second vLLM-owned family: every ``layers.N.attn.*`` key of
+        this rank's layer interval loads into the fork's attention sublayer (``_fork_attention_dest``
+        spells the destination and fused shard). The ownership table is enforced loudly BOTH ways —
+        an attention key that maps to no fork parameter raises, and a fork parameter the stream did
+        not fully load raises — because vLLM's strict check waives the fork's fp8-quantized
+        parameters the same way it waives the head's. The checkpoint's other families need no claim:
+        the runner already loaded the trunk, experts and embedding at construction, ``head.weight``
+        is the published spelling of ``lm_head.weight``, and the MTP head serves no twin."""
         is_last_rank = getattr(self, "_is_last_rank", True)
         coded_spec = getattr(self, "_coded_head_spec", None)
         param = self.lm_head.weight if is_last_rank and coded_spec is None else None
@@ -757,9 +790,14 @@ class EmmyGenModel(nn.Module, SupportsPP):
         elif coded is not None:
             _decode_lm_head_into(self.lm_head, coded)
             loaded.add("lm_head.weight")
-        if (is_last_rank and coded is None) or self.sinks is not None:
+        fork_attn = getattr(self, "fork_attn", None)
+        fork_params = None
+        if fork_attn is not None:
+            fork_params = [dict(module.named_parameters()) for module in fork_attn]
+            fork_loaded: dict[tuple[int, str], set] = {}
+        if (is_last_rank and coded is None) or self.sinks is not None or fork_params is not None:
             for name, w in weights:
-                if is_last_rank and name == "lm_head.weight" and coded is None:
+                if is_last_rank and name in ("lm_head.weight", "head.weight") and coded is None:
                     loader(param, w)
                     loaded.add("lm_head.weight")
                 elif is_last_rank and tied and coded is None and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
@@ -774,6 +812,45 @@ class EmmyGenModel(nn.Module, SupportsPP):
                         # vLLM's strict tracker compares the returned names with this module's
                         # registered parameters, not with the checkpoint source spelling.
                         loaded.add(f"sinks.{local_layer}")
+                elif fork_params is not None and name.startswith("layers."):
+                    layer_str, _, rest = name.removeprefix("layers.").partition(".")
+                    if not rest.startswith("attn."):
+                        continue  # runner-owned trunk key (attn_norm, ffn, hc_*) — loaded at construction
+                    layer = int(layer_str)
+                    if not (self.start_layer <= layer < self.end_layer):
+                        continue  # another pipeline rank's attention
+                    local = layer - self.start_layer
+                    rel, shard = _fork_attention_dest(rest.removeprefix("attn."))
+                    params = fork_params[local]
+                    if rel not in params:
+                        raise ValueError(
+                            f"EmmyGenModel: attention checkpoint key '{name}' maps to '{rel}', which is not a "
+                            "parameter of the fork's attention sublayer — the ownership table is stale"
+                        )
+                    if rel == "attn_sink":
+                        # Head-sharded copy, exactly as the fork loads it: each tensor-parallel rank
+                        # keeps its own head range of the per-head sink logits.
+                        tp = get_tp_group()
+                        n_local = self.config.num_attention_heads // tp.world_size
+                        narrow = w[tp.rank_in_group * n_local : (tp.rank_in_group + 1) * n_local]
+                        params[rel].data[: narrow.shape[0]].copy_(narrow)
+                    elif shard is not None:
+                        params[rel].weight_loader(params[rel], w, shard)
+                    else:
+                        getattr(params[rel], "weight_loader", default_weight_loader)(params[rel], w)
+                    fork_loaded.setdefault((local, rel), set()).add(shard)
+                    loaded.add(f"fork_attn.{local}.{rel}")
+        if fork_params is not None:
+            for local, params in enumerate(fork_params):
+                for rel in params:
+                    need = {0, 1} if "fused_" in rel else {None}
+                    got = fork_loaded.get((local, rel), set())
+                    if got != need:
+                        raise ValueError(
+                            f"EmmyGenModel: fork attention parameter 'fork_attn.{local}.{rel}' was not fully "
+                            f"loaded from the checkpoint (needed shards {sorted(need, key=str)}, got "
+                            f"{sorted(got, key=str)}) — this layer's attention would run on construction garbage"
+                        )
         if not is_last_rank:
             self.reclaim_device_memory()
             return loaded

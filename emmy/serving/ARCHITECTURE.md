@@ -327,6 +327,19 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   seam reproduces the eager `DeepseekV4DecoderLayer`, and per-shard expert partials sum to the
   unsharded combine (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
 
+  Inside the plugin, the whole attention sublayer is the FORK's: `EmmyGenModel` constructs one of the
+  fork's own attention modules per local layer (shared top-k indexer buffer, shared aux streams,
+  absolute-layer prefixes so every SWA/compressor/indexer cache registers its own KV-cache spec), and
+  `load_weights` owns the attention family of the checkpoint stream: every `layers.N.attn.*` key of
+  the rank's interval routes through `_fork_attention_dest` — the fp8 `.scale` sibling rename, the
+  compressor's `mla_attn` placement, the two fused-projection stackings (which also cover the
+  indexer's inner compressor), and the head-sharded `attn_sink` copy — into the fork module's own
+  `weight_loader`s. The ownership table is enforced loudly BOTH ways (an unmapped attention key, and
+  a fork parameter the stream did not fully load), because vLLM's strict check waives fp8-quantized
+  parameters the same way it waives the head's. The trunk, experts and embedding need no claim (the
+  runner loaded them at construction), `head.weight` is the published spelling of `lm_head.weight`,
+  and the MTP head serves no twin.
+
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
   `from_model` interns it into a group index, compiles that group's whole tier set on first sight

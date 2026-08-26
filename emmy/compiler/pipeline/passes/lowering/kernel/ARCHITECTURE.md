@@ -89,10 +89,9 @@ loop under the one name; anything else tiles nothing and folds serially one thre
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
-kernel-boundary `TileOp.stores` (1q — the root `Write`s / output sweep that left the term) are reconstituted into the
-projection `tail` at the zero-axis Fold peel (`effect_tail`; plain stores append at a flat/bare root), so everything below the
-peel — the sinks, the sweep's coop `StridedLoop` distribution, the split realizers — consumes the identical stmt
-stream the stored-`Write` era carried. The
+kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel,
+so everything below the peel — the sinks, cooperative loop distribution, and split realizers — consumes the
+identical statement stream that entered total lift. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is

@@ -33,7 +33,7 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
-from emmy.compiler.ir.tile.ir import TileOp, effect_tail
+from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import resolve, sites, spell
 
 
@@ -296,7 +296,17 @@ def sched_of(tile) -> Sched:
     return Sched(tile.op, tile.schedule, place=tile.place)
 
 
-def scheduled(op, *, name: str, place, knobs: dict, stores: tuple = (), slices=(), schedule: dict | None = None, workers=None):
+def scheduled(
+    op,
+    *,
+    name: str,
+    place,
+    knobs: dict,
+    output_specs: tuple = (),
+    slices=(),
+    schedule: dict | None = None,
+    workers=None,
+):
     """Build a SCHEDULED ``TileOp``: the term + placement, its schedule slices written through
     :class:`Sched` (the canonical key spelling), and the ``WORK`` inventory sealed.
 
@@ -308,7 +318,15 @@ def scheduled(op, *, name: str, place, knobs: dict, stores: tuple = (), slices=(
     ALREADY-KEYED dict (``030_split_reduce`` re-keys against the partial's own tree before it gets
     here). ``None`` slice values are skipped, so a resolver that declined needs no guard."""
     source = Sched(op, {}, place=place)
-    out = TileOp(op=op, name=name, place=place, workers=workers, knobs=knobs, schedule=dict(schedule or {}), stores=tuple(stores))
+    out = TileOp(
+        op=op,
+        name=name,
+        place=place,
+        workers=workers,
+        knobs=knobs,
+        schedule=dict(schedule or {}),
+        output_specs=tuple(output_specs),
+    )
     sched = sched_of(out)
     for family, node, value in slices:
         if value is not None:
@@ -344,19 +362,19 @@ def axis_names(root) -> set[str]:
 
 def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
-    kernel-boundary ``TileOp.stores`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.effect_tail`).
+    kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
     The ONE read every scheduler gate that inspects "the tail" goes through, so the
     ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
-    sweep moved to a ``Store`` decoration."""
+    sweep moved to an ``OutputSpec`` decoration."""
     op = tile.op
     body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
-    return effect_tail(body, tile.stores)
+    return apply_output_specs(body, tile.output_specs)
 
 
-def projection_regions(op: Fold, stores: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
-    """Partition an independent projection's pure body and stores by producing Fold.
+def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
+    """Partition an independent projection's pure body and output specifications by producing Fold.
 
-    Each boundary store must read exactly one root, the roots' backward cones must be disjoint,
+    Each output specification must read exactly one root, the roots' backward cones must be disjoint,
     and together those cones must cover the projection body. This is the structural ownership
     rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
     """
@@ -364,14 +382,14 @@ def projection_regions(op: Fold, stores: tuple) -> tuple[tuple[Fold, Body, tuple
     by_name = {name: root for root in roots for name in root.defines()}
     members: dict[int, set] = {id(root): set() for root in roots}
     grouped: dict[int, list] = {id(root): [] for root in roots}
-    for store in stores:
-        cone = op.body.backward_cone((store.write.value,))
+    for spec in output_specs:
+        cone = op.body.backward_cone((spec.write.value,))
         used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
         if len(used) != 1:
-            raise ValueError("an output-tiled root must own each boundary store independently")
+            raise ValueError("an output-tiled root must own each output specification independently")
         owner = used.pop()
         members[owner].update(cone.members)
-        grouped[owner].append(store)
+        grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
     if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):

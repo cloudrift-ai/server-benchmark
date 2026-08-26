@@ -14,7 +14,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
-from emmy.compiler.ir.tile import Placement, Store, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
@@ -73,9 +73,9 @@ def _mimo_graph() -> Graph:
         op=op,
         name="out0",
         place=Placement(free=(m, n)),
-        stores=(
-            Store(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
-            Store(Write(output="out1", index=(Var("m"), Var("n")), value="second")),
+        output_specs=(
+            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
+            OutputSpec(Write(output="out1", index=(Var("m"), Var("n")), value="second")),
         ),
     )
     graph = Graph()

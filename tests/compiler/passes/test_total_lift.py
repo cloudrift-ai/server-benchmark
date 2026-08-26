@@ -20,7 +20,9 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Channel, Fold, deep_defines
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
+from emmy.compiler.ir.tile import ProjectionRegion, lower_with_output_specs
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 
 
 def _tile(body: Body):
@@ -52,7 +54,7 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     assert node.role is AxisRole.CONTRACTION
     assert isinstance(node.a, Load) and node.a.input == "x"
     assert isinstance(node.b, Load) and node.b.input == "w"
-    assert len(tile.stores) == 1 and tile.stores[0].sweep is None
+    assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
 
 
 def test_epilogue_stays_in_the_projection_body() -> None:
@@ -116,6 +118,58 @@ def test_total_lift_fires_through_the_pipeline() -> None:
     from emmy.compiler.ir.tile import TileOp
 
     assert any(isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
+    """A shared row feeding different Q and K/V extents remains one pure TileOp."""
+    m, q, kv, k = Axis("m", 3), Axis("q", 4), Axis("kv", 2), Axis("k", 5)
+
+    def contraction(axis: Axis, weight: str, acc: str) -> Loop:
+        return Loop(
+            axis=k,
+            body=Body(
+                (
+                    Load(name=f"x_{acc}", input="x", index=(Var("m"), Var("k"))),
+                    Load(name=f"w_{acc}", input=weight, index=(Var(axis.name), Var("k"))),
+                    Assign(name=f"p_{acc}", op="multiply", args=(f"x_{acc}", f"w_{acc}")),
+                    Accum(name=acc, value=f"p_{acc}", op="add", axes=("k",)),
+                )
+            ),
+        )
+
+    q_region = Loop(
+        axis=q,
+        body=Body(
+            (
+                contraction(q, "wq", "q_acc"),
+                Write(output="q_out", index=(Var("m"), Var("q")), value="q_acc"),
+            )
+        ),
+    )
+    kv_region = Loop(
+        axis=kv,
+        body=Body(
+            (
+                contraction(kv, "wk", "k_acc"),
+                contraction(kv, "wv", "v_acc"),
+                Write(output="k_out", index=(Var("m"), Var("kv")), value="k_acc"),
+                Write(output="v_out", index=(Var("m"), Var("kv")), value="v_acc"),
+            )
+        ),
+    )
+    body = Body((Loop(axis=m, body=Body((q_region, kv_region))),))
+
+    tile = _tile(body)
+
+    regions = tuple(member for member in tile.op.body if isinstance(member, ProjectionRegion))
+    assert tuple(region.axis.extent for region in regions) == (Dim(4), Dim(2))
+    assert len(tile.output_specs) == 3
+    assert all(not isinstance(member, Loop) for member in tile.op.body.iter())
+    lowered = lower_with_output_specs(tile.op, tile.output_specs)
+    assert [member.axis.extent for member in lowered if isinstance(member, Loop)] == [Dim(4), Dim(2)]
+    assert {write.output for member in lowered for write in member.body.writes} == {"q_out", "k_out", "v_out"}
+    seam_scopes = {frozenset(axis.extent for axis in seam.axes) for seam in cuttable_seams(tile)}
+    assert {frozenset((Dim(3), Dim(4))), frozenset((Dim(3), Dim(2)))} <= seam_scopes
 
 
 # ===================================================================

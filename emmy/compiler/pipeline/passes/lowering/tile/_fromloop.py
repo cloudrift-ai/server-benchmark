@@ -14,7 +14,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt
-from emmy.compiler.ir.tile import Placement, TileOp, split_effects
+from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -97,10 +97,10 @@ def _raw_loops(body) -> list[Loop]:
 def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree."""
     free, cell = _peel(op.body)
-    split = split_effects(lift_body(cell))
+    split = extract_output_specs(lift_body(cell))
     if split is None:
-        raise ValueError("Loop IR effects are not a kernel-boundary store")
-    body, stores = split
+        raise ValueError("Loop IR effects cannot be represented as output specifications")
+    body, output_specs = split
     raw = _raw_loops(body)
     if raw:
         axes = ", ".join(inner.axis.name for inner in raw)
@@ -110,7 +110,7 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
         name=name,
         place=Placement(free=tuple(free)),
         inputs=dict(op.inputs),
-        stores=stores,
+        output_specs=output_specs,
     )
 
 

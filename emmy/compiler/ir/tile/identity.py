@@ -198,7 +198,7 @@ def shape_fingerprint(tile: TileOp) -> tuple[tuple[str, ...] | str, ...]:
 
 
 def store_fingerprint(tile: TileOp) -> tuple:
-    """The kernel-boundary stores' ADDRESSING — what ``TileOp.stores`` contributes that the term
+    """The output specifications' ADDRESSING — what ``TileOp.output_specs`` contributes that the term
     does not carry.
 
     Per store in order: the index expression, whether it is an ``atomicAdd``, its stored width, and
@@ -207,7 +207,7 @@ def store_fingerprint(tile: TileOp) -> tuple:
     (:func:`~emmy.compiler.structural.form`, a structural walk, not its ``repr``), since it is exactly what
     :func:`~_legality.warp_split_store` reads to decide addressability.
 
-    ``TileOp.structural_key`` excludes the stores by design (they are a kernel-boundary fact beside
+    ``TileOp.structural_key`` excludes the output specifications by design (they are a kernel-boundary fact beside
     ``place``, not algebra), so any identity coarser than the term folds them back in here.
     """
     return tuple(
@@ -218,7 +218,7 @@ def store_fingerprint(tile: TileOp) -> tuple:
             None if store.sweep is None else (str(store.sweep.extent.as_static()) if store.sweep.extent.is_static else "sym"),
             store.unroll,
         )
-        for store in tile.stores
+        for store in tile.output_specs
     )
 
 

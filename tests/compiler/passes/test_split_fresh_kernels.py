@@ -192,7 +192,7 @@ def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
 
 
 def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> None:
-    """A piece stays in Tile IR, so identity temporarily lowers its Fold with the boundary stores
+    """A piece stays in Tile IR, so identity temporarily lowers its Fold with the output specifications
     restored and the free axes nested around it. Both halves matter:
 
     - the STORES must come back, or a piece reports ``S_n_write = 0`` while every kernel that

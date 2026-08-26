@@ -6,8 +6,8 @@ canonicalizes the complete Fold tree before the separate algebraic rewrite and s
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
-preserved. A non-reduction output sweep becomes a boundary `Store.sweep`; any other surviving loop is a formation
-error.
+preserved. A non-reduction loop whose local values feed writes becomes a pure `ProjectionRegion`; each write becomes
+an `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation error.
 
 ## Fold storage
 
@@ -75,9 +75,9 @@ reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are
 and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
 as a supported slow path.
 
-Canonicalization runs entirely in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed
-when factoring makes a contraction the root compute node. Multiple stores in one output sweep retain one sweep axis and
-reconstitute one Loop.
+Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
+exposed when factoring makes a contraction the root compute node. Multiple output specifications owned by one
+projection region reconstitute one loop.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
@@ -88,8 +88,8 @@ without weakening buffer or axis identity. The emit-side same-score legality que
 than maintaining a second cone canonicalizer.
 
 `pipeline/passes/lowering/tile/_fromloop.py` exposes the total-lift entry used by the pass and golden replay. It peels
-the outer free axes, invokes the conversion, separates root stores, checks the no-inner-loop invariant, and creates
-one zero-axis root `Fold` over the lifted cell.
+the outer free axes, invokes the conversion, separates output specifications, checks the no-inner-loop invariant, and
+creates one zero-axis root `Fold` over the lifted cell.
 
 ## Algebraic rewrite
 
@@ -119,15 +119,15 @@ A fact that changes what a reader produces, and that the term does not carry, be
 fingerprint here. Omitting one is silent, and both known omissions cost the same way. `pool_key`
 shipped without per-axis extents, so two matmuls with transposed M/N — equal terms, equal
 `S_ext_*` summaries — shared one pool entry over spaces of 57442 and 8280 candidates. Buffer
-shapes and the boundary stores were missing from both identities, so a `(128, 128)` output and a
+shapes and the output specifications were missing from both identities, so a `(128, 128)` output and a
 `(4, 32, 128)` one over the same iteration space collided: the split form spells its coordinate as
 a dim pair the fragment store can address only under a divisibility rule, and a golden measured on
 the flat kernel joined a kernel that could not realize its row.
 
 ## TileOp and scheduling
 
-`TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and boundary
-stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
+`TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and output
+specifications. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 
 `lowering/tile/018_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling

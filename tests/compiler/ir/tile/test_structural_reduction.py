@@ -10,7 +10,7 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import ReducePlan, Store, TileOp, effect_tail
+from emmy.compiler.ir.tile import OutputSpec, ReducePlan, TileOp, apply_output_specs
 from emmy.compiler.ir.tile.ops import reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -149,7 +149,7 @@ def test_a_projection_rides_the_zero_axis_wrapper_not_the_node() -> None:
     node = Fold.projection(body=Body(proj), operands=(c,))  # the STORED form under the wrapper
     assert c.lower() == [c.loop]
     assert node.lower() == [c.loop, *proj]
-    assert effect_tail(node.lower(), (Store(write=write),)) == [c.loop, *proj, write]
+    assert apply_output_specs(node.lower(), (OutputSpec(write=write),)) == [c.loop, *proj, write]
     assert node.operands[0].role is AxisRole.CONTRACTION
 
 

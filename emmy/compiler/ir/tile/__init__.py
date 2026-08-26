@@ -10,7 +10,14 @@ node's derived ``Fold.role``, no per-kind type.
 
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import FoldMove, Level, Placement, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import Store, TileOp, effect_tail, split_effects
+from emmy.compiler.ir.tile.ir import (
+    OutputSpec,
+    ProjectionRegion,
+    TileOp,
+    apply_output_specs,
+    extract_output_specs,
+    lower_with_output_specs,
+)
 from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters, normalize_fold_tree
 
 __all__ = [
@@ -21,10 +28,12 @@ __all__ = [
     "Placement",
     "ReducePlan",
     "ReduceStage",
-    "Store",
+    "OutputSpec",
+    "ProjectionRegion",
     "TileOp",
-    "effect_tail",
+    "apply_output_specs",
     "lambda_equivalent_clusters",
+    "lower_with_output_specs",
     "normalize_fold_tree",
-    "split_effects",
+    "extract_output_specs",
 ]

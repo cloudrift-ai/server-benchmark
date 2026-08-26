@@ -31,6 +31,7 @@ from emmy.compiler.ir.pure.algebra import rename_combine
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.structural import digest, form
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the
@@ -87,6 +88,14 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
                 note_buf(b)
             for n in _operand_result_names(s):
                 note(n)
+            return
+        if isinstance(s, ProjectionRegion):
+            for param in s.lift.params[1:]:
+                note(param)
+            for child in s.body:
+                note_stmt(child)
+            for result in s.lift.results:
+                note(result)
             return
         if isinstance(s, Load):
             note_buf(s.input)
@@ -145,6 +154,15 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             child = next(consumed)
             key, cbufs = _structural(child)
             return ("node", key, tuple(bindex[b] for b in cbufs), tuple(rn(n) for n in _operand_result_names(child)))
+        if isinstance(s, ProjectionRegion):
+            return (
+                "projection",
+                form(s.axis),
+                s.unroll,
+                tuple(rn(param) for param in s.lift.params[1:]),
+                tuple(render(child) for child in s.body),
+                tuple(rn(result) if isinstance(result, str) else result for result in s.lift.results),
+            )
         return form(rebuffered(s).rewrite(rn))
 
     if node.axis is None:

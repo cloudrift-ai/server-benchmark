@@ -42,6 +42,7 @@ def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...
     TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
     into the flat loop body — deterministic, so the derived loop (and with it ``Op.cache_key``)
     depends only on the stored params."""
+    operands = _unique_edges(operands)
     if not operands:
         return stmts
     at: dict[int, list] = {}
@@ -55,6 +56,24 @@ def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...
             out.extend(operand_body(edge))
         if st is not None:
             out.append(st)
+    return tuple(out)
+
+
+def _unique_edges(operands: tuple) -> tuple:
+    """Maximal operand result sets, preserving their relative order.
+
+    A projection edge returning ``(a, b)`` subsumes a sibling returning only ``(a)``.  Keeping
+    both would bind and emit the same SSA value twice; the larger pure edge is the one source.
+    """
+    out = []
+    keys = tuple(_operand_result_names(edge) for edge in operands)
+    for index, (edge, key) in enumerate(zip(operands, keys, strict=True)):
+        names = set(key)
+        if any(names < set(other) for other in keys):
+            continue
+        if any(key == earlier for earlier in keys[:index]):
+            continue
+        out.append(edge)
     return tuple(out)
 
 
@@ -353,10 +372,10 @@ class Fold:
         one :meth:`Fold.contraction` builds, so ``a`` / ``channels`` / ``b_trans`` read back
         off any fold recognition stored as a contraction.
 
-        The shared/channel split rides the OPERAND ORDER — ``(b₀, a, b₁…)`` — not the
-        accesses. Node-locally the two sides are symmetric: each carries the reduction axis plus
-        one free axis. Telling physical M from N needs the PLACEMENT, which is a caller fact living
-        on the ``TileOp`` and deliberately absent here.
+        The canonical operand order starts ``(b₀, a, …)``; later channel edges occur once, even
+        when several channels reuse one. Node-locally the two sides are symmetric: each carries the
+        reduction axis plus one free axis. Telling physical M from N needs the PLACEMENT, which is a
+        caller fact living on the ``TileOp`` and deliberately absent here.
 
         The reading is SEMIRING-GENERIC, by the traits and never by op name: the carrier must be a
         product of ONE commutative-monoid ⊕ and every lift stmt one shared two-arg ⊗ with
@@ -368,24 +387,37 @@ class Fold:
             return None
         ring = self.semiring
         n = len(self.combine.results)
-        if ring is None or len(self.operands) != n + 1:
+        if ring is None:
             return None
         product, _ = ring
         defs = self.lift.body.definitions
         body = tuple(defs.get(result) for result in self.lift.results if isinstance(result, str))
         if len(body) != n or tuple(self.lift.results) != tuple(f"{r}__v" for r in self.combine.results):
             return None
-        names = [operand_name(e) for e in self.operands]
-        b0, a, rest = names[0], names[1], names[2:]
-        want = [(b0, a), *((a, b) for b in rest)]
-        for stmt, (x, y) in zip(body, want, strict=True):
-            if not isinstance(stmt, Assign) or stmt.op != product:
+        names = tuple(operand_name(edge) for edge in self.operands)
+        by_name = dict(zip(names, self.operands, strict=True))
+        shared = set(body[0].args).intersection(*(stmt.args for stmt in body[1:]))
+        a_name = names[1] if len(names) > 1 and names[1] in shared else next(iter(shared), None)
+        if a_name is None:
+            return None
+        b_names = []
+        for index, stmt in enumerate(body):
+            if not isinstance(stmt, Assign) or stmt.op != product or a_name not in stmt.args:
                 return None
-            expected = tuple(sorted((x, y))) if stmt.op.commutative else (x, y)
+            others = tuple(arg for arg in stmt.args if arg != a_name)
+            if not others and stmt.args == (a_name, a_name):
+                others = (a_name,)
+            if len(others) != 1 or others[0] not in by_name:
+                return None
+            b_name = others[0]
+            expected = tuple(sorted((a_name, b_name))) if stmt.op.commutative else ((b_name, a_name) if index == 0 else (a_name, b_name))
             if stmt.args != expected:
                 return None
-        chans = tuple(Channel(b=e, acc=acc) for e, acc in zip((self.operands[0], *self.operands[2:]), self.combine.results, strict=True))
-        return self.operands[1], chans
+            b_names.append(b_name)
+        if set(names) != {a_name, *b_names}:
+            return None
+        chans = tuple(Channel(b=by_name[name], acc=acc) for name, acc in zip(b_names, self.combine.results, strict=True))
+        return by_name[a_name], chans
 
     @cached_property
     def semiring(self) -> tuple | None:
@@ -475,7 +507,8 @@ class Fold:
     def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...], product="multiply", fold_op="add") -> Fold:
         """A BILINEAR fold over the ``(⊗, ⊕)`` semiring — the matmul cell at the default
         ``(multiply, add)`` instance. Unlike :meth:`projection` this constructor GENERATES
-        algebra: operands `(b₀, a, b₁…)`, the lift ``λ(k, b, a, b₂…). (b⊗a, a⊗b₂, …)`` and the
+        algebra: unique operands in first-use order from `(b₀, a, b₁…)`, the lift
+        ``λ(k, b, a, b₂…). (b⊗a, a⊗b₂, …)`` and the
         componentwise ⊕ over the channel accumulators. That generated shape is exactly what
         :attr:`_contraction` reads back, so ``a`` / ``channels`` / ``b_trans`` / :attr:`semiring`
         and the ``CONTRACTION`` role all follow from it.
@@ -487,9 +520,9 @@ class Fold:
         table). A caller REBUILDING an existing node (a σ-sliced split, a decode-boundary cone
         rewrap) must thread the node's own :attr:`semiring`, never assume the default.
 
-        Arity N ≥ 2 is the fused sibling edge (gate⊗up): N channel operands over ONE shared
-        operand, scheduled and lowered as one unit. Sharing is the arity — the shared edge simply
-        appears in every lift term; there is no let table beyond its canonical operand slot.
+        Arity N ≥ 2 is the fused sibling edge (gate⊗up): N channels over ONE shared operand,
+        scheduled and lowered as one unit. Any edge reused by several terms occupies one operand
+        slot; sharing never duplicates its load.
 
         Placement and schedule live nowhere here: the ``(m, n)`` axes ride ``TileOp.place`` and the
         slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
@@ -499,7 +532,14 @@ class Fold:
             raise ValueError(f"contraction: ({mul.name}, {plus.name}) is not a registered semiring (⊗ over a commutative-monoid ⊕)")
         channels = tuple(channels)
         prim = channels[0]
-        operands = (prim.b, a, *(ch.b for ch in channels[1:]))
+        operands = [prim.b, a]
+        seen = {operand_name(prim.b), operand_name(a)}
+        for channel in channels[1:]:
+            name = operand_name(channel.b)
+            if name not in seen:
+                seen.add(name)
+                operands.append(channel.b)
+        operands = tuple(operands)
         a_name = operand_name(a)
         body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name))]
         body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b))) for ch in channels[1:]]
@@ -524,7 +564,7 @@ class Fold:
         never a free name. The body is pure; synthesized Loop IR must pass through total lift
         before it can enter a projection. Results default to the body's last definition unless
         the caller explicitly names the values passed through to a consumer."""
-        operands = tuple(operands)
+        operands = _unique_edges(tuple(operands))
         b = Body.coerce(body) if body is not None else Body()
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
@@ -562,7 +602,7 @@ class Fold:
                     edge = by_param.get(term)
                     if isinstance(edge, Load):
                         consumed.add(id(edge))
-        return tuple(e for e in self.operands if id(e) not in consumed)
+        return _unique_edges(tuple(e for e in self.operands if id(e) not in consumed))
 
     @property
     def loop(self) -> Loop:
@@ -620,7 +660,7 @@ class Fold:
         free ``ops.lower`` wrapper duplicating it), which is also what keeps this module free of any
         import back into :mod:`~emmy.compiler.ir.tile.ops`."""
         if self.axis is None:
-            prefix = [s for e in self.operands for s in operand_body(e)]
+            prefix = [s for e in _unique_edges(self.operands) for s in operand_body(e)]
             return [*prefix, *_flatten_nodes(tuple(self.body))]
         return [*(s for e in self._hoisted_edges() for s in operand_body(e)), self.loop]
 

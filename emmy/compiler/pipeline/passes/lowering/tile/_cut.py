@@ -15,7 +15,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, refs_axis
 from emmy.compiler.ir.stmt import Body, Load, Write
-from emmy.compiler.ir.tile import Placement, Store, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
@@ -33,23 +33,26 @@ class CutSite:
     axes: tuple
 
 
-def _child_folds(member):
+def _member_occurrences(member, available: tuple):
+    """Stored Fold occurrences under one member, retaining wrapper-bound axes."""
     if isinstance(member, Fold):
-        yield member
+        yield member, available
+        yield from _occurrences(member, available)
         return
+    axis = getattr(member, "axis", None)
+    inner = (*available, axis) if axis is not None else available
     for body in member.nested():
         for child in body:
-            yield from _child_folds(child)
+            yield from _member_occurrences(child, inner)
 
 
 def _occurrences(node: Fold, available: tuple):
     """Stored child occurrences and the axes in scope at each incoming edge."""
     inner = available + (() if node.axis is None else (node.axis,))
-    children = [edge for edge in node.operands if isinstance(edge, Fold)]
-    children.extend(child for stmt in node.lift.body for child in _child_folds(stmt))
-    for child in children:
-        yield child, inner
-        yield from _occurrences(child, inner)
+    for edge in node.operands:
+        yield from _member_occurrences(edge, inner)
+    for member in node.lift.body:
+        yield from _member_occurrences(member, inner)
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -64,7 +67,7 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge, grouped only by object sharing."""
     all_sites = sites(tile.op)
-    outer = (*tile.place.free, *(store.sweep for store in tile.stores if store.sweep is not None))
+    outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
     for node, available in _occurrences(tile.op, outer):
         occurrence_axes.setdefault(id(node), []).append(available)
@@ -148,14 +151,14 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
         op=child,
         name=f"{tile.name}__place_producer",
         place=Placement(free=axes),
-        stores=tuple(Store(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)),
+        output_specs=tuple(OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)),
     )
     producer.knobs = consume_kernel_row(producer.knobs)
     parent_stores = tuple(
         replace(store, write=replace(store.write, output=renamed_outputs.get(store.write.output, store.write.output)))
-        for store in tile.stores
+        for store in tile.output_specs
     )
-    consumer = TileOp(op=parent_fold, name=tile.name, place=tile.place, stores=parent_stores)
+    consumer = TileOp(op=parent_fold, name=tile.name, place=tile.place, output_specs=parent_stores)
     consumer.knobs = consume_kernel_row(consumer.knobs)
 
     fragment = _input_fragment(match, root)

@@ -1374,7 +1374,7 @@ def _rename_buf_in_op(op, old: str, new: str):
         renamed = replace(
             op,
             op=rename_term(op.op),
-            stores=tuple(replace(store, write=fn(store.write)) for store in op.stores),
+            output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
         )
     renamed.inputs = renamed_io(op.inputs)
     renamed.outputs = renamed_io(op.outputs)

@@ -46,7 +46,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import Placement, Store, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
@@ -177,7 +177,7 @@ def _strippable(term: _Term) -> bool:
         return False
     if not place.free[-1].extent.is_static:
         return False
-    return all(isinstance(s, (Load, Assign, Write)) for s in op.body) and all(st.sweep is None for st in term.tile.stores)
+    return all(isinstance(s, (Load, Assign, Write)) for s in op.body) and all(st.sweep is None for st in term.tile.output_specs)
 
 
 # ---- the site tree ------------------------------------------------------------------------------ #
@@ -1540,7 +1540,7 @@ def _stamp(term: _Term, op, name, knobs: dict, slices, workers=None) -> TileOp:
         name=name,
         place=term.place,
         knobs=knobs,
-        stores=term.tile.stores,
+        output_specs=term.tile.output_specs,
         slices=slices,
         workers=workers,
     )
@@ -1561,7 +1561,7 @@ def _strip_variant(term: _Term, plan: TilePlan, name: str, knobs: dict) -> TileO
         ssa.update(s.defines())
     loads: list[Stmt] = []
     computes: list[Stmt] = []
-    stores: list[Store] = []
+    stores: list[OutputSpec] = []
     for i in range(r):
 
         def rename(n: str, i: int = i) -> str:  # suffix only the body's SSA names; axis vars stay
@@ -1571,11 +1571,11 @@ def _strip_variant(term: _Term, plan: TilePlan, name: str, knobs: dict) -> TileO
         for s in op.body:
             s2 = s.rewrite(rename, sigma)
             (loads if isinstance(s2, Load) else computes).append(s2)
-        stores.extend(Store(write=st.write.rewrite(rename, sigma)) for st in term.tile.stores)
+        stores.extend(OutputSpec(write=st.write.rewrite(rename, sigma)) for st in term.tile.output_specs)
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*term.place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return scheduled(Fold.projection(body=Body((*loads, *computes))), name=name, place=new_place, knobs=knobs, stores=tuple(stores))
+    return scheduled(Fold.projection(body=Body((*loads, *computes))), name=name, place=new_place, knobs=knobs, output_specs=tuple(stores))
 
 
 def _free_option(term: _Term, plan: TilePlan, name: str, knobs: dict, nested: Sequence[tuple] = ()) -> TileOp:
@@ -1659,7 +1659,7 @@ def _splitk_option(term: _Term, plan: TilePlan, node, rplan: ReducePlan, name: s
     # Re-indexing the computed cone can expose another canonical operand split. Normalize first,
     # then key the schedule against the nodes that are actually stored. No nested slice survives
     # this choice: 030 replaces the split carrier with fresh kernels which schedule themselves.
-    normalized = TileOp(op=op, place=term.place, stores=term.tile.stores).op
+    normalized = TileOp(op=op, place=term.place, output_specs=term.tile.output_specs).op
     actual_outer = normalized.operands[0] if normalized.axis is None else normalized
     actual_inner = actual_outer.composed
     assert actual_inner is not None

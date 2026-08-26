@@ -9,6 +9,7 @@ from __future__ import annotations
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
+from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
@@ -67,13 +68,13 @@ class _Ctx:
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
         # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
         # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
-        # a boundary store's sweep axis (off-term since 1q) — the same three the cut's closure
+        # an output specification's sweep axis (off-term) — the same three the cut's closure
         # check unions. Without a tile the placement is unknown, so ``captures`` declines to
         # answer rather than report grid coordinates as captured values.
         self.axes = None if tile is None else axis_names(root) if root is not None else set()
         if tile is not None:
             self.axes |= {a.name for a in (*tile.place.free, *tile.place.grid)}
-            self.axes |= {st.sweep.name for st in tile.stores if st.sweep is not None}
+            self.axes |= {st.sweep.name for st in tile.output_specs if st.sweep is not None}
 
     def captures(self, lam) -> tuple[str, ...]:
         """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
@@ -141,6 +142,10 @@ def _stmts(stmts, ctx: _Ctx):
             if isinstance(s, Fold):
                 out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
+            elif isinstance(s, ProjectionRegion):
+                out.append(f"{cont}  project[{_axis_span(s.axis)}]{' unroll' if s.unroll else ''}")
+                out.append(f"{cont}    {_lam_sig(s.lift, ctx)}")
+                out.extend(_stmts(s.body, ctx)(cont + "    "))
             else:
                 out.extend(pretty_body(Body((s,)), cont + "  "))
         return out
@@ -259,6 +264,8 @@ def tile_body(tile) -> str:
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
     lines += _pretty_region("schedule", [f"{k} = {v.spell() or '·'}" for k, v in unplaced_slices(tile)])
-    stores = [f"{f'sweep({st.sweep.name}) ' if st.sweep else ''}{ln.strip()}" for st in tile.stores for ln in st.write.pretty()]
-    lines += _pretty_region("stores", stores)
+    outputs = [
+        f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}" for spec in tile.output_specs for line in spec.write.pretty()
+    ]
+    lines += _pretty_region("outputs", outputs)
     return "\n".join(lines)

@@ -15,13 +15,13 @@ everything the term deliberately does not carry:
   the ONE worker inventory (``work``) and the warp-spec split (``workers``);
 - the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved TilePlan /
   ReducePlan / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
-- the kernel's EFFECTS — the root-store :class:`Store` decorations and the ``effect_tail`` /
-  ``split_effects`` pair that reconstitutes the effectful stmt stream from them.
+- the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
+  ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
 across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
 what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, slices,
-workers and stores all excluded. Tile IR stores only pure terms; statements appear when the term is
+workers and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
@@ -36,24 +36,27 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.pure.fold import edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
-from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write
+from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
+from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.structural import digest
 
 
 @dataclass(frozen=True)
-class Store:
-    """One ROOT-STORE decoration at the kernel boundary — the effect the stored term no
+class OutputSpec:
+    """One output write specification at the kernel boundary — the effect the stored term no
     longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
     names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
-    NOT part of the term: ``TileOp.stores`` owns the tuple, and consumers reconstitute the
-    effectful stmt stream via :func:`effect_tail`. Consecutive ``sweep`` stores on one axis ride
+    NOT part of the term: ``TileOp.output_specs`` owns the tuple, and consumers reconstitute the
+    effectful stmt stream via :func:`apply_output_specs`. Consecutive ``sweep`` stores on one axis ride
     one per-cell output ``Loop`` (rms/softmax's normalize sweep, ``unroll`` preserved); the swept
     members are the trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
-    through :func:`split_effects`, whose reconstitution round-trip gate is what keeps kernel
+    through :func:`extract_output_specs`, whose reconstitution round-trip gate is what keeps kernel
     sources byte-identical to the stored-``Write`` era."""
 
     write: Write
@@ -61,25 +64,99 @@ class Store:
     unroll: bool = False
 
 
+@dataclass(frozen=True)
+class ProjectionRegion:
+    """A pure output projection repeated over one local free axis.
+
+    A maximally fused kernel may have several sibling output loops with different extents.  Their
+    computation remains in pure lambdas while :class:`OutputSpec` owns the writes.  The region is
+    therefore structural map material, not a reduction and not an effectful Loop IR fallback.
+    """
+
+    axis: Axis
+    lift: Lambda
+    unroll: bool = False
+    pure = True
+
+    @property
+    def body(self) -> Body:
+        return self.lift.body
+
+    @property
+    def results(self) -> tuple[str, ...]:
+        """Values observed by this region's output specifications."""
+        return tuple(result for result in self.lift.results if isinstance(result, str))
+
+    def defines(self) -> tuple[str, ...]:
+        """A projection loop does not expose its per-iteration values to the enclosing scope."""
+        return ()
+
+    def deps(self) -> tuple[str, ...]:
+        return self.lift.params[1:]
+
+    def exprs(self) -> tuple:
+        return ()
+
+    def nested(self) -> tuple[Body, ...]:
+        return (self.lift.body,)
+
+    def with_bodies(self, bodies: tuple[Body, ...]) -> ProjectionRegion:
+        (body,) = bodies
+        return replace(self, lift=Lambda(self.lift.params, body, self.lift.results))
+
+    def binds_axes(self) -> frozenset[str]:
+        return frozenset({self.axis.name})
+
+    def rewrite(self, rename_ssa, sigma=None, axis_fn=None):
+        """Rename the pure region through the shared statement rewrite."""
+        return _rewrite(
+            self,
+            rename_ssa,
+            Sigma.IDENTITY if sigma is None else sigma,
+            _axis_identity if axis_fn is None else axis_fn,
+        )
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}project {self.axis.name} in 0..{self.axis.extent}", *pretty_body(self.body, indent + "    ")]
+
+
 def _sweep_start(stmts, axis_name: str) -> int:
     """The first index of the trailing projection run a ``sweep`` store's output ``Loop``
     wraps — the earliest stmt reading the sweep axis (SSA deps + Expr free vars, deep). The
     trailing-RUN rule (everything from that stmt on is swept) is deliberately simple; the
-    :func:`split_effects` round-trip gate is what proves it reproduces the captured loop."""
+    :func:`extract_output_specs` round-trip gate is what proves it reproduces the captured loop."""
     for i, s in enumerate(stmts):
         if axis_name in _member_reads(s):
             return i
     return len(stmts)
 
 
-def effect_tail(stmts, stores) -> list[Stmt]:
+def apply_output_specs(stmts, specs) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
-    kernel-boundary ``stores`` — the ONE reconstitution rule the scheduler's tail gates, the
+    kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
     materializer's zero-axis ``Fold`` peel and ``030_split_reduce`` share, so the lowered kernels stay
     byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
     ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
     (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
-    out = list(stmts)
+    specs = tuple(specs)
+    claimed: set[int] = set()
+
+    def expand(body) -> list:
+        out = []
+        for stmt in body:
+            if not isinstance(stmt, ProjectionRegion):
+                out.append(stmt)
+                continue
+            inner = expand(stmt.body)
+            results = set(stmt.results)
+            owned = [spec for spec in specs if set(spec.write.values) <= results]
+            claimed.update(id(spec) for spec in owned)
+            inner.extend(spec.write for spec in owned)
+            out.append(Loop(axis=stmt.axis, body=Body(inner), unroll=stmt.unroll))
+        return out
+
+    out = expand(stmts)
+    stores = [spec for spec in specs if id(spec) not in claimed]
     index = 0
     while index < len(stores):
         st = stores[index]
@@ -97,17 +174,53 @@ def effect_tail(stmts, stores) -> list[Stmt]:
     return out
 
 
-def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
-    """Split an effectful projection stmt stream into ``(pure stmts, Store decorations)`` — the
-    conversion-side inverse of :func:`effect_tail`, valid ONLY when the reconstitution
-    round-trips byte-identically (checked here; ``None`` otherwise). Recognized shapes: a trailing run
-    of top-level root ``Write``\\ s, or ONE trailing non-reduce output sweep ``Loop`` of pure
-    stmts followed by one or more trailing writes. An already-pure stream returns ``(stmts, ())``."""
+def _projection_results(body) -> set[str]:
+    out = set()
+    for member in body:
+        if isinstance(member, ProjectionRegion):
+            out.update(member.results)
+            out.update(_projection_results(member.body))
+    return out
+
+
+def lower_with_output_specs(op, specs) -> list[Stmt]:
+    """Lower one pure Tile term and attach every output specification at its owning scope."""
+    specs = tuple(specs)
+
+    def lower_body(body) -> list[Stmt]:
+        out = []
+        for member in body:
+            if isinstance(member, Fold):
+                out.extend(member.lower())
+                continue
+            if isinstance(member, ProjectionRegion):
+                inner = lower_body(member.body)
+                results = set(member.results)
+                inner.extend(spec.write for spec in specs if set(spec.write.values) <= results)
+                out.append(Loop(axis=member.axis, body=Body(inner), unroll=member.unroll))
+                continue
+            out.append(member)
+        return out
+
+    if isinstance(op, Fold) and op.axis is None:
+        body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
+        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
+        return apply_output_specs(body, root_specs)
+    return apply_output_specs(op.lower(), specs)
+
+
+def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
+    """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
+    conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
+    round-trips byte-identically (checked here; ``None`` otherwise). It handles flat root writes, the
+    legacy single output sweep, and recursively nested sibling output loops. Each sibling loop becomes a
+    pure :class:`ProjectionRegion`; every write becomes an :class:`OutputSpec`. An already-pure stream
+    returns ``(stmts, ())``."""
     original = list(stmts)
     rest = list(stmts)
-    stores: list[Store] = []
+    stores: list[OutputSpec] = []
     while rest and isinstance(rest[-1], Write):
-        stores.insert(0, Store(write=rest.pop()))
+        stores.insert(0, OutputSpec(write=rest.pop()))
     if not stores and rest and isinstance(rest[-1], Loop) and not rest[-1].is_reduce:
         loop = rest[-1]
         inner = list(loop.body)
@@ -115,13 +228,49 @@ def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
         while inner and isinstance(inner[-1], Write):
             writes.insert(0, inner.pop())
         if writes and all(s.pure for s in inner):
-            stores.extend(Store(write=write, sweep=loop.axis, unroll=loop.unroll) for write in writes)
+            stores.extend(OutputSpec(write=write, sweep=loop.axis, unroll=loop.unroll) for write in writes)
             rest = [*rest[:-1], *inner]
-    if not all(s.pure for s in rest):
+    if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
+        return tuple(rest), tuple(stores)
+
+    def extract(body: Body) -> tuple[Body, list[OutputSpec], list[OutputSpec]] | None:
+        pure = []
+        outputs: list[OutputSpec] = []
+        direct: list[OutputSpec] = []
+        for stmt in body:
+            if isinstance(stmt, Write):
+                spec = OutputSpec(write=stmt)
+                outputs.append(spec)
+                direct.append(spec)
+                continue
+            if isinstance(stmt, Loop) and not stmt.is_reduce:
+                child = extract(stmt.body)
+                if child is None:
+                    return None
+                child_body, child_outputs, child_direct = child
+                results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
+                provisional = Lambda(params=(stmt.axis.name,), body=child_body, results=results)
+                captures = tuple(sorted(provisional.free_names()))
+                region = ProjectionRegion(
+                    axis=stmt.axis,
+                    lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
+                    unroll=stmt.unroll,
+                )
+                pure.append(region)
+                outputs.extend(child_outputs)
+                continue
+            if not stmt.pure:
+                return None
+            pure.append(stmt)
+        return Body(pure), outputs, direct
+
+    extracted = extract(Body.coerce(stmts))
+    if extracted is None:
         return None
-    if effect_tail(rest, stores) != original:
+    body, outputs, _ = extracted
+    if apply_output_specs(body, outputs) != original:
         return None
-    return tuple(rest), tuple(stores)
+    return tuple(body), tuple(outputs)
 
 
 @dataclass
@@ -157,12 +306,12 @@ class TileOp(Op):
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
     schedule: dict = field(default_factory=dict)
-    # The kernel's ROOT-STORE decorations (``Store``): the output ``Write``\\ s (and the
-    # rms/softmax output-sweep spelling) — a kernel-boundary fact beside ``place``. Empty for a
+    # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
+    # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
-    # the effectful stmt stream via ``effect_tail`` — never read a ``Write`` out of the term.
-    stores: tuple = ()
+    # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
+    output_specs: tuple[OutputSpec, ...] = ()
     # The ONE worker inventory (``ir.schedule.Workers``): the ``w``/``n`` worker
     # tokens factored out of the per-site TILE values, derived at option assembly
     # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
@@ -176,7 +325,7 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp
 
-        scope_axes = (*self.place.free, *(store.sweep for store in self.stores if store.sweep is not None))
+        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         normalized = normalize_fold_tree(self.op, axes)
         if self.schedule and normalized != self.op:
@@ -188,7 +337,7 @@ class TileOp(Op):
         node = head(normalized)
         promoted = {
             store.sweep.name
-            for store in self.stores
+            for store in self.output_specs
             if store.sweep is not None and is_contraction(node) and any(edge_refs_axis(edge, store.sweep.name) for edge in node.operands)
         }
         if not promoted:
@@ -197,14 +346,14 @@ class TileOp(Op):
         extra = tuple(
             {
                 store.sweep.name: store.sweep
-                for store in self.stores
+                for store in self.output_specs
                 if store.sweep is not None and store.sweep.name in promoted - free_names
             }.values()
         )
         if extra:
             self.place = Placement(free=(*self.place.free, *extra))
-        self.stores = tuple(
-            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.stores
+        self.output_specs = tuple(
+            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
         )
 
     def pretty_body(self) -> str:
@@ -216,7 +365,7 @@ class TileOp(Op):
 
     def structural_key(self) -> str:
         """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
-        Placement, schedule slices, workers and stores are deliberately EXCLUDED: identity is
+        Placement, schedule slices, workers and output specifications are deliberately EXCLUDED: identity is
         the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
         shares the key and no emission path can leak a schedule into it."""
         return self.op.structural_key() if self.op is not None else ""
@@ -226,8 +375,24 @@ class TileOp(Op):
 
 
 __all__ = [
-    "Store",
+    "OutputSpec",
+    "ProjectionRegion",
     "TileOp",
-    "effect_tail",
-    "split_effects",
+    "apply_output_specs",
+    "extract_output_specs",
+    "lower_with_output_specs",
 ]
+
+
+from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
+
+
+@_rewrite.register
+def _(region: ProjectionRegion, rename, sigma, axis_fn):
+    axis = axis_fn(region.axis)
+    lift = Lambda(
+        params=(axis.name, *(rename(param) for param in region.lift.params[1:])),
+        body=Body(_rewrite(stmt, rename, sigma, axis_fn) for stmt in region.body),
+        results=tuple(rename(result) if isinstance(result, str) else result for result in region.lift.results),
+    )
+    return replace(region, axis=axis, lift=lift)

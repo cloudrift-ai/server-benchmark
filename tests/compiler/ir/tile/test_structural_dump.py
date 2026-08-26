@@ -4,7 +4,7 @@ NOTHING derived.
 The dump is the one place a reader meets the tile term directly, so what it shows has to be what
 the term IS: each node's kind and stored params, an operand edge recursed into (a computed edge is
 visibly a subtree, a materialized one visibly a leaf ``Load``), and the caller facts that live
-BESIDE the term — placement, workers, schedule, boundary stores — in their own regions. A derived
+BESIDE the term — placement, workers, schedule, output specifications — in their own regions. A derived
 evaluation (the per-cell step, the nodes synthesized inside it, the lowered nest) is a CONSEQUENCE
 of the stored params and is never printed: showing it beside storage is the inversion the layer
 exists to prevent, and it was the bulk of the output.
@@ -24,7 +24,7 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Store, TileOp
+from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty, unplaced_slices
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -231,14 +231,14 @@ def test_a_lambda_that_captures_an_enclosing_value_shows_its_capture_set() -> No
 
 def test_iteration_vars_are_not_captures() -> None:
     """A λ reading an axis is not capturing — the nest binds it. This covers the three places an
-    axis can come from: the term's own axes, the placement, and a boundary store's sweep."""
+    axis can come from: the term's own axes, the placement, and an output specification's sweep."""
     m, n = Axis("m", 128), Axis("n", 64)
     body = Body((Load(name="w_e", input="w", index=(Var("m"), Var("n"))), Assign(name="o", op="multiply", args=("acc0", "w_e"))))
     tile = TileOp(
         op=Fold.projection(operands=(_stat_fold(),), body=body),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
-        stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
     )
     # ``m`` comes from the placement, ``n`` from the output sweep — the sweep axis left the term
     # at 1q, so a dump reading only the term would wrongly call it captured.
@@ -269,17 +269,17 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
 # --- the caller facts beside the term get their own regions ------------------------------------- #
 
 
-def test_pretty_body_separates_placement_and_boundary_stores_from_the_term() -> None:
+def test_pretty_body_separates_placement_and_outputs_from_the_term() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
     tile = TileOp(
         op=Fold.projection(operands=(_stat_fold(),), body=Body((Assign(name="o", op="rsqrt", args=("acc0",)),))),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
-        stores=(Store(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
     )
     text = tile.pretty_body()
     assert "place  free=(m, n)  grid=(m)" in text
-    assert "stores" in text and "└─ sweep(n) y[m, n] = o" in text
+    assert "outputs" in text and "└─ sweep(n) y[m, n] = o" in text
 
 
 def test_an_unmapped_placement_says_so() -> None:

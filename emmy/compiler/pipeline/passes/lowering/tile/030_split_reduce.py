@@ -36,13 +36,14 @@ from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import (
+    OutputSpec,
     Placement,
     ReducePlan,
-    Store,
     TileOp,
-    split_effects,
+    extract_output_specs,
+    lower_with_output_specs,
 )
-from emmy.compiler.ir.tile.ir import effect_tail
+from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import head, projection_regions, projection_tail, reduce_plan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.knob import consume_kernel_row
@@ -68,8 +69,8 @@ def _slice_fold(fold: Fold, b: int) -> Fold:
 
 
 def _boundary(stmts) -> tuple[tuple, tuple]:
-    """Split a projection into a pure body and boundary stores."""
-    split = split_effects(tuple(stmts))
+    """Split a projection into a pure body and output specifications."""
+    split = extract_output_specs(tuple(stmts))
     if split is None:
         return tuple(stmts), ()
     return split
@@ -97,7 +98,7 @@ def _frag(match: Match, root: Node) -> Graph:
 def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     """Return fragment buffers followed by external inputs actually read by a piece."""
     if isinstance(body, TileOp):
-        body = effect_tail(body.op.lower(), body.stores)
+        body = lower_with_output_specs(body.op, body.output_specs)
     elif isinstance(body, Fold):
         body = body.lower()
     reads = {load.input for load in Body.coerce(body).loads}
@@ -110,8 +111,9 @@ def _add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inpu
     renamed = {name: f"{name}__split" for name in buffers}
     piece = replace(
         piece,
-        stores=tuple(
-            replace(store, write=replace(store.write, output=renamed.get(store.write.output, store.write.output))) for store in piece.stores
+        output_specs=tuple(
+            replace(spec, write=replace(spec.write, output=renamed.get(spec.write.output, spec.write.output)))
+            for spec in piece.output_specs
         ),
     )
     tensors = (
@@ -135,10 +137,10 @@ def _one(match: Match, frag: Graph, root: Node, piece: TileOp) -> Graph:
     return _add_output_piece(match, frag, root, piece, list(root.inputs))
 
 
-def _piece(body, free, *, stores: tuple = ()) -> TileOp:
+def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
     """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim."""
     op = body if isinstance(body, Fold) else Fold.projection(body=Body.coerce(body))
-    piece = TileOp(op=op, place=Placement(free=tuple(free)), stores=stores)
+    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -182,7 +184,7 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
 
     pieces = []
     chosen = None
-    for fold, body, stores in projection_regions(op, tile.stores):
+    for fold, body, stores in projection_regions(op, tile.output_specs):
         node = _output_root(root, {store.write.output for store in stores})
         entry = (node, fold, body, stores)
         if fold is selected:
@@ -192,13 +194,13 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     if chosen is None:
         raise ValueError("the scheduled Fold does not own an independent projection region")
     node, _, body, stores = chosen
-    return node, tuple(effect_tail(body, stores)), tuple(pieces)
+    return node, tuple(apply_output_specs(body, stores)), tuple(pieces)
 
 
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
     """Add the unsplit independent projection Folds as fresh schedulable kernels."""
     for root, fold, body, stores in pieces:
-        tile = _piece(_project(fold, body), free, stores=stores)
+        tile = _piece(_project(fold, body), free, output_specs=stores)
         _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
 
@@ -243,7 +245,7 @@ def _split_contraction(
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         p_body, p_stores = _boundary(atomic_epi)
-        result = _one(match, frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
+        result = _one(match, frag, root, _piece(_partial(p_body), (split, *grid), output_specs=p_stores))
         return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``.
@@ -265,8 +267,8 @@ def _split_contraction(
         lead_ix = (Var(split.name),) if n_comp == 1 else (Literal(i, "int"), Var(split.name))
         return (*lead_ix, *cell)
 
-    ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(_partial(()), (split, *grid), stores=ws_stores)
+    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
+    partial_tile = _piece(_partial(()), (split, *grid), output_specs=ws_stores)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     other = tuple(f"{nm}__p" for nm in states)
@@ -282,11 +284,11 @@ def _split_contraction(
         # The projected value is the LAST defining stmt's name — the epilogue tail may end with
         # non-defining stmts, so scan backward instead of indexing [-1].
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), acc)
-        fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
+        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
     # Stamped AFTER the workspace is in the fragment: the finalize reads it, and its structural
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(_project(fin_fold, fin_proj), grid, stores=fin_stores)
+    fin_tile = _piece(_project(fin_fold, fin_proj), grid, output_specs=fin_stores)
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
@@ -316,7 +318,7 @@ def rewrite(match: Match, root: Node) -> Graph:
     # so the partial keeps that Fold bare for the normal contraction binder.
     # The projection (when the split node carries one) rides the zero-axis ``Fold`` wrapper over the split
     # ``Fold`` — its ONE home; peel it here and hand it to the realizer.
-    # The projection with the kernel-boundary stores reconstituted (1q) — the split realizers
+    # The projection with its output specifications reconstituted — the split realizers
     # retarget the root ``Write`` exactly as when it rode the zero-axis ``Fold`` body. A projection whose
     # only stmt was the root ``Write`` leaves a BARE fold behind (the zero-axis ``Fold`` wrapper dropped
     # with its last in-body stmt), so the reconstitution keys off the TileOp, not the node shape.
@@ -359,7 +361,7 @@ def rewrite(match: Match, root: Node) -> Graph:
             atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
         proj_body, proj_stores = _boundary(atomic_proj)
         frag = _frag(match, root)
-        piece = _piece(_project(partial_fold, proj_body), (split, *grid), stores=proj_stores)
+        piece = _piece(_project(partial_fold, proj_body), (split, *grid), output_specs=proj_stores)
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
@@ -383,9 +385,9 @@ def rewrite(match: Match, root: Node) -> Graph:
         return (*lead, *ws_cell)
 
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace -----
-    ws_stores = tuple(Store(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
+    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     frag = _frag(match, root)
-    partial_tile = _piece(partial_fold, (split, *grid), stores=ws_stores)
+    partial_tile = _piece(partial_fold, (split, *grid), output_specs=ws_stores)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the finalize
@@ -401,11 +403,11 @@ def rewrite(match: Match, root: Node) -> Graph:
         # Backward scan — the epilogue tail may end with non-defining stmts (see the deferred
         # kernel arm above).
         out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
-        fin_stores = (Store(write=Write(output=out.name, index=cell, value=out_val)),)
+        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
     # --- splice the two-kernel fragment in place of the single split TileOp ----------------
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(_project(fin_fold, fin_proj), grid, stores=fin_stores)
+    fin_tile = _piece(_project(fin_fold, fin_proj), grid, output_specs=fin_stores)
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, tuple(grid))

@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural-IR root `op` (`tile/ir`: ONE `Fold` kind) + `place` / `work` / `workers` / `knobs` / `schedule` / `stores` — every per-node slice keyed into `schedule` by the tree-path codec |
+| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural root `op`, `output_specs`, placement, workers, knobs, and tree-path-keyed schedule slices |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -51,8 +51,8 @@ rewrite handler) and its seed was a second placement path that `_lift` stripped.
 cross-CTA finalize was numerically wrong as a result, and became correct when the combine started
 arriving as ordinary statements.
 
-**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and nothing else of the
-program; the schedule slices, the root stores and the knobs are the `TileOp`'s, not the term's. So
+**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the schedule
+slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 `Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
@@ -125,8 +125,8 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
-`010_lift` copies every port onto Tile IR, and Kernel/CUDA lowering renders every boundary Store and output
-pointer. Independent body placement may reorder sibling Writes without changing the ABI.
+`010_lift` copies every port onto Tile IR, and Kernel/CUDA lowering renders every `OutputSpec` and output pointer.
+Independent body placement may reorder sibling writes without changing the ABI.
 
 `Op.source` is the rewrite-chain predecessor — the engine's
 `_apply_one` stamps it on every 1:1 in-place rebind, so a fully
@@ -323,13 +323,15 @@ online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf,
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
-`Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop` never do — no
+`Load`/`Assign`/`Select` and the structural `Fold` and `ProjectionRegion` nodes opt in; `Accum`/`Write`/`Init`/`Loop`
+never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
 (`Lambda.canonical` — free names never renumbered). `Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
-commutative product's arguments does not change them. Formation is strict: a kernel's root stores ride
-`TileOp.stores`, and synthesized split-reduce loops remain Loop IR until the new kernel re-enters total lift. A result
+commutative product's arguments does not change them. Formation is strict: a kernel's writes ride
+`TileOp.output_specs`, and synthesized split-reduce loops remain Loop IR until the new kernel re-enters total lift. A
+result
 may be a bare
 `float` literal — ι is spelled in the lift (softmax's singleton
 is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
@@ -538,8 +540,8 @@ suffix.
 
 Tile IR stores the complete inner loop nest as one tree of `Fold` terms. The Loop IR boundary peels the outer parallel
 axes, converts every reduction from its explicit `Accum` statements, and leaves each nested reduction in the same
-position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence; root writes and output
-sweeps live in `TileOp.stores`.
+position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. Pure sibling output
+loops become `ProjectionRegion` terms, and their writes live in `TileOp.output_specs`.
 
 A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, so later sibling statements and outer
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to

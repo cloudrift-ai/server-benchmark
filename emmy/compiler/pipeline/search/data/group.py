@@ -48,9 +48,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from emmy.compiler.pipeline.passes.identity import kernel_sig
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
-from emmy.compiler.structural import digest
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -342,16 +342,6 @@ class GoldenGroup(Group):
         rows = (goldens,) if isinstance(goldens, int) else goldens
         ids = tuple(sorted({int(i) for i in rows}))
         return cls(key, name, tier, gpu, shape, dynamic, packed[0], matrix, len(matrix) if total is None else total, golden_ids=ids)
-
-
-def kernel_sig(feats: dict) -> str:
-    """The op signature of the kernel a row actually measured, digested from its own ``S_*`` stamps.
-
-    Exactly what :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's
-    recorded stamps instead — so this is the SAME identity, asked of the kernel that ran rather than of the
-    site it came from. On the RTX 5090 freeze the two agree for 83% of rows; the rest are where the
-    distinction matters."""
-    return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
 
 
 def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:

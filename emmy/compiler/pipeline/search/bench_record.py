@@ -124,7 +124,7 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     leaves for a realized config that failed to bench. A kernel with no recoverable
     offer site is skipped with a debug note."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.structural import digest  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.identity import kernel_sig  # noqa: PLC0415
 
     nids = [nid for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
@@ -133,7 +133,7 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     for idx, nid in enumerate(nids):
         op = compiled.nodes[nid].op
         site = _offer_site(op)
-        sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_"))) if site is not None else None
+        sig = kernel_sig(site.knobs) if site is not None else None
         if sig is not None:
             sig_by_nid[nid] = sig
         entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))

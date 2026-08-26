@@ -100,7 +100,7 @@ class IdentityStrategy(PipelineStrategy):
         """The sorted ``S_*`` row — golden-record identity. Knobs-first (the stamped row IS the
         identity every key already embeds); computed from the body only for an op nothing
         stamped yet (pass ``graph`` for the dtype features then)."""
-        stamped = tuple(sorted((k, float(v)) for k, v in (getattr(op, "knobs", None) or {}).items() if k.startswith(STRUCT_PREFIX)))
+        stamped = stamped_row(getattr(op, "knobs", None))
         if stamped:
             return stamped
         body = getattr(op, "body", None)
@@ -112,6 +112,19 @@ class IdentityStrategy(PipelineStrategy):
         """Digest of :meth:`signature` — the tune DB node-table key and the kernel-inventory
         dedup key."""
         return digest(*self.signature(op, graph))
+
+
+def stamped_row(knobs: dict | None) -> tuple:
+    """The sorted ``S_*`` pairs of a stamped knob row — the content of a kernel's identity."""
+    return tuple(sorted((k, float(v)) for k, v in (knobs or {}).items() if k.startswith(STRUCT_PREFIX)))
+
+
+def kernel_sig(feats: dict) -> str:
+    """The same function :meth:`IdentityStrategy.op_sig` computes, asked of a recorded row's
+    stamps instead of a live op — the identity of the kernel that RAN rather than of the site
+    it came from. The two agree whenever the row's stamps are the kernel's own; where they
+    disagree is where the distinction matters (see ``search/data/group.group_measured``)."""
+    return digest(*stamped_row(feats))
 
 
 # ---------------------------------------------------------------------------

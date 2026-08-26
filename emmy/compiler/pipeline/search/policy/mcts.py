@@ -213,7 +213,7 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
-        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _us, _status in kernels] if kernels is not None else None
+        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _stats, _status in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -232,8 +232,8 @@ class TuningSearch(Search):
                 self.prior_model.record_bench(token.realized_knobs, stats.median, status)
             else:
                 regime = context_view(self._base_knobs)
-                for knobs, median, st in kernels or ():
-                    self.prior_model.record_bench({**regime, **knobs}, median, st)
+                for knobs, kstats, st in kernels or ():
+                    self.prior_model.record_bench({**regime, **knobs}, kstats.median, st)
 
     def _realized_knobs(self, candidate: object) -> dict | None:
         """The terminal's ONE knob row — the kernel's ``base_knobs`` (``S_*`` identity + ``H_*``

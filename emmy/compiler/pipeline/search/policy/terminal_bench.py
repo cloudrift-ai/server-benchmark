@@ -47,14 +47,16 @@ class TerminalBench:
         # for the whole matmul).
         self.unlowered = [nid for nid in order if not isinstance(self.graph.nodes[nid].op, (CudaOp, InputOp, ConstantOp))]
         self.backend_name = getattr(backend, "name", "stub")
-        #: Per-KERNEL measurements, ``[(knobs, median_us, status), ...]`` in launch order — what
-        #: the search trains its prior on. A terminal is a Σ over its kernels; when a structural
-        #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
-        #: the total to. Each kernel carries its own decisions and earns its own sample.
-        self.per_kernel: list[tuple[dict, float, str]] = []
+        #: Per-KERNEL measurements, ``[(knobs, PerfStats, status), ...]`` in launch order — what
+        #: the search records a multi-kernel terminal as. A terminal is a Σ over its kernels; when
+        #: a structural fork made it several, they hold DIFFERENT rows and there is no single row
+        #: to attribute the total to. Each kernel carries its own decisions and earns its own
+        #: sample — including its own variance / sample count, which the node store's
+        #: quality-aware leaf replacement compares.
+        self.per_kernel: list[tuple[dict, PerfStats, str]] = []
 
-    def _note(self, op, stats, status: str) -> None:
-        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
+    def _note(self, op, stats: PerfStats, status: str) -> None:
+        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), stats, status))
 
     @staticmethod
     def _point_stats(us: float):
@@ -292,7 +294,7 @@ async def bench_terminal_async(cand, *, backend, db):
     """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
     rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
     ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
-    backend measurement was required, and ``per_kernel`` the ``(knobs, median_us, status)`` of each
+    backend measurement was required, and ``per_kernel`` the ``(knobs, PerfStats, status)`` of each
     kernel — the terminal's Σ decomposed into the rows that earned it. The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`TerminalBench`."""

@@ -69,7 +69,7 @@ class Search(ABC):
         its ``graph`` carries the realized op ``knobs`` (the full config,
         including knobs stamped at deterministic lowering steps that never
         appear as forks). ``kernels`` is the same terminal decomposed into its
-        PER-KERNEL ``(knobs, median_us, status)`` rows: a terminal is a Σ over
+        PER-KERNEL ``(knobs, PerfStats, status)`` rows: a terminal is a Σ over
         the kernels it lowered to, and one a structural fork made several of holds
         several rows, so the row that earned a latency is a kernel's and never the
         terminal's. Default no-op; :class:`TuningSearch` overrides it."""

@@ -84,8 +84,32 @@ def test_an_unknown_scheme_and_a_shapeless_graph_both_refuse(tmp_path):
     graph, bundle = _traced("nn.Linear(256, 64, bias=False)(torch.randn(32, 256))")
     with pytest.raises(ValueError, match="unknown quantization scheme"):
         write_quantized_checkpoint(graph, bundle, tmp_path / "a", scheme="int4")
-    assert SCHEMES == ("nvfp4",)
+    assert SCHEMES == ("nvfp4", "nvfp4-w4a16")
 
     bare, bundle2 = _traced("torch.exp(torch.randn(8, 8))")
     with pytest.raises(ValueError, match="no linear"):
         write_quantized_checkpoint(bare, bundle2, tmp_path / "b")
+
+
+def test_the_two_schemes_differ_only_in_the_activation_declaration(tmp_path):
+    """Same weights, same layout — the config's activation half is the whole difference, and it is
+    what decides which of the two deployable NVFP4 programs the spellers build. That makes the two
+    directly comparable on one shape, which is the point of having both."""
+    from safetensors import safe_open
+
+    keys, configs = [], []
+    for i, scheme in enumerate(SCHEMES):
+        graph, bundle = _traced("nn.Linear(256, 64, bias=False)(torch.randn(32, 256))")
+        ckpt = write_quantized_checkpoint(graph, bundle, tmp_path / f"c{i}", scheme=scheme)
+        with safe_open(str(ckpt / "model.safetensors"), framework="pt") as f:
+            keys.append(sorted(f.keys()))  # noqa: SIM118 — safetensors handle, not a dict
+        configs.append(json.loads((ckpt / "config.json").read_text())["quantization_config"])
+        assert spell_quantized_constants(graph, str(ckpt)) == 1
+        # W4A4 marks the linear; weights-only leaves the activation 16-bit.
+        assert spell_static_fp4_activations(graph, str(ckpt)) == (1 if scheme == "nvfp4" else 0)
+
+    assert keys[0] == keys[1], "both write the same tensors"
+    w4a4, w4a16 = (c["config_groups"]["group_0"] for c in configs)
+    assert w4a4["weights"] == w4a16["weights"]
+    assert w4a4["input_activations"]["num_bits"] == 4
+    assert "input_activations" not in w4a16

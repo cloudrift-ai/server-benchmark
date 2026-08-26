@@ -120,18 +120,6 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
             "an ``int <NAME>`` runtime arg per dim. Example: ``--dynamic seq_len@x:1``."
         ),
     )
-    parser.add_argument(
-        "--quantize",
-        choices=SCHEMES,
-        default=None,
-        help=(
-            "Quantize the traced module's linear weights to this scheme and compile the result. "
-            "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
-            "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
-            "The weight side is derived from each tensor; the activation scale is calibrated over the "
-            "trace's ONE example input — a real calibration, and a poor one."
-        ),
-    )
     if include_dump_dir:
         parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts")
 
@@ -280,6 +268,26 @@ def resolve_golden_arg(args) -> None:
     )
 
 
+def add_quantize_arg(parser) -> None:
+    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run``), not by
+    every command sharing the input parser. A flag that says it will quantize and does not is
+    worse than its absence."""
+    parser.add_argument(
+        "--quantize",
+        choices=SCHEMES,
+        default=None,
+        help=(
+            "Quantize the traced module's linear weights to this scheme and compile the result. "
+            "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
+            "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
+            "'nvfp4' declares static 4-bit activations (W4A4, the native block-scaled path); "
+            "'nvfp4-w4a16' declares weights only, leaving activations 16-bit. The weight side is derived "
+            "from each tensor; the activation scale is calibrated over the trace's ONE example input — "
+            "a real calibration, and a poor one."
+        ),
+    )
+
+
 def add_diagnostics_args(parser) -> None:
     """Register the ``-v`` / ``-q`` / diff-rendering args shared by ``compile`` and ``tune``."""
     verbosity = parser.add_mutually_exclusive_group()
@@ -412,6 +420,7 @@ def register_compile_command(subparsers):
             "SASS-identical, so it never changes measured perf; tune / run / bench leave it off."
         ),
     )
+    add_quantize_arg(parser)
     add_diagnostics_args(parser)
     add_nvcc_args(parser)
     parser.set_defaults(func=handle_compile)
@@ -514,6 +523,10 @@ def _quantize_traced(graph: Graph, bundle, args) -> None:
         logger.error("--quantize: %s", e)
         sys.exit(2)
     logger.info("%s checkpoint at %s\n%s", args.quantize, ckpt, summarize(ckpt))
+    # The isolated bench worker re-traces from ``--code`` and binds the packed constants through
+    # a checkpoint path; this is the one it needs (``load_or_trace`` prefers ``code``, so naming
+    # the directory here does not redirect the trace).
+    args._quantized_checkpoint = str(ckpt)
     spelled = spell_quantized_constants(graph, str(ckpt))
     marked = spell_static_fp4_activations(graph, str(ckpt))
     logger.info("spelled %d quantized weight(s); %d linear(s) marked for 4-bit activations", spelled, marked)

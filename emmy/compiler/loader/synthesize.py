@@ -31,8 +31,13 @@ from emmy.compiler.loader.quant import _E4M3_MAX, _F4_MAX, NVFP4_BLOCK, quantize
 
 logger = logging.getLogger(__name__)
 
-#: The scheme names ``--quantize`` accepts. One today; the fp8 spellers would slot in beside it.
-SCHEMES = ("nvfp4",)
+#: The scheme names ``--quantize`` accepts. The two differ ONLY in what the config declares about
+#: activations, which is the whole difference between the two deployable NVFP4 programs: with a
+#: static 4-bit declaration the activation speller marks each linear and the native block-scaled
+#: cell becomes reachable (W4A4); without it the weights stay packed against 16-bit activations and
+#: the packed byte-slab drain is the path (W4A16). Same weights, same checkpoint layout, so the two
+#: are directly comparable on one shape. The fp8 spellers would slot in beside them.
+SCHEMES = ("nvfp4", "nvfp4-w4a16")
 
 #: modelopt's NVFP4 declaration, the shape ``_fp4_quant_config`` and the static activation reader
 #: both recognize — the same one nvidia/Qwen3-8B-NVFP4 ships.
@@ -47,6 +52,13 @@ _NVFP4_CONFIG = {
         }
     },
     "ignore": [],
+}
+
+#: The same declaration minus the activation half — nvidia/Qwen3.6-27B-NVFP4's shape, where the
+#: MLP is packed but its activations stay 16-bit.
+_NVFP4_W4A16_CONFIG = {
+    **{k: v for k, v in _NVFP4_CONFIG.items() if k != "config_groups"},
+    "config_groups": {"group_0": {"weights": _NVFP4_CONFIG["config_groups"]["group_0"]["weights"], "targets": ["Linear"]}},
 }
 
 
@@ -153,7 +165,8 @@ def write_quantized_checkpoint(graph: Graph, bundle, out_dir: str | Path, *, sch
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(out / "model.safetensors"))
-    (out / "config.json").write_text(json.dumps({"model_type": "synthetic", "quantization_config": _NVFP4_CONFIG}, indent=1))
+    config = _NVFP4_CONFIG if scheme == "nvfp4" else _NVFP4_W4A16_CONFIG
+    (out / "config.json").write_text(json.dumps({"model_type": "synthetic", "quantization_config": config}, indent=1))
     logger.info("wrote a %s checkpoint for %d linear(s): %s", scheme, len(tensors) // 4, out)
     return out
 

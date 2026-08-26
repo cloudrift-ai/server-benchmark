@@ -7,6 +7,8 @@ IR. It is a value fact now, so fusion preserves it without knowing it exists.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from emmy.compiler.dtype import F16, F32, DataType
@@ -14,6 +16,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Pipeline
 
 _RULE = "090_spell_store_rounding"
@@ -58,11 +61,15 @@ def _pointwise_kernel() -> LoopOp:
     )
 
 
-def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16)) -> LoopOp:
+def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16), consumed: bool = True) -> LoopOp:
+    """Compile ``kernel`` writing ``out``. ``consumed`` puts a reader downstream — only then can
+    fusion delete the store, which is the whole reason to spell its rounding."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", input_shape, F16), node_id="x")
     graph.add_node(kernel, ["x"], out, node_id="out")
-    graph.outputs = ["out"]
+    if consumed:
+        graph.add_node(ElementwiseOp("negative"), ["out"], replace(out, name="reader"), node_id="reader")
+    graph.outputs = ["reader" if consumed else "out"]
     return Pipeline.build(["loop/lifting"], select=[_RULE]).run(graph).nodes["out"].op
 
 
@@ -105,3 +112,14 @@ def test_rule_is_idempotent(dtype: DataType) -> None:
     once = _run(_reduce_kernel(), Tensor("out", (4,), dtype))
     twice = _run(once, Tensor("out", (4,), dtype))
     assert _conversions(twice) == _conversions(once)
+
+
+def test_unconsumed_store_spells_nothing() -> None:
+    """Nothing reads it, so no fusion can delete the Write that already rounds.
+
+    Spelling it there would give a bare reduce a one-statement projection it did not have — a
+    cuttable PLACE seam, which a cold fork took, splitting an f16 ``sum`` into the reduce writing
+    f32 to a workspace plus a second kernel doing only the convert.
+    """
+    op = _run(_reduce_kernel(), Tensor("out", (4,), F16), consumed=False)
+    assert _conversions(op) == []

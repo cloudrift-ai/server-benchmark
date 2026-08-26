@@ -16,6 +16,14 @@ projection epilogue, and no pass needs a private channel for "this edge also con
 ``Assign`` chain already carries its inputs' width, so narrowing it here would introduce a rounding
 the reference never performed.
 
+**Which stores need it spelled.** Only one whose buffer something READS. The rounding has to
+survive fusion, and fusion is what deletes the store — but a buffer with no consumer is never
+fused away, so its ``Write`` rounds on its own exactly as it always did. Spelling it there is not
+merely redundant: a bare reduce would gain a one-statement projection it did not have, and that
+wrapper is a cuttable ``PLACE`` seam (the reduce stops being the root). A cold fork took it, and
+an f16 ``sum`` came out as two kernels — the reduce writing f32 to a workspace and a second kernel
+doing nothing but the convert.
+
 **Which buffers are boundaries.** Only a non-transient one. A transient buffer
 (:class:`~emmy.compiler.tensor.Tensor` — decided in :meth:`Graph.splice`) never existed outside the
 rewrite fragment that minted it, so its dtype carries shape rather than storage and there is no
@@ -53,6 +61,8 @@ def rewrite(match: Match, root: Node) -> LoopOp:
         # f32 — the accumulation dtype, not a missing value.
         if buffer is None or buffer.transient or buffer.dtype == (value.dtype or F32):
             continue
+        if not graph.buffer_users(write.output):
+            continue  # nothing reads it, so no fusion can delete the store that rounds
         name = f"{write.output}__st"
         while name in taken:
             name += "_"

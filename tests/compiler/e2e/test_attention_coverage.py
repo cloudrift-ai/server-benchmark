@@ -85,6 +85,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda
 
 
@@ -1058,11 +1059,14 @@ def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
 
 
 @requires_cuda
-def test_full_self_attn_tinyllama(_chain_tile_pins):
+def test_full_self_attn_tinyllama():
     """The real ``LlamaAttention`` from a TinyLlama config — the smallest scope that includes Q/K/V
     Linears, RoPE, masked SDPA, and O Linear. If this fails while the two simpler chains pass, the
-    regression is in the RoPE elementwise kernel or its interaction with the attention numerics."""
-    _run_self_attn_tinyllama(seq_len=32, threshold=1e-4)
+    regression is in the RoPE elementwise kernel or its interaction with the attention numerics.
+    Pin the bounded two-kernel scalar route: this is an accuracy test, not a cold-policy test."""
+    torch.manual_seed(42)
+    with pinned_knobs({"PLACE": "cut", "RASTER": "", "TILE": "", "STAGE": "", "REDUCE": "", "WORK": ""}):
+        _run_self_attn_tinyllama(seq_len=32, threshold=1e-4)
 
 
 @requires_cuda

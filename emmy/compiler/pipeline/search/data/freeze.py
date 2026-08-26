@@ -274,7 +274,19 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
         fpath = p / name
         if not fpath.exists():
             raise RuntimeError(f"measurement freeze {p} is missing {name} (listed in the manifest) — {regen}")
-        doc = yaml.safe_load(fpath.read_text())
+        text = fpath.read_text()
+        if text.startswith("version https://git-lfs.github.com/spec/v1"):
+            # The payload files are LFS-tracked. A clone or CI checkout without LFS leaves a
+            # three-line pointer here, and a pointer is valid YAML — it parses to a string and the
+            # first key lookup below fails as ``TypeError: string indices must be integers``, which
+            # says nothing about the real problem. Name it instead.
+            raise RuntimeError(
+                f"measurement freeze {p}: {name} is a git-LFS pointer, not the data. Run `git lfs install && "
+                f"git lfs pull`; in CI, check out with `lfs: true`."
+            )
+        doc = yaml.safe_load(text)
+        if not isinstance(doc, dict) or "configs" not in doc:
+            raise RuntimeError(f"measurement freeze {p}: {name} is not a freeze payload document — {regen}")
         gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
         payloads = doc.get("configs") or []
         file_digest = hashlib.sha256()

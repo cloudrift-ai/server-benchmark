@@ -1462,6 +1462,57 @@ def _stack_expert_modules(layer: int, by_name: dict, model) -> dict:  # noqa: AR
     return out
 
 
+def _native_checkpoint_renamer(config, keys=()):
+    """The checkpoint→module key translation for an architecture published in its own namespace.
+
+    DeepSeek V4 ships the flat V3-style spelling no module ever sees: ``layers.N.attn.wq_a``,
+    ``layers.N.attn_norm``, ``layers.N.ffn.experts.E.w1``, ``hc_attn_fn``, ``embed`` / ``head``, and
+    ``.scale`` for every fp8 block-scale sibling. Transformers publishes that renaming itself
+    (:func:`transformers.conversion_mapping.get_checkpoint_conversion_mapping`), so reuse it rather
+    than keeping a second copy that can drift from the modeling code the twin is built from. Only its
+    ``WeightRenaming`` entries apply here: the accompanying ``WeightConverter`` entries MERGE the
+    routed experts into one dense stacked parameter, which is exactly what the serving load must not
+    do — the experts stay compressed and per-expert until :func:`_stack_expert_modules`.
+
+    Two normalizations finish the job, both keeping downstream name maps untouched: the routed
+    ``w1``/``w3``/``w2`` projections take their ``gate``/``up``/``down`` module names (the same
+    convention Transformers applies to this checkpoint's SHARED expert), and a quantization block
+    scale becomes the ``weight_scale`` sibling spelling the fp8 pairing and :data:`_PER_EXPERT_LEAF`
+    already read. A ``.scale`` leaf earns that second rule ONLY when the checkpoint also holds the
+    module's ``.weight``: the hyper-connection blocks carry a LEARNED ``hc_attn_scale`` parameter
+    whose name ends the same way, and renaming it would leave the twin's ``attn_hc.scale`` on meta.
+
+    Returns identity for every other architecture: a checkpoint already in module naming must not be
+    put through a rename chain.
+    """
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return lambda key: key
+    present = set(keys)  # hoisted: this checkpoint has 72k keys, and rebuilding the set per key is quadratic
+    block_scales = {key for key in present if key.endswith(".scale") and key[: -len(".scale")] + ".weight" in present}
+    from transformers.conversion_mapping import WeightRenaming, get_checkpoint_conversion_mapping  # noqa: PLC0415
+
+    renames = [entry for entry in get_checkpoint_conversion_mapping("deepseek_v4") or [] if isinstance(entry, WeightRenaming)]
+    if not renames:
+        raise ValueError("transformers publishes no deepseek_v4 checkpoint renaming; cannot translate the native checkpoint")
+    routed = re.compile(r"(\.experts\.\d+\.)w([123])\.")
+    projections = {"1": "gate_proj.", "2": "down_proj.", "3": "up_proj."}
+
+    def rename(key: str) -> str:
+        quantization_scale = key in block_scales
+        for entry in renames:
+            renamed = entry.rename_source_key(key)
+            key = renamed[0] if isinstance(renamed, tuple) else renamed
+        key = routed.sub(lambda m: m.group(1) + projections[m.group(2)], key)
+        if quantization_scale:
+            key = key[: -len(".scale")] + ".weight_scale"
+        # Transformers renames into the BARE base-model namespace and re-attaches the prefix at load
+        # time; this loader assigns straight onto a head model, so carry it here. ``lm_head`` is the
+        # one leaf that lives outside the trunk.
+        return key if key.startswith("lm_head.") else "model." + key
+
+    return rename
+
+
 def _checkpoint_to_model_key(key: str) -> str:
     """Translate original Laguna checkpoint names to built-in Transformers names."""
     key = key.replace(".mlp.shared_expert.", ".mlp.shared_experts.")
@@ -1525,7 +1576,14 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
     this loader when PP is active: ``EmmyGenModel`` owns and decodes it on the last stage. Unknown
     model-level leaves stay replicated; they are small architecture state and some model families
     require them while tracing a local layer.
+
+    A multi-token-prediction head is never owned. It is a separate speculative-decoding model that no
+    twin instantiates, and on DeepSeek V4 it is not small: its 256 routed experts are 4,608 of the
+    checkpoint's tensors, which this loader would otherwise read in full on every rank only to
+    discard them as unexpected state.
     """
+    if key.startswith("mtp.") or ".mtp." in key:
+        return False
     if layer_range is None:
         return True
     if ".layers." in key:
@@ -1548,6 +1606,7 @@ def load_quantized_split(
     layer_range=None,
     include_embed=True,
     include_norm=True,
+    expert_range=None,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -1630,11 +1689,18 @@ def load_quantized_split(
         model = _auto_model_from_config(config)
 
     mxfp4_qc = _mxfp4_quant_config(model_dir)
+    # DeepSeek V4 declares an fp8 TRUNK while storing its routed experts as native MXFP4: the expert
+    # storage is named by ``expert_dtype``, not by ``quant_method``.
+    native_mxfp4_experts = str(getattr(config, "expert_dtype", "") or "") == "fp4"
     qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc)
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
+    rename = _native_checkpoint_renamer(config, index)
+    # The module-namespace view of the same index, so sibling lookups (block scales, coded leaves)
+    # can be spelled the way the modules name them whatever the checkpoint calls them.
+    renamed = {rename(key): key for key in index}
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
         by_shard.setdefault(str(shard), []).append(key)
@@ -1667,7 +1733,7 @@ def load_quantized_split(
                 key
                 for key in sorted(by_shard[shard_path])
                 if _quantized_stage_owns(
-                    _checkpoint_to_model_key(key),
+                    _checkpoint_to_model_key(rename(key)),
                     layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
@@ -1682,7 +1748,7 @@ def load_quantized_split(
                     qzeros_key, scales_key = base + ".qzeros", base + ".scales"
                     if qzeros_key not in index or scales_key not in index:
                         raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
-                    model_key = _checkpoint_to_model_key(base + ".weight")
+                    model_key = _checkpoint_to_model_key(rename(base + ".weight"))
                     if compress_trunk:
                         coded_trunk.add(model_key)
                     else:
@@ -1699,11 +1765,26 @@ def load_quantized_split(
                     base = k.rsplit(".", 1)[0]
                     if base + ".qweight" in index:
                         continue
-                slot = _expert_slot(k)
+                slot = _expert_slot(rename(k))
                 if slot is not None:
                     layer, name, expert = slot
+                    if expert is not None and expert_range is not None:
+                        if not expert_range[0] <= expert < expert_range[1]:
+                            continue  # another tensor-parallel rank owns this expert; never read its bytes
+                        # The store's expert axis is RANK-LOCAL: a shard stacks its own experts from
+                        # index 0, and the router maps global selections onto that axis at dispatch.
+                        expert -= expert_range[0]
                     t = f.get_tensor(k)
-                    if mxfp4_qc is not None and name in {"w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"}:
+                    if native_mxfp4_experts:
+                        # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
+                        # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW
+                        # (never cast) and give the blocks the ``(out, groups, 16)`` shape the
+                        # decode contract declares.
+                        fmt = "mxfp4"
+                        t = t.view(torch.uint8)
+                        if not name.endswith("_scale"):
+                            t = t.reshape(t.shape[0], t.shape[1] // 16, 16)
+                    elif mxfp4_qc is not None and name in {"w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"}:
                         if t.dtype != torch.uint8:
                             raise ValueError(
                                 f"native MXFP4 serving does not support an unconverted routed expert: "
@@ -1734,24 +1815,30 @@ def load_quantized_split(
                         logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
                         continue
                     if compress_trunk:
-                        coded_trunk.add(_checkpoint_to_model_key(base + ".weight"))  # placeholder; real bytes stay coded
+                        coded_trunk.add(_checkpoint_to_model_key(rename(base + ".weight")))  # placeholder; real bytes stay coded
                         continue
                     w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
-                    state[_checkpoint_to_model_key(base + ".weight")] = torch.from_numpy(w).to(dtype)
+                    state[_checkpoint_to_model_key(rename(base + ".weight"))] = torch.from_numpy(w).to(dtype)
                     continue
-                if k.endswith(("_scale", "_scale_inv")) and k[: k.rfind("_scale")] in index:
+                # Sibling pairing runs in the MODULE namespace: a natively named checkpoint spells the
+                # block scale ``.scale``, which only becomes the ``<weight>_scale`` sibling the fp8
+                # dequant looks for after renaming. Matching raw keys here would leave every fp8 trunk
+                # weight silently unscaled.
+                mk = rename(k)
+                if mk.endswith(("_scale", "_scale_inv")) and mk[: mk.rfind("_scale")] in renamed:
                     continue  # consumed by its base weight's dequant
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
-                    scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)
+                    scale_key = next((c for c in (mk + "_scale", mk + "_scale_inv") if c in renamed), None)
                     if scale_key is not None and not _is_skipped(k, patterns):
+                        scale_key = renamed[scale_key]
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))
-                        state[_checkpoint_to_model_key(k)] = torch.from_numpy(vals).to(dtype)
+                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                state[_checkpoint_to_model_key(k)] = t.to(dtype) if t.is_floating_point() else t
+                state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
 
     # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB

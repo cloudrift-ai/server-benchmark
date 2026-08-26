@@ -34,13 +34,11 @@ caller cannot forget it and no second spelling can appear.
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
-
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile.ir import TileOp
-from emmy.compiler.structural import digest
+from emmy.compiler.structural import digest, form
 
 __all__ = [
     "deploy_identity",
@@ -57,22 +55,6 @@ __all__ = [
 def _dims(shape) -> tuple[str, ...]:
     """A buffer shape rendered hint-free — a static dim as its integer, a symbolic one as ``sym``."""
     return tuple(str(d.as_static()) if d.is_static else "sym" for d in shape)
-
-
-def _expr_key(e) -> object:
-    """One index expression as a nested ``(class name, *fields)`` tuple.
-
-    Structural rather than ``repr``: every :mod:`~emmy.compiler.ir.expr` node is a frozen
-    dataclass, so the field walk is generic over the union and needs no per-class list — a new
-    node kind is covered the day it is added. The point is that identity must not move when a
-    ``__repr__`` does. Cosmetic edits to how an expression PRINTS are not changes to the kernel,
-    and keying on repr would re-key every stored golden for one.
-    """
-    if isinstance(e, (tuple, list)):
-        return tuple(_expr_key(x) for x in e)
-    if not is_dataclass(e):
-        return e
-    return (type(e).__name__, *(_expr_key(getattr(e, f.name)) for f in fields(e)))
 
 
 def hint_extent(ax) -> int:
@@ -222,7 +204,7 @@ def store_fingerprint(tile: TileOp) -> tuple:
     Per store in order: the index expression, whether it is an ``atomicAdd``, its stored width, and
     the sweep axis's extent when it rides an output ``Loop``. Buffer and SSA names are excluded —
     those are spelling, and identity is name-free — while the index EXPR is kept whole
-    (:func:`_expr_key`, a structural walk, not its ``repr``), since it is exactly what
+    (:func:`~emmy.compiler.structural.form`, a structural walk, not its ``repr``), since it is exactly what
     :func:`~_legality.warp_split_store` reads to decide addressability.
 
     ``TileOp.structural_key`` excludes the stores by design (they are a kernel-boundary fact beside
@@ -230,7 +212,7 @@ def store_fingerprint(tile: TileOp) -> tuple:
     """
     return tuple(
         (
-            tuple(_expr_key(e) for e in store.write.index),
+            tuple(form(e) for e in store.write.index),
             store.write.atomic,
             store.write.width,
             None if store.sweep is None else (str(store.sweep.extent.as_static()) if store.sweep.extent.is_static else "sym"),

@@ -31,7 +31,7 @@ from emmy.compiler.ir.pure.algebra import rename_combine
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.structural import digest
+from emmy.compiler.structural import digest, form
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the
 #: ``cached_property`` entries, set via ``object.__setattr__`` like they are).
@@ -145,7 +145,7 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             child = next(consumed)
             key, cbufs = _structural(child)
             return ("node", key, tuple(bindex[b] for b in cbufs), tuple(rn(n) for n in _operand_result_names(child)))
-        return repr(rebuffered(s).rewrite(rn))
+        return form(rebuffered(s).rewrite(rn))
 
     if node.axis is None:
         body_part = tuple(render(s) for s in body)
@@ -158,13 +158,13 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
         # twisted program REGENERATES over the renamed state, so the ``__o`` / ``__t`` derived
         # names follow their components without entering the local map.
         c = rename_combine(node.combine, rn)
-        combine_part = (c.params, tuple(repr(s) for s in c.body), c.results)
+        combine_part = (c.params, tuple(form(s) for s in c.body), c.results)
 
     key = digest(
         "Fold",
-        repr(node.axis),
+        form(node.axis),
         node.unroll,
-        repr(node.init),
+        form(node.init),
         tuple(rn(p) for p in node.lift.params),
         body_part,
         tuple(rn(r) if isinstance(r, str) else r for r in node.lift.results),

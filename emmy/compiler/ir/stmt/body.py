@@ -661,8 +661,11 @@ def _shared_structural_key(body: Body) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.
 
     The structural-key formula is fixed: ``normalize_body(body,
-    hoist=False, canonical_buffers=True, cluster_ops=True)`` joined as
-    pretty-printed text. With every concrete ``Stmt`` subclass a frozen
+    hoist=False, canonical_buffers=True, cluster_ops=True)`` rendered
+    through :func:`~emmy.compiler.structural.form`. Structural, not the
+    pretty text it used to join: ``pretty()`` is the human rendering, and
+    a cosmetic change to how a statement prints must not re-key every
+    kernel that contains it. With every concrete ``Stmt`` subclass a frozen
     dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
     bodies hash equal — so two structurally identical Body instances
     share one normalize+pretty walk through this cache. Tune mode hits
@@ -677,8 +680,8 @@ def _shared_structural_key(body: Body) -> str:
     queries but would be a *correctness bug* for any callsite running
     the normalized body.
     """
-    from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
     from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
     normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=True)
-    return "\n".join(pretty_body(normalized))
+    return digest(form(normalized))

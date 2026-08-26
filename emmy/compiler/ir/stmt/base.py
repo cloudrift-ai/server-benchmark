@@ -593,6 +593,22 @@ class Stmt:
         ``has_side_effects`` on the wrapper."""
         return any(c.has_side_effects for sub in self.nested() for c in sub)
 
+    def structural_key(self) -> str:
+        """This statement's structural identity — :func:`~emmy.compiler.structural.form` digested.
+
+        Implements the :class:`~emmy.compiler.structural.Structural` protocol. Structural rather
+        than ``repr`` or ``pretty()``: both are presentation, and identity must not move when
+        presentation does. Every concrete ``Stmt`` is a frozen dataclass, so the walk is generic —
+        a new statement kind needs no registration here.
+
+        This is the identity of ONE statement in isolation. It carries whatever names the stmt
+        holds, so callers wanting an α-invariant or buffer-invariant answer canonicalize FIRST and
+        key after (``Body.structural_key``, ``ir/tile/_key.py``).
+        """
+        from emmy.compiler.structural import digest, form  # noqa: PLC0415 — substrate, not a dialect
+
+        return digest(form(self))
+
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this
         stmt with its child bodies replaced by ``bodies`` (positionally

@@ -43,6 +43,7 @@ from emmy.compiler.pipeline.knob import (
     stamp_schedule_families,
     tuning_knob_items,
 )
+from emmy.compiler.pipeline.passes.identity import kernel_sig, stamped_row
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, node_key
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
@@ -263,6 +264,47 @@ class TuningSearch(Search):
             merged.update(knobs)
         return merged
 
+    def _measured_kernel_rows(self, node: SearchNode) -> list[tuple[dict, PerfStats, str]]:
+        """The per-KERNEL rows a benched leaf must be recorded as, as ``(features, stats,
+        op_sig)`` — or ``[]`` when the leaf has ONE row of its own and the ordinary path applies.
+
+        A terminal is a Σ over the kernels it lowered to. When it lowered to one, that kernel's
+        row earned the whole measurement. When a structural fork made it several, no row can
+        carry the total: the deploy prices such a realization by SUMMING a per-kernel price
+        (``greedy._resolved_price``), so the quantity a row must describe is one kernel's cost.
+        Each kernel carries its own decisions, its own µs and — since the identity strategy
+        stamps a minted piece at birth — its own ``S_*`` shape, which is the identity the row
+        keys on, so the same kernel measured at another site or tuned as its own enrolled target
+        is the same row.
+
+        Answers ``[]`` in three more cases, each for its own reason: a terminal whose bench
+        FAILED (the watchdog pins one sentinel latency on every kernel, so per-piece rows would
+        each carry a number no kernel measured — the failure is the terminal's), a leaf whose
+        bench handed over no per-kernel receipts (a cache hit, a stub backend), and a branch.
+
+        A kernel with no ``S_*`` stamps anywhere is dropped: it has no shape, so there is no
+        identity to key it by, and digesting the empty stamp set would collide every unstamped
+        auxiliary in the store onto one row. (``bench_record`` answers that question differently
+        — it can attribute such a kernel to its producer through the graph edge, which this walk,
+        holding knob dicts rather than a graph, cannot.)"""
+        stats, rows = node.bench_stats, node.kernel_rows or ()
+        if stats is None or (node.realized_knobs is not None and len(rows) <= 1):
+            return []
+        if node.bench_status != "ok":
+            return []
+        # One row per config: a piece whose own knobs don't vary with the fork being explored (a
+        # split's combine kernel) is re-minted by every variant, and counting it once per variant
+        # would weight that one config by how often it was re-minted. Within one batch there is
+        # no measurement order to call newest, so the walk's order stands in — the invariant is
+        # the weighting, not which of two identical-config measurements survives.
+        out: dict[tuple, tuple[dict, PerfStats, str]] = {}
+        for feats, kstats, status in rows:
+            if status != "ok" or not stamped_row(feats):
+                continue
+            sig = kernel_sig(feats)
+            out[(sig, canonical_row_key(feats))] = (feats, kstats, sig)
+        return list(out.values())
+
     @staticmethod
     def _realized_cuda_op_count(candidate: object | None) -> int | None:
         """Number of CUDA kernels in a directly observed terminal."""
@@ -479,23 +521,33 @@ class TuningSearch(Search):
 
         A directly-benched leaf uses its ``realized_knobs`` (the FULL config);
         a branch (no realized knobs of its own) uses its partial fork-prefix
-        (``_node_knobs``) — the value-of-position label still rides on it. A leaf that was benched
-        but has NO single row (a structural fork made it several kernels with different decisions)
-        contributes nothing here: its measurement was already attributed per kernel at
-        :meth:`observe`, and its fork-prefix would merge the pieces' rows into one that no kernel
-        realized — the fabrication this whole path exists to avoid."""
+        (``_node_knobs``) — the value-of-position label still rides on it.
+
+        A leaf a structural fork made SEVERAL kernels of contributes one row per kernel instead
+        (:meth:`_measured_kernel_rows`), each labeled with that kernel's own measured µs rather
+        than the terminal's Σ — the quantity ``greedy._resolved_price`` asks the model for, one
+        kernel at a time. Its fork-prefix would merge the pieces into one row no kernel realized.
+        A leaf with neither a single row nor per-kernel receipts contributes nothing."""
         rows: list[tuple[dict, float]] = []
+        # Per-kernel rows dedupe ACROSS the walk as well as within a leaf — the same piece
+        # re-minted by sibling variants is one config, and the reservoir is a weighted sample.
+        measured: dict[tuple, tuple[dict, float]] = {}
         stack = list(self.tree.root.children)
         while stack:
             node = stack.pop()
             stack.extend(node.children)
             if node.candidate is None or node.visits == 0 or node.best_reward <= 0:
                 continue
+            per_kernel = self._measured_kernel_rows(node)
+            if per_kernel:
+                for feats, kstats, sig in per_kernel:
+                    measured[(sig, canonical_row_key(feats))] = (feats, kstats.median)
+                continue
             if node.bench_stats is not None and node.realized_knobs is None:
                 continue
             knobs = node.realized_knobs if node.realized_knobs is not None else self._node_knobs(node)
             rows.append((knobs, 1.0 / node.best_reward))
-        return rows
+        return rows + list(measured.values())
 
     def _collect_node_records(
         self,
@@ -529,6 +581,13 @@ class TuningSearch(Search):
         node was directly benched, and ``variance`` / ``n_samples`` the leaf's OWN
         bench stats — a leaf whose subtree found a faster descendant keeps
         ``value_us`` = min-over-subtree while the stats describe its direct bench.
+
+        A leaf a structural fork made SEVERAL kernels of emits one row per kernel instead
+        (:meth:`_measured_kernel_rows`) — parentless, at depth 0, keyed by the kernel's own shape
+        rather than this walk's ``op_sig``, and labeled with that kernel's own measured µs. Such a
+        row is a measured kernel, not a position in this tree: it anchors no value, leaves
+        ``parent_value`` alone, and its children (there are none — it is a leaf) would keep the
+        inherited ``parent_key``.
 
         A directly-benched leaf whose bench FAILED (``bench_status == 'bench_fail'``,
         reward 0 — previously invisible) is now emitted too, as a ``bench_fail`` row
@@ -568,27 +627,32 @@ class TuningSearch(Search):
             if prev is None:
                 out[row.node_key] = row
                 return
-            # Within-batch duplicate (empty knob-delta chain): keep one row per key.
-            # An ``ok`` row always beats a ``bench_fail`` (record_perf's policy);
-            # among same-status rows prefer the directly-benched one (it carries the
-            # bench stats) with the min value. Either way the survivor takes the
-            # first-seen depth/parent and the max (not sum) of the visits, so
-            # ``record_nodes``'s SUM accumulation never double-counts one run.
-            keep = prev
-            if (row.status, prev.status) == ("ok", "bench_fail") or (row.status == prev.status and row.is_leaf and not prev.is_leaf):
+            # Within-batch duplicate — an empty knob-delta chain, or the same kernel measured by
+            # two variants that both minted it. Keep one row per key, by the same rules
+            # ``record_nodes`` applies across sessions: an ``ok`` row beats a ``bench_fail``; a
+            # directly-benched leaf beats a branch (it carries the bench stats); two BRANCHES
+            # keep the minimum, because a branch's value is a coverage bound a faster descendant
+            # genuinely tightens; and two LEAVES keep the later, because a leaf is a
+            # re-measurement of ONE config and min-of-K noisy medians drifts to the noise floor.
+            # Either way the survivor takes the first-seen depth/parent and the max (not sum) of
+            # the visits, so ``record_nodes``'s SUM accumulation never double-counts one run.
+            if row.status != prev.status:
+                keep = row if (row.status, prev.status) == ("ok", "bench_fail") else prev
+            elif row.is_leaf:
                 keep = row
-            value_us = min(prev.value_us, row.value_us) if prev.status == row.status else keep.value_us
-            out[row.node_key] = replace(
-                keep, visits=max(prev.visits, row.visits), depth=prev.depth, parent_key=prev.parent_key, value_us=value_us
-            )
+            elif prev.is_leaf:
+                keep = prev
+            else:
+                keep = replace(prev, value_us=min(prev.value_us, row.value_us))
+            out[row.node_key] = replace(keep, visits=max(prev.visits, row.visits), depth=prev.depth, parent_key=prev.parent_key)
 
         def visit(node: SearchNode, parent_key: str | None, parent_value: float | None, depth: int) -> None:
             nk = parent_key
             if node.candidate is not None:
                 is_leaf = node.bench_stats is not None
                 stats = node.bench_stats if is_leaf else None
-                # A benched leaf with no single row (several kernels with different
-                # decisions) has nothing to key a node record on — see :meth:`_collect_rows`.
+                # A benched leaf with no single row AND no per-kernel receipts to record in its
+                # place has nothing to key a node record on — see :meth:`_measured_kernel_rows`.
                 skip = is_leaf and node.realized_knobs is None
                 if node is structural_leaf and structural_input is not None and node.visits > 0 and node.best_reward > 0:
                     value_us = 1.0 / node.best_reward
@@ -634,6 +698,32 @@ class TuningSearch(Search):
                             run_id=run_id,
                         )
                     )
+                elif per_kernel := self._measured_kernel_rows(node):
+                    # A terminal a structural fork made several kernels of: one row per kernel,
+                    # each keyed by its OWN shape so the same kernel reached from another site is
+                    # the same row. Parentless at depth 0 — a measured kernel is not a position
+                    # in THIS tree, and its µs sits below every ancestor's Σ, so linking it would
+                    # break the monotone value-of-position invariant asserted below. ``nk`` and
+                    # ``parent_value`` stay untouched for the same reason.
+                    for feats, kstats, sig in per_kernel:
+                        emit(
+                            NodeRow(
+                                node_key=node_key(context_key, gpu, sig, feats),
+                                parent_key=None,
+                                context_key=context_key,
+                                op_sig=sig,
+                                features=feats,
+                                value_us=kstats.median,
+                                depth=0,
+                                gpu=gpu,
+                                visits=1,
+                                is_leaf=True,
+                                variance=kstats.variance,
+                                n_samples=kstats.n_samples,
+                                status="ok",
+                                run_id=run_id,
+                            )
+                        )
                 elif node.visits > 0 and node.best_reward > 0 and not skip:
                     feats = node.realized_knobs if is_leaf else self._node_knobs(node)
                     value_us = 1.0 / node.best_reward

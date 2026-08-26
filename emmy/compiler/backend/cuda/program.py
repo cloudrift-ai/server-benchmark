@@ -650,6 +650,16 @@ _BATCH_TARGET_MS = 1.0
 # this threshold.
 _WARMUP_TARGET_MS = 10.0
 
+# A single launch at or above this GPU time ends warmup at the current iter: one warm launch of a
+# heavy kernel already clears the clock-ramp floor, and spending the full requested warmup on
+# multi-ms launches burns the run-stage budget before a single sample lands.
+_SLOW_LAUNCH_WARMUP_MS = 50.0
+
+# When the run-stage budget expires mid-loop, a result with at least this many measured iters is
+# returned (truncated, with a warning) instead of discarded — a heavy kernel yields a real, if
+# lower-confidence, measurement. Below this floor the budget expiry stays a bench_fail.
+_MIN_MEASURED_ON_BUDGET = 3
+
 
 def _wait_for_event(event, timeout_ms: float, label: str) -> None:
     """Block until ``event`` completes, polling rather than calling the
@@ -1412,14 +1422,28 @@ def benchmark_program(
         while True:
             iter_dts = prog.iter_once(batch_sizes=batch_sizes, pre_iter=on_iter)
             iters_run += 1
-            total_gpu_ms += sum(iter_dts[i] * batch_sizes[i] for i in range(n))
-            # GPU-time run budget: bail if the cumulative GPU time
-            # across all iters (warmup + measured) exceeds
-            # ``run_timeout_s``. Catches the "every launch is just
-            # under the per-launch watchdog" pathology. Counts warmup
-            # iters too so a slow kernel can't hide behind warmup
-            # discards.
+            per_iter_ms = sum(iter_dts[i] * batch_sizes[i] for i in range(n))
+            total_gpu_ms += per_iter_ms
+            if iters_run < warmup and per_iter_ms >= _SLOW_LAUNCH_WARMUP_MS:
+                # One warm launch of a heavy kernel clears the clock-ramp floor; end warmup here so
+                # the run-stage budget is spent on measured iters instead of warmup discards.
+                warmup = iters_run
+            # GPU-time run budget: the cumulative GPU time across all
+            # iters (warmup + measured) is capped by ``run_timeout_s``.
+            # Counts warmup iters too so a slow kernel can't hide
+            # behind warmup discards. With enough samples already
+            # collected the run is truncated to what it measured;
+            # below that floor it stays a bench_fail, which also
+            # catches the "every launch is just under the per-launch
+            # watchdog" pathology.
             if run_timeout_s is not None and total_gpu_ms > run_timeout_s * 1000.0:
+                if measured >= _MIN_MEASURED_ON_BUDGET:
+                    logger.warning(
+                        "[cuda] run-stage budget (%.1fs GPU) reached after %d measured iters — returning truncated result",
+                        run_timeout_s,
+                        measured,
+                    )
+                    break
                 raise RuntimeError(f"benchmark run stage exceeded {run_timeout_s:.1f}s of GPU time — variant marked bench_fail")
             if iters_run == warmup:
                 batch_sizes = _calibrate_batch_sizes(iter_dts)

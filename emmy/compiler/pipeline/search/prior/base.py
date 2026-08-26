@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
 from emmy.compiler.pipeline.search.metrics import spearman
 
 if TYPE_CHECKING:
@@ -60,10 +61,12 @@ REFIT_SCHEDULE = ((1_000, 100), (10_000, 1_000), (100_000, 10_000))
 # rows ever seen. Bounds memory + fit time for a long-lived global prior.
 MAX_ROWS = 100_000
 
-# ``H_opt`` stamp of the deployable -O3 re-bench rows (``tune`` re-benches every
-# config within ``EMMY_O3_TOL`` of the -O1 best at -O3 and feeds the row in
-# with this tag) — the measured ground truth :meth:`Prior.evidence_pick` ranks by.
-_O3_OPT = 3.0
+# The deployable regime's ``H_opt`` stamp (spelled in ``search/features``): the only rows
+# :meth:`add_rows` admits and the measured ground truth :meth:`Prior.evidence_pick` ranks by. It
+# stays an explicit test because a legacy checkpoint can still hold rows from the era when sweeps
+# ranked at ``-Xcicc -O1``, and because a deliberate ``--nvcc-flags`` pin still produces rows
+# under another opt level.
+_O3_OPT = DEPLOYABLE_OPT
 
 # The calibration gate: minimum median per-op Spearman (predicted vs measured latency over the
 # model's own reservoir, :meth:`Prior._reservoir_calibration`) below which :attr:`Prior.trustworthy`
@@ -375,8 +378,19 @@ class Prior(ABC):
         """Stream training rows into the bounded dataset via reservoir
         sampling (Algorithm R): under the cap they append; at the cap each new row
         replaces a uniformly-random existing one with the correct probability, so
-        ``_dataset`` stays a uniform sample of every row ever seen."""
+        ``_dataset`` stays a uniform sample of every row ever seen.
+
+        **Only deployable-regime rows are admitted** (``H_opt == 3``). A measurement taken under
+        another opt level is a way of choosing what to measure, not a source of labels: its error
+        is biased along tile area — the very axis being tuned — so a model fit on the mixture
+        learns a systematic mis-ranking rather than averaging it away. Rows are dropped here, at
+        the one boundary into the dataset, rather than filtered by each reader. An unstamped row
+        reads as non-deployable, the same default :meth:`_o3_evidence` applies. A legacy checkpoint keeps
+        its old mixed rows (no version bump: that would discard the deployable half too, which is
+        also the deploy evidence tier) and simply stops accumulating new ones."""
         for k, v in rows:
+            if float(k.get("H_opt", 0.0)) != _O3_OPT:
+                continue
             self._seen += 1
             self._since_fit += 1
             row = (dict(k), float(v))

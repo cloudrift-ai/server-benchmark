@@ -31,8 +31,9 @@ def _linear(**weights) -> OfflinePrior:
 
 
 def _stamp(dynamic: float = 0.0) -> dict:
-    """The routing stamp the featurizer writes on every row — 0.0 when no axis is symbolic, never absent."""
-    return {"S_ext_n_symbolic_axis": dynamic}
+    """The stamps the featurizer writes on every row: the routing one — 0.0 when no axis is symbolic, never
+    absent — and the regime, which ``ctx.features()`` always supplies and the prior's dataset requires."""
+    return {"S_ext_n_symbolic_axis": dynamic, "H_opt": 3.0}
 
 
 def test_the_linear_half_scores_a_whole_pool_by_its_own_weights():

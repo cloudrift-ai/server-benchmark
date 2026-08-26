@@ -469,7 +469,7 @@ async def measure_proposals(
                 captured=True,
             )
         if prior is not None:
-            prior.add_rows(search._collect_rows() + search.o3_rows)
+            prior.add_rows(search._collect_rows())
             prior.maybe_refit()
         if loop_identity.value is not None:
             db.record_nodes(

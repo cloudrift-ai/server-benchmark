@@ -42,7 +42,6 @@ DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
 TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
-O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
 PRIOR_BLEND = "EMMY_PRIOR_BLEND"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
@@ -319,13 +318,6 @@ def tune_eps(default: float = 0.0) -> float:
     return float_env(TUNE_EPS, default)
 
 
-def o3_tol(default: float = 0.15) -> float:
-    """``EMMY_O3_TOL`` — tolerance band (fraction of the best -O1 latency)
-    within which a tuned config is also re-benched at -O3 for a deployable prior
-    sample. ``0.15`` = re-bench everything within 15% of the best -O1."""
-    return float_env(O3_TOL, default)
-
-
 def prior_blend(default: str = "tilt") -> str:
     """``EMMY_PRIOR_BLEND`` — how the online and offline priors interact:
     ``tilt`` (default; online owns deploys, its PUCT policy tilted by the offline
@@ -574,7 +566,8 @@ def set_nvcc_flags(cli_value: str | None, default: str) -> str:
 
     Precedence: ``cli_value`` (a ``--nvcc-flags`` override, when not ``None``) >
     a pre-set env var > ``default`` (per-command policy: ``""`` for compile/run,
-    ``"-Xcicc -O1"`` for tune). Must run before any compile/bench. Returns the
+    ``""`` everywhere today — tune measures in the same deployable regime it deploys into).
+    Must run before any compile/bench. Returns the
     effective string."""
     if cli_value is not None:
         os.environ[NVCC_FLAGS] = cli_value

@@ -33,7 +33,6 @@ import random
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from emmy import config
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.schedule import ReducePlan, Workers
 from emmy.compiler.pipeline.knob import (
@@ -48,23 +47,11 @@ from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
-from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async, rebench_o3_async
+from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.prior import Prior
-
-# Re-bench at -O3 any config whose -O1 latency is within this fraction of the best
-# -O1 so far (not just a strict new best). -O1 is the fast ranking compile but its
-# ranking diverges at -O3 (deployable): register-tile mma kernels run 1.5–3× slower at
-# -O1 (the cicc unroll blowup the ranking compile dodges), so an mma config outside a
-# narrow -O1 band can still be the -O3 deploy winner — and without a deployable sample
-# the evidence-first deploy hierarchy only ever sees scalar -O3 rows and keeps deploying
-# them (the qwen3-emb layer-0 projections: scalar g2a evidence at 394 µs deployed over
-# the 70 µs-class mma picks). The band covers that skew (within 3× of best -O1); cost is
-# bounded by ``_o3_done``'s per-config dedup — one -O3 compile + short bench each.
-# Env-overridable via ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
-O3_REBENCH_TOL = 2.0
 
 
 @dataclass
@@ -95,10 +82,6 @@ class SearchNode:
     # reject a parent row whose ordinary schedule pins describe a different
     # independently tuned child than the terminal actually measured.
     realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
-    # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
-    # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
-    # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
-    o3_us: float | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -190,26 +173,6 @@ class TuningSearch(Search):
         self.last_status: str | None = None
         # Set in ``observe`` when a bench sets a new global best.
         self.last_improved_best = False
-        # Set in ``observe`` when the just-benched config is a *deployable-bench
-        # candidate* — within ``O3_REBENCH_TOL`` of the best -O1 so far and not
-        # already re-benched. The engine reads it to trigger an -O3 re-bench
-        # (``observe_o3``). Widening from "strict new best" to a tolerance band is
-        # what lets configs that TIE at -O1 but differ at -O3 (the warp-tier
-        # WARPSPEC / occupancy split is the motivating case) get a deployable
-        # sample, so the prior can rank them by -O3 cost. ``_o3_done`` dedups so
-        # each config is -O3'd at most once; ``o3_rows`` holds the samples
-        # (knobs tagged ``H_opt=3``) for the prior.
-        self.last_o3_worthy = False
-        self._o3_done: set[tuple] = set()
-        self.o3_rows: list[tuple[dict, float]] = []
-        # Best -O1 latency among STANDARD-regime rows (no precision-trading realization). Under a
-        # precision gate (FAST_MATH / F16_MMA_F32_ACC) the global best is usually a fast-math row,
-        # and a regime-blind tolerance band would then starve the standard lane of -O3 samples —
-        # the gate-off deploy hierarchy is evidence-first, so a shape whose only -O3 rows are
-        # fast-math (absent from the gate-off enumeration) falls to the model argmin (the
-        # qkv.h4096 ~1000x scalar deploy, 2026-07-09 fm sweep). A standard row therefore competes
-        # in its OWN band; with no gate every row is standard and this equals the global best.
-        self._best_std_lat: float | None = None
 
     def note_bench(self, *, measured: bool) -> None:
         """Count only terminals that reached the live backend.
@@ -232,16 +195,12 @@ class TuningSearch(Search):
     async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
         """Value one terminal the engine's loop yielded — the whole of what a terminal is worth
         is policy: bench every CudaOp (or serve the cache / stub), persist the per-kernel
-        ``perf`` / inventory / lowering rows, feed the tree and the prior (:meth:`observe`), and
-        re-bench near-best winners at the deployable -O3 regime. The engine awaits this and
-        nothing else."""
+        ``perf`` / inventory / lowering rows, and feed the tree and the prior (:meth:`observe`).
+        Every bench is taken in the deployable regime, so a terminal earns exactly one
+        measurement. The engine awaits this and nothing else."""
         stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
         self.note_bench(measured=measured)
         self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
-        if backend is not None and self.last_o3_worthy:
-            o3_us = await rebench_o3_async(cand, backend)
-            if o3_us is not None:
-                self.observe_o3(token, o3_us)
 
     def observe(
         self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
@@ -262,29 +221,6 @@ class TuningSearch(Search):
         prev_best = self.tree.best_reward
         self.tree.record_terminal(token, reward)
         self.last_improved_best = status == "ok" and self.tree.best_reward > prev_best
-        # Re-bench at -O3 not only a strict new best but any config within the
-        # tolerance band of the best -O1 so far — configs that tie at -O1 can
-        # differ sharply at -O3 (the warp WARPSPEC / occupancy split), so the
-        # prior needs an -O3 sample for every near-best contender, not just the
-        # winner. Dedup via ``_o3_done`` so each config is -O3'd at most once.
-        self.last_o3_worthy = False
-        if status == "ok" and stats.median > 0 and self.tree.best_reward > 0:
-            from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415 — layering: policy → search core
-
-            # A standard-regime row competes in its own band (see ``_best_std_lat``): the best
-            # standard row must reach -O3 even when a fast-math row owns the global best, or the
-            # gate-off deploy lane is left with no deployable evidence for this shape.
-            is_fm = fast_math_knobs(token.realized_knobs or {})
-            if not is_fm and (self._best_std_lat is None or stats.median < self._best_std_lat):
-                self._best_std_lat = stats.median
-            ref_lat = 1.0 / self.tree.best_reward
-            if not is_fm and self._best_std_lat is not None:
-                ref_lat = self._best_std_lat
-            tol = config.o3_tol(O3_REBENCH_TOL)
-            sig = self._o3_sig(token.realized_knobs)
-            if stats.median <= ref_lat * (1.0 + tol) and sig not in self._o3_done:
-                self._o3_done.add(sig)
-                self.last_o3_worthy = True
         if self.prior_model is not None:
             # Train on the rows that actually earned a latency: the terminal's own when it lowered
             # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
@@ -299,32 +235,6 @@ class TuningSearch(Search):
                 regime = context_view(self._base_knobs)
                 for knobs, median, st in kernels or ():
                     self.prior_model.record_bench({**regime, **knobs}, median, st)
-
-    def observe_o3(self, token: object | None, o3_us: float) -> None:
-        """Record an extra training row for an -O1 winner re-benched at -O3: the
-        same realized knobs but tagged ``H_opt=3`` (the deployable regime) and
-        labeled with the -O3 median latency (µs) — the prior's regression target
-        is latency, converted to reward only in the MCTS selection loop. The prior
-        can then rank winners by -O3 cost where -O1 ties them; ``H_opt`` lets the
-        -O1 and -O3 rows coexist. Also stashed on the token so
-        :meth:`_collect_node_records` emits the leaf's -O3-regime node row."""
-        if o3_us <= 0 or not isinstance(token, SearchNode) or token.realized_knobs is None:
-            return
-        token.o3_us = o3_us
-        knobs = dict(token.realized_knobs)
-        knobs["H_opt"] = 3.0
-        self.o3_rows.append((knobs, o3_us))
-        if self.prior_model is not None:
-            self.prior_model.record_bench(knobs, o3_us, "ok")
-
-    @staticmethod
-    def _o3_sig(knobs: dict | None) -> tuple:
-        """A hashable signature of a realized knob set for -O3 dedup. Values are
-        ``str()``-ified for a uniform hashable key, and the ``H_opt`` regime tag is
-        excluded so the -O1 row and its -O3 re-bench share one signature."""
-        if not knobs:
-            return ()
-        return tuple(sorted((k, str(v)) for k, v in knobs.items() if k != "H_opt"))
 
     def _realized_knobs(self, candidate: object) -> dict | None:
         """The terminal's ONE knob row — the kernel's ``base_knobs`` (``S_*`` identity + ``H_*``
@@ -600,8 +510,7 @@ class TuningSearch(Search):
         rows would collide and keep-min would silently drop one card's data. ``S_*`` /
         ``H_*`` features are excluded from the set — already folded via ``op_sig`` /
         ``context_key`` (and ``gpu``) — so the key is the within-op node identity.
-        ``str()``-ified values mirror :meth:`_o3_sig` so non-string knob values
-        stay stable, and the sorted tuple keeps :func:`digest`
+        ``str()``-ified values keep non-string knob values stable, and the sorted tuple keeps :func:`digest`
         (order-sensitive) deterministic."""
         tun = tuple(sorted((k, str(v)) for k, v in feats.items() if not k.startswith(("S_", "H_"))))
         return digest(context_key, gpu, op_sig, tun)
@@ -613,7 +522,6 @@ class TuningSearch(Search):
         op_sig: str,
         gpu: str = "",
         run_id: str = "",
-        o3_context_key: str | None = None,
         validated_input_route: dict | None = None,
     ) -> list[NodeRow]:
         """Post-search tree walk producing keyed, parent-linked :class:`NodeRow`
@@ -647,14 +555,6 @@ class TuningSearch(Search):
         skip the monotone assert, don't update ``parent_value``, and children keep
         the inherited ``parent_key``; a branch whose descendants ALL failed stays
         unrecorded (``best_reward == 0``).
-
-        A leaf carrying an ``o3_us`` (the deployable :data:`O3_NVCC_FLAGS` re-bench
-        of a near-best config — ``observe_o3``) additionally emits an **-O3-regime
-        row** when ``o3_context_key`` is given: keyed under that context (so it never
-        collides with its -O1 twin), features stamped ``H_opt=3.0`` (the reservoir
-        convention), ``parent_key=None`` (a regime re-measurement, not part of this
-        tree — it never enters a fork sibling group), ``visits=1`` per re-bench, and
-        no variance/n_samples (the re-bench returns a bare median).
 
         ``parent_key`` is the *nearest emitted ok ancestor*'s ``node_key`` (a skipped
         intermediate node passes its own inherited parent down), so it always
@@ -776,24 +676,6 @@ class TuningSearch(Search):
                         )
                     )
                     parent_value = value_us
-                    if is_leaf and node.o3_us is not None and o3_context_key is not None:
-                        feats_o3 = {**node.realized_knobs, "H_opt": 3.0}
-                        emit(
-                            NodeRow(
-                                node_key=self._node_key(feats_o3, op_sig, o3_context_key, gpu),
-                                parent_key=None,
-                                context_key=o3_context_key,
-                                op_sig=op_sig,
-                                features=feats_o3,
-                                value_us=node.o3_us,
-                                depth=depth,
-                                gpu=gpu,
-                                visits=1,
-                                is_leaf=True,
-                                status="ok",
-                                run_id=run_id,
-                            )
-                        )
                 elif is_leaf and node.bench_status == "bench_fail" and stats is not None and node.realized_knobs is not None:
                     # ``skip`` above sends an unrealized leaf here, so the same
                     # nothing-to-key-on rule has to hold: a variant that bench-failed before

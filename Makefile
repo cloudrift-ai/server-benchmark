@@ -63,10 +63,12 @@ format: setup
 	./venv/bin/ruff format
 	./venv/bin/ruff check --fix
 
-# Compile CUDA kernels at -Xcicc -O1: ~3x faster suite (dodges the cicc/LLVM unroll
-# blowup on big register-tile kernels). This is the CORRECTNESS lane — -O1 changes
-# runtime perf, not numerics, and the deployable perf tests (tests/perf, -m perf) run
-# at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3.
+# Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
+# not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
+# `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
+# ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
+# to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
+# blowup it rested on. See AGENTS.md for the measurement.
 # --durations: the slowest tests are printed on every run (CI included), so a new long
 # pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup

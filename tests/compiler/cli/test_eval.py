@@ -709,35 +709,13 @@ def test_failures_none_recorded(run_cli, tmp_path):
     assert "No bench_fail rows" in stdout
 
 
-def test_o3_reservoir_index_joins_db_rows_by_sig_and_knobs():
-    """``_o3_reservoir_index`` keeps only ``H_opt=3`` reservoir rows and keys them
-    so a DB sample with the same ``S_*`` signature + tunable knobs joins (the -O3
-    re-bench never writes a ``perf`` row, so the reservoir is the only -O3 source)."""
-    from emmy.commands.eval import _o3_reservoir_index, _variant_key
-    from emmy.compiler.pipeline.search.data import Sample
-    from emmy.compiler.pipeline.search.db import PerfSample
-
-    stamped = {"BM": 8, "BN": 16, "S_ext_free_prod": 1024.0}
-
-    class _P:
-        _dataset = [
-            ({**stamped, "H_opt": 3.0}, 9.0),
-            ({**stamped, "H_opt": 1.0}, 12.0),  # -O1 sweep row — excluded
-            ({"BM": 64, "BN": 16, "S_ext_free_prod": 1024.0, "H_opt": 3.0}, 7.0),
-        ]
-
-    o3 = _o3_reservoir_index(_P())
-    assert len(o3) == 2
-    db_sample = Sample.from_perf_sample(PerfSample(pretty="__global__ void k_m(float*)", knobs=stamped, latency_us=12.5))
-    assert o3[_variant_key(db_sample)] == 9.0
-
-
-def test_emit_variant_table_o3_column_and_deterministic_pick(caplog):
-    """With a fake prior the pick is deterministic; the ``-O3 us`` column shows the
-    reservoir latency for the matching config and ``—`` elsewhere."""
+def test_emit_variant_table_marks_the_deployed_pick(caplog):
+    """With a fake prior the pick is deterministic. Every row is a deployable-regime
+    measurement, so the single ``us`` column IS the deploy latency and the pick's ratio is
+    judged against it directly — there is no second lane to reconcile."""
     import logging
 
-    from emmy.commands.eval import _emit_variant_table, _variant_key
+    from emmy.commands.eval import _emit_variant_table
     from emmy.compiler.pipeline.search.data import Sample
     from emmy.compiler.pipeline.search.db import PerfSample
 
@@ -755,13 +733,11 @@ def test_emit_variant_table_o3_column_and_deterministic_pick(caplog):
             best_i = min(range(len(scores)), key=scores.__getitem__)
             return best_i, scores[best_i]
 
-    o3 = {_variant_key(samples[0]): 9.5}
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        _emit_variant_table("k_m", samples, _P(), n_fail=0, o3=o3, top=0)
+        _emit_variant_table("k_m", samples, _P(), n_fail=0, top=0)
     out = "\n".join(caplog.messages)
-    assert "-O3 us" in out
-    assert "9.5" in out and "—" in out
-    assert "pick: rank 2/2, 3.00x of best" in out
+    assert "-O3 us" not in out, "the second lane is gone; one regime, one column"
+    assert "pick: rank 2/2, 3.00x of best (measured latency)" in out
     assert "<-- misses best" in out
 
 

@@ -307,7 +307,6 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             self.tree = SearchTree()
             self.last_status = "ok"
             self.last_stats = PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
-            self.o3_rows = []
 
     class FakePipeline:
         def __init__(self):

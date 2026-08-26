@@ -30,16 +30,21 @@ def test_configs_that_competed_land_in_one_group():
     assert len(group.feats) == 4 and group.gpu == _GPU
 
 
-def test_the_key_separates_cards_and_nvcc_regimes():
-    """Two axes, two reasons. Cards never pool. Regimes never pool because ``-O1`` and ``-O3`` invert."""
+def test_cards_never_pool_and_a_non_deployable_regime_never_arrives():
+    """Two axes, two fates. Cards never pool — they are different tuning problems. A row from a
+    non-deployable regime does not reach a pool at all: the shared admission filter
+    (``freeze_reason``) drops it, because a measurement taken where nothing deploys answers a
+    question nothing asks. The ``H_opt`` key stays part of the grouping key anyway — it is the
+    pool's honest label of what it was measured under, a report cell reads it, and it is what would
+    catch a regression that let a second regime back in."""
     rows = [
         _row("a", value_us=200.0, features=_feats(opt=3.0)),
-        _row("b", value_us=300.0, features=_feats(opt=1.0)),  # same kernel, other regime
+        _row("b", value_us=300.0, features=_feats(opt=1.0)),  # same kernel, non-deployable regime
         _row("d", value_us=500.0, features=_feats(opt=3.0), gpu=_GPU2),
     ]
     groups, dropped = group_measured(rows)
-    assert not dropped
-    assert len(groups) == 3 and all(len(g.feats) == 1 for g in groups)
+    assert dropped == {"non-deployable regime (H_opt=1)": 1}
+    assert len(groups) == 2 and all(len(g.feats) == 1 for g in groups)
 
 
 def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
@@ -152,15 +157,16 @@ def test_only_a_golden_pool_can_be_asked_which_rows_are_the_answer():
 
 
 def test_a_measured_pool_carries_the_regime_it_was_measured_under():
-    """``h_opt`` is on the group, not recovered from its packed columns, because it is what DECIDED the
-    group: rows measured under different nvcc regimes never competed. A report keys a cell on it, so it has
-    to survive the trip from the row to the pool."""
+    """``h_opt`` rides on the group rather than being recovered from its packed columns: a report keys
+    a cell on it, so it has to survive the trip from the row to the pool. Only the deployable regime
+    reaches a pool, so today every cell reads the same value — the field says which one, instead of
+    leaving a reader to assume."""
     rows = [
         _row("a", value_us=200.0, features=_feats(opt=3.0)),
         _row("b", value_us=300.0, features=_feats(opt=1.0)),
     ]
     groups, _ = group_measured(rows)
-    assert sorted(g.h_opt for g in groups) == [1.0, 3.0]
+    assert [g.h_opt for g in groups] == [3.0]
 
 
 def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():

@@ -280,6 +280,39 @@ class Body(tuple[Stmt, ...]):
         return frozenset(ax for s in self.iter() for ax in s.binds_axes())
 
     @cached_property
+    def _exported_accums(self) -> frozenset[str]:
+        """Accumulator names exposed by this immutable subtree."""
+        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
+
+        out: set[str] = set()
+        for stmt in self:
+            if isinstance(stmt, Accum):
+                out.add(stmt.name)
+            for child in stmt.nested():
+                out.update(child._exported_accums)
+        return frozenset(out)
+
+    @cached_property
+    def _all_ssa_defs(self) -> frozenset[str]:
+        """Every SSA definition in this immutable subtree."""
+        out: set[str] = set()
+        for stmt in self:
+            out.update(stmt.defines())
+            for child in stmt.nested():
+                out.update(child._all_ssa_defs)
+        return frozenset(out)
+
+    @cached_property
+    def _all_ssa_uses(self) -> frozenset[str]:
+        """Every SSA read in this immutable subtree."""
+        out: set[str] = set()
+        for stmt in self:
+            out.update(stmt.deps())
+            for child in stmt.nested():
+                out.update(child._all_ssa_uses)
+        return frozenset(out)
+
+    @cached_property
     def deps_closure(self) -> dict[str, frozenset[str]]:
         """For every SSA name defined in this body (recursive), the
         set of names it transitively reads. Values include both SSA

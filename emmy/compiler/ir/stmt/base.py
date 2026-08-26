@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
@@ -573,6 +574,7 @@ class Stmt:
         """
         return ()
 
+    @cached_property
     def has_side_effects(self) -> bool:
         """True iff executing this stmt produces an externally observable
         effect (a buffer write). For compound stmts (Loop / StridedLoop /
@@ -589,7 +591,7 @@ class Stmt:
         safe. Hoisting passes that want to move a Loop containing an
         Accum need a separate scope-bound check on the leaf, not
         ``has_side_effects`` on the wrapper."""
-        return any(c.has_side_effects() for sub in self.nested() for c in sub.iter())
+        return any(c.has_side_effects for sub in self.nested() for c in sub)
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this

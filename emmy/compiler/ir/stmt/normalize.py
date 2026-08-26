@@ -553,15 +553,36 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     check is needed.
     """
     stmts = Body.coerce(stmts)
+    closure = stmts.deps_closure
+    axis_names = stmts.axis_names
+    axis_deps: dict[int, tuple[Stmt, frozenset[str]]] = {}
+
+    def _axis_deps(s: Stmt) -> frozenset[str]:
+        """Axes read by one immutable subtree, computed bottom-up once."""
+        key = id(s)
+        cached = axis_deps.get(key)
+        if cached is not None and cached[0] is s:
+            return cached[1]
+        reads = set(s.deps())
+        for expr in s.exprs():
+            reads.update(expr.free_vars())
+        deps = reads & axis_names
+        for name in reads:
+            deps.update(closure.get(name, frozenset()) & axis_names)
+        for child in (child for body in s.nested() for child in body):
+            deps.update(_axis_deps(child))
+        result = frozenset(deps - s.binds_axes())
+        axis_deps[key] = (s, result)
+        return result
 
     def _hoistable(s: Stmt, axis: str) -> bool:
         # Accum / Init are scope-bound to their enclosing Loop's reduction (an Init seeds an
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
         # Write) pin their iteration count and stay put.
-        if isinstance(s, (Accum, Init)) or s.has_side_effects():
+        if isinstance(s, (Accum, Init)) or s.has_side_effects:
             return False
-        return not stmts.depends_on(s, axis)
+        return axis not in _axis_deps(s)
 
     def walk(body: Body) -> list[Stmt]:
         new_body: list[Stmt] = []
@@ -762,31 +783,15 @@ def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _exported_accs(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        if isinstance(s, Accum):
-            out.add(s.name)
-        for b in s.nested():
-            out |= _exported_accs(b)
-    return frozenset(out)
+    return Body.coerce(body)._exported_accums
 
 
 def _all_ssa_defs(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        out.update(s.defines())
-        for b in s.nested():
-            out |= _all_ssa_defs(b)
-    return frozenset(out)
+    return Body.coerce(body)._all_ssa_defs
 
 
 def _all_ssa_uses(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        out.update(s.deps())
-        for b in s.nested():
-            out |= _all_ssa_uses(b)
-    return frozenset(out)
+    return Body.coerce(body)._all_ssa_uses
 
 
 # ---------------------------------------------------------------------------

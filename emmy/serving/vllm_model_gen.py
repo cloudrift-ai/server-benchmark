@@ -37,7 +37,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
@@ -234,6 +234,42 @@ def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
     logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
 
 
+def _build_fork_attention(vllm_config, runner, n_layers, prefix):
+    """One engine-owned attention sublayer per local decoder layer (DeepSeek V4).
+
+    The 1Cat fork's ``DeepseekV4Attention`` is self-contained: ``forward(positions, hidden_states,
+    llama_4_scaling) -> [num_tokens, hidden]`` runs the low-rank query path, the shared-KV projection,
+    RoPE, the FP8 paged cache insert, the HCA/CSA compressor, the lightning indexer, sparse MLA and
+    the grouped output projection, against paged caches it registers itself. Emmy therefore hands it
+    the normalized hidden states its own ``pre`` program produced and takes the sublayer's output
+    back — there is no q/k/v seam to place a vLLM ``Attention`` in.
+
+    Two engine-level objects are shared across the layers exactly as the fork's own model builds
+    them: one reserved top-k indices buffer for every indexer, and the auxiliary streams its GEMMs
+    overlap on. The prefix carries the ABSOLUTE layer index so each layer's SWA / compressor /
+    indexer cache layers register distinct names — vLLM keys its KV-cache specs on them and rejects
+    duplicates, and under pipeline parallelism the local index is not the absolute one."""
+    import torch
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Attention
+
+    config = getattr(vllm_config.model_config.hf_config, "text_config", vllm_config.model_config.hf_config)
+    topk_indices_buffer = torch.empty(
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        config.index_topk,
+        dtype=torch.int32,
+    )
+    aux_streams = [torch.cuda.Stream() for _ in range(3)]
+    return [
+        DeepseekV4Attention(
+            vllm_config,
+            prefix=f"{prefix}.layers.{runner.global_layer_id(i)}.attn",
+            topk_indices_buffer=topk_indices_buffer,
+            aux_stream_list=aux_streams,
+        )
+        for i in range(n_layers)
+    ]
+
+
 class _SharedRawEmbedding(nn.Module):
     """The token embedding vLLM's speculative-decoding drafter shares off the target model.
 
@@ -393,7 +429,10 @@ class EmmyGenModel(nn.Module, SupportsPP):
                 f"serve with --max-num-batched-tokens {self.runner.prefill_capacity} or lower"
             )
         n_layers = self.runner.num_layers
-        self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(config.hidden_size, self.runner.residual_dtype)
+        # The pipeline boundary transports whatever the SEAM carries — the flattened hyper-connection
+        # stream stack for DeepSeek V4, the plain hidden vector otherwise. Re-deriving it from the
+        # config here would silently truncate every stage transition to one stream's worth.
+        self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(self.runner.carrier_size, self.runner.residual_dtype)
 
         # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
         # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
@@ -451,28 +490,45 @@ class EmmyGenModel(nn.Module, SupportsPP):
         # KV-cache spec accordingly).
         # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
         # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
-        attn = []
-        for i in range(n_layers):
-            global_i = self.runner.global_layer_id(i)
-            hd, nh, nkv, scaling = self.runner.layer_meta(i)
-            attn.append(
-                Attention(
-                    nh,
-                    hd,
-                    scaling,
-                    num_kv_heads=nkv,
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
-                    per_layer_sliding_window=_layer_window(i),
-                    prefix=f"{prefix}.layers.{global_i}.self_attn.attn",
-                    **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
+        # A hyper-connection architecture hands the WHOLE attention sublayer to the engine (see
+        # ``hyper_connection_seam``): its projections, compressors, indexer, paged FP8 cache insert
+        # and grouped output projection are fused with caches Emmy never sees, so there is no q/k/v
+        # to hand a vLLM ``Attention`` and no external RoPE to apply.
+        self.fork_attn = None
+        if self.runner.hc_mult > 1:
+            self.fork_attn = nn.ModuleList(_build_fork_attention(vllm_config, self.runner, n_layers, prefix))
+            self.attn = nn.ModuleList()
+            self.rotary_emb = nn.ModuleList()
+        else:
+            attn = []
+            for i in range(n_layers):
+                global_i = self.runner.global_layer_id(i)
+                hd, nh, nkv, scaling = self.runner.layer_meta(i)
+                attn.append(
+                    Attention(
+                        nh,
+                        hd,
+                        scaling,
+                        num_kv_heads=nkv,
+                        cache_config=vllm_config.cache_config,
+                        quant_config=vllm_config.quant_config,
+                        per_layer_sliding_window=_layer_window(i),
+                        prefix=f"{prefix}.layers.{global_i}.self_attn.attn",
+                        **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
+                    )
                 )
-            )
-        self.attn = nn.ModuleList(attn)
-        # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
-        # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
-        max_pos = _rope_cache_limit(mc, config)
-        self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
+            self.attn = nn.ModuleList(attn)
+            # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
+            # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
+            max_pos = _rope_cache_limit(mc, config)
+            self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
+
+        # Routed experts are sharded across the tensor-parallel group, so each rank's combine is a
+        # PARTIAL sum; the group reduction completes it before the placement closes the layer.
+        if get_tp_group().world_size > 1:
+            from vllm.distributed import tensor_model_parallel_all_reduce
+
+            self.runner._reduce_routed = tensor_model_parallel_all_reduce
 
         # vLLM owns the output head on the last pipeline rank; the runner owns only its
         # absolute decoder interval plus the first-rank embedding / last-rank final norm.
@@ -552,6 +608,13 @@ class EmmyGenModel(nn.Module, SupportsPP):
         prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
         if decode_ok or prefill_ok:
             return self._forward_device(hidden, positions)
+        if self.fork_attn is not None:
+            # The host numpy fallback carries q/k/v across the seam and has no stream form; a step
+            # this wide would silently take the wrong path rather than run slowly.
+            raise ValueError(
+                f"token width {t} exceeds the compiled widths for this hyper-connection model "
+                f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
+            )
         hidden_np = hidden.detach().cpu().numpy()
         for layer in range(self.runner.num_layers):
             residual_np = hidden_np
@@ -570,9 +633,29 @@ class EmmyGenModel(nn.Module, SupportsPP):
             return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
         return IntermediateTensors({"hidden_states": torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)})
 
+    def _forward_streams(self, hidden, positions):
+        """Device-resident forward for a hyper-connection architecture (DeepSeek V4).
+
+        ``hidden`` is the flattened residual-stream carrier. Per layer: Emmy's ``pre`` collapses the
+        streams and normalizes, the engine-owned sublayer runs the whole of attention against its own
+        paged caches, and Emmy's ``post`` mixes the result back onto the streams, runs the
+        feed-forward collapse, norm and shared expert, and closes with the routed combine (reduced
+        across the expert shards inside the runner)."""
+        for layer in range(self.runner.num_layers):
+            carrier = hidden
+            x = self.runner.forward_layer_pre_device(layer, carrier)
+            x = x[0] if isinstance(x, tuple) else x
+            attn_out = self.fork_attn[layer](positions, x.to(self.dtype), None)
+            hidden = self.runner.forward_layer_post_device(layer, attn_out, carrier)
+        if self._is_last_rank:
+            return self.runner.final_norm_device(hidden)
+        return IntermediateTensors({"hidden_states": hidden})
+
     def _forward_device(self, hidden, positions):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
+        if self.fork_attn is not None:
+            return self._forward_streams(hidden, positions)
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)

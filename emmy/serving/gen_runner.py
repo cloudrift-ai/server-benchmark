@@ -837,7 +837,7 @@ class EmmyGenRunner:
         snapshot, the coded allocation, the pack key — goes through the tagged id, so a repo
         publishing one rung per branch serves the rung that was asked for."""
         import torch
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoConfig, AutoModelForCausalLM
 
         from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
         from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
@@ -900,7 +900,14 @@ class EmmyGenRunner:
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
         with torch.device("cpu"):
-            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str)).eval()
+            # Resolve the config EXPLICITLY, the way the quantized lane already does. Inside a vLLM
+            # process, letting ``from_pretrained`` resolve it can attach Transformers' per-layer
+            # heterogeneity spec, after which the architecture's OWN modeling code can no longer read
+            # its per-layer fields off the config (DeepSeek V4: "no attribute 'layer_types'").
+            config = AutoConfig.from_pretrained(repo, revision=revision)
+            model = AutoModelForCausalLM.from_pretrained(
+                repo, revision=revision, dtype=getattr(torch, dtype_str), config=config
+            ).eval()
             return cls.from_model(
                 model,
                 dtype_str=dtype_str,

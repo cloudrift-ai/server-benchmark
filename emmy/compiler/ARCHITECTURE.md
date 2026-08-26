@@ -214,9 +214,13 @@ shared-vocabulary algebra: per 16-element K block, the e4m3 scale round trip (`t
 f32→f16 rounding of the fused scale (`fuse_nvfp4_scales` parity), the e2m1 encode over the rounded scale, the pair
 pack into an `f4e2m1x2` buffer, and the same pair-table-gather decode chain the weight side spells. Both matmul
 operands then read as one decode-chain shape, the graph's own meaning becomes Σ x̂·ŵ for the marked matmuls, and the
-numpy backend stays the parity oracle for every lowering of it. Equal-valued `input_scale` tensors over one
-activation share one chain (a fused projection group calibrates to one scale); unmarked linears keep their 16-bit
-activations. One parity property is inherent rather than a defect: behind a COMPUTED producer the two backends reach
+numpy backend stays the parity oracle for every lowering of it. Two halves spell the round trip, and the split
+decides what reaches memory: equal-valued `input_scale` tensors over one activation share the QUANTIZE (a fused
+projection group calibrates to one scale), while each consumer gets its own reconstruction. Loop fusion materializes
+an activation's fan-out point, so a shared activation reaches its matmuls as the packed codes beside their raw e4m3
+block scales — the same two leaves a packed weight constant stores — rather than as a dense 16-bit buffer with the
+codes dissolved into the producer. Unmarked linears keep their 16-bit activations. One parity property is inherent
+rather than a defect: behind a COMPUTED producer the two backends reach
 the encodes with epsilon-different upstream values, and a block whose scale ratio lands within that epsilon of a
 rounding boundary flips one code — parity there is distributional (median exact, rare flips bounded by the
 quantization step), where direct-feed comparisons stay tight.

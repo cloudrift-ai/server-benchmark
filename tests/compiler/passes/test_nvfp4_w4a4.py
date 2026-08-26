@@ -82,27 +82,10 @@ def test_a_shared_quantized_activation_behind_a_norm_compiles_and_holds_flip_bou
     bit-identical by construction."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
-    from emmy.compiler.ir.frontend.ir import RmsNormOp
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 
     m, n, k = 16, 128, 128
-    _w4a4_checkpoint(tmp_path, {"q": (n, 0.02), "kp": (n, 0.02), "v": (n, 0.02)}, k=k)
-    g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
-    nw = g.add_node(op=InputOp(), inputs=[], output=Tensor("norm_w", (k,), "f16"), node_id="norm_w")
-    h = g.add_node(op=RmsNormOp(), inputs=["x", nw], output=Tensor("h", (m, k), "f16"), node_id="h")
-    outs = []
-    for name in ("q", "kp", "v"):
-        w = g.add_node(
-            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
-            inputs=[],
-            output=Tensor(f"{name}_w", (n, k), "f16"),
-            node_id=f"{name}_w",
-        )
-        outs.append(g.add_node(op=LinearOp(), inputs=[h, w], output=Tensor(f"{name}_y", (m, n), "f16"), node_id=f"{name}_y"))
-    g.inputs, g.outputs = ["x", "norm_w"], outs
-    assert spell_quantized_constants(g, str(tmp_path)) == 3
-    assert spell_static_fp4_activations(g, str(tmp_path)) == 3
+    g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=m, n=n, k=k)
     encodes = [nd for nd in g.nodes.values() if type(nd.op).__name__ == "ElementwiseOp" and nd.op.name == "to_f4e2m1"]
     assert len(encodes) == 1, "equal input_scale values must share ONE quantize chain"
 
@@ -146,3 +129,51 @@ def test_the_spelled_w4a4_program_matches_numpy_on_device(tmp_path, m, n, k):
     c = np.asarray(got.outputs["y"]).reshape(m, n).astype(np.float32)
     denom = max(float(np.abs(r).max()), 1e-9)
     assert float(np.abs(c - r).max()) / denom < 2e-3
+
+
+def _w4a4_shared_linears(tmp_path, names, *, m, n, k):
+    """One RMSNorm output quantized once and read by several marked linears — q/k/v's shape.
+    Equal ``input_scale`` values, so the checkpoint's fused projection group calibrates to one
+    scale and the consumers share one quantize."""
+    from emmy.compiler.ir.frontend.ir import RmsNormOp
+
+    _w4a4_checkpoint(tmp_path, {name: (n, 0.02) for name in names}, k=k)
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    nw = g.add_node(op=InputOp(), inputs=[], output=Tensor("norm_w", (k,), "f16"), node_id="norm_w")
+    h = g.add_node(op=RmsNormOp(), inputs=["x", nw], output=Tensor("h", (m, k), "f16"), node_id="h")
+    outs = []
+    for name in names:
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(f"{name}_w", (n, k), "f16"),
+            node_id=f"{name}_w",
+        )
+        outs.append(g.add_node(op=LinearOp(), inputs=[h, w], output=Tensor(f"{name}_y", (m, n), "f16"), node_id=f"{name}_y"))
+    g.inputs, g.outputs = ["x", "norm_w"], outs
+    assert spell_quantized_constants(g, str(tmp_path)) == len(names)
+    assert spell_static_fp4_activations(g, str(tmp_path)) == len(names)
+    return g
+
+
+def test_a_shared_activation_reaches_its_matmuls_as_packed_codes(tmp_path):
+    """The boundary the two-half spelling buys. Several linears read one quantized activation, so
+    loop fusion materializes what they SHARE — the packed codes, beside the raw e4m3 block scales
+    a packed weight constant also stores. Before the split the shared point was the
+    reconstruction: a dense 16-bit buffer reached memory with the codes dissolved into the
+    producer, leaving nothing downstream to read as a 4-bit operand."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Load
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=16, n=128, k=128)
+    lowered = Pipeline.build(LOOP_PASSES).run(g)
+    codes = [t.name for node in lowered.nodes.values() if isinstance(node.op, LoopOp) for t in node.outputs if t.dtype.logical_elems == 2]
+    assert len(codes) == 1, f"the activation's packed codes must materialize exactly once, got {codes}"
+    readers = [
+        nid
+        for nid, node in lowered.nodes.items()
+        if isinstance(node.op, LoopOp) and any(isinstance(s, Load) and s.input == codes[0] for s in node.op.body.iter())
+    ]
+    assert len(readers) == 3, f"each marked linear must read the shared codes, got {readers}"

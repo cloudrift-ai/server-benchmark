@@ -1461,23 +1461,31 @@ def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
     return False
 
 
-def _spell_static_fp4_activation(graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]) -> str | None:
-    """Spell one static 4-bit activation quantize→dequantize round trip and return its restored
-    buffer, or ``None`` when the activation's shape cannot carry it (symbolic or non-16-multiple
-    K, a non-scalar ``input_scale``).
+def _spell_static_fp4_quantize(
+    graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]
+) -> tuple[str, str, str, str] | None:
+    """Spell the QUANTIZE half of one static 4-bit activation round trip — the half every
+    consumer of that activation shares. Returns ``(stem, packed codes, e4m3 block scales,
+    ``input_scale``)``, or ``None`` when the activation's shape cannot carry it (symbolic or
+    non-16-multiple K, a non-scalar ``input_scale``).
 
     The algebra is :func:`quantize_nvfp4` with the checkpoint's static per-linear ``input_scale``
     standing in for the tensor-derived ``scale_2``: per 16-element K block, the e4m3 block-scale
     round trip (``to_f8e4m3(amax / (6·s2))``), ONE f32→f16 rounding of the fused scale
     (:func:`fuse_nvfp4_scales` parity), the e2m1 encode of the block over the rounded fused
-    scale, and the pair pack into an ``f4e2m1x2`` buffer. The declared reconstruction then
-    mirrors the weight cone — pair-table gather over the packed buffer, fused-scale multiply at
-    the promised dtype — so both matmul operands read as the same decode-chain shape. The
-    quantize's divisor is floored at 1e-12 so an all-zero block divides by the floor instead of
-    by zero; its codes are zeros either way, and the decode multiplies by the unfloored scale."""
+    scale, and the pair pack into an ``f4e2m1x2`` buffer. The quantize's divisor is floored at
+    1e-12 so an all-zero block divides by the floor instead of by zero; its codes are zeros
+    either way, and the decode multiplies by the unfloored scale.
+
+    What the consumers share is the CODES and their raw block scales, never a reconstructed
+    value: the reconstruction is spelled per consumer (:func:`_spell_static_fp4_decode`). Loop
+    fusion materializes an activation's fan-out point, so this split is what decides that a
+    shared activation reaches its matmuls as the packed pair beside e4m3 scales — the two leaves
+    a packed weight constant already offers — instead of as a 16-bit dense buffer with the codes
+    dissolved into the producer."""
     from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
@@ -1496,9 +1504,9 @@ def _spell_static_fp4_activation(graph: Graph, activation: str, scale_key: str, 
     # Freshness must be probed on a DERIVED name: the stem itself never becomes a node, and
     # ``add_node`` silently falls back to an ``n<i>`` node id on a taken name while keeping the
     # duplicate TENSOR name — two buffers sharing one name then cross-read at the kernel level,
-    # where references are by name. ``_value`` exists in every chain, so it is the probe.
+    # where references are by name. ``_bits`` exists in every quantize half, so it is the probe.
     stem, suffix = f"{activation}_static_fp4", 2
-    while f"{stem}_value" in graph.nodes or graph.buffer(f"{stem}_value") is not None:
+    while f"{stem}_bits" in graph.nodes or graph.buffer(f"{stem}_bits") is not None:
         stem = f"{activation}_static_fp4_{suffix}"
         suffix += 1
     dt = source.dtype
@@ -1551,17 +1559,51 @@ def _spell_static_fp4_activation(graph: Graph, activation: str, scale_key: str, 
     hi = graph.add_node(op=ElementwiseOp(op="left_shift"), inputs=[odd, four_bc], output=Tensor(f"{stem}_hi", half, "i32"))
     byte = graph.add_node(op=ElementwiseOp(op="bitwise_or"), inputs=[even, hi], output=Tensor(f"{stem}_byte", half, "i32"))
     bits = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[byte], output=Tensor(f"{stem}_bits", half, F4E2M1x2.name))
+    return stem, bits, sbits, s2
+
+
+def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dtype) -> str:
+    """Spell ONE consumer's reconstruction over a shared quantized activation and return its
+    restored buffer.
+
+    The shape is the packed weight constant's own decode chain (:func:`_spell_nvfp4_weight`): a
+    pair-table gather over the packed codes, times the block scale, with the two scale levels
+    multiplied in f32 and rounded once to f16 (:func:`fuse_nvfp4_scales` parity). Spelled per
+    consumer rather than shared, so each marked matmul carries both operands in that one
+    decode-chain reading — the packed pair and the raw e4m3 scale each reached through a load of
+    their own."""
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    quant_stem, bits, sbits, s2 = quant
+    half = tuple(d.as_static() for d in graph.buffer(bits).shape)
+    bshape = tuple(d.as_static() for d in graph.buffer(sbits).shape)
+    flat, blocked = (*half[:-1], half[-1] * 2), (*bshape[:-1], NVFP4_BLOCK)
+    # A reconstruction's own stem, never the quantize half's: the two spell some of the same
+    # derived names (``_scale_vals``, ``_fused``), and ``add_node`` answers a taken name by
+    # keeping the duplicate TENSOR name while renaming only the node — buffers that share a name
+    # then cross-read at the kernel level, where references are by name.
+    suffix = 1
+    while f"{quant_stem}_r{suffix}_value" in graph.nodes or graph.buffer(f"{quant_stem}_r{suffix}_value") is not None:
+        suffix += 1
+    stem = f"{quant_stem}_r{suffix}"
 
     idx = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{stem}_idx", half, "i32"))
-    table = _f4_pair_table(graph, name=f"{stem}_f4_pairs", out_name=f"{stem}_f4_pairs", dtype=dt)
-    pairs = graph.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{stem}_pairs", (*half, 2), dt))
-    vblk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[pairs], output=Tensor(f"{stem}_vals", blocked, dt))
-    fused_x = fused
-    if dt.name != "f16":
-        fused_x = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_fused_cast", bshape, dt))
-    f_bc = broadcast_to(graph, fused_x, blocked)
-    scaled = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[vblk, f_bc], output=Tensor(f"{stem}_sblk", blocked, dt))
-    return graph.add_node(op=ReshapeOp(shape=flat), inputs=[scaled], output=Tensor(f"{stem}_value", flat, dt))
+    table = _f4_pair_table(graph, name=f"{stem}_f4_pairs", out_name=f"{stem}_f4_pairs", dtype=dtype)
+    pairs = graph.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{stem}_pairs", (*half, 2), dtype))
+    vblk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[pairs], output=Tensor(f"{stem}_vals", blocked, dtype))
+    sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))
+    s2_bc = broadcast_to(graph, s2, bshape)
+    fused32 = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[sdec, s2_bc], output=Tensor(f"{stem}_fused32", bshape, "f32"))
+    # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
+    fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{stem}_fused", bshape, "f16"))
+    if dtype.name != "f16":
+        fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_fused_cast", bshape, dtype))
+    f_bc = broadcast_to(graph, fused, blocked)
+    scaled = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[vblk, f_bc], output=Tensor(f"{stem}_sblk", blocked, dtype))
+    return graph.add_node(op=ReshapeOp(shape=flat), inputs=[scaled], output=Tensor(f"{stem}_value", flat, dtype))
 
 
 def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
@@ -1572,12 +1614,13 @@ def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
     checkpoint stores that module's ``input_scale`` — modelopt's calibrated per-linear activation
     ``scale_2`` (one f32, ``calibration amax / (6 · 448)``). The graph's own meaning then becomes
     Σ x̂·ŵ program-wide, and the numpy backend stays the parity oracle. Unmarked linears keep
-    their 16-bit activations untouched. Consumers reading one activation through equal-valued
-    ``input_scale`` tensors share one quantized value (the checkpoint calibrates a fused
-    projection group — q/k/v, gate/up — to one scale, stored once per member); unequal values
-    quantize per scale path. Returns the number of rewired linears; weight-only or non-NVFP4
-    checkpoints are a no-op. Runs after :func:`spell_quantized_constants`, whose spelled weight
-    cones are the marker it reads."""
+    their 16-bit activations untouched. The round trip is spelled in two halves: consumers
+    reading one activation through equal-valued ``input_scale`` tensors share ONE quantize (the
+    checkpoint calibrates a fused projection group — q/k/v, gate/up — to one scale, stored once
+    per member; unequal values quantize per scale path), and each consumer then gets its own
+    reconstruction over the shared codes. Returns the number of rewired linears; weight-only or
+    non-NVFP4 checkpoints are a no-op. Runs after :func:`spell_quantized_constants`, whose
+    spelled weight cones are the marker it reads."""
     from safetensors import safe_open  # noqa: PLC0415
 
     from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
@@ -1614,18 +1657,19 @@ def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
                 handle = handles[path] = stack.enter_context(safe_open(path, framework="numpy"))
             return handle
 
-        rewritten: dict[tuple[str, float], str] = {}
+        quantized: dict[tuple[str, float], tuple[str, str, str, str] | None] = {}
         for linear_id, activation, scale_key in eligible:
             value = float(np.asarray(_open(scale_key).get_tensor(scale_key), dtype=np.float32).reshape(-1)[0])
-            restored = rewritten.get((activation, value))
-            if restored is None:
+            key = (activation, value)
+            if key not in quantized:
                 s2_shape = tuple(int(x) for x in _open(scale_key).get_slice(scale_key).get_shape())
-                restored = _spell_static_fp4_activation(graph, activation, scale_key, s2_shape)
-                if restored is None:
+                quantized[key] = _spell_static_fp4_quantize(graph, activation, scale_key, s2_shape)
+                if quantized[key] is None:
                     logger.warning("static fp4 activation %s: shape cannot carry the block quantize; linear stays 16-bit", scale_key)
-                    continue
-                rewritten[(activation, value)] = restored
-            graph.replace_input(linear_id, activation, restored)
+            quant = quantized[key]
+            if quant is None:
+                continue
+            graph.replace_input(linear_id, activation, _spell_static_fp4_decode(graph, quant, graph.buffer(activation).dtype))
             spelled += 1
     if spelled:
         logger.info("spelled static 4-bit activation algebra for %d linear(s) from %s", spelled, model_dir)

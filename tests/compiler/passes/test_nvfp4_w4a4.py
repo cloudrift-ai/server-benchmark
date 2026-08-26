@@ -157,6 +157,13 @@ def _w4a4_shared_linears(tmp_path, names, *, m, n, k):
     return g
 
 
+def _folds(node):
+    """Every ``Fold`` in a tile tree, the root first."""
+    from emmy.compiler.ir.pure.fold import Fold
+
+    return [node, *(f for e in node.operands for f in _folds(e))] if isinstance(node, Fold) else []
+
+
 def test_a_shared_activation_reaches_its_matmuls_as_packed_codes(tmp_path):
     """The boundary the two-half spelling buys. Several linears read one quantized activation, so
     loop fusion materializes what they SHARE — the packed codes, beside the raw e4m3 block scales
@@ -177,3 +184,31 @@ def test_a_shared_activation_reaches_its_matmuls_as_packed_codes(tmp_path):
         if isinstance(node.op, LoopOp) and any(isinstance(s, Load) and s.input == codes[0] for s in node.op.body.iter())
     ]
     assert len(readers) == 3, f"each marked linear must read the shared codes, got {readers}"
+
+
+def test_the_marked_matmul_binds_both_operands_as_packed_decode_chains(tmp_path):
+    """The contraction reading the block-scaled atom's staging needs: one fold over two operand
+    edges, each a packed-pair k-block decode chain over 16-element blocks. The atom is not
+    offered yet, so the scheduler still deploys the demoted planar view; what this pins is the
+    bound shape, which is what an offer would read."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_kblock_b
+
+    g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=16, n=128, k=128)
+    # Recognition alone: the scheduler's chosen VIEW decides what a node stores, and with no atom
+    # offered for a packed pair it deploys the demoted planar one.
+    looped = Pipeline.build(LOOP_PASSES).run(g)
+    tiled = Pipeline.build(["lowering/tile"], select={"recognize"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+    bound = [(tile, t) for tile in tiles for t in _folds(tile.op) if is_contraction(t)]
+    assert bound, "no marked matmul bound as a contraction"
+    for tile, con in bound:
+        assert len(con.channels) == 1
+        edges = (con.a, con.channels[0].b)
+        assert all(isinstance(e, Fold) and e.axis is None for e in edges), "both operands must be plain operand edges"
+        reads = [match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in edges]
+        assert all(r is not None for r in reads), "both operands must read as packed decode chains"
+        assert {r.block for r in reads} == {16}

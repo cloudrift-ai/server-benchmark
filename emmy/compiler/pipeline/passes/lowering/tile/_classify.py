@@ -929,10 +929,10 @@ def bind_bilinear(
     be silently dropped — decline instead). ``None`` when any condition fails; the caller keeps
     the PLANAR fold unchanged.
 
-    Deliberately not yet bound here: the both-computed decode pair and the k-invariant factor
-    hoist (the fp8 / W8A8 mul-hoist arm — the ``Σ a⊗(s⊗w) = s⊗Σ a⊗w`` reassociation, licensed
-    by the same distributivity/commutativity traits) — registered casualties until ported to
-    the λ body."""
+    Both sides may be computed: with a k-invariant factor each, the mul-hoist binds them (the
+    fp8 / W8A8 pair — the ``Σ a⊗(s⊗w) = s⊗Σ a⊗w`` reassociation, licensed by the same
+    distributivity/commutativity traits); with a factor that varies per k block, which does not
+    commute out of the fold, each side binds as a plain projection carrying its own factor."""
     if f.axis is None or f.combine is None:
         return None
     stat = sweep = None
@@ -1093,10 +1093,34 @@ def bind_bilinear(
         consumed.update(id(s) for s in b_cone)
         a_edge = make_cone(a_cone, k_name, stat=a_stat, sweep=tuple(a_epi))
         b_edges = [make_cone(b_cone, k_name, stat=b_stat, sweep=tuple(b_epi))]
+    elif len(reads) == 1:
+        # Both sides computed with no chain. Factors CONSTANT along the reduce axis commute out
+        # of the fold, so that pair — W8A8's double decode — binds through the mul-hoist first.
+        # A factor that varies per k BLOCK does not commute, and the pair then binds as two plain
+        # projections, each side's factor staying inside the fold: the reading a block-scaled
+        # operand needs, and the shape a decode chain over packed pairs arrives in on both sides.
+        h = hoisted()
+        if h is not None:
+            return h
+        lift = reads[0][0]
+        other = next(a for a in lift.args if a != a_arg)
+        # Neither ⊗ argument is a direct load, so the role split is a property of the cones'
+        # indices rather than of the argument order: try the lift's order, then the swap.
+        rest = [s for s in body if id(s) not in consumed]
+        a_cone = b_cone = None
+        for a_try, b_try in ((a_arg, other), (other, a_arg)):
+            a_cone = _cone(rest, a_try, n_name, k_name, axes)
+            b_cone = _cone(rest, b_try, m_name, k_name, axes)
+            if a_cone is not None and b_cone is not None:
+                break
+        if a_cone is None or b_cone is None:
+            return None
+        consumed.update(id(s) for s in a_cone)
+        consumed.update(id(s) for s in b_cone)
+        a_edge = Fold.projection(body=Body(tuple(a_cone)))
+        b_edges = [Fold.projection(body=Body(tuple(b_cone)))]
     else:
-        # Both sides computed with no chain — the W8A8 double-decode pair binds through the
-        # mul-hoist alone.
-        return hoisted()
+        return None  # several channels over two computed sides — a shape this binding does not read
     if any(id(s) not in consumed for s in body):
         return None  # an unaccounted λ stmt — a shape this binding does not understand
     # B-layout agreement across channels: one shared A fragment implies one slab orientation

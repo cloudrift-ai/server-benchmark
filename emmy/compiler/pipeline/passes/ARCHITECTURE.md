@@ -472,7 +472,13 @@ failing several passes later:
   declines 1-byte elements (its fill math is unaudited there), so the scalar tier rides gmem-direct. The arm's boundary is
   the algebra: a k-VARYING (2-D block) scale does not commute and declines; an additive zero-point (affine cone) and a
   codebook (gather) decode are outside the multiplicative form; any other computed B raises, and the recognizer
-  demotes the cell to PLANAR (the guardrail contract). The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every
+  demotes the cell to PLANAR (the guardrail contract). Where the hoist declines a pair of computed sides — an NVFP4
+  matmul, whose block scale varies per k block on BOTH operands once the graph declares the activation's
+  quantization — the binding falls through to two plain operand edges (`Fold.projection`), each side keeping its own
+  factor inside the fold. Neither product argument is a direct load there, so the row side follows from the cones'
+  indices rather than from the argument order. That binding states the contraction and offers nothing: `_warp_atoms`
+  still declines a packed-pair storage dtype, so the pair takes the demoted planar view.
+  The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an
   unbindable one — a 1-D matvec-shaped output — keeps its loads inline in a fold's lift instead, so it **derives**

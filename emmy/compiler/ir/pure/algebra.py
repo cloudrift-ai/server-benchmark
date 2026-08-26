@@ -182,4 +182,37 @@ def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:
     return state
 
 
-__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "rename_combine"]
+def product_spine(defs: dict, name: str, *, divide: bool = False):
+    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)``.
+
+    The ONE reading of a product tree. The spine is recognized by the ``semiring_product`` TRAIT,
+    never an op-name list, so a newly registered ⊗ is covered without touching this. ``divide``
+    additionally admits a division node on the numerator side — ``(Σ x)/c`` equals ``Σ (x/c)`` for
+    a fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor
+    is recorded as a leaf and only the numerator continues the spine.
+
+    Returns ``None`` when a spine node is not binary; a name with no product above it is the
+    degenerate one-leaf product.
+    """
+    spine: list = []
+    leaves: list[str] = []
+
+    def walk(current: str) -> bool:
+        stmt = defs.get(current)
+        if isinstance(stmt, Assign):
+            if stmt.op.semiring_product:
+                if len(stmt.args) != 2:
+                    return False
+                spine.append(stmt)
+                return all(walk(arg) for arg in stmt.args)
+            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
+                spine.append(stmt)
+                leaves.append(stmt.args[1])
+                return walk(stmt.args[0])
+        leaves.append(current)
+        return True
+
+    return (tuple(leaves), tuple(spine)) if walk(name) else None
+
+
+__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "product_spine", "rename_combine"]

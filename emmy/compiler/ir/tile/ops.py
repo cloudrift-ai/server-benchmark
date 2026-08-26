@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
+from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
@@ -164,21 +165,12 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
     same reassociation category as split-K and the mul-hoist. The one registered ⊗ today is
     ``multiply`` (``ElementwiseImpl._SEMIRING``), which this helper spells directly."""
     defs: dict[str, object] = {n: s for s in body for n in s.defines()}
-    spine: list[str] = []
-    leaves: list[str] = []
-
-    def flatten(n: str) -> bool:
-        d = defs.get(n)
-        if isinstance(d, Assign) and d.op.name == "multiply":
-            if len(d.args) != 2:
-                return False
-            spine.append(n)
-            return flatten(d.args[0]) and flatten(d.args[1])
-        leaves.append(n)
-        return True
-
-    if not flatten(value):
+    flattened = product_spine(defs, value)
+    if flattened is None:
         return None
+    leaf_names, spine_stmts = flattened
+    leaves = list(leaf_names)
+    spine = [stmt.name for stmt in spine_stmts]
     spine_reads = {n for n in spine if n != value}
     for s in body:
         if not (isinstance(s, Assign) and s.name in spine) and set(s.deps()) & spine_reads:

@@ -49,9 +49,35 @@ clustering, semiring contraction canonicalization, and closed child-Fold extract
 contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
 cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to one shared result even when their
 source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
-single. A semiring without one shared product argument remains a general planar Fold. Canonicalization runs entirely
-in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed when factoring makes a
-contraction the root compute node. Multiple stores in one output sweep retain one sweep axis and reconstitute one Loop.
+single. A semiring without one shared product argument remains a general planar Fold.
+
+**Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
+(`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
+axis is not left as a computed cone. The decode is absorbed by the raw load's storage dtype, since every
+consumer converts a bits-carrier element by dtype, and the invariant factors commute out onto the
+accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
+side-generic, so a W8A8 cell binds BOTH operands raw and composes the two scales into one epilogue
+chain; with several channels a shared operand's factor is applied to each accumulator. A contraction
+reached with no projection to host the factors gets one; nested contractions use their parent's.
+
+This is what makes quantized weights reach the tensor cores at storage width. Without it the residue is
+a computed cone, and a computed cone can feed no native fp8 atom at all — those atoms require a
+materialized f8 `a` — so the whole `mma_m16n8k32_*` family becomes unreachable and a W8A16 weight
+routes through the smem compute fill instead of the gmem-direct converting fragment load. The decode
+gate is deliberate: an ordinary floating-point factor chain keeps its cone, so this never reassociates
+arithmetic that was not already a dequantization.
+
+**What the planar fallback costs.** Declining to factor a stat-free cone is not a neutral fallback — it demotes the
+cell to a scalar fold, which cost the gemma-4 M=256 post twin **144 ms against a 4.3 ms bound**. A cone-internal load
+is `(m, k)`-indexed like the shared operand, so a positional reading rather than a geometric one once bound gemma's
+GeGLU combine as `gate @ W` and silently dropped both the gelu and the up projection; on the B side the same positional
+reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are silent — the numerics stay plausible
+and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
+as a supported slow path.
+
+Canonicalization runs entirely in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed
+when factoring makes a contraction the root compute node. Multiple stores in one output sweep retain one sweep axis and
+reconstitute one Loop.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that

@@ -6,6 +6,74 @@ attention integration. Tensor-core SDPA is realized by the generic residence eva
 child contractions produce fragments, row statistics use ``FragmentRowReduce``, and the enclosing
 Fold's stored carrier Lambda combines the state. No attention-specific scheduler or emitter is
 part of the tested contract.
+
+## Measured evidence
+
+These numbers are why the structural assertions below exist. They are not reproduced by the
+correctness lane — they were measured once, on the named card, and they are recorded here because
+nothing else in the tree records them. A restructuring that keeps every assertion green can still
+lose the performance they describe; re-measure before believing a claim that one of them no longer
+applies.
+
+**5090, f16, ``(1, 8, S, D)``, fused arm against the two-kernel materialized-score sibling and
+torch SDPA (us):**
+
+| shape        | torch | two-kernel | fused    | (gmem-direct score) |
+| ------------ | ----- | ---------- | -------- | ------------------- |
+| S=512 D=16   |  10.5 |       35.4 | **7.5**  |                 8.6 |
+| S=512 D=32   |  10.5 |       22.7 | **6.9**  |                 8.1 |
+| S=512 D=64   |  12.5 |       25.6 | **11.4** |                14.3 |
+| S=512 D=128  |  18.9 |       19.5 |   22.2   |                35.1 |
+| S=1024 D=128 |  41.2 |       64.0 |   84.4   |               125.8 |
+| S=2048 D=16  |  33.0 |      163.8 |   36.1   |                42.1 |
+| S=2048 D=32  |  30.9 |      170.2 |   47.7   |                60.1 |
+| S=2048 D=64  |  60.6 |      140.8 |   97.0   |               148.3 |
+| S=2048 D=128 | 117   |      162    |  190.8   |               273   |
+
+So on that card the fused arm beat the materialized sibling at every ``D <= 64`` and beat torch at
+every ``D`` at ``S = 512``, and lost at ``D = 128``. Both forms remain structural siblings so that
+measured evidence chooses between them rather than a compile-time rule. These rows PREDATE the
+slab-swizzle fix below and have not been re-measured; the A100 rows have.
+
+**All four of the fused kernel's slabs must swizzle.** Three of them once did not: the score's own
+staged operands and the weight tile the ``ldmatrix`` drain reads were left plain row-major, and at
+``D = 128`` their 256 B rows drained ~32-way bank-conflicted — 78% of the kernel's shared
+wavefronts were conflict replays, L1/TEX sat at 80% against 7% compute, and THAT, not the tile, was
+the ``D = 128`` wall. Three things had to hold at once, each measured on its own (A100, f16,
+``(1, 8, 1024, 128)``, ``w4x1``/``f1x16``/``k8``): the score's key and query slabs swizzling on
+their ``cp.async`` fill (108.7 -> 84.8 us), the weight tile swizzling on its FRAGMENT store
+(84.8 -> 64.9), and the XOR shifting by the slab's own ROW rather than by the swizzle atom
+(64.9 -> 50.1 at the best schedule). The last is why the D-sweep looks the way it does: a fixed
+shift reads the row index only while a slab row IS one 128 B atom, so ``D <= 64`` was always
+conflict-free and only ``D = 128`` paid — ncu measured 7.8-way at ``D = 128`` and none at
+``D = 64`` on the same kernel.
+
+**A100-SXM4-80GB, f16, ``(1, 8, S, 128)``, ``EMMY_PLACE=fuse``, serial ``REDUCE``, empty tune DB
+and prior.** The ``D = 128`` conclusion above does NOT hold here — the fused arm beats torch at the
+short shapes and reaches parity at ``S = 1024`` (us):
+
+| shape        | torch | fused (best schedule pinned)    |
+| ------------ | ----- | ------------------------------- |
+| S=256 D=128  |  13   | **9.0**  (``w4x1``/``f1x8/k8``) |
+| S=512 D=128  |  24   | **19.0** (``w4x1``/``f1x16/k8``) |
+| S=1024 D=128 |  48   |   50.1   (``w8x1``/``f1x16/k8``) |
+| S=2048 D=128 | 133   |  179.0   (``w4x1``/``f1x16/k8``) |
+
+Emmy's column repeats to +/-0.2 us across runs; torch's drifts a few percent, and more at
+``S = 2048`` (132-148 observed). The COLD pick is a separate matter: unpinned it lands on ``f1x8``
+at every shape, which happens to be the best schedule at ``S = 256`` (9.0) and is 231 us at
+``S = 512``.
+
+Two forks the cold pick can land on cost most of the fused column: a split-K partition falls back
+to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an ``n``-unit split of the output tile makes
+every ``n`` warp recompute the whole score (323 cold vs 190.8 at S=2048 D=128). Both are schedule
+forks evidence prices, not defects. What is left at ``D = 128`` after the swizzles is not the
+shared path either: L1/TEX fell from 80% to 61% and compute rose from 7% to 24%, and the residual
+grows with ``S``.
+
+**Single-pass sweep.** Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
+regression from the single pass back to the two-pass pair is invisible to a numerics assert — which
+is what ``test_fused_sdpa_sweeps_the_score_once`` is for.
 """
 
 from __future__ import annotations
@@ -282,7 +350,23 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 @requires_cuda
 @pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
 def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
-    """The fragment-resident Fold makes one pass over the score and keeps its carrier in registers."""
+    """The fused kernel makes ONE pass over the keys — the statistic and the weight come off the
+    SAME score fragments.
+
+    The two halves cannot share a pass while the weight names a denominator the sweep has not
+    finished, so the cone's state-only factors are split off and multiplied back onto the output
+    fragments after the loop, and the carrier's psi-rescale (``carrier.exp_rescale`` — the factor
+    the merge puts on every carried channel) advances the enclosing drain's output tile per KV
+    chunk.
+
+    What is asserted is that form's OBSERVABLE consequence: the carried ``(pivot, denominator)``
+    pair never leaves the registers, so nothing is bridged through the stat smem rows the two-pass
+    pair needs. Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
+    regression to the two-pass pair is invisible to a numerics assert.
+
+    ``REDUCE`` is pinned off because the single pass needs the sweep and the contraction to cover
+    the same keys; a split-K partition does not, and there the two-pass pair stands
+    (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)

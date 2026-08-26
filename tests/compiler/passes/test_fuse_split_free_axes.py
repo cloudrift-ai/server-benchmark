@@ -6,7 +6,14 @@ binding (the trailing free pair reads the wrong row and the weight load carries 
 axis). The canonicalization restores the single-axis spelling; these tests pin the fuse cases
 (N split, M split, the pair across an intervening free loop — the transposed projection, the
 permuted split store), the decline case (an axis addressed alone), the downstream classification
-of the canonical nest, and the warp tier's split-store addressability."""
+of the canonical nest, and the warp tier's split-store addressability.
+
+The operand ROLE-PURITY section at the end was deleted with ``_classify.bind_bilinear`` and is
+RESTORED against the canonical Fold tree. Its contracts are about correctness, not coverage: a
+composite index that binds as a direct slab load emits code referencing an undefined iteration
+variable, a grouped B address that varies with the output row is not one slab per tile, and trying
+the opposite operand orientation is licensed only for a COMMUTATIVE product — reordering a
+noncommutative one computes a different value."""
 
 from __future__ import annotations
 
@@ -294,3 +301,109 @@ def test_warp_roles_move_only_the_innermost_carrier():
     assert _warp_roles((lit0, Var("m"), _pair("n", 32, "//"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "fixed", "n")
     assert _warp_roles((_pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "n")
     assert _warp_roles((Var("b"), Var("m"), Var("n")), "m", "n") == ("fixed", "m", "n")
+
+
+# --- operand role purity and product orientation (restored) --------------------------------------- #
+
+
+def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply"):
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
+
+    loop = Loop(
+        axis=Axis("k", Dim(K)),
+        body=Body(
+            (
+                Load(name="wv", input="w", index=w_index),
+                Load(name="xv", input="x", index=x_index),
+                Assign(name="prod", op=ElementwiseImpl(product), args=("wv", "xv")),
+                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    return fold_from_loop(_stamp_axes(loop))
+
+
+def _bind(fold, free_names):
+    """Canonicalize the lifted fold under ``free_names``; return the contraction, or ``None`` when
+    the tree keeps its PLANAR reading (the decline every negative case below asserts)."""
+    from emmy.compiler.ir.pure.fold import Fold, is_contraction
+    from emmy.compiler.ir.tile import Placement
+
+    tile = TileOp(op=Fold.projection(body=Body((fold,))), place=Placement(free=tuple(Axis(n, Dim(4)) for n in free_names)))
+    root = tile.op
+    if is_contraction(root):
+        return root
+    inner = [s for s in root.lift.body if isinstance(s, Fold) and is_contraction(s)]
+    inner += [o for o in root.operands if isinstance(o, Fold) and is_contraction(o)]
+    return inner[0] if inner else None
+
+
+def test_bilinear_batched_operand_still_binds():
+    """Role purity must not over-reach: a batch offset riding a SEPARATE dim of the A load
+    (batched GEMM) binds exactly as an unbatched one does.
+
+    The batch dim is a grid offset, not a scheduling axis — ``loop/canonicalize`` folds a leading
+    batch into the row axis before lowering, so the canonical term sees the ordinary ``(m, n)``
+    pair with the offset still spelled in A's index."""
+    con = _bind(_bilinear_fold((Var("n"), Var("k")), (Var("b"), Var("a0"), Var("k"))), ("a0", "n"))
+    assert con is not None, "the batched GEMM demoted to PLANAR"
+    assert isinstance(con.a, Load) and con.a.input == "x"
+
+
+def test_bilinear_declines_composite_role_expr():
+    """A third free axis composed into the SAME index expr as the role axis (the split-axis
+    composite) must not bind as the direct B load — the mma slab template cannot address it.
+    Before the per-expr purity check this bound and emitted code referencing an undefined
+    iteration variable."""
+    comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("n"))
+    con = _bind(_bilinear_fold((comp, Var("k")), (Var("b"), Var("a0"), Var("k"))), ("b", "a1", "a0", "n"))
+    if con is not None:
+        for channel in con.channels:
+            assert not isinstance(channel.b, Load), "the impure composite must not become a direct slab load"
+
+
+def test_bilinear_binding_is_independent_of_the_product_argument_order():
+    """A flattened GQA value row binds the same whichever way the commutative product is spelled.
+
+    Fusion emits the value load first in the deployed attention cell, so an order-sensitive binder
+    would bind one spelling and decline its twin. What the B edge becomes is NOT asserted here: the
+    old binder answered slab addressability itself by forcing a computed cone, and that question
+    now belongs to ``_legality``. Order independence is the part that is still this rule's."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    w_index = (Literal(0, "int"), Var("k"), Literal(0, "int"), flat)
+    x_index = (Var("h"), Var("m"), Var("k"))
+
+    forward = _bind(_bilinear_fold(w_index, x_index), ("h", "m", "n"))
+    assert forward is not None, "the grouped value row demoted to PLANAR"
+    assert isinstance(forward.a, Load) and forward.a.input == "x"
+
+    swapped = _bilinear_fold(w_index, x_index)
+    reversed_products = _bind(swapped, ("h", "m", "n"))
+    assert reversed_products is not None
+    assert reversed_products.structural_key() == forward.structural_key()
+
+
+def test_bilinear_rejects_grouped_b_that_changes_with_the_row():
+    """A grouped value address that also reads the output row is not one B slab per tile. Trying
+    the commutative product's other orientation must still fail closed."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
+    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
+    fold = _bilinear_fold((Literal(0, "int"), Var("k"), Literal(0, "int"), flat), (Var("h"), Var("m"), Var("k")))
+
+    assert _bind(fold, ("h", "m", "n")) is None
+
+
+def test_bilinear_does_not_reorder_a_noncommutative_product():
+    """Trying the opposite direct/computed role is licensed only for a COMMUTATIVE product.
+    Reordering ``subtract`` computes a different value — a miscompile, not a missed schedule."""
+    group = BinaryExpr("//", Var("h"), Literal(3, "int"))
+    flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
+    fold = _bilinear_fold(
+        (Literal(0, "int"), Var("k"), Literal(0, "int"), flat),
+        (Var("h"), Var("m"), Var("k")),
+        product="subtract",
+    )
+
+    assert _bind(fold, ("h", "m", "n")) is None

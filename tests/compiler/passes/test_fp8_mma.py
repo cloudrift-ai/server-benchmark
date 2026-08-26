@@ -7,8 +7,12 @@ compiles and verifies on sm_89 AND sm_120; ptxas refuses the Blackwell ``.kind::
 on both). Enumeration is precision-gated (``FP8_MMA`` / the ``FAST_MATH`` umbrella — accumulation
 precision is arch-dependent, reduced on sm_89) and structurally gated (materialized f8 A, every
 channel at the same f8 dtype, static K); a ``TILE`` pin naming the atom bypasses the precision
-gate only. The W8A8 form arrives by graph algebra after ``to_f8e4m3`` materializes the quantized
-activation.
+gate only. The W8A8 form arrives by graph algebra: ``to_f8e4m3`` (the encode twin of the decode)
+materializes the quantized activation, and the side-generic mul-hoist must bind BOTH decode cones
+as raw f8 loads with the two scale factors composed on the f32 accumulator epilogue. That
+side-generic section was deleted with ``_classify.bind_bilinear`` and is RESTORED below against the
+canonical Fold tree: without it a W8A8 matmul routes both operands through computed cones instead
+of feeding the native k32 atom raw bytes, which no numerics assert detects.
 """
 
 from __future__ import annotations
@@ -21,14 +25,14 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, decode_f8, encode_f8
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
 from emmy.compiler.ir.schedule import Placement, TilePlan, Workers
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
@@ -36,6 +40,88 @@ from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
 from tests.compiler.helpers import requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"
+
+# ===================================================================
+# The side-generic mul-hoist: A-side and double-cone W8A8 (restored)
+# ===================================================================
+
+
+def _bind(loop, m: str = "m", n: str = "n"):
+    """Lift then canonicalize; return ``(a, b, acc, epilogue)`` of the resulting contraction."""
+    from emmy.compiler.ir.tile import Placement as TilePlacement
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
+
+    fold = fold_from_loop(_stamp_axes(loop))
+    assert fold is not None, "the dequant loop must lift"
+    tile = TileOp(op=Fold.projection(body=Body((fold,))), place=TilePlacement(free=(Axis(m, Dim(64)), Axis(n, Dim(64)))))
+    root = tile.op
+    if is_contraction(root):
+        return root.a, root.b, root.acc, ()
+    inner = [s for s in root.lift.body if isinstance(s, Fold) and is_contraction(s)]
+    inner += [o for o in root.operands if isinstance(o, Fold) and is_contraction(o)]
+    assert inner, "the W8A8 shape must canonicalize to a contraction, not PLANAR"
+    con = inner[0]
+    return con.a, con.b, con.acc, tuple(s for s in root.lift.body if s is not con)
+
+
+def _w8a8_loop(*, a_scale=True, b_scale=True):
+    """The fused W8A8 matmul loop body: ``acc += (sa * from_f8(a[m,k])) * (sb[n] * from_f8(w[k,n]))``
+    — a storage-decode cone on EACH operand, each times a k-invariant scale factor."""
+    k = Axis("k", Dim(64))
+    stmts: list = [
+        Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
+        Assign(name="adq", op="from_f8e4m3", args=("ab",)),
+        Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
+        Assign(name="wdq", op="from_f8e4m3", args=("wb",)),
+    ]
+    a_val, b_val = "adq", "wdq"
+    if a_scale:
+        stmts += [
+            Load(name="sa", input="act_scale", index=(Literal(0), Literal(0))),
+            Assign(name="asc", op="multiply", args=("sa", "adq")),
+        ]
+        a_val = "asc"
+    if b_scale:
+        stmts += [
+            Load(name="sb", input="w_scale", index=(Literal(0), Var("n"))),
+            Assign(name="wsc", op="multiply", args=("sb", "wdq")),
+        ]
+        b_val = "wsc"
+    stmts += [
+        Assign(name="v", op="multiply", args=(a_val, b_val)),
+        Accum(name="acc", value="v", op=ElementwiseImpl("add")),
+    ]
+    return Loop(axis=k, body=Body(tuple(stmts)), role=AxisRole.CONTRACTION)
+
+
+def test_a_side_decode_scale_binds_raw_with_hoist():
+    """A decode-times-factor cone on the A side (B a bare decode) binds A as the RAW f8 load with
+    the activation scale hoisted to the epilogue."""
+    a, b, _acc, epi = _bind(_w8a8_loop(b_scale=False))
+    assert isinstance(a, Load) and a.input == "a_bits"
+    assert isinstance(b, Load) and b.input == "w_bits"
+    tail = [s for s in epi if isinstance(s, Assign)]
+    assert tail and tail[-1].op.name == "multiply", "the activation scale did not hoist"
+
+
+def test_double_cone_hoists_both_scales():
+    """The W8A8 shape: BOTH operands ride decode-times-factor cones — both bind raw, and the two
+    scale factors compose into one epilogue chain on the accumulator."""
+    a, b, _acc, epi = _bind(_w8a8_loop())
+    assert isinstance(a, Load) and a.input == "a_bits"
+    assert isinstance(b, Load) and b.input == "w_bits"
+    assigns = [s for s in epi if isinstance(s, Assign)]
+    assert assigns and {s.op.name for s in assigns} == {"multiply"}
+    assert {s.input for s in epi if isinstance(s, Load)} == {"act_scale", "w_scale"}
+
+
+def test_bare_double_decode_binds_raw_without_epilogue():
+    """Two bare decodes and no factors: both operands are raw f8 loads, nothing hoists."""
+    a, b, _acc, epi = _bind(_w8a8_loop(a_scale=False, b_scale=False))
+    assert isinstance(a, Load) and a.input == "a_bits"
+    assert isinstance(b, Load) and b.input == "w_bits"
+    assert not [s for s in epi if isinstance(s, Assign)]
+
 
 # ===================================================================
 # The atom registry + codec spelling

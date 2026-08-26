@@ -132,6 +132,15 @@ a shared producer or change the recognized computation. Merge order may temporar
 another reduction; the later legal merge is still taken. That maximal result is final: no later placement rule cuts
 it apart.
 
+**Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
+trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
+producer into a still-open contraction product lands that product in gmem; on a 1-layer Qwen3-0.6B trunk at seq 512 the
+losing order planned a **6.006 GiB** scratch slab against **0.026 GiB** for the other, and at batch 4 it pushed a buffer
+past 2^31 elements. Separately, removing fusion's memory bound outright produced a **194x** scratch blowup and a device
+fault. Maximal fusion is claimed to make both unreachable because the scratch is never materialized at a kernel
+boundary the placement fork can no longer introduce — that claim is what the scratch-plan assertions must hold, and it
+is the first thing to check when a trunk compile reports an implausible workspace.
+
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
 coordinates are related by reshape and axis permutation. The proof matches source coordinates to mixed-radix digits

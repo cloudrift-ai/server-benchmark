@@ -661,8 +661,14 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
 
 
 @requires_cuda
-def test_input_spelling_computed_b_mma_matches_decoded_linear():
-    """The streamed generic B cone's tensor-core row agrees with the decoded-weight linear."""
+@pytest.mark.parametrize(("K", "cb", "m", "lane"), [(2, 0, 16, "mma"), (5, 2, 1, "coop")])
+def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
+    """The streamed generic B cone agrees with the decoded-weight linear on CUDA.
+
+    RESTORED parametrization: the ``coop`` row (K=5, cb=2, m=1) is the DECODE shape and the only
+    case that exercises a second codebook and the cooperative lane. Collapsing this to the single
+    ``mma`` row left every m=1 quantized linear — the shape a served EXL3 model actually runs —
+    with no parity coverage at all, and no other test reaches cb=2."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph, Tensor
@@ -676,15 +682,15 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     from tests.compiler.helpers import device_compute_capability
 
     capability = device_compute_capability()
-    if capability < (8, 0):
+    if lane == "mma" and capability < (8, 0):
         pytest.skip("computed-B tensor-core lane requires SM80 or newer")
-    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
+    tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=K, cb=cb)
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (m, 128), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (128, 128), "f16"), node_id="w")
-    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (16, 128), "f16"), node_id="y")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("y", (m, 128), "f16"), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
-    spell_trellis_inputs(graph, {"w": (0, tuple(tensors["layer.trellis"].shape))})
+    spell_trellis_inputs(graph, {"w": (cb, tuple(tensors["layer.trellis"].shape))})
     # Preserve the same computed-B lowering boundary as the GPU-less source test above.
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
@@ -701,9 +707,10 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     assert selected
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert any("emmy_bitcast" in source for source in sources)
-    assert any("mma.sync.aligned" in source for source in sources)
+    if lane == "mma":
+        assert any("mma.sync.aligned" in source for source in sources)
 
-    x = (rng.standard_normal((16, 128)) * 0.25).astype(np.float16)
+    x = (rng.standard_normal((m, 128)) * 0.25).astype(np.float16)
     feed = bind_constants(lowered, {})
     assert "y_factor32" in feed and np.any(feed["y_factor32"])
     decoded_constants = [name for name in feed if name.startswith("w_decoded_")]
@@ -826,6 +833,25 @@ def _computed_b_rows(rows):
         if str(r.get("WORK", "")).startswith("w")
         and any(key.split("@", 1)[0] == "STAGE" and str(value).endswith("/smem") for key, value in r.items())
     ]
+
+
+def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
+    """The computed-B warp lane admits the cross-CTA split — no GPU, enumeration only.
+
+    RESTORED: the split factors a static K into ``ksplit x kslice`` and sigma-reindexes each
+    operand to absolute k. A materialized edge rewrites its gmem index; a computed cone rewrites
+    its own k coordinate, which is the SAME rule. This lane once offered the serial fold alone, so
+    no golden could record a split quantized linear — an enumeration gap, invisible to every
+    numerics test, that costs the whole split family on quantized weights."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
+        monkeypatch.delenv(var, raising=False)
+    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))).rows)
+    assert rows, "the trellis linear must offer a compute-filled warp lane"
+    offered = {str(value) for row in rows for key, value in row.items() if key.split("@", 1)[0] == "REDUCE"}
+    assert any(spelling.startswith("g") for spelling in offered), offered
 
 
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):

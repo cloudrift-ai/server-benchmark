@@ -1,4 +1,13 @@
-"""Placement-routing acceptance tests over complete Fold trees."""
+"""Placement-routing acceptance tests over complete Fold trees.
+
+The last two tests are RESTORED from the pre-rewrite suite. Both assert behaviour ``018_cut``
+implements today and nothing else checks: a graph-wide ``PLACE`` pin that names no seam in THIS
+tree must be skipped rather than emptying the fork (the pin-bleed rule — one env pin, several
+kernels, and this tree is not the one it was written for), and a seam standing in for a contraction
+OPERAND must carry the atom's element type, not the f32 its cone computed in. The second is a
+silent perf cliff: an f32 workspace can feed no warp atom on the B side, so the whole contraction
+drops off the tensor-core tier while still producing correct numbers.
+"""
 
 from __future__ import annotations
 
@@ -116,3 +125,39 @@ def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None
     with pytest.raises(ValueError, match="innermost free axis"):
         with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE": "coop-t"}):
             Pipeline.build(CUDA_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
+
+
+def test_pin_naming_no_seam_is_skipped() -> None:
+    """A whole-model pin targets one kernel shape; a tree without that seam must be UNAFFECTED.
+
+    RESTORED (pin-bleed): one env pin, several kernels in a graph, and this tree is not the one it
+    was written for. Emptying the fork would leave that tree unmapped over a pin that was never
+    about it. The old version asserted a kernel count, which today is the placement fork's decision
+    rather than the pin's — so what is asserted is the actual rule: same result with and without."""
+    pinned = _compile(_rms_graph(), {"PLACE@b": "cut"})
+    bare = _compile(_rms_graph(), {})
+    assert [node.op.kernel_source for node in _kernels(pinned)] == [node.op.kernel_source for node in _kernels(bare)]
+
+
+def test_contraction_operand_seam_takes_the_output_dtype() -> None:
+    """A seam standing in for a contraction OPERAND holds what the fused slab stored — the atom's
+    16-bit element — not the f32 its cone computed in.
+
+    RESTORED: typed f32 (an f32-computing norm over f16 keys), the materialized B could feed no
+    warp atom, since only the ``a`` edge has a converting fill."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
+
+    graph, _, _ = graph_from_code(
+        "F.scaled_dot_product_attention("
+        "torch.randn(1, 1, 8, 8, dtype=torch.float16), "
+        "torch.nn.functional.rms_norm(torch.randn(1, 1, 8, 8, dtype=torch.float16), (8,)), "
+        "torch.randn(1, 1, 8, 8, dtype=torch.float16))"
+    )
+    with pinned_knobs({"PLACE@b": "cut"}):
+        out = Pipeline.build(TILE_PASSES).run(graph, ctx=_CTX)
+    workspaces = [node for node in out.nodes.values() if "_place_" in node.id and isinstance(node.op, (LoopOp, TileOp))]
+    assert workspaces, [node.id for node in out.nodes.values()]
+    assert any(node.output.dtype == F16 for node in workspaces), [(n.id, str(n.output.dtype)) for n in workspaces]

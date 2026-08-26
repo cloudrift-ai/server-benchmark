@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
+from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
@@ -159,13 +160,9 @@ def _projection_members(node: Fold) -> Body:
 
 
 def _mul_leaves(defs: dict[str, object], name: str) -> tuple[str, ...] | None:
-    stmt = defs.get(name)
-    if not isinstance(stmt, Assign) or stmt.op.name != "multiply":
-        return (name,)
-    if len(stmt.args) != 2:
-        return None
-    left, right = (_mul_leaves(defs, arg) for arg in stmt.args)
-    return None if left is None or right is None else (*left, *right)
+    """The product tree's leaves, read through the shared trait-based spine flattener."""
+    flattened = product_spine(defs, name)
+    return None if flattened is None else flattened[0]
 
 
 def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[_Score, Body] | None:

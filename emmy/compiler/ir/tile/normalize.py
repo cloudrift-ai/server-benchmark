@@ -19,7 +19,8 @@ from emmy.compiler.ir.pure import (
     component_ops,
     is_contraction,
 )
-from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name
+from emmy.compiler.ir.pure.algebra import product_spine
+from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -441,6 +442,192 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
     return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results)
 
 
+def _flat_members(edge) -> tuple | None:
+    """A zero-axis operand edge's statements, when it is a plain scalar wrapper.
+
+    A hoisted factor becomes ordinary epilogue statements rather than a projection root: an
+    output-tiled root forest must own a boundary store, so a factor edge left as an operand would
+    break the ownership rule the split and kernel-binding passes share.
+    """
+    if not isinstance(edge, Fold) or edge.axis is not None or edge.operands or len(edge.lift.results) != 1:
+        return None
+    members = tuple(edge.lift.body)
+    if any(not isinstance(stmt, (Load, Assign)) for stmt in members):
+        return None
+    return members if operand_name(edge) in {name for stmt in members for name in stmt.defines()} else None
+
+
+def _decode_split(edge, axis_name: str):
+    """Split a computed operand cone into its raw storage load and its fold-invariant factors.
+
+    The shape is a STORAGE DECODE (the ``ElementwiseImpl.decodes`` trait, never an op-name list)
+    times factors constant along the fold axis. The decode is absorbed by the raw load's storage
+    dtype — every consumer converts a bits-carrier element by dtype, the mma fragment loaders
+    included — and the invariant factors commute out onto the accumulator:
+    ``Sum_k a*(s*w) = s*Sum_k a*w``, the same reassociation category as split-K.
+
+    Returns ``None`` unless the residue really is a decode of one raw load, so an ordinary
+    floating-point factor chain keeps its computed-cone form and this never reassociates
+    arithmetic a storage decode did not already introduce.
+    """
+    if not isinstance(edge, Fold) or edge.axis is not None or len(edge.lift.results) != 1:
+        return None
+    body = edge.lift.body
+    if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
+        return None
+    by_param = {operand_name(operand): operand for operand in edge.operands}
+    result = operand_name(edge)
+    flattened = product_spine(body.definitions, result, divide=True)
+    if flattened is None:  # a bare decode: nothing to hoist, but the decode is still absorbed
+        leaves, spine = (result,), ()
+    else:
+        leaves, spine = flattened
+
+    def varies(leaf: str) -> bool:
+        if leaf in by_param:
+            return edge_refs_axis(by_param[leaf], axis_name)
+        return any(refs_axis(stmt, axis_name) for stmt in body.backward_cone((leaf,)).members)
+
+    varying = [leaf for leaf in leaves if varies(leaf)]
+    if len(varying) != 1 or varying[0] in by_param:
+        return None
+    invariant = [leaf for leaf in leaves if leaf not in varying]
+
+    cone = body.backward_cone((varying[0],)).members
+    if len(cone) != 2 or not isinstance(cone[0], Load) or not isinstance(cone[1], Assign):
+        return None
+    raw, decode = cone
+    # The DECODE OP names the storage dtype; the load's own ``dtype`` is stamped later, in Kernel
+    # IR, so it is only a consistency check here and never the authority.
+    if decode.op.decodes is None or decode.args != (raw.name,):
+        return None
+    if raw.dtype is not None and raw.dtype.name != decode.op.decodes:
+        return None
+
+    seen = {id(stmt) for stmt in cone} | {id(stmt) for stmt in spine}
+    members: tuple = ()
+    used_params = 0
+    for leaf in invariant:
+        if leaf in by_param:
+            flat = _flat_members(by_param[leaf])
+            if flat is None:
+                return None
+            members += flat
+            used_params += 1
+            continue
+        # A leaf this cone neither defines nor takes as an operand is an ENCLOSING-scope name.
+        # It needs no statements: the epilogue lands in that same scope, so the name stays bound.
+        for stmt in body.backward_cone((leaf,)).members:
+            if id(stmt) not in seen:
+                seen.add(id(stmt))
+                members += (stmt,)
+    if any(id(stmt) not in seen for stmt in body) or used_params != len(edge.operands):
+        return None  # a statement or operand the split does not account for — keep the cone whole
+    return raw, members, spine, varying[0], result
+
+
+def _renamed(stmt, mapping: dict[str, str]):
+    """Rename one pure scalar statement's definition and its read names."""
+    name = mapping.get(stmt.name, stmt.name)
+    if isinstance(stmt, Load):
+        return replace(stmt, names=(name,))
+    return replace(stmt, name=name, args=tuple(mapping.get(arg, arg) for arg in stmt.args))
+
+
+def _apply_spine(split, carried: str, out: str, taken: set[str]) -> tuple[tuple, str]:
+    """Emit one hoisted factor chain, threading ``carried`` through it and defining ``out``."""
+    _raw, members, spine, varying, result = split
+    mapping = {varying: carried, result: out}
+    emitted: list = []
+    for stmt in (*members, *spine):
+        if stmt.name != result:
+            fresh = stmt.name if stmt.name not in taken else f"{stmt.name}__h{len(taken)}"
+            mapping[stmt.name] = fresh
+            taken.add(fresh)
+        emitted.append(_renamed(stmt, mapping))
+    taken.add(out)
+    return tuple(emitted), out
+
+
+def _hoist_decode_factors(node: Fold, taken: set[str]):
+    """Bind a quantized contraction's operands as raw storage loads with the factors on the
+    epilogue. Returns ``(contraction, epilogue statements)`` or ``None``."""
+    if not is_contraction(node) or node.semiring is None:
+        return None
+    axis_name = node.axis.name
+    a_split = _decode_split(node.a, axis_name)
+    b_splits = [_decode_split(channel.b, axis_name) for channel in node.channels]
+    if a_split is None and not any(b_splits):
+        return None
+    if a_split is None and not all(b_splits):
+        return None  # homogeneous channels only: a half-bound B pair has no single slab dtype
+
+    def hoists(split) -> bool:
+        return split is not None and bool(split[1] or split[2])
+
+    product, plus = node.semiring
+    accs = tuple(channel.acc for channel in node.channels)
+    any_hoist = hoists(a_split) or any(hoists(split) for split in b_splits)
+    renamed = tuple(f"{acc}__mh" for acc in accs) if any_hoist else accs
+
+    epilogue: list = []
+    for index, (acc, out) in enumerate(zip(renamed, accs, strict=True)):
+        chain = [split for split in (a_split, b_splits[index]) if hoists(split)]
+        carried = acc
+        for position, split in enumerate(chain):
+            target = out if position == len(chain) - 1 else f"{out}__mh{position}"
+            stmts, carried = _apply_spine(split, carried, target, taken)
+            epilogue.extend(stmts)
+
+    rebuilt = Fold.contraction(
+        k_axis=node.axis,
+        a=a_split[0] if a_split is not None else node.a,
+        channels=tuple(
+            Channel(b=split[0] if split is not None else channel.b, acc=acc)
+            for channel, split, acc in zip(node.channels, b_splits, renamed, strict=True)
+        ),
+        product=product,
+        fold_op=plus,
+    )
+    return replace(rebuilt, unroll=node.unroll), tuple(epilogue)
+
+
+def _hoist_decode_root(node: Fold) -> Fold:
+    """Hoist a contraction reached with no projection wrapper, creating the one it needs.
+
+    A split piece, or a root whose projection already collapsed, has nowhere to put the factors.
+    The wrapper defines exactly the names the contraction defined, so consumers are unaffected."""
+    hoisted = _hoist_decode_factors(node, set(node.defines()))
+    if hoisted is None:
+        return node
+    rebuilt, epilogue = hoisted
+    if not epilogue:
+        return rebuilt
+    return Fold.projection(operands=(rebuilt,), body=Body(epilogue), results=node.defines())
+
+
+def _hoist_decode_operands(root: Fold) -> Fold:
+    """Apply the storage-decode hoist to every contraction stored in a projection's body."""
+    if root.axis is not None:
+        return root
+    taken = {name for stmt in root.lift.body for name in stmt.defines()}
+    taken.update(operand_name(operand) for operand in root.operands)
+    members: list = []
+    changed = False
+    for stmt in root.lift.body:
+        hoisted = _hoist_decode_factors(stmt, taken) if isinstance(stmt, Fold) else None
+        if hoisted is None:
+            members.append(stmt)
+            continue
+        rebuilt, epilogue = hoisted
+        members.append(rebuilt)
+        members.extend(epilogue)
+        changed = True
+    if not changed:
+        return root
+    return Fold.projection(operands=root.operands, body=Body(tuple(members)), results=root.lift.results)
+
+
 def _normalize_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     operands = tuple(_normalize_fold(edge, axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
@@ -451,6 +638,7 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     node = _canonical_semiring(node, axes)
     if node.axis is not None:
         return node
+    node = _hoist_decode_operands(node)
     node = _close_projection(node, axes)
     return _hoist_closed_folds(node, axes)
 
@@ -460,6 +648,11 @@ def normalize_fold_tree(root, axes: Iterable[str] = ()):
     if not isinstance(root, Fold):
         return root
     normalized = _normalize_fold(root, tuple(axes))
+    # A contraction reached as the whole tree has no projection to host hoisted factors, so the
+    # hoist creates one here. Nested contractions are handled by their own projection, which keeps
+    # the common shape flat.
+    if normalized.axis is not None:
+        normalized = _hoist_decode_root(normalized)
     return root if normalized == root else normalized
 
 

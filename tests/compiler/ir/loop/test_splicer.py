@@ -861,8 +861,8 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     assert "/" not in merged.writes[0].index[0].pretty() and "%" not in merged.writes[0].index[0].pretty()
 
 
-def test_output_equivalence_retargets_a_transpose_without_changing_iteration_space():
-    """A proven permutation moves to the producer Write while its loop geometry stays intact."""
+def test_output_equivalence_retargets_transpose_in_canonical_storage_order():
+    """A proven permutation retargets the Write and adopts canonical output-storage order."""
     i, j = Var("i"), Var("j")
     producer = LoopOp(
         body=(
@@ -907,7 +907,7 @@ def test_output_equivalence_retargets_a_transpose_without_changing_iteration_spa
 
     assert result is not None
     merged, _ = result
-    assert [loop.axis.extent for loop in merged.body.loops] == [2, 3]
+    assert [loop.axis.extent for loop in merged.body.loops] == [3, 2]
     load = next(load for load in merged.loads if load.input == "x")
     write = next(write for write in merged.writes if write.output == "out")
     assert load.index == tuple(reversed(write.index))

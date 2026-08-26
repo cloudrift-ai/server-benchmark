@@ -32,19 +32,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from emmy.compiler.context import Context, split_opt_level
+from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import stamp_schedule_families
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent, discovered_strategies
@@ -317,7 +316,18 @@ class TwoLevelStrategy(SearchStrategy):
             # lowers each via the DB-best forks the inner search recorded. No backend →
             # nothing persisted (so the 1.0us stub never clobbers a tuned row). The dump (if
             # any) rides here so it captures the winning config's full stage artifacts.
-            assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=self.db, dump=self.dump)
+            #
+            # The card's recorded goldens are held OUT of this replay. They are a DEPLOY tier —
+            # "this config is known good on this card" — and now that the sweep measures in the
+            # deployable regime the tier would activate here for the first time and decide ahead
+            # of the search's own evidence. A tune must assemble what it measured: ``--output``
+            # and ``tune --bench`` read this graph while ``persist_tune_winner`` records the
+            # searched winner, so a golden overriding it would report a benched number for a
+            # config the tune did not choose.
+            from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+
+            with records_override([]):  # synchronous body — see the helper's note
+                assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=self.db, dump=self.dump)
         return TwoLevelResult(
             best_fused=best_fused, best_reward=best_reward, n_terminals=n_terminals, assembled=assembled, prior_summaries=prior_summaries
         )
@@ -336,10 +346,6 @@ class TwoLevelStrategy(SearchStrategy):
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
         ctx_key = ctx.structural_key()
-        # The regime the deployable -O3 re-benches are keyed under in the node store — the tune
-        # context with the re-bench's flags substituted, so an -O3 leaf row never collides with
-        # its -O1 twin. ``None`` when the sweep itself already runs at -O3.
-        o3_ctx_key = None if split_opt_level(ctx.compile_flags)[0] == 3 else replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
         # Group structurally-identical LoopOps under one ``Op.cache_key`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
@@ -423,7 +429,7 @@ class TwoLevelStrategy(SearchStrategy):
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
-                    prior.add_rows(inner._collect_rows() + inner.o3_rows)
+                    prior.add_rows(inner._collect_rows())
                     if prior.maybe_refit():
                         prior.checkpoint()
                 # Persist every search-tree node to the keyed/deduped ``node`` table. The
@@ -435,7 +441,6 @@ class TwoLevelStrategy(SearchStrategy):
                         op_sig=identity.op_sig(work.op),
                         gpu=ctx.hardware_id(),
                         run_id=self.run_id,
-                        o3_context_key=o3_ctx_key,
                     )
                 )
                 if work.enrolled:

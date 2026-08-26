@@ -43,13 +43,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves
-from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +251,7 @@ def _price_kernel(graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, f
     with (:func:`_resolved_price`). ``db`` rides into the
     nested decide, so each fork's pick follows the same deploy evidence
     hierarchy as a top-level knob pick (reservoir -O3 rows, then the tune DB's
-    -O1 ranking rows, model prediction only where nothing was measured) — the
+    measured DB rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
     per ``Op.cache_key`` so 28 identical per-layer kernels price once.
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
@@ -334,21 +332,15 @@ def _priced_pick(fp: ForkPoint, leaves: list, prior, memo: dict[str, float | Non
     return min(priced, key=lambda op_us: op_us[1])[0]
 
 
-# The default nvcc flags of the tune ranking pass (``emmy/commands/tune.py``'s
-# ``apply_nvcc_flags(default=...)``) — the deploy-side DB consult also queries the
-# perf rows recorded under a ``context_key`` with these flags, beside the deploy's own.
-_TUNE_RANKING_FLAGS = "-Xcicc -O1"
-
-
-# Process-wide memo for the built DB index, keyed on (db path, mtime, the three
-# context keys). The index depends only on the DB file and cc+nvcc-flags (NOT the
+# Process-wide memo for the built DB index, keyed on (db path, mtime, context key).
+# The index depends only on the DB file and cc+nvcc-flags (NOT the
 # op shape — ``structural_key`` folds neither), so for a serve boot it is identical
 # across all ~96 program compiles; without this the 527 MB perf scan reran each time.
 # Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
 _DB_INDEX_CACHE: dict = {}
 
 
-def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
+def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
     """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built
     index per process on ``(db path, mtime, context keys)``, invalidated when the
     DB file's mtime changes. An in-memory DB (no ``_path``) or an unstatable file
@@ -364,14 +356,7 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]
         # write-then-read (the tune lane). ``os.stat`` on a missing WAL → skip it.
         wal = path.with_name(path.name + "-wal")
         mtime = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
-        ctx_keys = frozenset(
-            {
-                ctx.structural_key(),
-                replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key(),
-                replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key(),
-            }
-        )
-        key = (str(path), mtime, ctx_keys)
+        key = (str(path), mtime, ctx.structural_key())
     except Exception:  # noqa: BLE001 — any key-build failure → just rebuild uncached
         return _db_measured_index_build(db, ctx)
     hit = _DB_INDEX_CACHE.get(key)
@@ -383,39 +368,33 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]
     return index
 
 
-def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float, bool]]]:
-    """The tune DB's measured ``ok`` cuda perf rows, indexed by their ``S_*``
-    structural signature (stringified values — perf knobs round-trip JSON) —
-    the deploy-side analogue of ``Prior._o3_evidence``. Queries three context
-    keys (``context_key`` folds the nvcc flags): the deploy's own, and the same
-    key with the ``-Xcicc -O1`` tune ranking flags and with ``-Xcicc -O3``,
-    where the tune's deployable re-benches land. Each entry carries a
-    ``deployable`` flag: an -O1 median is a *ranking* signal with known -O3
-    inversions, so the pick must prefer rows measured at deployable flags
-    wherever they exist (letting -O1 rows override a well-trained model
-    regressed qkv/mlp_down ~15% in the ninth-4090-sweep verification).
-    Best-effort: any failure returns an empty index (deploys fall back to the
-    prior)."""
+def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+    """The tune DB's measured ``ok`` cuda perf rows for THIS compile's regime, indexed by their
+    ``S_*`` structural signature (stringified values — perf knobs round-trip JSON) — the
+    deploy-side analogue of ``Prior._o3_evidence``.
 
-    index: dict[frozenset, list[tuple[dict, float, bool]]] = {}
+    One context key, because there is one measurement regime: a sweep benches at the deployable
+    flags a deploy compiles with, and ``structural_key`` gives that regime one key however the
+    flags are spelled (``context.split_opt_level``). Rows from a deliberately non-deployable
+    ``--nvcc-flags`` run key elsewhere and are simply not consulted, which is the whole of the
+    protection the old ranking-vs-deployable tier used to provide.
+
+    Best-effort: any failure returns an empty index (deploys fall back to the prior)."""
+
+    index: dict[frozenset, list[tuple[dict, float]]] = {}
     try:
-        o1_key = replace(ctx, compile_flags=_TUNE_RANKING_FLAGS).structural_key()
-        keys = {ctx.structural_key(), o1_key, replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()}
-        # Sorted — set iteration order is per-process (hash-seeded), and the index's
-        # per-signature row order must not vary across boots (ties resolve through it).
-        for ck in sorted(keys):
-            for row in db.iter_perf(ck, backend="cuda"):
-                if row.status != "ok" or row.stats.median <= 0:
-                    continue
-                sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
-                tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-                index.setdefault(sig, []).append((tun, float(row.stats.median), ck != o1_key))
+        for row in db.iter_perf(ctx.structural_key(), backend="cuda"):
+            if row.status != "ok" or row.stats.median <= 0:
+                continue
+            sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+            tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
+            index.setdefault(sig, []).append((tun, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
         return {}
     return index
 
 
-def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: frozenset) -> list[list[tuple[dict, float, bool]]]:
+def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
     """Drift-tolerant signature match — see :meth:`Prior.sig_groups` (one
     contract for the reservoir tier and this DB tier)."""
     from emmy.compiler.pipeline.search.prior.base import Prior  # noqa: PLC0415
@@ -424,7 +403,7 @@ def _sig_groups(index: dict[frozenset, list[tuple[dict, float, bool]]], sig: fro
 
 
 def _db_measured_pick(
-    index: dict[frozenset, list[tuple[dict, float, bool]]],
+    index: dict[frozenset, list[tuple[dict, float]]],
     rows: list[dict],
     *,
     exact_families: frozenset[str] = frozenset(),
@@ -433,13 +412,9 @@ def _db_measured_pick(
     the same prefix-consistency contract as ``Prior.evidence_pick`` (every
     tunable knob the candidate specifies must match the measured row; undecided
     knobs are free). Signature matching is drift-tolerant (:func:`_sig_groups`).
-    Two-tier: rows measured at deployable flags (the deploy's own + ``-O3``
-    context keys) decide outright; ``-O1`` ranking rows decide only when no
-    candidate has deployable evidence — an -O1 median is a ranking signal with
-    known -O3 inversions, and letting it override a well-trained model regressed
-    qkv/mlp_down ~15% in the ninth-4090-sweep verification. Keeps a config the
-    tune *measured* fastest from losing the deploy to an unmeasured model
-    extrapolation (eighth golden sweep, finding 2). -O3 reservoir evidence,
+    One lane: every indexed row was measured in this compile's own regime, so the argmin over
+    matching rows IS the answer. Keeps a config the tune *measured* fastest from losing the deploy
+    to an unmeasured model extrapolation (eighth golden sweep, finding 2). Reservoir evidence,
     where present, still takes precedence at the call site."""
     from emmy.compiler.pipeline.knob import canonical_row_key, evidence_row_vouches  # noqa: PLC0415
 
@@ -465,27 +440,23 @@ def _db_measured_pick(
     # index signature building a dict per entry — 41.5k candidates x 61 signatures
     # for a single fork. The memo bounds that at one scan per distinct sig.
     # Per-call scope, so a rebuilt index is never served stale.
-    groups_memo: dict[frozenset, list[list[tuple[dict, float, bool]]]] = {}
+    groups_memo: dict[frozenset, list[list[tuple[dict, float]]]] = {}
 
-    best: tuple[int, float] | None = None  # deployable lane
-    best_rank: tuple[int, float] | None = None  # fallback: rows from the -O1 ranking pass
+    best: tuple[int, float] | None = None
     for i, cand in enumerate(rows):
         sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
         cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
         if sig not in groups_memo:  # not ``.get`` — an empty group list is a valid, falsy hit
             groups_memo[sig] = _sig_groups(index, sig)
         for measured in groups_memo[sig]:
-            for row_tun, us, deployable in measured:
+            for row_tun, us in measured:
                 # A row counts as evidence when it matches every knob the candidate
                 # has decided; undecided knobs are free (``evidence_row_vouches``).
                 if not evidence_row_vouches(cand_tun, row_tun, exact_families=exact_families):
                     continue
-                if deployable:
-                    if better(us, i, best):
-                        best = (i, us)
-                elif better(us, i, best_rank):
-                    best_rank = (i, us)
-    return best if best is not None else best_rank
+                if better(us, i, best):
+                    best = (i, us)
+    return best
 
 
 def _placement_candidate_rows(leaves: list[object]) -> list[dict] | None:
@@ -531,7 +502,7 @@ def _placement_candidate_rows(leaves: list[object]) -> list[dict] | None:
     return [] if ambiguous or len(set(keys)) != len(keys) else rows
 
 
-def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict], node_id: str) -> None:
+def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict], node_id: str) -> None:
     """Warn when a fork's candidate set is DISJOINT from its measured evidence:
     the DB holds rows for this kernel's structural signature, yet
     :func:`_db_measured_pick` matched none of them against any offered
@@ -828,7 +799,8 @@ def greedy_decide(
                 return found
         # The VERIFIED tier: the card's recorded goldens, joined by strict structural identity
         # and decoded by exact spelled-row equality. Needs no prior, and applies only in the
-        # deployable regime — a recorded µs is -O3 truth and must never arbitrate an -O1 compile.
+        # deployable regime — a recorded µs is deployable truth and must never arbitrate a
+        # compile pinned to some other opt level.
         from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
 
         if float(fp.ctx.features().get("H_opt", _O3_OPT)) == _O3_OPT:

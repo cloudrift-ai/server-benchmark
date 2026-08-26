@@ -192,14 +192,16 @@ EMMY_TUNE_DB=<arm.db> EMMY_ONLINE_FILE=<arm-online.json> \
 
 Give cold arms separate empty `EMMY_CUBIN_CACHE` directories. For a warm comparison, restore the same DB/prior
 snapshots into distinct arm paths and still start with empty arm-specific cubin directories. Enforce the same external
-deadline around each command when wall time is part of the comparison. The tune ranking lane normally compiles at
-`-Xcicc -O1`; its latencies rank search results but are not deployable performance. Read the per-entry `ranking`
-blocks and search logs for proposal status, measured knobs, latency, and the exact searched finalists.
+deadline around each command when wall time is part of the comparison. A sweep measures in the deployable regime, so
+its latencies ARE deployable performance — unless an arm deliberately pins `--nvcc-flags` to another optimization
+level, which the run warns about and which makes that arm's numbers comparable only to itself. Read the
+per-entry `ranking` blocks and search logs for proposal status, measured knobs, latency, and the exact searched finalists.
 
 Do not use `emmy tune --bench` as an arm's winner measurement. Its assembled graph replays through the deploy
-evidence hierarchy, where a canonical golden can override the searched DB result and make both arms benchmark the
-same deployed configuration. Compare the primary arms with ranking/search feedback, then pin the exact actual
-proposal and search finalists through `emmy run --ab` for fresh O3 measurements.
+evidence hierarchy, which resolves each fork from whatever measured evidence the DB and reservoir now hold — not from
+this arm's search reward — so two arms can end up benchmarking the same configuration. (The card's recorded goldens
+are held out of that replay, so they are not the reason.) Compare the primary arms with ranking/search feedback, then
+pin the exact actual proposal and search finalists through `emmy run --ab` for fresh measurements.
 
 Compare arms per target: successful live measurements, best ranking latency, exact searched finalist, exact-pinned
 deployable O3 result, correctness, wall time, and failures. Also report aggregate geometric mean or total latency only

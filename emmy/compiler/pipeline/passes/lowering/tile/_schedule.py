@@ -1798,13 +1798,8 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     reconstruct the absolute index; distinct names are what avoid a double-reduce."""
     legal.enforce(legal.splitk_width(k_axis, w), pinned=True)
     b = k_axis.extent.as_static() // w
-    # LEADING UNDERSCORE, and it is load-bearing: ``normalize_body``'s ``canonicalize_free_axis_order``
-    # sorts a body's outer free-loop chain by axis NAME, so a partition axis spelled ``a3_ks`` sorts
-    # BELOW the row / column axes it must dominate and ``hoist_loop_invariants`` then sinks it between
-    # the column sweep and the K fold — a shape ``bind_prologue_contraction`` cannot parse, which
-    # costs a newly lifted split piece its computed-A binding (and its warp rows). ``_`` sorts ahead
-    # of every ``aN``, keeping the partition a LEAD grid axis, the same convention the residual path's
-    # ``_ksplit`` already relies on.
+    # Keep the established generated spelling; free-loop canonicalization now uses the partial
+    # workspace's output-coordinate order, not this name, to retain the partition as a lead axis.
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     # The slice carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes
     # it, and an axis that is already a window of a parent is one nothing may partition again.

@@ -82,7 +82,9 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
 - **Tensor → loop** (after `fusion`): only `LoopOp` + boundaries.
   Tensor-IR ops survive only *inside* `LoopOp.body` as `Assign.op` or
   `Accum.op` (`ElementwiseOp` only — `ReduceOp` is not a valid body
-  op; reductions are `Accum` statements inside a reduce `Loop`).
+  op; reductions are `Accum` statements inside a reduce `Loop`). `LoopOp` construction orders a free-loop chain by
+  the row-major coordinate depth in its boundary writes; axis spelling is only the fallback when output storage does
+  not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
   one `Fold` kind) plus the root-global schedule fields
@@ -402,11 +404,10 @@ canonicalized before validation:
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
-- `canonicalize_free_axis_order` — sort outer free Loops by axis name.
-  A loop whose position is SEMANTIC rather than interchangeable must be
-  named so it sorts where it belongs: a cross-CTA partition axis leads
-  with `_` (`_ksplit`, `_<k>_ks`) to stay ahead of every `aN`, because
-  sinking it below the axes it partitions changes the partition semantics.
+- `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
+  storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
+  names provide a deterministic fallback. A cross-CTA partition coordinate occupies the workspace's leading index,
+  so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
 - `unify_sibling_reduce_axes` — rename sibling reduce Loops whose

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
@@ -134,12 +134,35 @@ def _recurse_canonicalize(s: Stmt) -> Stmt:
     return s.with_bodies(tuple(canonicalize_free_axis_order(b) for b in nested))
 
 
+def _output_storage_depth(stmts: Body, axis: str) -> int | None:
+    """The row-major output-coordinate depth of one unit-affine free axis."""
+    depths = []
+    for write in stmts.iter_of_type(Write):
+        positions = []
+        for position, expr in enumerate(write.index):
+            form = affine_form(expr, {axis})
+            if form is None:
+                return None
+            coefficient = form[1].get(axis, 0)
+            if coefficient:
+                if coefficient != 1:
+                    return None
+                positions.append(position)
+        if len(positions) > 1:
+            return None
+        if positions:
+            depths.append(len(write.index) - positions[0] - 1)
+    return depths[0] if depths and len(set(depths)) == 1 else None
+
+
 def canonicalize_free_axis_order(stmts: Body) -> Body:
-    """Sort the outer chain of free ``Loop`` blocks alphabetically by axis
-    name. The chain is the sequence of single-child free Loops at the top of
-    ``stmts``; it terminates at a reduce Loop or a branching body.
-    Recursion continues into terminal block bodies (Loop / StridedLoop /
-    Tile / Cond)."""
+    """Sort an outer free-loop chain by row-major output storage order.
+
+    Boundary writes provide the canonical geometry: larger coordinate depth is outer, so the
+    innermost loop follows the output's contiguous dimension. If the writes do not totally order
+    the chain, axis names provide the deterministic fallback. Recursion continues into terminal
+    block bodies (Loop / StridedLoop / Tile / Cond).
+    """
     stmts = Body.coerce(stmts)
     chain: list[Loop] = []
     current = stmts
@@ -152,7 +175,11 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
 
     terminal = tuple(_recurse_canonicalize(s) for s in current)
 
-    chain_sorted = sorted(chain, key=lambda lp: lp.axis.name)
+    depths = [_output_storage_depth(Body(terminal), loop.axis.name) for loop in chain]
+    if all(depth is not None for depth in depths) and len(set(depths)) == len(depths):
+        chain_sorted = [loop for _, loop in sorted(zip(depths, chain, strict=True), key=lambda item: -item[0])]
+    else:
+        chain_sorted = sorted(chain, key=lambda lp: lp.axis.name)
     result: Body = terminal
     for loop in reversed(chain_sorted):
         result = (Loop(axis=loop.axis, body=result, unroll=loop.unroll),)

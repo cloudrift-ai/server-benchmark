@@ -252,12 +252,12 @@ boundaries between operations. A pipeline built without the strategy has no prov
 imports none of it.
 **`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
 `op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
-`loop/stamp`), minted pieces (a cut's fragments, a split's pieces) at the splice event, before the fragment even
+`loop/stamp`), minted split pieces at the splice event, before the fragment even
 enters the graph, so no rule at any cursor position can observe an unstamped kernel. The stamped row rides the
 engine's rebind knob-merge into every later dialect (which is what keeps a terminal `CudaOp`'s cache key, DB rows,
-and prior feature columns carrying the loop-birth identity). It also threads decomposition attribution
-(`Op.source`) and serves the read API (`signature` / `op_sig` — knobs-first, compute-fallback) every identity
-consumer goes through. The search shapes (`SearchStrategy` subclasses) are the same idea one level up — they own
+and prior feature columns carrying the kernel-birth identity). It serves the read API (`signature` / `op_sig` —
+knobs-first, compute-fallback) every identity consumer goes through. The search shapes (`SearchStrategy` subclasses)
+are the same idea one level up — they own
 loop composition and terminal aggregation — but are constructed by their entry points, not discovered.
 
 A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
@@ -1377,8 +1377,9 @@ would be reporting mostly arithmetic.
 stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
 structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
 evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
-because the identity strategy stamps a kernel **at birth**, in recognition, before `020_schedule` offers the first
-fork — so nothing a schedule fork decides can move an `S_*` value, and sibling schedules cannot be split apart.
+because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
+`020_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
+schedules cannot be split apart.
 
 Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
 **over-merges**, because `op_sig` digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
@@ -1452,8 +1453,9 @@ live at the `TileOp` boundary.
 
 `015_twisted` rewrites the exp-family composition over that canonical tree. `020_schedule` then enumerates schedules
 over the stored Fold tree only. Independent roots stay fused and combine only schedules with matching physical
-output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition. There
-is no placement-cut phase or alternate fused view.
+output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition by
+slicing the same Fold and folding partial state tuples with its stored combine. There is no placement-cut phase or
+alternate fused view.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in
@@ -1594,9 +1596,10 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
 shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
 
-**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — the LoopOp's structural features (stmt/op histogram +
-loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
-online prior's feature vector). Skipped by `format_tuning_knobs`.
+**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
+histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
+Not tunable — identity facts that make a knob dict a complete variant identity (the online prior's feature vector).
+Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own

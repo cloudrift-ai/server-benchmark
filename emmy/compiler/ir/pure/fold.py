@@ -28,7 +28,7 @@ from functools import cached_property
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.pure.algebra import M, component_ops, rename_combine
+from emmy.compiler.ir.pure.algebra import M, component_ops, merge_stmts, rename_combine
 from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
@@ -130,6 +130,12 @@ def _composes_state(inner, names: tuple[str, ...], ops) -> bool:
     return is_contraction(inner) and tuple(inner.defines()) == names and ops == (ElementwiseImpl("add"),) * len(names)
 
 
+def _identity_lift(fold: Fold) -> bool:
+    """Whether the lift passes complete operand state through unchanged."""
+    bound = tuple(name for edge in fold.operands for name in _operand_result_names(edge))
+    return not fold.lift.body and tuple(fold.lift.results) == bound and all(isinstance(result, str) for result in fold.lift.results)
+
+
 def _operand_binding(fold: Fold) -> dict:
     """The bound-name → operand-edge map (positional binding, one lift param per operand RESULT
     COMPONENT — a product edge binds every component to the same edge)."""
@@ -174,37 +180,33 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
 
 
 def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
-    """The DERIVED serial step of a λ-spelled fold — ``s′ = combine(s, lift(k))``, the combine
-    specialized at the singleton state the lift produces. For a DEGENERATE (componentwise)
-    monoid that specialization IS the ``Accum`` form — ``sᵢ = ⊕ᵢ(sᵢ, liftᵢ)`` — and each
-    component's ``Accum`` lands immediately after the lift stmt that defines its value (a
-    literal / param component falls to the tail), exactly where the dissolved fold sat, so the
-    derived loop is byte-identical to the historical spelling. A TWISTED (exp-family) monoid
-    specializes through the family's own generator (``exp_merge`` — the streaming fold IS
-    combine-at-the-singleton with the ψ-rescale simplification applied, temps renumbered by the
-    same deterministic emitter that produced the stored combine), landing after the lift body —
-    exactly where recognition's dissolved merge sat; a twisted fold with operand edges derives
-    the full blocked evaluation (:func:`_twisted_derived_step` — flash). Deterministic from the
-    stored params only — kernel identity (``Op.cache_key``) depends on nothing else."""
+    """Derive ``s′ = combine(s, lift(k))`` from the stored Fold.
+
+    A componentwise monoid specializes a singleton lift to ``Accum`` statements. An exp-family
+    singleton uses its registered streaming generator. An identity lift is different: its
+    operands are already complete monoid states, so it realizes the stored ``S × S → S`` combine
+    directly. That is the generic cross-partition merge used by split-reduce.
+
+    A split-K identity lift over one contraction is reassociated by embedding that contraction;
+    its additive accumulators already carry the outer state. Every case is deterministic from the
+    stored parameters, so kernel identity depends on no classified view."""
     lam = fold.lift
     names = fold.combine.results
     ops = component_ops(fold.combine)
+    if _identity_lift(fold):
+        if len(fold.operands) == 1 and _composes_state(fold.operands[0], tuple(names), ops):
+            # Split-K's inner contraction already updates the shared accumulators directly.
+            return (fold.operands[0],)
+        # A fully reduced state is an ordinary monoid element, not a singleton injection. Apply
+        # the stored S × S → S combine verbatim; this is the generic split-finalize shape.
+        return tuple(
+            replace(stmt, axes=(fold.axis.name,)) if isinstance(stmt, Accum) else stmt
+            for stmt in merge_stmts(fold.combine, tuple(lam.results), dtype=None)
+        )
     if ops is None:  # the twisted (exp-family) serial step — the derived state's channels
         # carry the singleton terms (the lift results), so the generated streaming merge is the
         # singleton specialization of the stored combine, names included.
         return fold._derived_twisted
-    if (
-        not len(lam.body)
-        and tuple(lam.results) == tuple(names)
-        and len(fold.operands) == 1
-        and _composes_state(fold.operands[0], tuple(names), ops)
-    ):
-        # The reassociation COMPOSITION (split-K's outer reduce): an IDENTITY lift over one
-        # inline fold operand sharing the outer's exact accumulator state. Combine at that
-        # singleton is the shared-accumulator simplification (a ×1 fold): the derived step is
-        # the sliced fold in place — its own ``Accum``\\ s carry across both loops — with NO
-        # outer folds.
-        return (fold.operands[0],)
     accums = tuple(Accum(name=names[i], value=str(lam.results[i]), op=ops[i], axes=(fold.axis.name,)) for i in range(len(names)))
     after: dict[str, list[int]] = {}
     for i, r in enumerate(lam.results):
@@ -542,7 +544,7 @@ class Fold:
         each component's ``Accum`` — the combine specialized at the singleton; the full blocked
         evaluation for a twisted fold with operand edges (flash's derived head is its score
         operand edge, its PV the memoized synthesized contraction); the embedded operand for
-        the identity-lift composition."""
+        split-K composition; or the stored combine for an identity lift of complete states."""
         return _fold_derived_step(self)
 
     def _splice_edges(self) -> tuple:
@@ -553,7 +555,7 @@ class Fold:
         composition (split-K) embeds its one fold operand verbatim. None of those splice
         twice."""
         consumed = {id(s) for s in self.step_stmts()}
-        if component_ops(self.combine) is None:
+        if component_ops(self.combine) is None and not _identity_lift(self):
             by_param = _operand_binding(self)
             for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
                 if isinstance(term, str):

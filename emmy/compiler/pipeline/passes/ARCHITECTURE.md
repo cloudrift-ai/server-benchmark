@@ -224,9 +224,10 @@ this is the intentional recovery boundary while schedule support is rebuilt over
   output storage; low-precision output takes the deferred f32 workspace and rounds once after the combine. It runs
   AFTER its decision — the `g` row was chosen FOR the split form.
 
-**Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh Loop IR for the
-partial and, when required, the finalize. Each piece receives a fresh structural identity, passes through
-`010_lift`, and chooses its own schedule.
+**Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR
+for the partial and, when required, the finalize. The partial keeps the same `Fold(init, combine)` over an axis
+slice; the finalize identity-lifts stored state tuples through that same monoid. This is one carrier-independent
+path for additive and exp-family folds. Each piece receives a fresh structural identity and chooses its own schedule.
 
 A selected cross-CTA split is recorded structurally by an axis `Window`. The scheduler refuses to repartition an
 axis that is already a slice, including partition axes nested inside the complete Fold tree. The one-kernel atomic arm

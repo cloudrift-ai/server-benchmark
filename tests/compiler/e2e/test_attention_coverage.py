@@ -25,10 +25,10 @@ softmax reduce. This file pins every tier of it:
   back onto the output fragments after the loop, so the statistic and the weight come off ONE pass
   of the score, the carried pair never leaves the registers, and the twisted carrier's ψ-rescale
   (``carrier.exp_rescale``) advances the enclosing drain's output tile per KV chunk. Where that
-  cannot read — a split-K partition, whose statistic spans keys the contraction does not — the
-  TWO-PASS pair stands instead (``_atom.chain_stat_fill``'s ``FragmentRowReduce`` + ``exp_merge`` at
-  a BLOCK singleton, bridged through smem, then ``_atom.chain_a_fill``). The nested score's own
-  operands STAGE like any other (``_atom.score_key_operand`` / ``score_query_operand``): keys per
+  cannot read, the scalar realization remains available. A cross-CTA partition is expressed above
+  this tree: each partial folds one key slice to a complete monoid state, then a finalize folds the
+  states with the same combine. The nested score's own operands STAGE like any other
+  (``_atom.score_key_operand`` / ``score_query_operand``): keys per
   chunk, queries once, both drained by the ordinary ``ldmatrix``, so the score crosses L1 once per
   CTA instead of once per warp. Measured on a
   5090 at f16, ``(1, 8, S, D)``, against the two-kernel shared-score placement sibling and torch:
@@ -80,8 +80,8 @@ softmax reduce. This file pins every tier of it:
   about it: unpinned it lands on ``f1x8`` at every shape, which happens to be the best schedule at
   ``S = 256`` (9.0) and is 231 us at ``S = 512``.
 
-  The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
-  of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
+  The fused column is the best schedule measured, and two forks the COLD pick could land on cost most
+  of it: the historical split-K realization cost 25.9 vs 14.3 at S=512 D=64, and an
   ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (323 cold vs
   190.8 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left at
   ``D = 128`` after the swizzles is no longer the shared path either: L1/TEX fell from 80% to 61%
@@ -460,13 +460,8 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 
 
 @requires_cuda
-def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
-    """A split-K partition contracts a SLICE of the keys while its statistic still spans the whole
-    axis (every partition divides by the whole denominator), so one pass cannot serve both — the
-    single-pass sweep declines and the two-pass pair stands, bridging through the stat smem rows.
-
-    The deferred split is a correctness gate, not a preference: sweeping only the partition's keys would
-    normalize each partial by its own denominator and the atomic sum of those is not softmax."""
+def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
+    """Each partition folds its key slice into the same state; the finalize merges those states."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
@@ -480,22 +475,15 @@ def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
 
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
     src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
-    assert "_a_stat_" in src, "the split partition must fall back to the two-pass pair's bridged statistic"
+    assert "__partial" in src and src.count("__global__") == 2
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"split-K fused sdpa vs torch max_diff={md:.6e}"
 
 
 @requires_cuda
 def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
-    """A causal predicate in the two-pass computed fill keeps the absolute query/key coordinates.
-
-    Two cross-CTA partitions and two chunks per partition make both offsets nonzero. The fragment epilogue writes
-    weights to a tile-local shared-memory slab, but its predicate still compares the source program's absolute
-    coordinates; deriving them from that local write index admits future keys in every chunk after the first.
-    """
+    """A causal partial compares absolute query/key coordinates after the Fold is sliced."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -508,7 +496,7 @@ def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(
 
     backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
     src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
-    assert "_a_stat_" in src, "the split partition must use the two-pass computed fill"
+    assert "__partial" in src and src.count("__global__") == 2
     assert "_ks - _ks" not in src, "the causal predicate lost the absolute key-chunk base"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"split-K causal fused sdpa vs torch max_diff={md:.6e}"

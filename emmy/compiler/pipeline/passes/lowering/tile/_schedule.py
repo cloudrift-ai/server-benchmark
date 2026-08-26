@@ -1305,7 +1305,11 @@ def _blocked_parent_blocks(term: _Term, node: _Node, combo: tuple[_Row, ...]) ->
         and first.reg_m == second.reg_m
         and first.tile_n == second.bk * second.atom.atom_k
     )
-    return [Block({"REDUCE": ReducePlan()}, (None,))] if compatible else []
+    if not compatible:
+        return []
+    # The paired child contractions own the block/warp geometry. The parent Fold may still be
+    # serial or split across CTAs; both are ordinary partitions of its stored monoid.
+    return [block for block in _reduce_blocks(term, node.site.node) if block.values["REDUCE"].coop == 1 and block.values["REDUCE"].reg == 1]
 
 
 def _raster_values(term: _Term) -> list[str]:

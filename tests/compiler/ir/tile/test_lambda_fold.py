@@ -10,7 +10,7 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Lambda, component_ops, degenerate
+from emmy.compiler.ir.pure import Lambda, component_ops, degenerate, merge_stmts
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.sigma import Sigma
@@ -100,6 +100,27 @@ def test_twisted_fold_stores_the_true_monoid() -> None:
     assert fold.loop == loop
     assert fold.role is AxisRole.TWISTED
     assert component_ops(fold.combine) is None  # twisted — derived structurally, never stored
+
+
+def test_twisted_identity_lift_merges_complete_states() -> None:
+    """An identity lift receives monoid elements, so it uses the stored combine directly."""
+    algebra = _softmax_fold()
+    loads = (
+        Load(name="m_p", input="partial", index=(Var("part"),)),
+        Load(name="l_p", input="partial", index=(Var("part"),)),
+    )
+    fold = Fold(
+        axis=Axis("part", 2),
+        operands=loads,
+        lift=Lambda(params=("part", "m_p", "l_p"), body=Body(), results=("m_p", "l_p")),
+        init=algebra.init,
+        combine=algebra.combine,
+    )
+    step = fold.step_stmts()
+    expected = merge_stmts(algebra.combine, ("m_p", "l_p"), dtype=None)
+    assert [(stmt.name, stmt.value) for stmt in step if isinstance(stmt, Accum)] == [
+        (stmt.name, stmt.value) for stmt in expected if isinstance(stmt, Accum)
+    ]
 
 
 def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:

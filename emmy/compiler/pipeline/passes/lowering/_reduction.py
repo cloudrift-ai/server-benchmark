@@ -2,9 +2,9 @@
 materializers derive from a :class:`~emmy.compiler.ir.pure.fold.Fold`'s stored ``(combine, lift,
 dtypes)``. This is a LOWERING helper, not IR vocabulary: the stored term keeps exactly one ⊕
 program (the flat ``combine``), and everything here — the state⊕state re-emission, the one-shot
-statement realization of the cross-partition combine, the twist facts —
-is derived on demand at the two consumers, the kernel materializer (``lowering/kernel/_factor``
-and friends) and the cross-CTA split (``lowering/tile/030_split_reduce``). Nothing else reads it.
+statement realization of the cross-thread combine, and the twist facts — is derived on demand by
+the kernel materializer (``lowering/kernel/_factor`` and friends). Tile split-reduce preserves the
+Fold directly and does not use this lowering view.
 
 Leading ``_`` so the pass loader skips this module."""
 

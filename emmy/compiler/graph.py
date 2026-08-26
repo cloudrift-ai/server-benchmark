@@ -22,7 +22,7 @@ from __future__ import annotations
 import heapq
 import itertools
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
@@ -1286,9 +1286,8 @@ def _dim_to_json(d):
 
 
 def _rename_buf_in_op(op, old: str, new: str):
-    """Rewrite ``Load.source`` / ``Write.output`` references inside a
-    ``LoopOp`` body from ``old`` to ``new`` (recursively into nested Loops).
-    Pass-through for op types without internal buf refs. Preserves the op's
+    """Rewrite ``Load.source`` / ``Write.output`` references inside a kernel op.
+    Pass-through for op types without internal buffer references. Preserves the op's
     ``name`` / ``knobs`` / ``source`` identity — a rename after
     the name stamp / the IdentityStrategy's ``S_*`` row (e.g. the
     splice id-promotion of a lowering-phase fragment like the demoted-matmul
@@ -1297,8 +1296,10 @@ def _rename_buf_in_op(op, old: str, new: str):
     pre-split op as each fragment kernel's ``source``; the two-level tuner's
     composed Σ rows group by it)."""
     from emmy.compiler.ir.loop import Load, LoopOp, Write
+    from emmy.compiler.ir.pure.fold import Fold
+    from emmy.compiler.ir.tile import TileOp
 
-    if not isinstance(op, LoopOp):
+    if not isinstance(op, (LoopOp, TileOp)):
         return op
 
     def fn(s):
@@ -1327,7 +1328,26 @@ def _rename_buf_in_op(op, old: str, new: str):
             for buf, tensor in io.items()
         }
 
-    renamed = LoopOp(body=op.body.map(fn))
+    if isinstance(op, LoopOp):
+        renamed = LoopOp(body=op.body.map(fn))
+    else:
+
+        def rename_term(term):
+            if isinstance(term, Load):
+                return fn(term)
+            if not isinstance(term, Fold):
+                return term
+            return replace(
+                term,
+                operands=tuple(rename_term(edge) for edge in term.operands),
+                lift=replace(term.lift, body=term.lift.body.map(rename_term)),
+            )
+
+        renamed = replace(
+            op,
+            op=rename_term(op.op),
+            stores=tuple(replace(store, write=fn(store.write)) for store in op.stores),
+        )
     renamed.inputs = renamed_io(op.inputs)
     renamed.outputs = renamed_io(op.outputs)
     renamed.name = op.name

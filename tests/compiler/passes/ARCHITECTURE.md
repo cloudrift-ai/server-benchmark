@@ -33,6 +33,7 @@ tests/compiler/passes/
 ├── test_partition_planner_forks.py # partition-planner fork generation
 ├── test_launch_geometry_rules.py   # launch-geometry pass
 ├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
+├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_stage_inputs_classify.py   # Stage-input classifier
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy

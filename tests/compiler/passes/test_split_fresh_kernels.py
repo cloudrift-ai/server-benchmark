@@ -159,9 +159,8 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("graph", [_matmul(), _sum()])
-def test_synthesized_split_reductions_reenter_total_lift(monkeypatch, graph) -> None:
-    """Both split-K and plain-reduce pieces pass through the public Tile stage; their synthesized
-    partial/finalize loops cannot survive in the resulting Fold trees."""
+def test_split_reductions_remain_fold_trees(monkeypatch, graph) -> None:
+    """Both split-K and plain-reduce pieces preserve Fold trees without embedded Loop IR."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     pieces = _tile_pieces(graph)
     assert len(pieces) == 2
@@ -184,8 +183,8 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
 
 def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
     """A piece featurizes as ITSELF. Without this the partial joined the pre-split kernel's
-    evidence — the same signature for a kernel doing half the reduction. Nothing in the rule stamps
-    it: ``005_stamp`` picks up any op with no ``S_*`` on the pass-scan restart."""
+    evidence — the same signature for a kernel doing half the reduction. The identity strategy
+    stamps each fragment at the splice boundary."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     stamps = [{k: v for k, v in row.items() if k.startswith(STRUCT_PREFIX)} for row in _kernels(_resolve(CUDA_PASSES)[0]).values()]
     assert all(stamps), "every piece must carry a structural stamp"
@@ -193,12 +192,11 @@ def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
 
 
 def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> None:
-    """A piece is minted as a loop-dialect kernel, so ``_piece`` has to BUILD the body: the term's
-    lowered per-cell nest with the boundary stores put back, re-nested under its free axes. Both
-    halves of that matter and both were once wrong to assume:
+    """A piece stays in Tile IR, so identity temporarily lowers its Fold with the boundary stores
+    restored and the free axes nested around it. Both halves matter:
 
     - the STORES must come back, or a piece reports ``S_n_write = 0`` while every kernel that
-      reached the stamp through the loop dialect reports its writes;
+      reached the stamp through Loop IR reports its writes;
     - the FREE AXES must be re-nested, since recognition peels them onto the placement — a piece
       stamped off the bare lowered body reports ``S_ext_n_free_axis = 0`` and every extent feature
       the occupancy and wave models are built on collapses to 1.

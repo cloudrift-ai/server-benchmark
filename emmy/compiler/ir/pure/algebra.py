@@ -12,14 +12,15 @@ is consumed. This module holds only what the STORED TERM itself needs:
   combine (the family discriminator; no family annotation exists).
 - :func:`rename_combine` — the SSA-rename lockstep for the stored program (a generated twisted
   program is REGENERATED over the renamed state, keeping the formation invariant).
+- :func:`merge_stmts` — the one statement realization of a complete state⊕state combine.
 - :func:`eval_lambda` / :func:`foldmap_eval` — the denotational spec oracle the agreement +
   associativity property tests run against.
 
 The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.pure.carrier`; the
-lowering-side derivations (state⊕state re-emission, finalize seeds) live with their one consumer
-(``pipeline/passes/lowering/_reduction``). The old ``Monoid`` / ``Semiring`` node wrappers, the
-ψ-conjugation apparatus (``Carrier`` / ``Twist`` / ``State``) and the loop-annotation ``Algebra``
-bundle are all retired: the node's stored combine is the single spelling of ⊕.
+kernel-level partition helpers live in ``pipeline/passes/lowering/_reduction``. The old
+``Monoid`` / ``Semiring`` node wrappers, the ψ-conjugation apparatus (``Carrier`` / ``Twist`` /
+``State``) and the loop-annotation ``Algebra`` bundle are all retired: the node's stored combine
+is the single spelling of ⊕.
 """
 
 from __future__ import annotations

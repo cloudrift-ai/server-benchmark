@@ -170,6 +170,14 @@ def test_sdpa_fold_tree_offers_paired_mma_rows(unpinned, monkeypatch) -> None:
     assert all(sum(key.startswith("TILE@") and "mma_" in value for key, value in row.items()) == 2 for row in warp)
 
 
+def test_paired_sdpa_honors_a_grid_reduce_partition(unpinned, monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    pools, _ = _enumerated(_sdpa_graph(), monkeypatch)
+    rows = [row for _, pool in pools for row in pool]
+    paired = [row for row in rows if sum(key.startswith("TILE@") and "mma_" in value for key, value in row.items()) == 2]
+    assert paired and all(row["REDUCE"] == "g2k" for row in paired)
+
+
 # --- the space itself: two traversals of one structure -------------------------------------------
 
 

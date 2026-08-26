@@ -287,12 +287,11 @@ semiring and operand roles prove it; the mma atom tier reads the resulting Fold 
 the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
 `Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
 denotational foldMap spec oracle, and `merge_stmts` — the state⊕state combine's one statement
-realization, a function over the stored combine rather than a second term kind. The lowering side
-reads the algebra through ONE helper, `pipeline/passes/lowering/_reduction.Reduction` (wrap a
-`Fold`; `names` / `state_b` / `twisted`, the `combine_states` re-emission for the cross-thread
-primitives, `merge_stmts(other)` for the statement positions, and `loop_state_head` — the
-loop-body read of the carried state's head), consumed only by the kernel materializer and
-`030_split_reduce`. A *degenerate* fold is a plain
+realization, a function over the stored combine rather than a second term kind. Fold lowering uses
+that realization when an identity lift receives complete states, including a cross-CTA finalize.
+The kernel materializer reads the same algebra through
+`pipeline/passes/lowering/_reduction.Reduction` (`names`, `state_b`, `combine_states`, and
+`merge_stmts`) for cross-thread partitions. A *degenerate* fold is a plain
 `sum`/`max`/`mean` reduce; a *twisted* one is online-softmax; a contraction's algebra is
 the degenerate algebra of its additive fold.
 

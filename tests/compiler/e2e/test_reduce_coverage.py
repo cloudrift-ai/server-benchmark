@@ -317,7 +317,7 @@ def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatc
     The finalize is the native ``REDUCE`` codec's ``c`` letter — one knob owns split + finalize."""
     spec = _CROSS_CTA[carrier]
     code, ref_fn = _OPS[spec["op"]]
-    env = {"EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
+    env = {"EMMY_PLACE": "fuse", "EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
     got, xs, src = _compile_run(code, env, monkeypatch)
     want = ref_fn(xs).reshape(got.shape)
     diff = float(np.abs(got - want).max())
@@ -351,12 +351,12 @@ _PROJECTION_DISTRIBUTES = {"mean": True, "l2": False}
 def test_split_reduce_projection_epilogue(op, finalize, monkeypatch):
     """A split-reduce carrier carrying a projection epilogue. ``mean``'s ``×1/N`` distributes over
     the atomic add, so the atomic finalize rides it per-partition and stays accurate; ``l2``'s
-    ``sqrt`` does not, so the atomic finalize REFUSES (``NotImplementedError`` → pin ``g<n>k``).
+    ``sqrt`` does not, so the pinned atomic finalize raises ``ValueError`` and directs the caller to ``g<n>k``.
     The deferred-kernel finalize projects once after the combine and is accurate for both."""
     code, ref_fn = _OPS[op]
-    env = {"EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
+    env = {"EMMY_PLACE": "fuse", "EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
     if finalize == "atomic" and not _PROJECTION_DISTRIBUTES[op]:
-        with pytest.raises(NotImplementedError, match="non-distributive projection"):
+        with pytest.raises(ValueError, match="must distribute over the add"):
             _compile_run(code, env, monkeypatch)
         return
     got, xs, src = _compile_run(code, env, monkeypatch)

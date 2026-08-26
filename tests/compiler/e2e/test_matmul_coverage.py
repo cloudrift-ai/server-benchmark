@@ -239,6 +239,7 @@ def test_matmul_reg_tile_epilogue(epilogue, mode, monkeypatch):
     symbolic M."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_tile(monkeypatch, _EPILOGUE_TILE)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the fused epilogue, not the restored split-K fork
     m = _DYN_M if mode == "dynamic" else _M
@@ -1144,6 +1145,7 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
     """A warp-tier matmul with a fused pointwise / causal epilogue stays accurate AND folds the
     epilogue into the ONE mma.sync kernel (the per-element ``RegStore`` chain), over static and
     symbolic M."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_tile(monkeypatch, _WARP_PIN)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the fused epilogue, not the restored split-K fork
     M = N = K = 128

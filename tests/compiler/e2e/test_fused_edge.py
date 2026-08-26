@@ -142,6 +142,7 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     # cell is an unpinned greedy compile, so without the pin the device's evidence may steer it
     # to a (legal) 2-kernel split row (seen on sm_89). The split form has its own test
     # (test_fused_cone_splitk_matches_reference); the free pick, test_fused_rmsnorm_linear_unpinned.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
     S, H, inter = 32, 1024, 3072
     g = Graph()
@@ -217,6 +218,7 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     The B128 cell also pins ``RASTER`` on the fused-cone grid (a computed-A kernel's output is
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", tile)
     monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
@@ -265,6 +267,7 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     at the hint and run at off-hint sizes straddling the 64-row tile (31 under, 130 over + tail):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # tile 64×32 — every runtime S is masked
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the ONE-masked-kernel contract is what's under test
@@ -279,10 +282,10 @@ def test_fused_rmsnorm_linear_unpinned():
     computed-A bilinear fold's warp rows) lowers and matches numpy whichever row the prior picks —
     the fork-integrity e2e (runs on any CUDA device). Which row wins is not this test's business:
     the pick may be a serial or cooperative ``Map`` row, a warp row, the 1-kernel fused form or a
-    2-kernel redundant-statistic split; every one of them is a legal fork member on this decode-M
-    shape and every one of them must lower and be accurate."""
+    2-kernel redundant-statistic split, or a 3-kernel placement-cut plus split; every one is a
+    legal fork member on this decode-M shape and must lower accurately."""
     S, H, inter = 32, 256, 512
-    _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False, kernels=(1, 2))
+    _rmsnorm_linear_check(_rmsnorm_linear_graph(S, H, inter), S, H, inter, want_mma=False, kernels=(1, 2, 3))
 
 
 @requires_cuda
@@ -294,6 +297,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment feeding per-fold B slabs / C fragments) and the SwiGLU combine rides the store's
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — ONE masked kernel is the contract; the split form has its own test
@@ -409,6 +413,7 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     the projection — the output must match the fp32 reference. Parametrized over both sync
     depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
     (M=32) is where this split pays: the un-split cone grid starves the SMs."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")
@@ -448,6 +453,7 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     deferred finalize folds the 2-component carrier and applies the SwiGLU ⊗-combine ONCE after
     the cross-partition sums — the output must match the fp32 reference. The decode-M shape
     class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x4")
     monkeypatch.setenv("EMMY_REDUCE", "g4k")

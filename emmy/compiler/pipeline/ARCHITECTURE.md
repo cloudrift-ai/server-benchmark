@@ -538,10 +538,7 @@ Three definitions the list leans on:
 - **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
-  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided. At
-  a placement fork, `PLACE` is the exception: each candidate's complete `PLACE` subset must exactly equal the measured
-  row's subset, including the fused candidate's empty subset. A cut measurement therefore vouches only for that cut,
-  while the same prefix rule continues to apply to every non-`PLACE` knob.
+  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so
@@ -834,9 +831,8 @@ two-level-shaped. **Outer**: drive the graph-changing passes (`TwoLevelStrategy.
 `loop`, the strategy's OWN boundary config, never an engine parameter). The outer never ventures into Tile IR; a
 **terminal** is the fused graph of finalized `LoopOp`s. Each terminal is one candidate grouping of ops into
 kernels; its **reward** is `1 / Σ best-per-op time` from the strategy's separable scoring, backpropagated by the
-reused `TuningSearch`. Tile-dialect structural forks (a `PLACE` cut, a cross-CTA split) stay INNER — they are part
-of a kernel's independent measurement, and a slice whose kernel set changed benches as the Σ over the pieces it
-minted.
+reused `TuningSearch`. The Tile-dialect cross-CTA split stays INNER — it is part of a kernel's independent
+measurement, and a slice whose kernel set changed benches as the Σ over the pieces it minted.
 
 Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
@@ -1300,8 +1296,8 @@ explicit working file whose GPU header is checked against the selected tune devi
    registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
    raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it. Two realizations are **structural** and cannot be read off a knob stamp at all, so the check skips them:
-   a `PLACE` cut, and the `g<n>` cross-CTA stage of a `REDUCE` value. A split replaces the kernel it splits, and
+   match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
+   check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
    value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a

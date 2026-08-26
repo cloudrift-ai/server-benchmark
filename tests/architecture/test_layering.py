@@ -118,7 +118,7 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
 _KERNEL_DIR = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "kernel"
 
 # The enumeration / split move-composer layer: where the *forks* live — offer
-# enumeration, knob schema, the algebra classifiers, the edge-placement cut. A
+# enumeration, knob schema, and the algebra classifiers. A
 # kernel pass importing any of these is reaching above assemble to (re-)make a
 # scheduling decision instead of reading a stamped fact off the ``TileOp``.
 _FORBIDDEN_IMPORTS = (
@@ -126,15 +126,15 @@ _FORBIDDEN_IMPORTS = (
     "lowering.tile.split",
 )
 
-# Schedule-decision functions (offer enumeration / algebra classifiers / the
-# edge-placement cut). A kernel pass must not *call* one — not even a re-rolled
+# Schedule-decision functions (offer enumeration / algebra classifiers). A
+# kernel pass must not *call* one — not even a re-rolled
 # local copy. ``classify_fragment_epilogue`` (``lowering/_predicates.py``) is the
 # one allowed ``classify*`` name: it is a mechanical fragment-epilogue lowering
 # analysis shared by both layers, not a ranked scheduling choice.
 _FORBIDDEN_CALL_RE = re.compile(
     r"\b("
     r"\w*_offers"  # thread_offers / map_reg_offers / warp_bk_offers / coop_reduce_offers / …
-    r"|cut_offers|stage_candidates|legal_decomps|eligible_atoms"
+    r"|stage_candidates|legal_decomps|eligible_atoms"
     r"|classify_algebra|classify_matmul_operands"
     r")\b"
 )
@@ -179,7 +179,7 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
     and it also catches a re-rolled *local* copy of a classifier (no import to
     flag). A kernel pass may read a stamped ``TileOp`` attribute (``StageBundle.
     policy``, ``SerialTile.kind``, ``WarpSpecialize.ring_depth``, …) but must not
-    invoke the offer enumeration / algebra classification / edge-placement cut
+    invoke the offer enumeration or algebra classification
     that produced those facts — those are mechanical-pass discipline violations.
     """
     offenders: list[str] = []

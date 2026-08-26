@@ -116,9 +116,9 @@ Loop IR persistence and vectorized reference evaluation retain the boolean type 
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
-tier, or faster than its parts. Nested reductions, multi-statistic compounds, and the loss of a previously recognized
-cut shape are therefore not fusion gates. A downstream failure to recognize or cut a maximally fused body is a
-lowering or placement coverage gap; it must not be repaired by retaining an early graph boundary.
+tier, or faster than its parts. Nested reductions and multi-statistic compounds are therefore not fusion gates. A
+downstream failure to recognize or schedule a maximally fused body is a lowering coverage gap; it must not be
+repaired by retaining an early graph boundary.
 
 Only semantic splice boundaries remain: internal nodes must be owned, every escape must be an explicit live output,
 and the splicer must preserve semantics. Fusion does not estimate arithmetic work and has no lowering-dependent
@@ -128,8 +128,8 @@ There is one fusion pass and one fixpoint. One rewrite takes the maximal downstr
 consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The
 worklist's shared binding table emits an equal upstream demand once across every port, so fusion order cannot duplicate
 a shared producer or change the recognized computation. Merge order may temporarily place a contraction inside
-another reduction; the later legal merge is still taken. Every fused-versus-cut choice belongs to placement and the
-deploy evidence hierarchy.
+another reduction; the later legal merge is still taken. That maximal result is final: no later placement rule cuts
+it apart.
 
 Shape-only graph outputs participate through output equivalence clusters, not a separate fusion rule. A cluster is a
 single-owner chain of same-dtype copies with one terminal live output and an exact proof that source and destination
@@ -154,15 +154,15 @@ or the permuted `[…, f/Q, …, f%Q]` of a transposed output. The pair need not
 parallel, so the perfectly-nested free loops between them (the `transpose(1, 2)` every attention projection
 fuses after its view puts `seq` between `heads` and `head_dim`) interchange outward and the fused axis takes
 the inner loop's place. Any surviving residue elsewhere (an axis addressed alone, a predicate over the pair)
-declines the pair and the nest stands. Split and unsplit spellings of one contraction thereby converge to ONE
-canonical nest — one kernel identity, one shape key, one golden family.
+declines the pair and the nest stands. A store that reverses the quotient/remainder order also stays split because
+output-storage order is canonical. Split and unsplit spellings of one contraction thereby converge to ONE canonical
+nest — one kernel identity, one shape key, one golden family.
 
 It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
 fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
-check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cut pieces
-minted at splice time, where re-fusing axes would fight the scheduler or re-spell a fragment whose `PLACE`
-seam was recorded against the unfused nest. And canonicalizing a producer that still awaits a merge could
-re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
+check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cross-CTA split pieces
+minted at splice time, where re-fusing axes would fight the scheduler. Canonicalizing a producer that still awaits a
+merge could re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
 `loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
 
 The consumers that had assumed "one output axis per buffer dim" were generalized with it, all on one

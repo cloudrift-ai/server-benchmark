@@ -64,7 +64,7 @@ softmax reduce. This file pins every tier of it:
   ``D ≤ 64`` was always conflict-free and only ``D = 128`` paid — ncu measures 7.8-way at
   ``D = 128`` and none at ``D = 64`` on the same kernel.
 
-  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, ``EMMY_PLACE=fuse``, serial ``REDUCE``, empty
+  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, serial ``REDUCE``, empty
   tune DB and prior) the ``D = 128`` conclusion does NOT hold — the fused arm beats torch at the
   short shapes and reaches parity at ``S = 1024``:
 
@@ -79,11 +79,6 @@ softmax reduce. This file pins every tier of it:
   ``S = 2048`` (132-148 observed). The COLD pick is a separate matter and this changed nothing
   about it: unpinned it lands on ``f1x8`` at every shape, which happens to be the best schedule at
   ``S = 256`` (9.0) and is 231 us at ``S = 512``.
-
-  A bare ``EMMY_PLACE=cut`` selects the shallowest normalize seam and is not the shared-score
-  inverse (909 us at ``S = 256`` against the old default's 45). The exact score path selects the
-  grouped two-use seam: one producer workspace feeds both contextual uses, and each piece receives
-  its own schedule evidence.
 
   The fused column is the best schedule measured, and two forks the COLD pick can land on cost most
   of it: a split-K partition falls back to the two-pass pair (25.9 vs 14.3 at S=512 D=64), and an
@@ -330,7 +325,6 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
     account for the producer once while placement retains the materialized sibling. This test has
     no fusion override: it protects that end-to-end contract together with the COMPOSED-STEP
     reading and computed-A realization asserted below."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")  # authoritative: keep the merged tree whole, so the count is not greedy's
     torch.manual_seed(0)
     B, H, S, D = cfg
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -385,7 +379,6 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     ``REDUCE`` is pinned off because the single pass needs the sweep and the contraction to cover
     the same keys; a split-K partition does not, and there the two-pass pair stands
     (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)
     B, H, S, D = cfg
@@ -409,7 +402,6 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
 @requires_cuda
 def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k2")
@@ -446,7 +438,6 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 
     Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
@@ -476,7 +467,6 @@ def test_fused_sdpa_split_partition_keeps_the_two_pass_pair(monkeypatch):
 
     The deferred split is a correctness gate, not a preference: sweeping only the partition's keys would
     normalize each partial by its own denominator and the atomic sum of those is not softmax."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
@@ -503,7 +493,6 @@ def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(
     weights to a tile-local shared-memory slab, but its predicate still compares the source program's absolute
     coordinates; deriving them from that local write index admits future keys in every chunk after the first.
     """
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")

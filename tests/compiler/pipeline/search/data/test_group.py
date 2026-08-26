@@ -45,14 +45,12 @@ def test_the_key_separates_cards_and_nvcc_regimes():
 def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
     """The key is the KERNEL's structure, not the ``op_sig`` column, which digests the pre-descent offer op.
 
-    A kernel a placement cut minted is an independent kernel — ``_cut.py`` mints it and the identity strategy
-    stamps it at birth — so tuning it is the same question as tuning an identical kernel nobody split, and
-    the deploy path already joins their evidence that way (``Prior.evidence_pick`` indexes on ``S_*``).
-    Keyed on ``op_sig`` the two land in different pools and get searched twice: on the RTX 5090 freeze 73
-    structures were fragmented like that, the losing pool's best coming in a median 1.46x behind the
-    winning pool's."""
+    A kernel minted by a cross-CTA split has its own structural identity, so tuning it is the same
+    question as tuning an identical standalone kernel. The deploy path already joins their evidence
+    that way (``Prior.evidence_pick`` indexes on ``S_*``). Keyed on ``op_sig`` the two land in
+    different pools and get searched twice."""
     rows = [
-        _row("from-a-cut", value_us=200.0, features=_feats(TILE="f2x2"), op_sig="site-of-the-fused-parent"),
+        _row("from-a-split", value_us=200.0, features=_feats(TILE="f2x2"), op_sig="site-of-the-fused-parent"),
         _row("standalone", value_us=150.0, features=_feats(TILE="f4x4"), op_sig="its-own-site"),
     ]
     (group,), dropped = group_measured(rows)

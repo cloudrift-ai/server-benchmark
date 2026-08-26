@@ -488,49 +488,6 @@ def _db_measured_pick(
     return best if best is not None else best_rank
 
 
-def _placement_candidate_rows(leaves: list[object]) -> list[dict] | None:
-    """Exact PLACE identities for one placement fork, aligned with ``leaves``.
-
-    A Graph has no ordinary knob row because its kernels may carry conflicting
-    schedules. Its placement route is different: every fragment stamps the one
-    exact PLACE subset that identifies it, while the fused Op has an empty
-    subset. ``None`` means this is not a placement fork; an empty list means the
-    offered routes are ambiguous and measured evidence must not decide them.
-    """
-    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-
-    rows: list[dict] = []
-    saw_place = False
-    ambiguous = False
-    for leaf in leaves:
-        ordinary = {
-            key: value for key, value in _leaf_knobs(leaf).items() if not key.startswith(("S_", "H_")) and family_of(key) != "PLACE"
-        }
-        if not _is_structural_option(leaf):
-            rows.append(ordinary)
-            continue
-        route = {}
-        for node in _leaf_graph(leaf).nodes.values():
-            for key, value in (getattr(node.op, "knobs", None) or {}).items():
-                if family_of(key) != "PLACE":
-                    continue
-                value = str(value)
-                if key in route and route[key] != value:
-                    ambiguous = True
-                route[key] = value
-        if route:
-            saw_place = True
-            rows.append({**ordinary, **route})
-        else:
-            ambiguous = True
-            rows.append(ordinary)
-    if not saw_place:
-        return None
-    keys = [canonical_row_key(row) for row in rows]
-    return [] if ambiguous or len(set(keys)) != len(keys) else rows
-
-
 def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float, bool]]], rows: list[dict], node_id: str) -> None:
     """Warn when a fork's candidate set is DISJOINT from its measured evidence:
     the DB holds rows for this kernel's structural signature, yet
@@ -641,39 +598,40 @@ def _live_leaf_rows(leaves: list, node_blocked) -> list[tuple[object, dict]]:
     return rows if node_blocked is None else [(o, k) for o, k in rows if not _tile_blocked(k, node_blocked)]
 
 
-def _verified_index(ctx: Context) -> tuple[dict, dict]:
+def _verified_index(ctx: Context) -> dict:
     """The card's recorded goldens keyed by STRICT structural identity — the recognized term's
     algebra digest + dtype fingerprint (``_schedule.deploy_identity``), derived record-side from
-    each record's own persisted program through the shared recognition core. Returns
-    ``(schedule rows, routing rows)`` as ``{identity: [records fastest-first]}``, scoped to the
-    live ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an
-    underivable row is skipped — the decode tripwire is where that is loud); classification-free:
-    no shape key, no matching heuristic, identity or nothing."""
+    each record's own persisted program through the shared recognition core. Returns schedule
+    rows as ``{identity: [records fastest-first]}``, scoped to the live
+    ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an underivable row
+    is skipped — the decode tripwire is where that is loud); classification-free: no shape key,
+    no matching heuristic, identity or nothing."""
     from emmy.compiler.pipeline.search.golden import flush_identity_store, kernel_identity, records_for_card  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
     if not gpu_name:
-        return {}, {}
+        return {}
     sched: dict = {}
-    routing: dict = {}
     try:
         cap = tuple(ctx.compute_capability)
         for g in records_for_card(gpu_name, cap):
             if not g.knobs or not _pins_live(g.pin_map):
                 continue
+            if any(str(key).split("@", 1)[0] == "PLACE" for key in g.knobs):
+                continue
             identity = kernel_identity(g)
             if identity is None:
                 continue
-            (routing if g.is_routing else sched).setdefault(identity, []).append(g)
-        for entries in (*sched.values(), *routing.values()):
+            sched.setdefault(identity, []).append(g)
+        for entries in sched.values():
             entries.sort(key=lambda g: g.emmy_us or float("inf"))
         flush_identity_store()
     except Exception:  # noqa: BLE001 — a golden consult failure must never break compile
-        return {}, {}
-    return sched, routing
+        return {}
+    return sched
 
 
-def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
+def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
     """The strict verified-tier decision for one fork, or ``None``.
 
     A SCHEDULE fork (the recognized ``TileOp`` root): the fork's ``deploy_identity`` selects the
@@ -681,11 +639,6 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
     acceptance this tier replaced is what deployed wrong kernels).
-
-    A PLACEMENT fork (``Graph`` cut options beside the fused ``TileOp``): a ROUTING record picks
-    the cut fragment whose parent piece stamps the record's ``PLACE`` keys; otherwise a schedule
-    record for the fused identity keeps the fused side (the verified µs is fused truth, so the
-    prior must not cut against it).
 
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
@@ -695,32 +648,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, routing_idx: dict, blocked) -
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     leaves = flatten_leaves(fp.options)
-    structural = [o for o in leaves if _is_structural_option(o)]
-    if structural:
-        tile = next((o for o in leaves if isinstance(o, TileOp)), None)
-        if tile is None:
-            return None
-        identity = deploy_identity(tile)
-        for rec in routing_idx.get(identity, ()):
-            place = {k: str(v) for k, v in rec.knobs.items()}
-            if set(place) == {"PLACE"}:
-                # The bare spelling names the SHALLOWEST legal seam — the first cut option
-                # (recognition offers them in ``cuttable_seams`` order).
-                return structural[0], float(rec.emmy_us or 0.0), None
-            for opt in structural:
-                graph = _leaf_graph(opt)
-                ops = [n.op for n in graph.nodes.values()]
-                stamps = {k: str(v) for op in ops for k, v in (getattr(op, "knobs", {}) or {}).items() if k.startswith("PLACE")}
-                if stamps == place:
-                    return opt, float(rec.emmy_us or 0.0), None
-            logger.warning(
-                "deploy: node %r matches routing golden %s by identity, but no cut option stamps %s — placement drift; falling through.",
-                fp.node_id,
-                rec.name,
-                place,
-            )
-        if identity in sched_idx:
-            return tile, float(sched_idx[identity][0].emmy_us or 0.0), None
+    if any(_is_structural_option(o) for o in leaves):
         return None
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
@@ -834,11 +762,11 @@ def greedy_decide(
         if float(fp.ctx.features().get("H_opt", _O3_OPT)) == _O3_OPT:
             if verified_state[0] is None:
                 verified_state[0] = _verified_index(fp.ctx)
-            sched_idx, routing_idx = verified_state[0]
+            sched_idx = verified_state[0]
             # An empty index still consults under an audit sink: "this card records nothing for
             # any fork" is the audit's all-GAP coverage answer, not silence.
-            if sched_idx or routing_idx or _AUDIT_SINK is not None:
-                got_verified = _verified_pick(fp, sched_idx, routing_idx, blocked)
+            if sched_idx or _AUDIT_SINK is not None:
+                got_verified = _verified_pick(fp, sched_idx, blocked)
                 if got_verified is not None:
                     leaf, price, row = got_verified
                     fp.score = price
@@ -858,21 +786,6 @@ def greedy_decide(
         # the lazy tree's levels are arranged.
         leaves = flatten_leaves(fp.options)
         base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
-        placement_rows = _placement_candidate_rows(leaves)
-        picker = getattr(the_prior, "pick", None)
-        if price_structural and placement_rows and picker is not None:
-            from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-
-            placement_base = {key: value for key, value in base.items() if family_of(key) != "PLACE"}
-            evidence_rows = [{**placement_base, **row} for row in placement_rows]
-            exact_families = frozenset({"PLACE"})
-            ev = getattr(the_prior, "evidence_pick", None)
-            got = ev(evidence_rows, exact_families=exact_families) if ev is not None else None
-            if got is None and db_index():
-                got = _db_measured_pick(db_index(), evidence_rows, exact_families=exact_families)
-            if got is not None:
-                best_i, fp.score = got
-                return leaves[best_i]
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a
         # multi-kernel Graph option is meaningless. :func:`_priced_pick` asks
@@ -917,7 +830,8 @@ def greedy_decide(
         # eighth-sweep finding 2); (3) the model argmin only when no candidate
         # has evidence at all. An env pin overrides everything upstream of the
         # fork (a pinned family never reaches a decide).
-        if picker is not None and placement_rows is None:
+        picker = getattr(the_prior, "pick", None)
+        if picker is not None:
             ev = getattr(the_prior, "evidence_pick", None)
             got = ev(rows) if ev is not None else None
             if got is None and db_index():
@@ -925,7 +839,7 @@ def greedy_decide(
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)
             best_i, price = got if got is not None else picker(rows)
-        else:  # bare-mean_scores prior, or placement with no whole-route evidence
+        else:  # bare-mean_scores prior
             from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
             s = the_prior.mean_scores(rows)

@@ -304,10 +304,6 @@ class GoldenRecord:
         return str(self.measurements["reference_backend"]) if self.measurements else None
 
     @property
-    def is_routing(self) -> bool:
-        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
-
-    @property
     def dynamic(self) -> bool:
         return self.shape_key.is_dyn
 
@@ -450,8 +446,8 @@ def validate_golden_file(
                         f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
                     )
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
-                if "PLACE" in families and families != {"PLACE"}:
-                    raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
+                if "PLACE" in families:
+                    raise ValueError(f"{realization_where} uses the removed PLACE family")
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
@@ -688,7 +684,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
-    if record.is_routing:
+    if any(str(key).split("@", 1)[0] == "PLACE" for key in record.knobs):
         return "placement routing is not part of structural total lift"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
     store = _identity_store()

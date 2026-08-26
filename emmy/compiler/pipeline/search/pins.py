@@ -22,7 +22,7 @@ def _stampable_reduce(want: str) -> str | None:
     pieces and ``knob.consume_kernel_row`` strips their schedule row, so no piece may carry the
     ``g<n>`` it came from (``test_split_fresh_kernels`` asserts that outright). The receipt is
     structural — the piece's reduce axis is a slice of the parent — and knob stamps cannot show
-    it, exactly as a realized ``PLACE`` cut cannot be read off one.
+    it.
 
     Only the cross-CTA stage is invisible. The rest of the value (``coop`` / ``r<n>``) is decided
     by the piece on its own body and stamped there, so it stays gateable.
@@ -47,8 +47,6 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)
-        if fam == "PLACE":
-            continue  # a realized cut is visible structurally, not as a knob stamp
         probe = want
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
@@ -94,8 +92,7 @@ def pinned_knobs(knobs: dict):
     """Temporarily publish ``knobs`` as authoritative environment pins.
 
     Axis-scoped keys ride both their programmatic ``EMMY_<KNOB@site>`` splat and the raw
-    ``EMMY_KNOBS`` aggregate. Schedule readers consume the splat after import, while placement
-    routing reads the aggregate directly because ``@`` is not a portable shell-variable name.
+    ``EMMY_KNOBS`` aggregate because ``@`` is not a portable shell-variable name.
     """
     saved: dict[str, str | None] = {}
     try:

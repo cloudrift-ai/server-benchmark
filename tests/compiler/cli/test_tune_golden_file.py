@@ -23,7 +23,6 @@ from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, Tu
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
-    _ProposalLoopIdentity,
     load_working_targets,
     measure_proposals,
     persist_proposal_rankings,
@@ -266,37 +265,6 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
     }
 
 
-def test_place_proposal_records_only_the_fresh_fragment_cut(tmp_path):
-    path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm")), path)
-    _, targets = load_working_targets(path)
-    loop_graph = Pipeline.build(LOOP_PASSES).run(targets[0].program.copy(), ctx=Context((8, 9)))
-    [original_loop] = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
-
-    identity = _ProposalLoopIdentity()
-    original = TileOp(knobs={"S_n_loop": 2.0})
-    cut_fragment = Graph()
-    cut_fragment.add_node(
-        LoopOp(body=original_loop.body, knobs={"PLACE@map": "cut"}),
-        [],
-        Tensor("cut", (1,)),
-        node_id="cut",
-    )
-    identity.on_splice(SimpleNamespace(root_op=original, fragment=cut_fragment))
-
-    propagated = TileOp(knobs={"S_n_loop": 1.0, "PLACE@map": "cut"})
-    later_fragment = Graph()
-    later_fragment.add_node(LoopOp(body=original_loop.body), [], Tensor("later", (1,)), node_id="later")
-    identity.on_splice(SimpleNamespace(root_op=propagated, fragment=later_fragment))
-
-    assert len(identity.structural_parents) == 1
-    route, key, knobs = identity.structural_parents[0]
-    assert route == {"PLACE@map": "cut"}
-    assert knobs == {"S_n_loop": 2.0, "PLACE@map": "cut"}
-    assert key == TileOp(knobs=knobs).cache_key()
-    assert identity.structural_parent(route) == (key, knobs)
-
-
 def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(tmp_path, monkeypatch):
     from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
 
@@ -359,12 +327,8 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             for strategy in self.strategies:
                 strategy.on_pass_end(event)
             route_parent = TileOp(knobs=dict(live_features))
+            route_parent.knobs.update(active_route)
             fragment = Graph()
-            if any(key.startswith("PLACE") for key in active_route):
-                piece = LoopOp(body=original_loop.body, knobs={**structural_features, **active_route})
-                fragment.add_node(piece, [], Tensor("piece", (1,)), node_id="piece")
-            else:
-                route_parent.knobs.update(active_route)
             splice = SimpleNamespace(root_op=route_parent, fragment=fragment)
             for strategy in self.strategies:
                 strategy.on_splice(splice)
@@ -469,162 +433,6 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert proposal["ranking"]["measured_knobs"] == route
     assert proposal["ranking"]["status"] == "ok"
     assert reloaded_targets[0].proposals == [((0, 1), route)]
-
-    place = {"PLACE@map": "cut"}
-    active_route = place
-    place_db = SearchDB(tmp_path / "place.db")
-    [place_ranking] = asyncio.run(
-        measure_proposals(
-            stable_graph,
-            [((0, 1), place)],
-            backend=object(),
-            db=place_db,
-            ctx=ctx,
-            max_candidates=1,
-            run_id="place-proposal-run",
-        )
-    )
-    place_parent = TileOp(knobs={**live_features, **place})
-    assert place_parent.cache_key() != original_loop.cache_key()
-    place_perf = place_db.lookup_perf(ctx.structural_key(), place_parent.cache_key(), backend="cuda")
-    assert place_ranking["status"] == "ok"
-    assert place_ranking["measured_knobs"] == place
-    assert place_perf is not None
-    assert place_perf.knobs == {**ctx.features(), **live_features, **place}
-    assert place_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
-    place_db.close()
-
-    from emmy.compiler.pipeline.search.policy.greedy import (
-        _db_measured_index,
-        _db_measured_pick,
-        _placement_candidate_rows,
-    )
-    from emmy.compiler.pipeline.search.prior.online import OnlinePrior
-
-    fused = TileOp()
-
-    def cut(route):
-        graph = Graph()
-        graph.add_node(TileOp(knobs=route), [], Tensor("cut", (1,)), node_id="cut")
-        return graph
-
-    leaves = [fused, cut({"PLACE@a": "cut"}), cut({"PLACE@map": "cut"}), cut({"PLACE@a0": "cut"})]
-    placement_rows = _placement_candidate_rows(leaves)
-    assert placement_rows == [{}, {"PLACE@a": "cut"}, {"PLACE@map": "cut"}, {"PLACE@a0": "cut"}]
-    evidence_rows = [{**ctx.features(), **live_features, **row} for row in placement_rows]
-
-    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
-    index = _db_measured_index(reloaded_db, ctx)
-    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (2, 59.61)
-    reloaded_db.close()
-
-    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
-
-    class NoEvidencePrior:
-        def evidence_pick(self, _rows, **_kwargs):
-            return None
-
-        def mean_scores(self, rows):
-            return [1_000_000.0] * len(rows)
-
-        def pick(self, _rows):
-            raise AssertionError("exact measured placement evidence was not selected")
-
-    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
-    root = LoopOp(body=original_loop.body, knobs=live_features)
-    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.policy.greedy._verified_index", lambda _ctx: ({}, {}))
-    priced_calls = []
-    monkeypatch.setattr(
-        "emmy.compiler.pipeline.search.policy.greedy._priced_pick",
-        lambda *_args: priced_calls.append(True) or leaves[0],
-    )
-    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
-    assert selected is leaves[2]
-    assert fork.score == pytest.approx(59.61)
-    assert priced_calls == []
-    reloaded_db.close()
-
-    def stats(us):
-        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
-
-    place_db = SearchDB(tmp_path / "place.db")
-    place_db.record_perf(
-        ctx.structural_key(),
-        "fused",
-        backend="cuda",
-        status="ok",
-        stats=stats(40.0),
-        knobs={**ctx.features(), **live_features},
-        captured=True,
-    )
-    place_db.close()
-    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
-    index = _db_measured_index(reloaded_db, ctx)
-    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
-    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
-    priced_calls.clear()
-    selected = greedy_decide(prior=NoEvidencePrior(), db=reloaded_db)(fork)
-    assert selected is leaves[0]
-    assert fork.score == pytest.approx(40.0)
-    assert priced_calls == []
-    reloaded_db.close()
-
-    place_db = SearchDB(tmp_path / "place.db")
-    place_db.record_perf(
-        ctx.structural_key(),
-        "other-cut",
-        backend="cuda",
-        status="ok",
-        stats=stats(30.0),
-        knobs={**ctx.features(), **live_features, "PLACE@a": "cut"},
-        captured=True,
-    )
-    place_db.close()
-    reloaded_db = SearchDB.open_readonly(tmp_path / "place.db")
-    index = _db_measured_index(reloaded_db, ctx)
-    assert _db_measured_pick(index, evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
-    reloaded_db.close()
-
-    unmatched_db = SearchDB(tmp_path / "unmatched-place.db")
-    unmatched_db.record_perf(
-        ctx.structural_key(),
-        "unmatched-cut",
-        backend="cuda",
-        status="ok",
-        stats=stats(1.0),
-        knobs={**ctx.features(), **live_features, "PLACE@foreign": "cut"},
-        captured=True,
-    )
-    unmatched_db.close()
-    reloaded_db = SearchDB.open_readonly(tmp_path / "unmatched-place.db")
-    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), evidence_rows, exact_families=frozenset({"PLACE"})) is None
-    reloaded_db.close()
-
-    reservoir = OnlinePrior()
-    reservoir.add_rows(
-        [
-            ({**ctx.features(), **live_features, **place}, 59.61),
-            ({**ctx.features(), **live_features}, 40.0),
-            ({**ctx.features(), **live_features, "PLACE@foreign": "cut"}, 1.0),
-        ]
-    )
-    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (0, 40.0)
-    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
-    priced_calls.clear()
-    selected = greedy_decide(prior=reservoir, db=None)(fork)
-    assert selected is leaves[0]
-    assert fork.score == pytest.approx(40.0)
-    assert priced_calls == []
-
-    reservoir.add_rows([({**ctx.features(), **live_features, "PLACE@a": "cut"}, 30.0)])
-    assert reservoir.evidence_pick(evidence_rows, exact_families=frozenset({"PLACE"})) == (1, 30.0)
-    fork = SimpleNamespace(ctx=ctx, root_op=root, options=leaves, node_id="root", score=None)
-    priced_calls.clear()
-    selected = greedy_decide(prior=reservoir, db=None)(fork)
-    assert selected is leaves[1]
-    assert fork.score == pytest.approx(30.0)
-    assert priced_calls == []
 
     nonstructural = {**route, "REDUCE": ""}
     active_route = nonstructural

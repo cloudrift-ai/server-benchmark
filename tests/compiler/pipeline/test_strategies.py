@@ -19,7 +19,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import flatten_leaves
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy, structure_features
@@ -138,23 +138,6 @@ def test_every_fusion_born_kernel_is_stamped_at_the_loop_terminal() -> None:
             stamped = {k: v for k, v in node.op.knobs.items() if k.startswith(STRUCT_PREFIX)}
             assert stamped, f"{nid} must carry its structural identity at the loop terminal"
             assert stamped == structure_features(node.op.body, out), "the stamp IS structure_features of the final body"
-
-
-def test_minted_pieces_are_stamped_with_their_own_identity(monkeypatch) -> None:
-    """A cut minted during lowering is stamped at the splice event — each piece with features of
-    its OWN body — and attributed to the kernel it decomposed (``Op.source``)."""
-    monkeypatch.setenv("EMMY_PLACE", "cut")
-    out, _ = _resolve(CUDA_PASSES, _norm_linear())
-    kernels = {nid: n for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None)}
-    assert any("__cut_" in nid for nid in kernels), f"the pin must cut: {list(kernels)}"
-    sigs = set()
-    identity = _identity()
-    for nid, node in kernels.items():
-        loop_ancestor = next(op for op in node.op.source_chain() if isinstance(op, LoopOp))
-        sig = identity.signature(loop_ancestor)
-        assert sig, f"{nid} has no structural identity"
-        sigs.add(sig)
-    assert len(sigs) == len(kernels), "each piece featurizes as itself, not as its parent"
 
 
 def test_read_api_is_knobs_first_and_compute_equal() -> None:

@@ -220,7 +220,6 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     monkeypatch.setenv("EMMY_TILE", tile)
     monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
-    monkeypatch.setenv("EMMY_PLACE", "fuse")  # …and its cone kept whole, not routed to a cut by the host's prior
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
     S, H, inter = 64, 1024, 3072
@@ -242,68 +241,6 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     assert "emmy_swizzle" in srcs[0], "the sync compute-fill must swizzle its slabs (fill-side Write XOR)"
     if tile.endswith("k4"):
         assert "_rsub" in srcs[0], "RASTER must resolve on the fused-cone grid (grouped CTA decode emitted)"
-    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
-    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
-    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
-
-
-@requires_cuda
-def test_place_cone_cut_splits_the_kernels(monkeypatch):
-    """``PLACE@cone=cut`` (here via the bare ``EMMY_PLACE`` env pin) keeps the norm producer OUT
-    of the matmul kernel — the ``xn`` intermediate stays a MEMORY edge and the program lowers to
-    MULTIPLE kernels (the fusion-pass guard; the tile recognizer's gate alone could only demote
-    an already-fused kernel to its coop form, never split it — the pin used to be a silent
-    no-op). The matmul side then owns a plain gmem A, so the staged cp.async/TMA tiers apply —
-    measured 496-503 µs vs the exhaustively-optimized fused kernel's ~660 on the gemma gate_up
-    shape (5090). Numerics must match the same numpy reference as the fused form."""
-    monkeypatch.setenv("EMMY_PLACE", "cut")
-    S, H, inter = 32, 1024, 3072
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
-    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
-    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
-    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
-    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
-    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
-    rng = np.random.default_rng(0)
-    ins = {
-        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
-        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
-        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
-    }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) >= 2, f"PLACE@cone=cut must split the norm from the matmul, got {len(srcs)} kernel(s)"
-    x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
-    rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
-    np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
-
-
-@requires_cuda
-def test_place_cone_cut_degenerate_m1(monkeypatch):
-    """``PLACE@cone=cut`` on the DEGENERATE M=1 composition — per-token decode's norm→matvec.
-    At S=1 the reshape-folded lift leaves the contraction with ZERO free axes; the recognizer
-    synthesizes a unit ``_um`` axis so the composition still binds (instead of a grid-1 fused
-    schedule ~300× off the memory floor) and the cut guard accepts ``free ≤ 1``. The cut's
-    consumer half then re-lowers through ``rename_ssa_sequential`` — the shape that miscompiled
-    (``acc1``-undefined) when ``Loop.rewrite`` carried its ``Carrier`` verbatim past the body's
-    Accum renumber. Compiling, splitting, and matching numpy is the whole regression."""
-    monkeypatch.setenv("EMMY_PLACE", "cut")
-    S, H, inter = 1, 1024, 3072
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
-    g.add_node(InputOp(), [], Tensor("nw", (H,), F16), node_id="nw")
-    g.add_node(InputOp(), [], Tensor("wg", (inter, H), F16), node_id="wg")
-    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("xn", (1, S, H), F16), node_id="xn")
-    g.add_node(LinearOp(), ["xn", "wg"], Tensor("o", (1, S, inter), F16), node_id="o")
-    g.inputs, g.outputs = ["x", "nw", "wg"], ["o"]
-    rng = np.random.default_rng(0)
-    ins = {
-        "x": (rng.standard_normal((1, S, H)) * 0.3).astype(np.float16),
-        "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
-        "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
-    }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) >= 2, f"PLACE@cone=cut must split the M=1 norm from the matvec, got {len(srcs)} kernel(s)"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)

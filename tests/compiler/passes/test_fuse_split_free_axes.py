@@ -148,17 +148,13 @@ def test_axis_addressed_alone_declines():
     assert [ln.axis.extent for ln in _free_chain(op)] == [Dim(M), Dim(H), Dim(D)], "the pair must decline"
 
 
-def test_permuted_split_fuses_with_the_split_store():
-    """A store whose dims transpose the split (``[…, d, h]`` under an ``h*D + d`` operand index)
-    still fuses: the output keeps the honest ``f%D, f//D`` pair — exact per element on every
-    scalar tier; whether the warp tier can address it is the scheduler's legality question."""
+def test_permuted_split_store_keeps_the_axes_separate():
+    """Output-storage order is canonical, so a transposed ``[d, h]`` store keeps the pair split."""
     op = _run(_graph(_split_n_body((Literal(0, "int"), Var("a0"), Var("a2"), Var("a1"))), (1, M, D, H)))
     chain = _free_chain(op)
-    assert [ln.axis.extent for ln in chain] == [Dim(M), Dim(H * D)]
-    n = chain[1].axis.name
+    assert [ln.axis.extent for ln in chain] == [Dim(M), Dim(D), Dim(H)]
     wr = next(s for s in op.body.iter() if isinstance(s, Write))
-    assert wr.index[2] == BinaryExpr("%", Var(n), Literal(D, "int"))
-    assert wr.index[3] == BinaryExpr("//", Var(n), Literal(D, "int"))
+    assert wr.index == (Literal(0, "int"), *(Var(loop.axis.name) for loop in chain))
 
 
 def _transposed_body() -> Body:

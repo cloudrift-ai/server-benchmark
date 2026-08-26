@@ -9,8 +9,8 @@ kernel, at birth:
   computed stamp boundary; run start for a pipeline entering at lowering): the fused body is
   final, so the identity reflects the final form; earlier would give the same logical kernel two
   identities (pre- and post-stamp) and split the tune DB's keyings.
-- **minted during lowering** — a placement cut's fragments, a cross-CTA split's pieces
-  (``on_splice`` of a lowering pass): fresh knob-less ``LoopOp``\\ s stamped before the fragment
+- **minted during lowering** — a cross-CTA split's pieces (``on_splice`` of a lowering pass):
+  fresh knob-less ``LoopOp``\\ s stamped before the fragment
   even enters the graph, so no rule, whatever the cursor position, can observe an unstamped
   kernel. The same moment threads decomposition attribution (``Op.source`` — the two-level
   tuner's composed Σ rows group by it).

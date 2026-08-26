@@ -329,8 +329,8 @@ def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatc
     else:
         assert "atomicAdd" not in src, "the deferred kernel finalize must not emit atomicAdd"
         # The finalize adds exactly ONE combine kernel over a simple carrier's one-kernel
-        # lowering. SDPA may retain multiple kernels through a placement cut, so only the split
-        # workspace contract is asserted there.
+        # lowering. SDPA's twisted split has its own kernel structure, so only the split workspace
+        # contract is asserted there.
         if carrier != "flash":
             assert n_global == 2, f"deferred finalize splices one combine kernel over 1, got {n_global}"
         assert "__partial" in src, "the producer writes its partial state to a workspace"

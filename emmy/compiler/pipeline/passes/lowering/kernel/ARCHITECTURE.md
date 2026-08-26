@@ -372,7 +372,9 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Kernel-IR peepholes
 
-`030_stamp_types` resolves element dtypes; `050_vectorize_loads` / `080_vectorize_stores` /
+`030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
+stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
+`080_vectorize_stores` /
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses slab-adjacent staged `x2` B-fragment
 `LdmatrixLoad`s into one `x4` (`pair_frag` — plain `x4` for an N-adjacent transposed-B pair, `x4.trans` for a
 col-adjacent canonical pair; equal swizzle modes pair too — the per-lane address XOR commutes with the paired lane

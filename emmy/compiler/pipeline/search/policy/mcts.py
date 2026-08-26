@@ -370,9 +370,6 @@ class TuningSearch(Search):
         if not knobs:
             return None
         row = dict(tuning_knob_items(knobs))
-        cuts = {key: value for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
-        if cuts:
-            return cuts
         work = Workers.parse(row.get("WORK"))
         if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
             return stamp_schedule_families(row)
@@ -435,8 +432,7 @@ class TuningSearch(Search):
         if structural is None and node.realized_knobs is None and (node.realized_cuda_ops or 0) > 1:
             structural = self._structural_row(validated_input_route)
         if structural is not None:
-            place_only = all(family_of(key) == "PLACE" for key in structural)
-            if not place_only and (
+            if (
                 not node.realized_cuda_knobs
                 or unreproducible_pin_flag(structural, node.realized_cuda_knobs, reject_conflicts=True) is not None
             ):

@@ -90,7 +90,7 @@ EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
     "scalar_matmul": [(("TILE", "STAGE", "REDUCE"), 17988, "b30d5d0f9070cd89d130ff8fad132a84")],
     "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
     "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
-    "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
+    "fused_norm_linear": [(("TILE", "STAGE", "REDUCE"), 12624, "257c4310f90f108a369583ff2dce18b0")],
     "flash_pair": [(("TILE@a3", "TILE@pj", "STAGE", "REDUCE"), 29, "a0c1bafcbcf96ba19e02ff7f50dda9eb")],
 }
 

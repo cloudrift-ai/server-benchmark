@@ -69,22 +69,22 @@ def test_pinned_knobs_sets_and_restores_env(monkeypatch):
 
 
 def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch):
-    """Axis-scoped programmatic pins preserve the raw aggregate that placement routing reads."""
+    """Axis-scoped programmatic pins preserve the raw aggregate and their environment splat."""
     import os
 
     from emmy.compiler.pipeline.knob import parse_knob_spec
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
-    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
-    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
-        assert os.environ["EMMY_PLACE@A"] == "cut"
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,STAGE@a=d1/smem")
+    monkeypatch.setenv("EMMY_STAGE@A", "d1/smem")
+    with pinned_knobs({"STAGE@a": "d2/smem", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_STAGE@A"] == "d2/smem"
         assert os.environ["EMMY_TILE@DD"] == "f2x2"
-        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
-        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
-    assert os.environ["EMMY_PLACE@A"] == "fuse"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem,STAGE@a=d2/smem,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["STAGE@a"] == "d2/smem"
+    assert os.environ["EMMY_STAGE@A"] == "d1/smem"
     assert "EMMY_TILE@DD" not in os.environ
-    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem"
 
 
 def _symbolic_input_graph():

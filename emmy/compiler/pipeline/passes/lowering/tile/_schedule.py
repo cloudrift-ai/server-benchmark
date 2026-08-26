@@ -1922,14 +1922,27 @@ def deploy_identity(tile: TileOp) -> str:
 
 def pool_key(tile: TileOp) -> str:
     """The pool cache key — everything the enumeration reads that the Context does not pin.
-    ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs; the
-    three identity-excluded inputs are folded in explicitly — the operand/output dtypes
-    (:func:`_dtype_fingerprint` — the atom-eligibility input the term deliberately omits), the
-    symbolic-axis hints (:func:`_hint_fingerprint`) and the live env pins
-    (:func:`schedule_pin_fingerprint`). The ctx facts (target, smem cap, TMA, the f16acc gate)
-    need no key part: the cache lives ON the Context, so one instance never spans two fact
-    sets."""
-    return digest(tile.cache_key(), _dtype_fingerprint(tile), _hint_fingerprint(tile), schedule_pin_fingerprint())
+
+    ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs. Every
+    OTHER input :class:`_Term` reads has to be folded in explicitly, because ``structural_key``
+    excludes it by design: the operand/output dtypes (:func:`_dtype_fingerprint` — the
+    atom-eligibility input), the per-axis EXTENTS (:func:`_extent_fingerprint`), the symbolic-axis
+    hints (:func:`_hint_fingerprint`) and the live env pins (:func:`schedule_pin_fingerprint`).
+    The ctx facts (target, smem cap, TMA, the f16acc gate) need no key part: the cache lives ON
+    the Context, so one instance never spans two fact sets.
+
+    The extents are NOT covered by the knobs' ``S_ext_*`` features, which are a lossy summary
+    (count / product / max). An ``8x64 @ 64x512`` matmul and a ``512x64 @ 64x8`` one agree on all
+    three, and on the term — the algebra digest canonicalizes sizes away — so they shared one pool
+    while their spaces are 57442 and 8280 candidates. Whichever compiled first decided the other.
+    A new read in ``_Term`` that the term does not carry belongs here."""
+    return digest(
+        tile.cache_key(),
+        _dtype_fingerprint(tile),
+        _extent_fingerprint(tile),
+        _hint_fingerprint(tile),
+        schedule_pin_fingerprint(),
+    )
 
 
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] | TileOp:

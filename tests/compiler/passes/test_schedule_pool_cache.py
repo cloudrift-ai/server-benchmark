@@ -15,7 +15,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of
 from emmy.compiler.pipeline.pipeline import Run
@@ -159,3 +159,48 @@ def test_a_live_context_never_samples() -> None:
         assert set(map(canonical_row_key, drawn_pool.rows)) < set(map(canonical_row_key, full_pool.rows))
         assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
         assert _resolve(ctx, _matmul_graph()) == full
+
+
+def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
+    """The lifted, unscheduled ``TileOp`` for one ``m x k @ k x n`` matmul, knobs and all.
+
+    Lifting by hand rather than through ``lowering/tile`` is what lets the assertion below name
+    the pool key directly instead of inferring a collision from downstream symptoms.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=dtype), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (Dim(k), Dim(n)), dtype=dtype), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=dtype), node_id="o")
+    g.inputs, g.outputs = ["a", "b"], ["o"]
+    node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
+    tile = lift_loop_op(node.op, name=node.op.name)
+    tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+    return tile
+
+
+def test_transposed_free_extents_do_not_share_a_pool() -> None:
+    """Per-axis extents are an ENUMERATION input, so they must be a key part.
+
+    The term's algebra digest canonicalizes sizes away and the knobs carry only the lossy
+    ``S_ext_*`` summary (count / product / max), which ``8x512`` and ``512x8`` agree on. They
+    therefore reach identical ``structural_key`` AND ``cache_key`` while their spaces differ by
+    7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment store
+    against the free axes — so sharing a pool let whichever compiled first decide the other.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term, pool_key
+
+    ctx = Context.from_target((12, 0))
+    wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
+
+    # The premise: everything the OLD key was built from agrees.
+    assert wide.structural_key() == tall.structural_key()
+    assert wide.cache_key() == tall.cache_key()
+
+    # The consequence: the spaces do not.
+    def total(tile) -> int:
+        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+
+    assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
+    assert pool_key(wide) != pool_key(tall), "so they must not share a pool entry"

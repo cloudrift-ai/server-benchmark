@@ -15,6 +15,7 @@ the signature alone.
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -51,6 +52,34 @@ def _env_compile_flags() -> str:
     CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
     :meth:`Context.structural_key` so the perf cache is partitioned by opt level."""
     return config.nvcc_flags()
+
+
+# The cicc optimization level as it is spelled on the nvcc command line, with the ``-Xcicc``
+# forwarding prefix when present. nvcc's own default is -O3, which is why an absent token reads
+# as 3 (:func:`split_opt_level`) — the compile / run default of ``""`` IS the deployable regime.
+_OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
+
+
+def split_opt_level(compile_flags: str) -> tuple[int, str]:
+    """Split extra nvcc flags into ``(cicc opt level, everything else)``.
+
+    ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
+    (:meth:`Context.features`) and the identity a measurement is stored under
+    (:meth:`Context.structural_key`). They must agree — the deploy evidence tiers gate on
+    ``H_opt`` and then look rows up by ``structural_key``, so a regime the two spell differently
+    is a row that is declared deployable and is then unreadable at a deploy.
+
+    Splitting rather than digesting the raw string is what makes ``""`` (compile / run's default)
+    and ``"-Xcicc -O3"`` ONE regime, as they physically are — keyed on the raw string they were
+    two, and every ``-O3``-pinned row was invisible to a default deploy. The residual keeps every
+    other flag verbatim, so ``--use_fast_math`` (which genuinely changes codegen) stays its own
+    partition."""
+    opt = 3
+    m = _OPT_TOKEN.search(compile_flags)
+    if m is not None:
+        opt = int(m.group(1))
+        compile_flags = compile_flags[: m.start()] + compile_flags[m.end() :]
+    return opt, " ".join(compile_flags.split())
 
 
 def _max_dynamic_smem_for(cc: tuple[int, int]) -> int:
@@ -166,11 +195,10 @@ class Context:
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
     # Extra nvcc flags this compile uses (from ``EMMY_NVCC_FLAGS`` — e.g.
-    # tune's ``-Xcicc -O1`` vs compile/run's -O3). Folded into
-    # ``structural_key`` so the autotune ``perf`` cache is partitioned by opt
-    # level: -O1-measured latencies (a fast-compile *ranking* signal) never
-    # clobber -O3 ones, and a later -O3 ``run`` re-benches rather than reading a
-    # stale -O1 number. Populated from the env by :meth:`probe` /
+    # normally empty — tune, compile and run all measure in the deployable regime).
+    # Folded into ``structural_key`` (split, see :func:`split_opt_level`) so the autotune
+    # ``perf`` cache is partitioned by opt level: a measurement taken under a deliberately
+    # non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the env by :meth:`probe` /
     # :meth:`from_target`.
     compile_flags: str = ""
     # Whether the strict knob-pin validator (``lowering/tile/_validate``)
@@ -275,10 +303,13 @@ class Context:
         As other non-derived knobs land (forced TMA on/off, splitk overrides),
         extend this method explicitly — keep ambient I/O fields out so the
         autotuning cache survives debug-flag flips.
+
+        The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
+        key however it is spelled.
         """
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
-        return digest("Context", self.compute_capability, self.compile_flags)
+        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags))
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the node-store key + ``gpu`` column: the PCIe
@@ -305,24 +336,21 @@ class Context:
         - ``H_tc_gen`` — tensor-core generation (``_TENSOR_CORE_GEN``)
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
         - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
-          ``-Xcicc -O1`` → 1; compile/run's default → 3)
+          an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
           ``H_regs_per_block`` / ``H_warp_size`` / ``H_total_mem`` — live device props
           (:func:`target.live_device_features`; absent on GPU-less hosts). ``H_total_mem``
           (VRAM bytes) is the one feature that distinguishes same-die SKUs the SM-only
           features can't — H100 80GB vs H200 141GB share cc + SM count.
         """
-        import re  # noqa: PLC0415
-
         from emmy.compiler.target import live_device_features  # noqa: PLC0415
 
         major, minor = self.compute_capability
-        m = re.search(r"-O(\d)", self.compile_flags)
         feats = {
             "H_cc": float(major * 10 + minor),
             "H_tc_gen": float(_TENSOR_CORE_GEN.get((major, minor), major)),
             "H_smem_optin": float(self.max_dynamic_smem),
-            "H_opt": float(m.group(1)) if m else 3.0,
+            "H_opt": float(split_opt_level(self.compile_flags)[0]),
         }
         # The memorized props of this context's card (golden reconstruction) when
         # set, else the live device's — so a golden featurizes with its own card.

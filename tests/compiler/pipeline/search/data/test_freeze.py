@@ -118,7 +118,8 @@ def _seed_db(path, rows) -> None:
 
 
 _SEED = [
-    # _SPEC_A's -O3/-O1 twins on the 5090 — same declarative op, two lanes.
+    # _SPEC_A on the 5090, plus the non-deployable twin an older store still holds: same
+    # declarative op, but only the deployable row is a measurement anything reads.
     _row("leaf-a3", value_us=500.0, op_sig="mm1", features=_feats(), run_id="run-a"),
     _row("leaf-a1", value_us=900.0, op_sig="mm1", features=_feats(opt=1.0), run_id="run-a"),
     _row("leaf-b", value_us=480.0, op_sig="mm2", gpu=_GPU2, features=_feats(cc=89.0), run_id="run-b"),
@@ -127,7 +128,7 @@ _SEED = [
     _row("leaf-stale", value_us=500.0, op_sig="mm1", features=_feats(), feat_ver=FEATURIZER_VERSION - 1),
     _row("leaf-legacy", value_us=500.0, op_sig="mm1", features=_feats()),  # no identity — never freezes
 ]
-_N_KEPT = 5
+_N_KEPT = 4
 
 
 def test_write_freeze_round_trip(tmp_path) -> None:
@@ -139,7 +140,7 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert manifest["kind"] == FREEZE_KIND
     assert manifest["freeze_ver"] == FREEZE_VER
     assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
-    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 4, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 4}}
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}}
     assert manifest["run_ids"] == ["run", "run-a", "run-b"]
     assert manifest["policy_note"] == "unit-test policy"
     assert manifest["source_db"] == str(db_path.resolve())
@@ -156,25 +157,24 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert len(rows) == _N_KEPT
     by_run_value = {(r.run_id, r.value_us): r for r in rows}
     a3 = by_run_value[("run-a", 500.0)]
-    a1 = by_run_value[("run-a", 900.0)]
     fail = by_run_value[("run-a", 60000.0)]
     assert a3.status == "ok" and a3.measured_at == "2026-07-09T00:00:00+00:00"
     assert fail.status == "bench_fail"
     # Features are RE-DERIVED: card-faithful H_* (H_cc from the file cap), the opt lane
     # from the row's own field, full traced S_* keying to the spec, tunables verbatim.
     assert a3.features["H_cc"] == 120.0 and a3.features["H_opt"] == 3.0
-    assert a1.features["H_opt"] == 1.0
+    assert ("run-a", 900.0) not in by_run_value, "the non-deployable twin does not freeze"
     assert a3.features["TILE"] == "f2x2"
     assert ShapeKey.from_s_features(a3.features).joins(ShapeKey.from_matmul(_SPEC_A["M"], _SPEC_A["N"], _SPEC_A["K"], _SPEC_A["dtype"]))
     assert a3.feat_ver == FEATURIZER_VERSION
-    # Treeless contract + stored DB identity: -O1/-O3 twins share one op_sig.
+    # Treeless contract + stored DB identity.
     assert all(r.parent_key is None and r.depth == 0 and r.visits == 0 and r.is_leaf is True for r in rows)
-    assert a3.op_sig == a1.op_sig == "mm1"
-    assert a3.op_sig != fail.op_sig and a3.node_key != a1.node_key
+    assert a3.op_sig == "mm1"
+    assert a3.op_sig != fail.op_sig
     # The fold seam reads freeze rows unchanged — the split unit for out-of-sample evaluation. It has no
     # production caller yet: ``group_measured`` keys its own comparison sets and does not fold.
-    assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 4, _GPU2: 1}
-    assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 3, fail.op_sig: 2}
+    assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 3, _GPU2: 1}
+    assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 2, fail.op_sig: 2}
     assert len(rows) == _N_KEPT
 
 

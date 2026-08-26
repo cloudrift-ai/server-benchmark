@@ -37,7 +37,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from emmy.compiler.context import Context
+from emmy.compiler.context import Context, split_opt_level
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import stamp_schedule_families
@@ -339,7 +339,7 @@ class TwoLevelStrategy(SearchStrategy):
         # The regime the deployable -O3 re-benches are keyed under in the node store — the tune
         # context with the re-bench's flags substituted, so an -O3 leaf row never collides with
         # its -O1 twin. ``None`` when the sweep itself already runs at -O3.
-        o3_ctx_key = replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key() if "-O3" not in ctx.compile_flags else None
+        o3_ctx_key = None if split_opt_level(ctx.compile_flags)[0] == 3 else replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
         # Group structurally-identical LoopOps under one ``Op.cache_key`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are

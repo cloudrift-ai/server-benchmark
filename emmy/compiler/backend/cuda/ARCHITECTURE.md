@@ -247,6 +247,24 @@ setting reaches every bench path uniformly — the in-child backend inherits the
 pinned-row cap, the comparison jobs' workload-scaled cap) recompute from the overridden values. Raising them is how a
 golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified.
 
+The three budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
+about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's
+sentinel latency. A `bench_compile_timeout_s` overrun is a fact about **cicc and the tile's unroll size**: nothing
+about the kernel's speed was measured, so it raises `CompileBudgetExceeded` and callers record *nothing at all*
+(`search/policy/terminal_bench.py`, and `run --bench`'s pinned rows via `_failed_bench_status`). The exception class
+cannot cross the worker pipe (the protocol carries `error` as a string), so the child flags the kind as
+`compile_budget: True` and the parent rebuilds it onto `BenchWorkerJobError` — the same shape the retryable
+`cache_miss` kind already uses.
+
+`bench_wall_timeout_s` is the third, and it **must exceed the other two**, because it cannot tell them apart: on
+overrun the parent SIGKILLs the child and raises a plain `RuntimeError`, so a wall that can fire first collapses both
+honest in-child verdicts into one anonymous failure. The compile budget is checked when the compile *returns* and so
+can only fire for a compile that finished; the sweep's old wall sat ~2 s above compile+run, which meant any compile
+slower than that was killed rather than reported — and the wide register-tile family that motivates the budget is
+exactly the family that overruns it. The sweep therefore derives its wall as `compile + run + 60 s`, the same formula
+the pinned path uses; the 60 s of headroom is what lets the per-launch watchdog's first-iter grace fire in-child,
+which is what actually catches hangs. The wall is a backstop for a wedged worker, not a per-variant budget.
+
 The one-shot comparison result includes the worker's non-fatal `accuracy_error` beside timings, reference
 availability, and capture state. `tune --bench` persists that verdict per provenance reproducer instead of treating a
 successful timing response as proof of correctness.

@@ -1,4 +1,4 @@
-"""``Group`` — one candidate pool plus its labels: the comparison set every ranking question is asked over.
+"""``Group`` — one candidate pool plus its labels: the candidate pools every ranking question is asked over.
 
 A group is one shape's featurized candidate pool on one card, with whatever supervision exists for it. The
 base carries the pool and its identity and nothing about supervision, because the two kinds of it are not
@@ -370,7 +370,7 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
       of the same structure on the same card are ONE tuning problem whatever produced them — which is
       already how the deploy path joins evidence (``Prior.evidence_pick`` and
       ``policy/greedy._db_measured_pick`` both index on the ``S_*`` signature), so this makes the
-      comparison sets agree with the tier that consumes them.
+      candidate pools agree with the tier that consumes them.
 
       Keying on the recorded ``op_sig`` instead gets it wrong in both directions, and the freeze shows
       both. It **over-merges**: ``op_sig`` digests the PRE-DESCENT offer op, and a site realized as several

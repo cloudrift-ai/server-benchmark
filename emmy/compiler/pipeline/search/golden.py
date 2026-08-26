@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -796,8 +797,6 @@ def kernel_identity(record: GoldenRecord) -> str | None:
         _IDENTITY_CACHE[key] = identity
         return identity
     try:
-        from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
-
         identity = deploy_identity(_lifted_target(record))
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None

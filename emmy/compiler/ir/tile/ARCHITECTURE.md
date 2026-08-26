@@ -105,6 +105,21 @@ which contraction normalization has placed those statistics inside a computed no
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
 operand; the generic twisted Fold derivation then exposes the corresponding contraction to scheduling.
 
+## Kernel identity
+
+`identity.py` is the home for every "are these two kernels the same?" question, and the index over
+the ones answered elsewhere. The term digest (`_key.py`) canonicalizes α-renaming, buffer spelling
+**and sizes** away — right for the algebra, wrong for everything downstream — so each coarser
+identity folds the excluded facts back in through a named fingerprint rather than deriving them at
+the call site. `deploy_identity` is the verified-tier join key; `pool_key` is the schedule-space
+key and takes the live pin fingerprint as a required argument, which is what keeps the module a
+pure function of a `TileOp` and below the pipeline layer.
+
+A fact that changes what a reader produces, and that the term does not carry, belongs in a
+fingerprint here. Omitting one is silent: `pool_key` shipped without per-axis extents, and two
+matmuls with transposed M/N — equal terms, equal `S_ext_*` summaries — shared one pool entry over
+spaces of 57442 and 8280 candidates.
+
 ## TileOp and scheduling
 
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and boundary

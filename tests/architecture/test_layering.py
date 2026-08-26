@@ -225,3 +225,57 @@ def test_search_data_does_not_import_the_prior() -> None:
         "search/data/*.py must not import search.prior — the data layer carries columns and labels; "
         "each model class decides for itself which columns it wants.\n" + "\n".join(offenders)
     )
+
+
+_IDENTITY_HOME = "emmy/compiler/ir/tile/identity.py"
+
+
+def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
+    """No module outside the home may DEFINE one of its readings.
+
+    Identity has several legitimate meanings — the algebra digest, the deploy join key, the
+    schedule-space key, the ``S_*`` row — and each is answered once, in a module whose docstring
+    says which. What this forbids is a second copy of one of THESE readings: a fingerprint
+    re-derived beside its caller drifts from the thing it identifies, silently, and the failure is
+    two kernels sharing a cache entry or a golden record joining the wrong shape.
+
+    ``pool_key`` shipped omitting per-axis extents for exactly that reason — it lived next to the
+    enumeration it keyed, read as a local memo detail, and nobody treated it as a contract with
+    three external consumers.
+
+    Deliberately narrow: it matches the home's own names, not every function whose name contains
+    "identity" or "sig". A guard that flagged those would be exempted rather than obeyed, and the
+    exemption list would become the real rule.
+    """
+    owned = ("deploy_identity", "pool_key", "dtype_fingerprint", "extent_fingerprint", "hint_fingerprint", "hint_extent")
+    forbidden = re.compile(r"^def\s+_?(" + "|".join(owned) + r")\s*\(")
+    offenders: list[str] = []
+    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
+        relative = py.relative_to(_REPO_ROOT).as_posix()
+        if relative == _IDENTITY_HOME:
+            continue
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.match(line):
+                offenders.append(f"{relative}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        f"these readings are defined in {_IDENTITY_HOME}; import them instead of re-deriving. A new "
+        "fact the enumeration reads belongs in a fingerprint THERE.\n" + "\n".join(offenders)
+    )
+
+
+def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
+    """Identity readers import ``ir/tile/identity``, never a lowering pass's private module.
+
+    ``search/golden.py`` and ``search/policy/greedy.py`` used to import ``deploy_identity`` and
+    ``pool_key`` from ``passes/lowering/tile/_schedule`` — inside functions, with ``noqa: PLC0415``,
+    because the module-level direction is a cycle (``_schedule`` imports ``search.space``). A
+    deferred import with a lint suppression is what a layering inversion looks like when the code
+    has not moved yet.
+    """
+    forbidden = re.compile(r"lowering\.tile\._schedule\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
+    offenders: list[str] = []
+    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.search(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
+    assert not offenders, "import kernel identity from emmy.compiler.ir.tile.identity\n" + "\n".join(offenders)

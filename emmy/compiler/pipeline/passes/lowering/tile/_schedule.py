@@ -25,7 +25,7 @@ from dataclasses import dataclass, field, replace
 from itertools import accumulate, product
 from types import MappingProxyType
 
-from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -47,6 +47,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Placement, Store, TileOp
+from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
@@ -125,67 +126,6 @@ def _projection(op) -> Body:
     """The kernel's per-cell projection — the wrapping zero-axis fold's body, or empty when the
     term is a bare node. A projection has ONE home (the wrapper's lift), never a node field."""
     return op.lift.body if isinstance(op, Fold) and op.axis is None and op.operands else Body(())
-
-
-def _hint_extent(ax) -> int:
-    """An axis's static extent, or its ``Dim`` hint when symbolic."""
-    e = ax.extent
-    return e.as_static() if e.is_static else (e.hint or DEFAULT_SEQ_HINT)
-
-
-def _hint_fingerprint(tile: TileOp) -> tuple[int, ...]:
-    """The hint-resolved extents of the term's SYMBOLIC axes, in walk order. ``Dim.hint`` is
-    deliberately excluded from identity (``Op.cache_key`` stays hint-independent), but the
-    enumeration SIZES against it (:func:`_hint_extent` → which coop bands the reduce extent can
-    feed), so the pool cache's key must carry it — two same-key ops traced at different
-    ``--seq-len`` hints enumerate different pools."""
-    out: list[int] = []
-
-    def note(ax) -> None:
-        if ax is not None and not ax.extent.is_static:
-            out.append(_hint_extent(ax))
-
-    def walk(node) -> None:
-        if not isinstance(node, Fold):
-            return
-        note(node.axis)
-        for e in node.operands:
-            walk(e)
-        for s in node.lift.body:
-            walk(s)
-
-    for a in tile.place.free:
-        note(a)
-    walk(tile.op)
-    return tuple(out)
-
-
-def _extent_fingerprint(tile: TileOp) -> tuple[str, ...]:
-    """Every axis extent of the Fold tree in walk order — the free grid, then each
-    ``Fold`` axis: a static extent as its integer, a symbolic axis as the bare ``sym`` marker
-    (identity stays hint-free — a symbolic record is the symbolic kernel's identity at every
-    hint). Part of :func:`deploy_identity` because the α-invariant algebra digest canonicalizes
-    sizes away: without extents every same-algebra cone on a card shares one key, and the
-    fastest record of ANY shape decides them all (an m32 scalar row deploying onto every M)."""
-    out: list[str] = []
-
-    def note(ax) -> None:
-        if ax is not None:
-            out.append(str(ax.extent.as_static()) if ax.extent.is_static else "sym")
-
-    def walk(node) -> None:
-        if not isinstance(node, Fold):
-            return
-        note(node.axis)
-        for e in node.operands:
-            walk(e)
-        for s in node.lift.body:
-            walk(s)
-
-    for a in tile.place.free:
-        note(a)
-    walk(tile.op)
-    return tuple(out)
 
 
 def _inner_free(place: Placement) -> Axis | None:
@@ -794,7 +734,7 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
             # ``030_split_reduce`` and crash the emitter instead of reporting a refusal.
             legal.enforce(atomic, pinned=True)
         return [plan]
-    extent = _hint_extent(node.axis)
+    extent = hint_extent(node.axis)
     cands = [ReducePlan()]
     for p in coop_reduce_moves():
         if p.needs_split and not _splittable_axis(term, node):
@@ -1874,77 +1814,6 @@ class _Pool:
         return cls(tuple(keys), stored, total)
 
 
-def _dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
-    """The operand dtypes as the enumeration reads them — each term ``Load``'s buffer dtype in
-    first-use walk order, plus the output dtypes. NAME-FREE (a buffer's graph id never enters),
-    so two same-shape kernels still share a pool, while an f16 and an f32 trace of one shape —
-    equal terms, different atom eligibility — key apart. Explicit rather than via the stamped
-    ``S_dtype_*`` knobs because not every path that reaches scheduling carries the stamps."""
-    seen: set[str] = set()
-    out: list[str] = []
-
-    def note_stmt(s) -> None:
-        if isinstance(s, Fold):
-            walk(s)
-            return
-        if isinstance(s, Load) and s.input not in seen:
-            seen.add(s.input)
-            t = tile.inputs.get(s.input)
-            out.append(str(t.dtype) if t is not None else "?")
-        for b in s.nested():
-            for c in b:
-                note_stmt(c)
-
-    def walk(node) -> None:
-        if not isinstance(node, Fold):
-            return
-        for e in node.operands:
-            note_stmt(e)
-        for s in node.lift.body:
-            note_stmt(s)
-
-    walk(tile.op)
-    return (*out, "->", *(str(t.dtype) for t in tile.outputs.values()))
-
-
-def deploy_identity(tile: TileOp) -> str:
-    """The verified-tier join key — the Fold tree's α/buffer-invariant algebra digest
-    (:meth:`TileOp.structural_key`) folded with the operand/output dtype fingerprint and the
-    axis-extent fingerprint the term deliberately omits (:func:`_extent_fingerprint` — static
-    sizes and symbolic markers, never hints). A golden record derives the SAME key from its own
-    persisted program through the shared total lift (``_fromloop.lift_loop_op``), so the
-    join is exact structural identity — no classified shape, no matching heuristic. Unlike
-    :func:`pool_key` it excludes knobs, symbolic hints and live pins: identity is what the
-    kernel IS; the strict row decode (exact spelled-row equality) is what guarantees a record
-    still realizes."""
-    return digest(tile.structural_key(), _dtype_fingerprint(tile), _extent_fingerprint(tile))
-
-
-def pool_key(tile: TileOp) -> str:
-    """The pool cache key — everything the enumeration reads that the Context does not pin.
-
-    ``tile.cache_key()`` covers the term (the bottom-up ``structural_key``) and the knobs. Every
-    OTHER input :class:`_Term` reads has to be folded in explicitly, because ``structural_key``
-    excludes it by design: the operand/output dtypes (:func:`_dtype_fingerprint` — the
-    atom-eligibility input), the per-axis EXTENTS (:func:`_extent_fingerprint`), the symbolic-axis
-    hints (:func:`_hint_fingerprint`) and the live env pins (:func:`schedule_pin_fingerprint`).
-    The ctx facts (target, smem cap, TMA, the f16acc gate) need no key part: the cache lives ON
-    the Context, so one instance never spans two fact sets.
-
-    The extents are NOT covered by the knobs' ``S_ext_*`` features, which are a lossy summary
-    (count / product / max). An ``8x64 @ 64x512`` matmul and a ``512x64 @ 64x8`` one agree on all
-    three, and on the term — the algebra digest canonicalizes sizes away — so they shared one pool
-    while their spaces are 57442 and 8280 candidates. Whichever compiled first decided the other.
-    A new read in ``_Term`` that the term does not carry belongs here."""
-    return digest(
-        tile.cache_key(),
-        _dtype_fingerprint(tile),
-        _extent_fingerprint(tile),
-        _hint_fingerprint(tile),
-        schedule_pin_fingerprint(),
-    )
-
-
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] | TileOp:
     """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
 
@@ -1964,7 +1833,11 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES the
     # session cache, so a sampled Context and the live one it came from sit on one memo and a
     # Context-only flag would serve a sampled pool to a live compile.
-    key = digest(pool_key(tile), sample.key if sample is not None else "") if cache is not None or sample is not None else None
+    key = (
+        digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "")
+        if cache is not None or sample is not None
+        else None
+    )
     pool = cache.get(key) if cache is not None else None
     if pool is None:
         pool = _Pool.build(*_enumerate(term, sample))
@@ -1988,4 +1861,4 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> Fork | list[TileOp] |
     return build_fork_tree(params=pool.rows, levels=levels, materialize=materialize)
 
 
-__all__ = ["FAMILIES", "deploy_identity", "pool_key", "schedule"]
+__all__ = ["FAMILIES", "schedule"]

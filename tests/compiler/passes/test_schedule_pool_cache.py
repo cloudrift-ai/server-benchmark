@@ -189,7 +189,9 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
     7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment store
     against the free axes — so sharing a pool let whichever compiled first decide the other.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term, pool_key
+    from emmy.compiler.ir.tile.identity import pool_key
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
 
     ctx = Context.from_target((12, 0))
     wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
@@ -203,4 +205,5 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
         return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
 
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
-    assert pool_key(wide) != pool_key(tall), "so they must not share a pool entry"
+    pins = schedule_pin_fingerprint()
+    assert pool_key(wide, pins=pins) != pool_key(tall, pins=pins), "so they must not share a pool entry"

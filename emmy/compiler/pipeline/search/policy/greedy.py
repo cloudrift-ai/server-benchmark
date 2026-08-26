@@ -47,7 +47,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
+from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves
+from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 
 logger = logging.getLogger(__name__)
@@ -165,14 +167,12 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
     if not isinstance(fp.root_op, TileOp):
         return None
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import pool_key  # noqa: PLC0415
-
     rule = fp.match.rule
     node_blocked = blocked.get(fp.node_id) if blocked else None
     return (
         getattr(getattr(rule, "pass_", None), "name", None),
         getattr(rule, "name", None),
-        pool_key(fp.root_op),
+        pool_key(fp.root_op, pins=schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
 
@@ -641,7 +641,6 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     root = fp.root_op

@@ -54,15 +54,19 @@ class Structural(Protocol):
     dedup purposes return the same string from :meth:`structural_key`;
     two instances that differ in any codegen- or dataflow-relevant way
     return different strings.
+
+    **Inherit it and you get the default**: :func:`form` over the instance, which is the right
+    answer for any frozen dataclass whose fields ARE its identity (every ``Stmt``). Override it
+    when the type owns a canonicalization the field walk cannot know — ``Fold``'s α-invariance,
+    ``Body``'s normalize-and-collapse, ``Graph``'s Merkle walk over its nodes.
+
+    :func:`form` reads that distinction directly (``type(x).structural_key is
+    Structural.structural_key``) and delegates only to an override, which is what keeps the
+    default from calling itself forever. There is no marker to set and none to forget.
     """
 
-    def structural_key(self) -> str: ...
-
-
-#: Marks a ``structural_key`` that is DERIVED from :func:`form` rather than owning its own
-#: canonicalization. :func:`form` must not delegate to one, or it would call itself forever.
-#: Set on ``Stmt.structural_key``; every other implementor is authoritative and gets asked.
-DERIVED_FROM_FORM = "derived_from_form"
+    def structural_key(self) -> str:
+        return digest(form(self))
 
 
 def form(value: object) -> object:
@@ -81,13 +85,14 @@ def form(value: object) -> object:
     - tuples / lists (``Body`` included — it is a ``tuple`` subclass) render elementwise;
     - sets render SORTED, because their iteration order is not stable and an unsorted rendering
       would key one object two ways;
-    - a value that OWNS its identity — anything implementing :class:`Structural` with its own
-      ``structural_key`` — renders as ``(class, its key)``. A ``Fold`` is the case that matters:
+    - a value that OVERRIDES :meth:`Structural.structural_key` renders as ``(class, its key)`` —
+      it owns a canonicalization this walk cannot know. A ``Fold`` is the case that matters:
       it is a dataclass, so the field walk below would happily render it by SSA spelling, while
       its own key is α-invariant. Two renderings of one type is what this module exists to
-      prevent, so the type that knows better is asked. Checked AFTER the container rules, so a
-      ``Body`` still renders elementwise rather than through its own aggressive
-      normalize-and-collapse key;
+      prevent, so the type that knows better is asked. A type that merely INHERITS the default
+      falls through to the field walk below — that is the default's definition, and delegating
+      would recurse. Checked AFTER the container rules, so a ``Body`` still renders elementwise
+      rather than through its own aggressive normalize-and-collapse key;
     - dataclasses render as their fields, in declaration order;
     - anything else exposing a ``str`` ``name`` renders as ``(class, name)`` — the
       ``ElementwiseImpl`` case, whose name IS its identity (its algebraic traits are looked up by
@@ -108,7 +113,7 @@ def form(value: object) -> object:
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((form(v) for v in value), key=repr))
     own_key = getattr(type(value), "structural_key", None)
-    if own_key is not None and not getattr(own_key, "derived_from_form", False):
+    if own_key is not None and own_key is not Structural.structural_key:
         return (type(value).__name__, value.structural_key())
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return (type(value).__name__, *(form(getattr(value, f.name)) for f in dataclasses.fields(value)))

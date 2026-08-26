@@ -16,6 +16,7 @@ from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.structural import Structural
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
@@ -459,7 +460,7 @@ def _is_one(e: Expr) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class Stmt:
+class Stmt(Structural):
     """Base class for IR body statements.
 
     Every concrete Stmt implements:
@@ -592,27 +593,6 @@ class Stmt:
         Accum need a separate scope-bound check on the leaf, not
         ``has_side_effects`` on the wrapper."""
         return any(c.has_side_effects for sub in self.nested() for c in sub)
-
-    def structural_key(self) -> str:
-        """This statement's structural identity — :func:`~emmy.compiler.structural.form` digested.
-
-        Implements the :class:`~emmy.compiler.structural.Structural` protocol. Structural rather
-        than ``repr`` or ``pretty()``: both are presentation, and identity must not move when
-        presentation does. Every concrete ``Stmt`` is a frozen dataclass, so the walk is generic —
-        a new statement kind needs no registration here.
-
-        This is the identity of ONE statement in isolation. It carries whatever names the stmt
-        holds, so callers wanting an α-invariant or buffer-invariant answer canonicalize FIRST and
-        key after (``Body.structural_key``, ``ir/tile/_key.py``).
-        """
-        from emmy.compiler.structural import digest, form  # noqa: PLC0415 — substrate, not a dialect
-
-        return digest(form(self))
-
-    #: This key is DERIVED from ``form``, so ``form`` renders a Stmt by its fields rather than
-    #: calling back here. Every other :class:`~emmy.compiler.structural.Structural` implementor
-    #: owns a canonicalization of its own (``Fold``'s is α-invariant) and IS delegated to.
-    structural_key.derived_from_form = True
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this

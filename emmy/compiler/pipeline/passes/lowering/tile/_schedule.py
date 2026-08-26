@@ -385,6 +385,7 @@ class _Term:
         self.proj = _projection(tile.op)
         self.tree = _site_tree(tile.op, self.key)
         self._tiles: dict[int, dict[str, list[TilePlan]]] = {}
+        self._packed: dict[int, tuple] = {}
         #: The refusal a schedule PIN drew, kept until the walk is done. One inventory declining
         #: a pin is ordinary (the widths are read OFF the inventory, so the pin names a different
         #: plan under each); a pin NO inventory could spell is malformed, and that is loud.
@@ -430,6 +431,20 @@ class _Term:
         if id(node) not in self._tiles:
             self._tiles[id(node)] = self._build_tiles(node)
         return self._tiles[id(node)]
+
+    def packed_readings(self, node) -> tuple:
+        """This node's ``(single-sided, pair)`` packed readings, computed ONCE.
+
+        Both are pure functions of the node and its input tensors, and both are expensive: each
+        walks an operand body, builds a backward cone per side and proves k-block invariance over
+        every index expr. The stage resolver needs them per CANDIDATE, of which a warp site has
+        hundreds, so asking there recomputed one answer thousands of times — measured at 391k
+        matcher calls and 57 s for a single toy linear. Memoized on the term, which lives for one
+        node's enumeration, keyed the way the tile catalog beside it already is."""
+        if id(node) not in self._packed:
+            inputs = self.tile.inputs
+            self._packed[id(node)] = (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs))
+        return self._packed[id(node)]
 
     def _build_tiles(self, node) -> dict[str, list[TilePlan]]:
         atoms = _warp_atoms(self, node)
@@ -668,7 +683,7 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     # both sides packed over one block extent (``match_packed_pair_node``). Asked before
     # :func:`_a_dtype`, whose K-indexed-leaf rule would answer with whichever of the chain's two
     # loads — the codes or their e4m3 block scales — the body happens to name first.
-    pair = match_packed_pair_node(node, inputs)
+    pair = term.packed_readings(node)[1]
     if pair is not None:
         # The weight side's codes are always STORED, so its dtype is the pair's — the activation's
         # may be computed in this very kernel, in which case it has no gmem tensor to ask.
@@ -909,19 +924,14 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: l
     if want is not None and legal.stage_target(want, term.ctx) is not None:
         return None
     if _needs_fill(term, node, tile):
-        if (
-            want is not None
-            and want.transport in ("smem-async", "smem-tma")
-            and tile.is_warp
-            and match_packed_b_node(node, term.tile.inputs) is not None
-        ):
+        if want is not None and want.transport in ("smem-async", "smem-tma") and tile.is_warp and term.packed_readings(node)[0] is not None:
             # ONE computed edge has a copy transport: a packed-pair weight cone, whose bits stage
             # as raw bytes beside a small compute-filled block-scale slab (the mma resolver's
             # packed arm). The test is the NODE's shape, not the want's spelling. A multi-channel
             # product reaches here too and must take the compute fill, since the copy emitters
             # carry one channel; the mma resolver declines it on its own, so naming the packed
             # node here states the exception rather than leaning on that decline.
-            resolved = legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
+            resolved = legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs, readings=term.packed_readings(node))
             if resolved is not None:
                 return resolved
         # A computed edge, a multi-channel product, or a converting materialized edge takes only
@@ -940,7 +950,7 @@ def _resolve_stage(term: _Term, node, tile: TilePlan, want: Stage | None, why: l
     if want is None or (want.transport == "smem-tma" and not term.ctx.has_tma):
         return None
     if tile.is_warp:
-        return legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs)
+        return legal.resolve_warp_stage(node, tile, want, budget, term.tile.inputs, readings=term.packed_readings(node))
     return legal.resolve_scalar_stage(node, tile, want, term.tile.inputs, budget)
 
 

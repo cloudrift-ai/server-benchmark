@@ -540,7 +540,7 @@ def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int,
     return replace(stage, depth=clamp_depth(stage, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
 
 
-def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
+def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None, *, readings: tuple | None = None) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
     slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose single depth-1 slot
@@ -570,10 +570,13 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     # only for the atom that consumes a pair. Both operands packed under a 16-BIT atom is still
     # the single-sided shape: that drain decodes each operand into 16-bit fragments, which is
     # correct — just not what the native cell does.
-    pair = match_packed_pair_node(c, inputs) if block_scaled_atom(tile.atom) else None
-    if pair is not None:
+    # ``readings`` is the caller's memo of the two packed questions, both pure functions of the
+    # node. Recomputing them here costs a backward cone per side PER CANDIDATE, and a warp site
+    # has hundreds; the scheduler asks once and hands the answer down (``_Term.packed_readings``).
+    single, pair = readings if readings is not None else (match_packed_b_node(c, inputs), match_packed_pair_node(c, inputs))
+    if pair is not None and block_scaled_atom(tile.atom):
         return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs)
-    packed = match_packed_b_node(c, inputs)
+    packed = single
     if packed is not None:
         return _packed_warp_stage(c, tile, stage, budget, packed, inputs)
     atom = tile.atom

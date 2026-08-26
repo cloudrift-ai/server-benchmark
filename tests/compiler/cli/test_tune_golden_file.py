@@ -373,7 +373,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             leaf.best_reward = 1.0 / 59.61
             leaf.realized_knobs = None
             leaf.realized_cuda_ops = 2
-            leaf.realized_cuda_knobs = [dict(node.op.knobs) for node in terminal.nodes.values()]
+            leaf.kernel_rows = [(dict(node.op.knobs), search.last_stats, "ok") for node in terminal.nodes.values()]
             leaf.bench_status = "ok"
             leaf.bench_stats = search.last_stats
             search.tree.root.children = [leaf]

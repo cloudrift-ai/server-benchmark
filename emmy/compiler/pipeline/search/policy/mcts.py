@@ -77,10 +77,13 @@ class SearchNode:
     # CUDA kernels (for example a split reduction + combine). A candidate-file
     # annotation is only unambiguous in the one-CudaOp case.
     realized_cuda_ops: int | None = field(default=None, repr=False)
-    # Decision rows from the directly measured per-kernel receipts. Structural winners use them to
-    # reject a parent row whose ordinary schedule pins describe a different
-    # independently tuned child than the terminal actually measured.
-    realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
+    # The terminal's per-KERNEL measurements — ``(features, PerfStats, status)`` per CUDA kernel,
+    # each kernel's own knobs under this run's ``H_*`` regime. Set in ``observe``; ``None`` on
+    # branches and wherever the bench handed over no per-kernel receipts. This is what a terminal
+    # that lowered to several kernels is recorded as (no single row can carry a Σ), and what
+    # structural winners read to reject a parent row whose ordinary schedule pins describe a
+    # different independently tuned child than the terminal actually measured.
+    kernel_rows: list[tuple[dict, PerfStats, str]] | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -213,7 +216,10 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
-        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _stats, _status in kernels] if kernels is not None else None
+        # Each kernel's own row: its own knobs (its own ``S_*`` stamps included) under this run's
+        # regime, so a consumer needs no further context to key or featurize it.
+        regime = context_view(self._base_knobs)
+        token.kernel_rows = [({**regime, **knobs}, kstats, st) for knobs, kstats, st in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -221,19 +227,11 @@ class TuningSearch(Search):
         self.tree.record_terminal(token, reward)
         self.last_improved_best = status == "ok" and self.tree.best_reward > prev_best
         if self.prior_model is not None:
-            # Train on the rows that actually earned a latency: the terminal's own when it lowered
-            # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
-            # this run's host regime). The Σ is the tree's reward; it is not any single row's
-            # label, and a terminal a structural fork made several kernels of has no row of its
-            # own to give the prior.
-            # The model itself is fixed during a run — it refits in batches between ops (see
-            # ``Prior``), not per bench — so there is nothing to refit here.
-            if token.realized_knobs is not None:
-                self.prior_model.record_bench(token.realized_knobs, stats.median, status)
-            else:
-                regime = context_view(self._base_knobs)
-                for knobs, kstats, st in kernels or ():
-                    self.prior_model.record_bench({**regime, **knobs}, kstats.median, st)
+            # The end-of-run summary's unit is the TERMINAL — the thing the search benched and
+            # ranks by. Training rows are a separate question with a different answer for a
+            # multi-kernel terminal, and they are collected from the finished tree
+            # (:meth:`_collect_rows`), never streamed from here.
+            self.prior_model.record_bench(token.realized_knobs or self._node_knobs(token), stats.median, status)
 
     def _realized_knobs(self, candidate: object) -> dict | None:
         """The terminal's ONE knob row — the kernel's ``base_knobs`` (``S_*`` identity + ``H_*``
@@ -345,10 +343,8 @@ class TuningSearch(Search):
             structural = self._structural_row(validated_input_route)
         if structural is not None:
             place_only = all(family_of(key) == "PLACE" for key in structural)
-            if not place_only and (
-                not node.realized_cuda_knobs
-                or unreproducible_pin_flag(structural, node.realized_cuda_knobs, reject_conflicts=True) is not None
-            ):
+            cuda_knobs = [dict(decision_view(feats)) for feats, _stats, _status in node.kernel_rows or ()]
+            if not place_only and (not cuda_knobs or unreproducible_pin_flag(structural, cuda_knobs, reject_conflicts=True) is not None):
                 return None
             return structural, float(node.bench_stats.median), node.realized_cuda_ops, True
         if node.realized_knobs is None:

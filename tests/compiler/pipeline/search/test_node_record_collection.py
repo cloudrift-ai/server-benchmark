@@ -32,13 +32,17 @@ def _bench_fail_leaf(*, realized_knobs: dict | None) -> SearchNode:
     return node
 
 
+def _stats(us: float) -> PerfStats:
+    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
+
+
 def _ok_leaf(us: float, *, realized_knobs: dict | None, cuda_ops: int, cuda_knobs: list[dict] | None = None) -> SearchNode:
     node = SearchNode(candidate=object())
     node.realized_knobs = realized_knobs
     node.realized_cuda_ops = cuda_ops
-    node.realized_cuda_knobs = cuda_knobs
+    node.kernel_rows = [(dict(k), _stats(us / max(len(cuda_knobs), 1)), "ok") for k in cuda_knobs] if cuda_knobs is not None else None
     node.bench_status = "ok"
-    node.bench_stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=1)
+    node.bench_stats = _stats(us)
     return node
 
 

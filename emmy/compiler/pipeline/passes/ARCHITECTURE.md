@@ -476,8 +476,11 @@ failing several passes later:
   matmul, whose block scale varies per k block on BOTH operands once the graph declares the activation's
   quantization — the binding falls through to two plain operand edges (`Fold.projection`), each side keeping its own
   factor inside the fold. Neither product argument is a direct load there, so the row side follows from the cones'
-  indices rather than from the argument order. That binding states the contraction and offers nothing: `_warp_atoms`
-  still declines a packed-pair storage dtype, so the pair takes the demoted planar view.
+  indices rather than from the argument order. That pair is what the BLOCK-SCALED cell reads
+  (`_packed.match_packed_pair_node`): both edges split into packed codes, a raw 1-byte block-scale load and a
+  k-invariant residue, over one block extent. `_warp_atoms` asks that question before it asks any operand's leaf
+  dtype — the cell is the one atom whose operands are read off the pair rather than off an `a` edge — and offers the
+  atom when it matches. A packed operand with no packed peer still declines to the decode-based readings.
   The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every
   recognized contraction, per-cell scalar included, stores in the bilinear SHAPE — one `Fold` whose operands are
   `(b, a, b_i…)` under a `multiply` lift and an additive combine; an

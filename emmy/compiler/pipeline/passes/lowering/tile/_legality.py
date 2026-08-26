@@ -42,7 +42,7 @@ from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
-from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node
+from emmy.compiler.pipeline.passes.lowering.tile._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -466,6 +466,70 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
 
 
+def _row_major_k_inner(tensor, load, k_name: str) -> bool:
+    """Whether a staged operand is ROW-MAJOR with the contraction axis innermost — the layout the
+    byte gathers walk, asked without pinning a rank.
+
+    A layer program and a weight constant carry the same operand at different ranks: a weight is
+    ``[N, K/2]``, while an activation keeps its batch axis and its block axis as degenerate dims
+    (``[1, M, K/2]``, ``[1, M, K/16, 1]``). Neither affects the address — a unit extent contributes
+    no stride — so both are dropped before asking the one question that matters."""
+    dims, idx = list(tensor.shape), list(load.index or ())
+    if len(dims) != len(idx):
+        return False
+    while len(dims) > 2 and dims[-1].is_static and dims[-1].as_static() == 1 and not idx[-1].free_vars():
+        dims.pop()
+        idx.pop()
+    while len(dims) > 2 and dims[0].is_static and dims[0].as_static() == 1:
+        dims.pop(0)
+        idx.pop(0)
+    return len(dims) == 2 and all(d.is_static for d in dims) and k_name in idx[-1].free_vars()
+
+
+def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, pair, inputs) -> Stage | None:
+    """Resolve the FOUR-SLAB stage of a block-scaled packed pair — the native fp4 cell.
+
+    The simplest staging in the tier, because nothing is computed: both operands' codes and both
+    operands' raw block scales are stored bytes, so all four slabs are verbatim copies. The
+    packed byte-slab stage next door still compute-fills its scale slab; here the instruction
+    takes the stored e4m3 byte itself, so that fill has nothing left to evaluate.
+
+    The scoped shape: cp.async (the four-descriptor TMA box copy is not built — a missing-code
+    fact, stated where the code would live), a k64 cell over 16-element blocks, both code
+    operands canonically laid out with k innermost, and a static k the tile divides.
+
+    Sizing restates the byte-slab rule in the format's units, twice per side. A codes row is
+    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; the fill copies 16 B chunks and
+    a chunk never straddles a row, so both spans — and the gmem rows they stride, ``k / 2`` and
+    ``k / block`` — must be 16-divisible. That is what bounds the tile from below: at block 16 a
+    scales row needs ``bk_elems`` to be a multiple of 256, so the narrow-k tiles decline here and
+    keep the generic reading.
+    """
+    atom = tile.atom
+    if stage.transport != "smem-async":
+        return None
+    if atom.atom_k != 64 or pair.block != _PACKED_BLOCK or atom.operand_dtype("a") != atom.operand_dtype("b"):
+        return None
+    if not c.axis.extent.is_static or tile.n.mask:
+        return None  # an N tile the copy would clamp element-by-element along the contiguous span
+    k, bk_elems, block = c.axis.extent.as_static(), tile.bk * atom.atom_k, pair.block
+    for side, tile_side, atom_dim in ((pair.a, tile.m, 0), (pair.b, tile.n, 1)):
+        bits, scale = inputs.get(side.bits.input), inputs.get(side.scale.input)
+        if bits is None or scale is None or bits.dtype != atom.operand_dtype("a"):
+            return None
+        if not _row_major_k_inner(bits, side.bits, c.axis.name) or not _row_major_k_inner(scale, side.scale, c.axis.name):
+            return None  # a k-strided operand is not the layout the byte gathers walk
+        if tile_side.tile % atom.shape[atom_dim]:
+            return None
+    if k % bk_elems or (bk_elems // 2) % 16 or (k // 2) % 16 or (bk_elems // block) % 16 or (k // block) % 16:
+        return None
+    rows = (tile.m.tile, tile.n.tile)
+    slot_bytes = sum(r * (bk_elems // 2 + BYTE_SLAB_PAD) + r * (bk_elems // block + BYTE_SLAB_PAD) for r in rows)
+    if slot_bytes > budget:
+        return None
+    return replace(stage, depth=clamp_depth(stage, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+
+
 def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth`` clamped so the ring's
@@ -492,6 +556,13 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     scales the cone would otherwise recompute per element ride a small compute-filled slab beside
     them. Every other computed edge declines — a copy transport cannot evaluate a producer cone —
     and takes :func:`resolve_fill_stage` instead."""
+    # Which cell is being resolved decides which reading applies, so the pair question is asked
+    # only for the atom that consumes a pair. Both operands packed under a 16-BIT atom is still
+    # the single-sided shape: that drain decodes each operand into 16-bit fragments, which is
+    # correct — just not what the native cell does.
+    pair = match_packed_pair_node(c, inputs) if block_scaled_atom(tile.atom) else None
+    if pair is not None:
+        return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs)
     packed = match_packed_b_node(c, inputs)
     if packed is not None:
         return _packed_warp_stage(c, tile, stage, budget, packed, inputs)

@@ -20,6 +20,9 @@ _TYPE_NAME: dict[str, str] = {
     "f16x2": "__half2",
     "f8e4m3": "__nv_fp8_e4m3",
     "f8e5m2": "__nv_fp8_e5m2",
+    # Packed e2m1 pairs move as raw bytes, the same spelling ``cuda_name`` gives them (a slab of
+    # them declares ``unsigned char``); a fragment drain templated on the slab's type reads it here.
+    "f4e2m1x2": "unsigned char",
     "i16": "short",
     "i32": "int",
     "i64": "long long",

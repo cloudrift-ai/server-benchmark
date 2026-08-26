@@ -227,10 +227,19 @@ quantization step), where direct-feed comparisons stay tight.
 
 Both readings still hand the tensor cores 16-bit fragments, because every mma before Blackwell multiplies 16-bit or
 8-bit operands. Consumer Blackwell adds one that multiplies the 4-bit codes THEMSELVES and applies each 16-value
-block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul would carry no decode at
-all. Nothing offers it yet: the instruction wants BOTH multiplicands packed, and the activation speller above now
-delivers a packed activation for marked linears — so the missing piece is the both-sides recognition and the
-scale-fragment hand-off, no longer the operands.
+block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul carries no decode at all.
+A marked matmul reaches it when BOTH operands read as packed decode chains: the schedule offers the atom, the stage
+resolves FOUR verbatim byte slabs (both operands' codes, both operands' raw e4m3 block scales — nothing is
+compute-filled, because the cell takes the stored scale byte itself), and the drain loads two data fragments through
+the same byte gathers the fp8 k32 atoms use plus one scale register per side. The per-tensor scale levels ride the
+epilogue.
+
+That last move is why the native lowering carries a bounded gap rather than the exact oracle every other lowering
+answers to. The declared program applies `f16(block_scale x tensor_scale)` per element — the single fused rounding
+above — and the instruction applies the raw block scale itself with the tensor level factored out, so the two are not
+the same expression and no reassociation connects them. The gap is one f16 rounding of a per-block constant per side,
+about 2^-11 relative; the native path is therefore checked to a tolerance, and every other reading keeps the exact
+check. Dropping the fusion would close it and is recorded as a follow-up.
 
 **Mixed-scheme checkpoints.** A checkpoint may quantize different leaves differently, and the two
 recognizers answer independently rather than exclusively: each asks whether ANY declared weight group is

@@ -1449,6 +1449,57 @@ def swizzle_fn(mode: str) -> str:
 
 
 @dataclass(frozen=True)
+class BlockScaleLoad(Stmt):
+    """Load one lane's b32 of ue4m3 block scales for the block-scaled fp4 mma.
+
+    The instruction takes its per-16-element scales as two ordinary register operands beside the
+    multiplicands, one per side, and applies them itself. A supplying lane holds four K blocks as
+    the four bytes of one b32 — exactly the ``k = 64`` an atom step spans — and the lane→row map
+    differs per side and is NOT the data fragment's: SFA's supplying lanes are picked by
+    ``(lane & 3)`` against a thread-id selector, SFB's by equality with one. Both maps were found
+    by probing the hardware, and the render's prelude records them beside the PTX (the PTX ISA's
+    documented thread-id range is wrong for ``scale_vec::4X`` — ptxas takes 0..1, not 0..3).
+
+    ``src_buffer`` is the scale slab, ``src_index`` the fragment's ``(row, k-block)`` base and
+    ``ldm`` the slab's row stride in bytes. Non-supplying lanes read nothing and the instruction
+    ignores their register, so there is no guard here.
+
+    Distinct from :class:`LdmatrixLoad`'s ``scale_buffer``, which is the OTHER way to spend a
+    block scale: there the k16 drain folds it into a 16-bit fragment and no scale reaches the
+    instruction. These two never appear on one operand."""
+
+    frag: str
+    src_buffer: str
+    src_index: tuple
+    role: str  # "a" / "b" — which side's lane map supplies the rows
+    ldm: int = 0
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.frag,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.src_buffer,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return tuple(self.src_index)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = ", ".join(e.pretty() for e in self.src_index)
+        return [f"{indent}BlockScaleLoad {self.frag} <- {self.src_buffer}[{idx}] (sf{self.role}, ldm={self.ldm})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        flat = render_index(self.src_buffer, self.src_index, ctx)
+        # The slab declares the scales at their storage dtype (``__nv_fp8_e4m3``); the loader moves
+        # them as the raw ue4m3 bytes the instruction reads, so the pointer casts rather than the
+        # slab changing type — a byte-typed slab would lose that the bytes ARE e4m3 to every other
+        # reader of ``ctx.buffer_dtypes``.
+        src = f"reinterpret_cast<const unsigned char*>(&{self.src_buffer}[{flat}])"
+        return [f"{_pad(ctx.indent)}unsigned {self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
+
+
+@dataclass(frozen=True)
 class LdmatrixLoad(Stmt):
     """``ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16`` — load one operand
     fragment from smem into a per-thread register array.
@@ -1677,9 +1728,13 @@ class LdmatrixLoad(Stmt):
                 args = f"&{self.src_buffer}[{flat}], {ldm}, &{self.scale_buffer}[{scale_flat}], {self.scale_ldm}"
                 return [f"{_pad(ctx.indent)}{call}({self.frag}, {args});"]
             k_contig = self.role == "a" or self.b_trans  # each lane's K run is slab-contiguous
-            if frag_dt in ("f8e4m3", "f8e5m2"):
-                # k32 byte repack. Contiguous-K lanes load one u32 (the ``_smem_b8v`` family);
-                # a canonical K-major B strides its 4 bytes across rows — the scalar gather.
+            if frag_dt in ("f8e4m3", "f8e5m2", "f4e2m1x2"):
+                # Raw-byte repack, no per-element convert: the mma consumes storage bits. The k64
+                # 4-bit fragment map is byte-for-byte the k32 8-bit one — a lane owns 4 bytes per
+                # register either way, and a packed row is K/2 bytes where an fp8 row is K — so
+                # the same ``_b8v`` helpers serve both, with ``ldm`` carrying the byte stride.
+                # Contiguous-K lanes load one u32; a canonical K-major B strides its 4 bytes
+                # across rows — the scalar gather.
                 if k_contig:
                     trans = "_trans" if self.b_trans else ""
                     call = f"emmy_mma_load_{self.role}_smem{trans}_b8v<{ctx.type_name(slab_dt)}>"
@@ -2674,6 +2729,17 @@ def _(s: RegFragment, rename, sigma, axis_fn):
 
 
 @_rewrite.register
+def _(s: BlockScaleLoad, rename, sigma, axis_fn):
+    return BlockScaleLoad(
+        frag=rename(s.frag),
+        src_buffer=s.src_buffer,
+        src_index=tuple(sigma.apply(e) for e in s.src_index),
+        role=s.role,
+        ldm=s.ldm,
+    )
+
+
+@_rewrite.register
 def _(s: LdmatrixLoad, rename, sigma, axis_fn):
     return LdmatrixLoad(
         frag=rename(s.frag),
@@ -2698,7 +2764,17 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
 @_rewrite.register
 def _(s: MmaSyncPtx, rename, sigma, axis_fn):
     return MmaSyncPtx(
-        c_frag=rename(s.c_frag), a_frag=rename(s.a_frag), b_frag=rename(s.b_frag), shape=s.shape, ab_dtype=s.ab_dtype, c_dtype=s.c_dtype
+        c_frag=rename(s.c_frag),
+        a_frag=rename(s.a_frag),
+        b_frag=rename(s.b_frag),
+        shape=s.shape,
+        ab_dtype=s.ab_dtype,
+        c_dtype=s.c_dtype,
+        # The block-scaled form's scale registers are fragments like any other and must be
+        # renamed with them: dropping them here would silently rewrite the instruction into its
+        # plain three-operand sibling, which renders with the wrong arity.
+        sfa_frag=rename(s.sfa_frag) if s.sfa_frag is not None else None,
+        sfb_frag=rename(s.sfb_frag) if s.sfb_frag is not None else None,
     )
 
 

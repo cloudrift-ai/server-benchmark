@@ -109,7 +109,7 @@ from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
 from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 from emmy.compiler.pipeline.passes.lowering.tile._classify import demoted_chain, fused_view, unit_contraction_view
-from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node
+from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering.tile._pool import Block, PoolSpace, Segment
 from emmy.compiler.pipeline.search.space import (
     RASTER,
@@ -663,12 +663,19 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     # the projection is a straight-line fragment epilogue, or a swept stack tail reaches RegStore.
     if not inputs or legal.fragment_epilogue(Body(tuple(projection_tail(term.tile)))) is not None:
         return ()
+    # The block-scaled cell multiplies the packed CODES themselves, so it is the one atom whose
+    # operands are read off the pair of decode chains rather than off an ``a`` edge's leaf dtype:
+    # both sides packed over one block extent (``match_packed_pair_node``). Asked before
+    # :func:`_a_dtype`, whose K-indexed-leaf rule would answer with whichever of the chain's two
+    # loads — the codes or their e4m3 block scales — the body happens to name first.
+    pair = match_packed_pair_node(node, inputs)
+    if pair is not None:
+        return atoms_for(inputs[pair.a.bits.input].dtype, ctx=term.ctx)
     ab = _a_dtype(node, inputs)
     if ab is not None and ab.logical_elems != 1:
         # A packed-pair storage dtype has no scalar byte semantics, so every atom that multiplies
-        # DECODED operands is out. The block-scaled fp4 cell multiplies the codes themselves, but
-        # it needs BOTH operands packed and an activation arrives 16-bit, so nothing reaches it
-        # through here yet — a packed A still declines to the decode-based readings.
+        # DECODED operands is out. A packed operand that does not pair with a packed peer therefore
+        # declines to the decode-based readings, which compute the same values.
         return ()
     if ab is not None and ab.nbytes == 1:
         # The native fp8 tier (M3): offered only under the precision gate, on a MATERIALIZED f8

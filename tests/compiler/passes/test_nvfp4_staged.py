@@ -39,7 +39,7 @@ def _lit(v: int):
     return Literal(v, "int")
 
 
-def _packed_cone(k: int, *, block: int = 16, k_last: bool = True) -> Fold:
+def _packed_cone(k: int, *, block: int = 16, k_last: bool = True, row: str = "n", prefix: str = "") -> Fold:
     """The NVFP4 speller's decode cone as the tile lowering sees it — flat reshape arithmetic over
     the checkpoint's three tensors, exactly the shape the whole-graph lowering produces (verified
     against it): a block-scale byte decoded and multiplied by the per-tensor scale, and a packed
@@ -47,21 +47,22 @@ def _packed_cone(k: int, *, block: int = 16, k_last: bool = True) -> Fold:
 
     ``k_last=False`` swaps the bits load's index so the packed axis is the ROW — the layout the
     drain cannot read."""
-    n, kv = Var("n"), Var("k")
+    n, kv = Var(row), Var("k")
+    q = prefix
     flat = BinaryExpr("+", BinaryExpr("*", n, _lit(k)), kv)
     sblock = BinaryExpr("%", BinaryExpr("/", flat, _lit(block)), _lit(k // block))
     byte = BinaryExpr("%", BinaryExpr("/", flat, _lit(2)), _lit(k // 2))
     pair = BinaryExpr("%", flat, _lit(2))
     bits_index = (n, byte) if k_last else (byte, n)
     body = (
-        Load(name="in0", input="w_scale_2", index=(_lit(0), _lit(0)), dtype=None),
-        Load(name="in1", input="w_scale_bits", index=(n, sblock), dtype=None),
-        Load(name="in2", input="w_bits", index=bits_index, dtype=None),
-        Assign(name="v0", op="from_f8e4m3", args=("in1",)),
-        Assign(name="v1", op="copy", args=("in2",)),
-        Assign(name="v2", op="multiply", args=("in0", "v0")),
-        Load(name="in3", input="w_f4_pairs", index=(CastExpr(dtype="int", expr=Var("v1")), pair), dtype=None),
-        Assign(name="v3", op="multiply", args=("in3", "v2")),
+        Load(name=f"{q}in0", input=f"{q}w_scale_2", index=(_lit(0), _lit(0)), dtype=None),
+        Load(name=f"{q}in1", input=f"{q}w_scale_bits", index=(n, sblock), dtype=None),
+        Load(name=f"{q}in2", input=f"{q}w_bits", index=bits_index, dtype=None),
+        Assign(name=f"{q}v0", op="from_f8e4m3", args=(f"{q}in1",)),
+        Assign(name=f"{q}v1", op="copy", args=(f"{q}in2",)),
+        Assign(name=f"{q}v2", op="multiply", args=(f"{q}in0", f"{q}v0")),
+        Load(name=f"{q}in3", input=f"{q}w_f4_pairs", index=(CastExpr(dtype="int", expr=Var(f"{q}v1")), pair), dtype=None),
+        Assign(name=f"{q}v3", op="multiply", args=(f"{q}in3", f"{q}v2")),
     )
     return Fold.projection(body=Body(body))
 
@@ -631,3 +632,73 @@ def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
     ref = x.astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
     denom = max(float(np.abs(ref).max()), 1e-9)
     assert float(np.abs(y - ref).max()) / denom < 1e-3
+
+
+# ===================================================================
+# The block-scaled pair — the native fp4 cell's four-slab stage
+# ===================================================================
+
+K64 = "mma_m16n8k64_e2m1_f32"
+
+
+def _pair_node(*, m=512, n=4096, k=4096, block=16):
+    """Both operands packed — the shape the block-scaled cell reads. A's cone mirrors B's with the
+    row axis swapped, which is what the activation speller produces once its codes materialize."""
+
+    axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
+    a_cone = _packed_cone(k, block=block, row="m", prefix="a_")
+    node = Fold.contraction(k_axis=Axis("k", Dim(k)), a=a_cone, channels=(Channel(b=_packed_cone(k, block=block), acc="acc"),))
+    inputs = {
+        "w_bits": Tensor("w_bits", (n, k // 2), F4E2M1x2),
+        "w_scale_bits": Tensor("w_scale_bits", (n, k // block), F8E4M3),
+        "w_scale_2": Tensor("w_scale_2", (1, 1), F32),
+        "w_f4_pairs": Tensor("w_f4_pairs", (256, 2), F16),
+        "a_w_bits": Tensor("a_w_bits", (m, k // 2), F4E2M1x2),
+        "a_w_scale_bits": Tensor("a_w_scale_bits", (m, k // block), F8E4M3),
+        "a_w_scale_2": Tensor("a_w_scale_2", (1, 1), F32),
+        "a_w_f4_pairs": Tensor("a_w_f4_pairs", (256, 2), F16),
+    }
+    return node, inputs, axes
+
+
+def test_the_pair_reading_splits_each_side_into_codes_scale_and_residue():
+    """What the cell takes: the packed codes, the RAW block-scale load, and the k-invariant factor
+    the epilogue applies. The per-tensor scale is that residue — it is the one part of the
+    operand's chain the instruction has no operand for."""
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+
+    node, inputs, _axes = _pair_node()
+    pair = match_packed_pair_node(node, inputs)
+    assert pair is not None and pair.block == 16
+    assert pair.a.bits.input == "a_w_bits" and pair.b.bits.input == "w_bits"
+    assert pair.a.scale.input == "a_w_scale_bits" and pair.b.scale.input == "w_scale_bits"
+    assert [ld.input for ld in pair.a.alpha] == ["a_w_scale_2"]
+    assert [ld.input for ld in pair.b.alpha] == ["w_scale_2"]
+
+
+def test_a_packed_weight_beside_a_materialized_a_is_not_a_pair():
+    """The single-sided shape answers ``None`` here and keeps its own reading — the k16 drain,
+    which decodes the weight into 16-bit fragments against a 16-bit activation."""
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+
+    node, inputs, _axes = _node()
+    assert match_packed_pair_node(node, inputs) is None
+
+
+def test_the_block_scaled_stage_resolves_four_byte_slabs_on_cp_async():
+    node, inputs, axes = _pair_node()
+    tile = _tile(K64, "f1x4/k4", "w1x4", axes)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 200 * 1024, inputs)
+    assert st is not None and st.transport == "smem-async"
+    assert st.bk_elems == tile.bk * 64
+
+
+def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
+    """Two refusals, both facts rather than preferences. TMA: the four-descriptor box copy is not
+    written. The narrow tile: a scale row is ``bk_elems / 16`` bytes and the cp.async fill copies
+    16 B chunks, so ``bk_elems`` under 256 leaves a row a chunk cannot fill."""
+    node, inputs, axes = _pair_node()
+    tile = _tile(K64, "f1x4/k4", "w1x4", axes)
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, inputs) is None
+    narrow = _tile(K64, "f1x4/k2", "w1x4", axes)
+    assert resolve_warp_stage(node, narrow, Stage.parse("d2/smem-async"), 200 * 1024, inputs) is None

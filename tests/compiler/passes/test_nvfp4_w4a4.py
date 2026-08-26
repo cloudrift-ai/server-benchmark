@@ -131,17 +131,24 @@ def test_the_spelled_w4a4_program_matches_numpy_on_device(tmp_path, m, n, k):
     assert float(np.abs(c - r).max()) / denom < 2e-3
 
 
-def _w4a4_shared_linears(tmp_path, names, *, m, n, k):
-    """One RMSNorm output quantized once and read by several marked linears — q/k/v's shape.
-    Equal ``input_scale`` values, so the checkpoint's fused projection group calibrates to one
-    scale and the consumers share one quantize."""
+def _w4a4_shared_linears(tmp_path, names, *, m, n, k, norm=True):
+    """One activation quantized once and read by several marked linears — q/k/v's shape. Equal
+    ``input_scale`` values, so the checkpoint's fused projection group calibrates to one scale and
+    the consumers share one quantize.
+
+    ``norm=False`` feeds the linears the graph INPUT directly. That is the shape a tight parity
+    bound needs: behind a computed producer the two backends reach the encodes with
+    epsilon-different upstream values and a block at a rounding boundary flips one code, so parity
+    there is distributional. Fed directly, both encode bit-identical codes."""
     from emmy.compiler.ir.frontend.ir import RmsNormOp
 
     _w4a4_checkpoint(tmp_path, {name: (n, 0.02) for name in names}, k=k)
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
-    nw = g.add_node(op=InputOp(), inputs=[], output=Tensor("norm_w", (k,), "f16"), node_id="norm_w")
-    h = g.add_node(op=RmsNormOp(), inputs=["x", nw], output=Tensor("h", (m, k), "f16"), node_id="h")
+    h = "x"
+    if norm:
+        nw = g.add_node(op=InputOp(), inputs=[], output=Tensor("norm_w", (k,), "f16"), node_id="norm_w")
+        h = g.add_node(op=RmsNormOp(), inputs=["x", nw], output=Tensor("h", (m, k), "f16"), node_id="h")
     outs = []
     for name in names:
         w = g.add_node(
@@ -151,7 +158,7 @@ def _w4a4_shared_linears(tmp_path, names, *, m, n, k):
             node_id=f"{name}_w",
         )
         outs.append(g.add_node(op=LinearOp(), inputs=[h, w], output=Tensor(f"{name}_y", (m, n), "f16"), node_id=f"{name}_y"))
-    g.inputs, g.outputs = ["x", "norm_w"], outs
+    g.inputs, g.outputs = (["x", "norm_w"] if norm else ["x"]), outs
     assert spell_quantized_constants(g, str(tmp_path)) == len(names)
     assert spell_static_fp4_activations(g, str(tmp_path)) == len(names)
     return g
@@ -212,3 +219,48 @@ def test_the_marked_matmul_binds_both_operands_as_packed_decode_chains(tmp_path)
         reads = [match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in edges]
         assert all(r is not None for r in reads), "both operands must read as packed decode chains"
         assert {r.block for r in reads} == {16}
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
+    """The native fp4 path end to end: both operands packed, the block-scaled cell selected, and
+    the result within the gap PR decision 18 accepts.
+
+    That gap is not rounding noise, so this is a tolerance and not the exact oracle every other
+    lowering answers to. The declared program applies ``f16(block_scale x tensor_scale)`` per
+    element (decision 3's single fused rounding); the instruction applies the RAW e4m3 block
+    scale itself and the tensor scale rides the epilogue, and no reassociation connects the two.
+    The two differ by one f16 rounding of a per-block constant on each side — about 2^-11
+    relative per side — which is what the bound below is sized for.
+
+    K is 512 because the scale slab's cp.async fill copies 16 B chunks: at 16-element blocks a
+    chunk spans 256 logical k, so the tile — and therefore K — is a multiple of 256. Narrower
+    shapes decline the stage and keep the generic reading."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    m, n, k = 16, 128, 512
+    g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=m, n=n, k=k, norm=False)
+    feed = {"x": (np.random.default_rng(11).standard_normal((m, k)) * 0.5).astype(np.float16)}
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
+    backend = CudaBackend()
+    compiled = backend.compile(g)
+    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert any("emmy_mma_m16n8k64_e2m1_f32(" in s for s in sources), "the block-scaled cell was never selected"
+    native = next(s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s)
+    assert "emmy_mma_load_sfa_f4" in native and "emmy_mma_load_sfb_f4" in native, "the cell ran without its scale operands"
+    assert "EMMY_F4_LUT" not in native, "a native cell must not decode either operand through the value table"
+
+    got, _ = backend.run(compiled, input_data={**data, **feed})
+    for out in g.outputs:
+        r = ref.outputs[out].astype(np.float32).reshape(-1)
+        c = np.asarray(got.outputs[out]).astype(np.float32).reshape(-1)
+        rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
+        # Every element carries the gap, so the median is small but not zero — unlike the W4A16
+        # drain, which reproduces the declared value exactly. Measured on a 5090: median 1.8e-5,
+        # max 5.6e-4; the bounds are roughly 5x those.
+        assert float(np.median(rel)) < 1e-4, f"{out}: a systematic shift, not the fused-scale rounding"
+        assert float(rel.max()) < 2e-3, f"{out}: past one fused-scale rounding per side"

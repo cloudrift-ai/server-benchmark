@@ -1750,6 +1750,7 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     this shape had only the scalar rows."""
     for k, v in {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}.items():
         monkeypatch.setenv(f"EMMY_{k}", v)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
     assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "a computed-A symbolic-K contraction must reach the warp tier"

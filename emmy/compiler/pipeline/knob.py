@@ -472,6 +472,21 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
+def family_pins(family: str) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order."""
+    import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
+
+    family = family.upper()
+    prefix = config.knob_var(family)
+    pairs = []
+    if prefix in os.environ:
+        pairs.append((family, os.environ[prefix]))
+    scoped = sorted(
+        (family + "@" + name[len(prefix) + 1 :].lower(), value) for name, value in os.environ.items() if name.startswith(prefix + "@")
+    )
+    return tuple((*pairs, *scoped))
+
+
 def parse_knob_spec(raw: str) -> dict[str, str]:
     """Parse the shared ``K1=V1,K2=V2`` knob-spec grammar (the ``EMMY_KNOBS``
     aggregate, ``run --ab``) into an ordered ``{NAME: value}`` dict — whitespace
@@ -508,8 +523,8 @@ apply_knobs_env()
 # ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
 # follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
 # and the ``emmy eval`` tables so columns read stably.
-_FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
-KNOB_ORDER = ("WORK", "TILE", "REDUCE", "STAGE")
+_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
+KNOB_ORDER = ("PLACE", "WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
 # The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
@@ -518,11 +533,12 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
 
 
 def consume_kernel_row(knobs: dict) -> dict:
-    """``knobs`` with everything that described the kernel it came from removed — every SCHEDULE
-    family and every FEATURE (``S_*`` / ``H_*``).
+    """``knobs`` with everything that described the kernel it came from removed — every kernel
+    decision family (``PLACE`` plus the schedule families) and every FEATURE (``S_*`` / ``H_*``).
 
     A rule that splits a kernel calls this on the pieces it mints. What it takes out is
     exactly what belongs to the kernel being replaced: the row it was scheduled with, and the
@@ -530,7 +546,9 @@ def consume_kernel_row(knobs: dict) -> dict:
     neither — it is stamped and scheduled on its own, from its own body.
 
     It leaves any knob outside those families that the rewrite computed for the piece itself."""
-    return {k: v for k, v in knobs.items() if family_of(k) not in SCHEDULE_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
+    return {
+        k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))
+    }
 
 
 #: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare

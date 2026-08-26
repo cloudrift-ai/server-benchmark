@@ -17,6 +17,8 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
@@ -28,8 +30,8 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
-from emmy.compiler.ir.stmt import Assign, Body
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select
+from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, effect_tail
 from emmy.compiler.ir.tile.path import resolve, sites, spell
 
@@ -60,6 +62,47 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
     stats = tuple(sorted(pro_results & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
+
+
+def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None) -> tuple:
+    """Infer a pure operand edge's result dtypes from its typed leaves and SSA program."""
+    cache = {} if cache is None else cache
+    if id(edge) in cache:
+        return cache[id(edge)]
+    if isinstance(edge, Load):
+        tensor = inputs.get(edge.input) if inputs else None
+        result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
+        cache[id(edge)] = result
+        return result
+    if not isinstance(edge, Fold):
+        result = (None,) * len(_operand_result_names(edge))
+        cache[id(edge)] = result
+        return result
+
+    env = {}
+    for operand in edge.operands:
+        env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache), strict=True))
+    for stmt in edge.lift.body:
+        if isinstance(stmt, Load):
+            tensor = inputs.get(stmt.input) if inputs else None
+            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
+        elif isinstance(stmt, Fold):
+            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache), strict=True))
+        elif isinstance(stmt, Assign):
+            args = [env.get(name) for name in stmt.args]
+            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
+        elif isinstance(stmt, Init):
+            env[stmt.name] = stmt.dtype
+        elif isinstance(stmt, Select):
+            branch_dtypes = [env.get(branch.value) for branch in stmt.branches]
+            env[stmt.name] = branch_dtypes[0] if branch_dtypes and all(dtype == branch_dtypes[0] for dtype in branch_dtypes) else None
+        else:
+            env.update((name, None) for name in stmt.defines())
+
+    lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in edge.lift.results)
+    result = lifted if edge.axis is None else lifted[: len(edge.combine.results)]
+    cache[id(edge)] = result
+    return result
 
 
 def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
@@ -411,6 +454,7 @@ __all__ = [
     "Sched",
     "axis_names",
     "cone_seam",
+    "edge_dtypes",
     "head",
     "make_cone",
     "projection_regions",

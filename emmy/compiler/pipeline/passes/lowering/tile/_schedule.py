@@ -26,13 +26,11 @@ from itertools import accumulate, product
 from types import MappingProxyType
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
-from emmy.compiler.dtype import F32
-from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.atom import atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_reads, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import Level as _ReduceLevel
 from emmy.compiler.ir.schedule import (
     Raster,
@@ -46,11 +44,10 @@ from emmy.compiler.ir.schedule import (
     resolve_site_tile,
 )
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile import Placement, Store, TileOp
-from emmy.compiler.ir.tile.ops import Sched, cone_seam, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
 from emmy.compiler.pipeline.knob import family_of, schedule_pin_fingerprint, values_equal
@@ -593,55 +590,14 @@ def _f8_mma_allowed(ctx) -> bool:
     return bool(precision_pin(FP8_MMA))
 
 
-def _edge_dtypes(edge, inputs, cache: dict[int, tuple]) -> tuple:
-    """Infer a pure operand edge's result dtypes from its typed leaves and SSA program."""
-    if id(edge) in cache:
-        return cache[id(edge)]
-    if isinstance(edge, Load):
-        tensor = inputs.get(edge.input) if inputs else None
-        result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
-        cache[id(edge)] = result
-        return result
-    if not isinstance(edge, Fold):
-        result = (None,) * len(_operand_result_names(edge))
-        cache[id(edge)] = result
-        return result
-
-    env = {}
-    for operand in edge.operands:
-        env.update(zip(_operand_result_names(operand), _edge_dtypes(operand, inputs, cache), strict=True))
-    for stmt in edge.lift.body:
-        if isinstance(stmt, Load):
-            tensor = inputs.get(stmt.input) if inputs else None
-            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
-        elif isinstance(stmt, Fold):
-            env.update(zip(_operand_result_names(stmt), _edge_dtypes(stmt, inputs, cache), strict=True))
-        elif isinstance(stmt, Assign):
-            args = [env.get(name) for name in stmt.args]
-            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
-        elif isinstance(stmt, Init):
-            env[stmt.name] = stmt.dtype
-        elif isinstance(stmt, Select):
-            branch_dtypes = [env.get(branch.value) for branch in stmt.branches]
-            env[stmt.name] = branch_dtypes[0] if branch_dtypes and all(dtype == branch_dtypes[0] for dtype in branch_dtypes) else None
-        else:
-            env.update((name, None) for name in stmt.defines())
-
-    results = edge.lift.results
-    lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in results)
-    result = lifted if edge.axis is None else lifted[: len(edge.combine.results)]
-    cache[id(edge)] = result
-    return result
-
-
 def _a_dtype(term: _Term, node):
     """The ``a`` edge's produced element dtype — the value stored to or read by the A slab."""
-    return _edge_dtypes(node.a, term.tile.inputs, term._dtypes)[0]
+    return edge_dtypes(node.a, term.tile.inputs, term._dtypes)[0]
 
 
 def _channel_dtype(term: _Term, node):
     """The unambiguous tensor-core dtype supplied by the B channels, if any."""
-    dts = {_edge_dtypes(ch.b, term.tile.inputs, term._dtypes)[0] for ch in node.channels}
+    dts = {edge_dtypes(ch.b, term.tile.inputs, term._dtypes)[0] for ch in node.channels}
     if len(dts) == 1:
         return next(iter(dts))
     eligible = {dtype for dtype in dts if dtype is not None and atoms_for(dtype, ctx=term.ctx)}
@@ -1227,6 +1183,11 @@ class _Row:
     plans: dict = field(default_factory=dict)
     stages: dict = field(default_factory=dict)
     coop: int = 1
+
+    @property
+    def width(self) -> int:
+        """One fully spelled row occupies one address in a pool segment."""
+        return 1
 
     @classmethod
     def union(cls, parts: Iterable[_Row]) -> _Row | None:

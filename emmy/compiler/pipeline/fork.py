@@ -69,6 +69,7 @@ class Fork(ABC):
 
     knobs: dict
     is_leaf: bool = False
+    structural: bool = False
 
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...
@@ -91,8 +92,27 @@ class OptionFork(Fork):
     knobs: dict = field(default_factory=dict)
     is_leaf = True
 
+    @property
+    def structural(self) -> bool:
+        from emmy.compiler.graph import Graph  # noqa: PLC0415
+
+        return isinstance(self.option, Graph)
+
     def expand(self) -> list[Op | Graph | Fork]:
         return [self.option]
+
+
+@dataclass(frozen=True)
+class DeferredFork(Fork):
+    """A lazy concrete leaf whose selected ``Op`` or ``Graph`` is built on expansion."""
+
+    materialize: Callable[[], Op | Graph]
+    knobs: dict = field(default_factory=dict)
+    structural: bool = False
+    is_leaf = True
+
+    def expand(self) -> list[Op | Graph | Fork]:
+        return [self.materialize()]
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:

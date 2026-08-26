@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.pipeline.fork import Fork, OptionFork
+from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
@@ -879,13 +879,10 @@ class Run:
 def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
-    **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
-    whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
-    reads op-variant: the sole branch-Fork emitter today is the partition
-    planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —
-    the body-normalizing build the lazy tree exists to avoid."""
-    return isinstance(option, Graph) or (isinstance(option, OptionFork) and isinstance(option.option, Graph))
+    **op-variant**. A deferred leaf declares the same fact through ``Fork.structural`` so graph
+    construction stays lazy. A branch Fork reads op-variant: schedule-product branches contain
+    only TileOp leaves, and typing them would require the expansion their lazy structure avoids."""
+    return isinstance(option, Graph) or (isinstance(option, Fork) and option.structural)
 
 
 def _concrete_option(option: object) -> object | None:

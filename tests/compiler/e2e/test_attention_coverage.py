@@ -241,9 +241,9 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
     """SDPA lowers to ONE kernel and matches torch through the ordinary fusion path.
 
     Recognition proves the exact two-use score inverse, so nested-reduce readability and work
-    account for the producer once while placement retains the materialized sibling. This test has
-    no fusion override: it protects that end-to-end contract together with the COMPOSED-STEP
-    reading and computed-A realization asserted below."""
+    account for the producer once. Pin the fused placement because this test protects that sibling,
+    not the tuner's choice between the fused and cut rows."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     torch.manual_seed(0)
     B, H, S, D = cfg
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -283,6 +283,7 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 @pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
 def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     """The fragment-resident Fold makes one pass over the score and keeps its carrier in registers."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)
     B, H, S, D = cfg
@@ -306,6 +307,7 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
 @requires_cuda
 def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k2")
@@ -370,6 +372,7 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 @requires_cuda
 def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
     """Each partition folds its key slice into the same state; the finalize merges those states."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
@@ -391,6 +394,7 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
 @requires_cuda
 def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
     """A causal partial compares absolute query/key coordinates after the Fold is sliced."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
@@ -749,6 +753,7 @@ def _chain_tile_pins(monkeypatch):
     in-smem-budget tile; the cold emission-order pick can choose an over-budget tile and hard-fail.
     The tile is irrelevant to the accuracy checks (legacy env pins route through the ingest mapper)."""
     torch.manual_seed(42)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     for k, v in (("BN", "16"), ("BM", "8"), ("FN", "2"), ("FM", "2"), ("BK", "8"), ("BR", "4")):
         monkeypatch.setenv(f"EMMY_{k}", v)
 

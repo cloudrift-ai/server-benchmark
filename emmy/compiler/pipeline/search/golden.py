@@ -179,6 +179,11 @@ class GoldenRecord:
     loop_index: int | None = None
     loop_wire: dict | None = None
 
+    @property
+    def is_routing(self) -> bool:
+        """Whether this row records a kernel-placement decision rather than a kernel schedule."""
+        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
     @cached_property
     def pool_key(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
@@ -446,8 +451,8 @@ def validate_golden_file(
                         f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
                     )
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
-                if "PLACE" in families:
-                    raise ValueError(f"{realization_where} uses the removed PLACE family")
+                if "PLACE" in families and families != {"PLACE"}:
+                    raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
@@ -675,22 +680,44 @@ def _lifted_target(record: GoldenRecord):
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; routing records are obsolete; a SCHEDULE record's spelled row equals one enumerated
+    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
+    equals one enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
     any-of, no classified shape."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
     try:
-        _lifted_target(record)
+        tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
-    if any(str(key).split("@", 1)[0] == "PLACE" for key in record.knobs):
-        return "placement routing is not part of structural total lift"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
+    if record.is_routing:
+        from dataclasses import replace  # noqa: PLC0415
+
+        from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
+
+        axes = [axis.name for axis in tile.place.free]
+        axes.extend(store.sweep.name for store in tile.stores if store.sweep is not None)
+        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
+        seams = cuttable_seams(tile)
+        seam_ids = {id(seam.node) for seam in seams}
+        all_sites = sites(tile.op)
+        for key, value in record.knobs.items():
+            if str(value) != "cut":
+                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
+            try:
+                site = resolve(tile.op, str(key), all_sites=all_sites)
+            except ValueError as exc:
+                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
+            if site is None or id(site.node) not in seam_ids:
+                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
+        return _remember_verdict(verdict_key, None)
     candidates = _candidate_row_keys(record)
     if schedule_row_key(record.knobs) in candidates:
         reason = None
@@ -698,6 +725,13 @@ def decode_record(record: GoldenRecord) -> str | None:
         reason = f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
+    _IDENTITY_STORE_DIRTY = True
+    return reason
+
+
+def _remember_verdict(key: str, reason: str | None) -> str | None:
+    global _IDENTITY_STORE_DIRTY
+    _identity_store().setdefault("verdicts", {})[key] = reason
     _IDENTITY_STORE_DIRTY = True
     return reason
 

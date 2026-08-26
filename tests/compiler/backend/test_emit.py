@@ -17,6 +17,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import Assign, LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: F401
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import matmul_graph, requires_cuda
 
 
@@ -131,7 +132,8 @@ def test_softmax_emits_multiple_k_loops():
     two loops, not a single collapsed pass. (The online formulation folds max + sum in
     one loop via the ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a
     literal ``+=``.)"""
-    compiled = CudaBackend().compile(_softmax_graph())
+    with pinned_knobs({"PLACE": "fuse"}):
+        compiled = CudaBackend().compile(_softmax_graph())
     sources = [n.op.kernel_source for n in _cuda_nodes(compiled)]
     # Find the softmax-bearing kernel (contains fmaxf for max reduction).
     softmax_src = next((s for s in sources if "fmaxf" in s), None)

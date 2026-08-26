@@ -181,6 +181,7 @@ def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, 
     A slab the Volta shared gather reads, and the materialized B peer rides the BLOCKING vector
     copy — sm_70 has no ``cp.async`` to fly it under the fill."""
     _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
     assert knobs["TILE"] == f"{VOLTA}/f1x1"
     assert knobs["STAGE"] == stage
@@ -196,6 +197,7 @@ def test_modern_computed_a_edge_keeps_the_cp_async_peer_copy(monkeypatch) -> Non
     """The same fused edge on a cp.async target still flies its peer copy asynchronously — the
     blocking copy is the sm_70 fallback, not a new default."""
     _pin(monkeypatch, AMPERE, tile="f1x1", stage="d1/smem")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, _ = _source(_norm_linear_graph(k=32), Context(compute_capability=(8, 0)))
     assert "emmy_cp_async" in src
     assert "ldmatrix" in src and "rsqrtf" in src

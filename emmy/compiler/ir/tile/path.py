@@ -26,9 +26,9 @@ already canonical and the corpus needs zero migration):
 - the ordinal ``<n>`` (1-based, canonicalized traversal order) exists ONLY for true same-path
   collisions — two sites with identical full path AND axis; current kernels never need it.
 
-RESERVED (reject cleanly, never reuse): the graph-level placement grammar — the ``in.<operand>``
-path prefix and the leading-``=`` value-name pin form. Whoever restores graph-level placement owns
-that namespace; this parser only refuses to let a tile key squat on it.
+RESERVED (reject cleanly, never reuse): the retired placement spellings — the ``in.<operand>`` path
+prefix and the leading-``=`` value-name pin form. Current ``PLACE`` keys address stored Fold edges
+through the same tree paths as schedule keys.
 
 Ambiguity failures are LOUD by design: a stored short key broken by a future structural change must
 fail and be re-spelled by hand (``test_golden_spelling_canonical`` is the tripwire) — never
@@ -47,8 +47,9 @@ from emmy.compiler.ir.pure.fold import Fold, is_contraction
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
 SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
-#: What a tree path may address.
-PATH_FAMILIES = SLICE_FAMILIES
+#: What a tree path may address. ``PLACE`` addresses a non-root Fold's incoming edge; it is a
+#: kernel-boundary decision rather than a schedule slice.
+PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
@@ -124,11 +125,15 @@ def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = Fals
     for edge in node.operands:
         if isinstance(edge, Fold):
             _walk(edge, (*prefix, _seg(edge)), out, derived)
+    # A Fold stored literally in the lift is a materializable child, just like an operand edge.
+    # Walk it before the derived program so it is not confused with synthesized combine material.
+    stored = {id(s) for s in node.lift.body if isinstance(s, Fold)}
+    for child in (s for s in node.lift.body if isinstance(s, Fold)):
+        _walk(child, (*prefix, _seg(child)), out, derived)
     # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the fold)
-    # are real schedule sites, marked ``derived`` (combine material below the seam lattice; a
-    # lift-body inline node — the demoted cone — likewise: un-realizable as a seam). Operand
-    # edges embedded at their derived head position were walked above.
-    edge_ids = {id(e) for e in node.operands}
+    # are real schedule sites, marked ``derived`` (combine material below the seam lattice).
+    # Operand edges and literal lift-body Fold children were walked above.
+    edge_ids = {id(e) for e in node.operands} | stored
     for s in node.step_stmts():
         if id(s) in edge_ids:
             continue
@@ -164,9 +169,12 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     zero-axis fold is not a strip target).
 
     Residence is an edge decision made by scheduling; it does not remove the producer Fold's own
-    schedule site."""
+    schedule site. ``PLACE`` addresses every stored non-root Fold, excluding synthesized derived
+    evaluation nodes that have no replaceable edge in the term."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
+    if family == "PLACE":
+        return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
         return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None)
     out = []

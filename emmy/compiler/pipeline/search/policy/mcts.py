@@ -370,6 +370,9 @@ class TuningSearch(Search):
         if not knobs:
             return None
         row = dict(tuning_knob_items(knobs))
+        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE"}
+        if placement:
+            return placement
         work = Workers.parse(row.get("WORK"))
         if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
             return stamp_schedule_families(row)

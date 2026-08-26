@@ -33,8 +33,8 @@ cell read the maximum, denominator, or nested QK result without extracting or re
 2. remove the current loop's `Accum` statements from its step body;
 3. build the `lift`, `init`, and `combine` directly from those accumulators.
 
-There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, placement cut, or raw-loop
-fallback at this boundary. Unsupported non-canonical Loop IR fails loudly.
+There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
+boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
 
 ## Canonicalization
 
@@ -83,6 +83,13 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and boundary
 stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
+
+`lowering/tile/018_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
+stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
+writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
+ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s, so they re-enter the same placement
+and scheduling rules. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
+families nor filters legal cuts by profitability.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
 not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis

@@ -195,20 +195,27 @@ def _find_decided_leaf(options: list, want: dict) -> object | None:
 
 
 def _leaf_op(leaf: object):
-    """The concrete ``Op`` behind a flattened leaf, or ``None``. Reads
-    ``OptionFork.option`` rather than firing ``expand()`` — a planner tree
-    ``_Leaf``'s thunk would materialize a TileOp just to inspect it."""
+    """The concrete ``Op`` behind a flattened leaf, or ``None``.
+
+    A schedule-tree leaf exposes its concrete option directly. A deferred non-structural leaf is
+    materialized only after the flattening walk selected it for inspection.
+    """
     from emmy.compiler.ir.base import Op  # noqa: PLC0415
 
     if isinstance(leaf, Op):
         return leaf
     option = getattr(leaf, "option", None)
+    if option is None and isinstance(leaf, Fork) and leaf.is_leaf and not leaf.structural:
+        option = leaf.expand()[0]
     return option if isinstance(option, Op) else None
 
 
 def _leaf_graph(leaf: object) -> Graph:
-    """The ``Graph`` behind a structural leaf (raw or ``OptionFork``-wrapped)."""
-    return leaf if isinstance(leaf, Graph) else leaf.option
+    """The ``Graph`` behind a raw, concrete, or deferred structural leaf."""
+    if isinstance(leaf, Graph):
+        return leaf
+    option = getattr(leaf, "option", None)
+    return option if option is not None else leaf.expand()[0]
 
 
 def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float | None:

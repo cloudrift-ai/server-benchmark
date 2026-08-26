@@ -33,6 +33,7 @@ tests/compiler/passes/
 ├── test_partition_planner_forks.py # partition-planner fork generation
 ├── test_launch_geometry_rules.py   # launch-geometry pass
 ├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
+├── test_cut_forks.py              # fused/cut Fold-edge offers and pinned CUDA lowering
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_stage_inputs_classify.py   # Stage-input classifier
@@ -112,7 +113,10 @@ sites through the CUDA pipeline. `test_pool_space.py` addresses large spaces by 
 paired MMA checks with exact pins; it never exhausts a live catalog. `test_move_catalog.py` checks that independent
 roots with reversed M/N readings combine only when their tile
 widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
-output-tile rows when no MMA atom applies. The generated carrier's numerical laws are covered
+output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for computed
+operands, SDPA score production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA
+lowering. The pool-space tests inspect combined, atomic, and deferred reduce partitions through the lazy partition
+index rather than enumerating the full schedule space. The generated carrier's numerical laws are covered
 independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
 attention accuracy remain covered by the e2e suites.
 

@@ -134,6 +134,8 @@ def _emit(op, ctx: Ctx) -> Frag:
     The single node-kind dispatch every kernel's compute flows through — walking ``source`` AND
     ``step`` so nested contractions are reached as nodes. Scalar-nested: a node's body is its
     lowered loop-IR (byte-identical to ``Fold.lower``)."""
+    if isinstance(op, Load):
+        return Frag(body=[op], out=Handle(op.names[-1]))
     if isinstance(op, Fold) and op.axis is None:
         # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
         # edge per computed input, including nested reductions and contractions.
@@ -176,6 +178,8 @@ def _map_wire(op: Fold) -> Handle:
 def _emit_wire(op) -> Handle:
     """The produced-value :class:`Handle` of any node — a ``Fold`` / contraction names its
     carrier / accumulator; a zero-axis ``Fold`` scans for its last defining stmt (:func:`_map_wire`)."""
+    if isinstance(op, Load):
+        return Handle(op.names[-1])
     if isinstance(op, Fold) and op.axis is None:
         return _map_wire(op)
     return Handle(op.out)  # Fold.out — the carrier state, or a contraction's primary acc; always safe

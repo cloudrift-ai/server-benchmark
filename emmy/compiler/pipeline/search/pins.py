@@ -47,6 +47,8 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)
+        if fam == "PLACE":
+            continue  # graph placement is consumed by a splice, not stamped on either resulting kernel
         probe = want
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,

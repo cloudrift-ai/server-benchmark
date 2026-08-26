@@ -169,6 +169,9 @@ class TileOp(Op):
     # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in
     # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
     work: object = None
+    # Whether the graph-level Fold-edge placement fork kept this kernel fused. Cut pieces are
+    # fresh TileOps with the default ``False`` and may expose their own smaller seam set.
+    placement_decided: bool = False
 
     def __post_init__(self) -> None:
         from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp

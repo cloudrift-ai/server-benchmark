@@ -25,7 +25,7 @@ _CC = (12, 0)
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail every digest here for a reason that has nothing to do with the traversal.
-_PIN_VARS = ("EMMY_KNOBS", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER")
+_PIN_VARS = ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER")
 
 
 def _matmul_graph(m: int, n: int, k: int, dtype: str) -> Graph:
@@ -127,6 +127,13 @@ def test_paired_sdpa_honors_a_grid_reduce_partition(unpinned, monkeypatch) -> No
     space = _spaces(_sdpa_graph(), monkeypatch)[0]
     row = dict(space[0])
     assert row["REDUCE"] == row["REDUCE@a3"] == row["REDUCE@pj"] == "g2k"
+
+
+def test_reduce_space_keeps_combined_atomic_and_deferred_forks(unpinned, monkeypatch) -> None:
+    """Inspect the lazy partition index: no full schedule-space traversal is needed."""
+    space = _spaces(_matmul_graph(64, 64, 64, "f32"), monkeypatch)[0]
+    choices = {value for value, _ in space.partition("REDUCE")}
+    assert {"", "g2a", "g2k"} <= choices
 
 
 # --- the space itself: two traversals of one structure -------------------------------------------

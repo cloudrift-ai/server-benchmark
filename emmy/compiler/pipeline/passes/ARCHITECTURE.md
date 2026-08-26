@@ -71,11 +71,12 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `020_schedule` then
-maps the free axes and exposes a recursive, addressable product over every stored Fold site. It chooses the kernel's
-worker inventory, then composes legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values through generic worker and physical
-axis interfaces. Keys use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in
-`TileOp.schedule`. Candidate dictionaries are created only at addressed leaves; there is no eager row list or row cap.
+`015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `018_cut` then offers
+the maximal fused tree beside every semantically closed stored Fold-edge cut. `020_schedule` maps the free axes and
+exposes a recursive, addressable product over every stored Fold site. It chooses the kernel's worker inventory, then
+composes legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values through generic worker and physical-axis interfaces.
+Keys use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
+Candidate dictionaries are created only at addressed leaves; there is no eager row list or row cap.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
@@ -211,9 +212,16 @@ when roots reverse their algebraic M/N readings. A derived contraction uses the 
 parent/child interface. Materialization binds selected sites from their schedule slices; unsupported forms remain
 unmapped.
 
-## The divide rule: `split` an iteration axis
+## Kernel boundaries after maximal fusion
 
-`lowering/tile` carries one one-kernel→graph-fragment rule:
+Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
+that canonical input:
+
+- **`018_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
+  per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
+  Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
+  are not. The new producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same
+  ordinary passes.
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
@@ -230,8 +238,8 @@ A selected cross-CTA split is recorded structurally by an axis `Window`. The sch
 axis that is already a slice, including partition axes nested inside the complete Fold tree. The one-kernel atomic arm
 also splices a graph so it restarts the ordinary pass scan with the consumed schedule removed.
 
-Tile lowering creates no other kernel boundaries. In particular there is no placement cut, routing fork, or
-`__cut_` workspace path after maximal Loop IR fusion.
+Both forms keep their uncut or unsplit sibling addressable. The tuner chooses among them; neither greedy policy nor
+schedule enumeration may hide a legal kernel set.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_bilinear`) reads any lifted fold, so a nested

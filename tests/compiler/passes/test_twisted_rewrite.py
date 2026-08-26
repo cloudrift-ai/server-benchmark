@@ -79,6 +79,7 @@ def test_sdpa_fold_tree_reaches_both_mma_sites(monkeypatch, causal: bool) -> Non
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x2")
     monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
 
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))

@@ -46,6 +46,9 @@ register value); the **tensor-core seam** is the view arm in `_bind` — an outp
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires`.
 
+A materialized Fold-edge cut reaches this walk as an ordinary `Load` operand. `_emit` preserves that load and returns
+its bound value as the wire, so cut and fused trees use the same parent emission path.
+
 The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `TilePlan`
 slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
 TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from

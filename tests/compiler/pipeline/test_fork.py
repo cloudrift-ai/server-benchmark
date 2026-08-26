@@ -3,9 +3,8 @@
 Covers the generic builder contract using synthetic knob rows so the suite
 stays decoupled from any specific Tile-IR pass (`partition_loops` is the
 canonical caller; its integration tests live in
-``tests/compiler/passes/test_partition_planner_forks.py``). The flat
-``Fork`` implementations (``OptionFork`` / ``ThunkFork``) are exercised
-through the engine in ``tests/compiler/pipeline/search/test_thunk_forks.py``.
+``tests/compiler/passes/test_partition_planner_forks.py``). The deferred structural leaf is covered
+directly because graph-building must remain lazy.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree
 
 
 def _row(a: int, b: int, c: int) -> dict:
@@ -62,6 +61,15 @@ _LEVELS = [
     Level(("A",), lambda r: (r["A"],)),
     Level(("B",), lambda r: (r["B"],)),
 ]
+
+
+def test_deferred_structural_leaf_materializes_only_when_selected() -> None:
+    made: list[str] = []
+    leaf = DeferredFork(lambda: made.append("built") or "graph", {"PLACE": "cut"}, structural=True)
+    assert leaf.is_leaf and leaf.structural and leaf.knobs == {"PLACE": "cut"}
+    assert made == []
+    assert leaf.expand() == ["graph"]
+    assert made == ["built"]
 
 
 def test_empty_params_raises():

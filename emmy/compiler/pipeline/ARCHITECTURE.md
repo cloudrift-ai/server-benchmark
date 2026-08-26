@@ -405,11 +405,11 @@ What a newcomer needs to know about the fit:
   `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
   fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
   the metrics header, along with the loss — two fits are only comparable under the same one.
-- **A case is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
+- **A group is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
   set of rows in that pool a golden verified: usually one, several when the builder matched
   several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
   goldens share a pool is settled before any group is built, so a group's labels are final at construction.
-  The per-case term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  The per-group term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
   config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
   At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
@@ -422,7 +422,7 @@ What a newcomer needs to know about the fit:
   raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
   so a full-pool refit reproduces byte for byte.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  each case counting once — plus an L2 penalty in
+  each group counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
   the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
@@ -481,7 +481,7 @@ The names below recur throughout this document; together they are the whole publ
 | `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the verified tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
 | `sig_groups` | both measured-evidence tiers | How a candidate is matched to measured rows by its `S_*` features. It still matches when the feature set has changed since those rows were written (Part 4) — one rule shared by the reservoir tier and the DB tier. |
 | `trustworthy` | the check that lets the online model decide | `fitted` AND passing the calibration gate. |
-| `mean_score_features` / `explain_features` | diagnostics only | Scoring / decomposing a row that is ALREADY in feature form (Part 8) — which is what lets the attribution views hide individual features that no knob value corresponds to. |
+| `mean_score_features` / `mean_scores_features` | the model classes' own seam | Scoring a row that is ALREADY in feature form. `mean_score` / `mean_scores` featurize and delegate here, so a model class implements the featurized half only. Not a pool-scoring surface — that is `score_rows`, which projects a packed matrix and is what the fitter and the evaluation report use. |
 
 ### The deploy evidence hierarchy
 
@@ -682,8 +682,8 @@ touches the µs scale a deploy sees.
   more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine drops to
   goldens → DB `perf` rows → offline prior, with no warning at deploy time.
 - **The autotune DB's `node` rows** (a `feat_ver` column, added without rewriting old rows):
-  `diagnostics.node_report` excludes rows from another version and prints how many it dropped. Rows written before the
-  column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
+  `data/group.group_measured` excludes rows from another version and counts how many it dropped. Rows written before
+  the column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version then
 age out instead of poisoning the model.
@@ -1154,11 +1154,9 @@ a `configs` list), beside a `manifest.json` holding the provenance header and th
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
   `load_node_rows` sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze
   pointer) and yields `NodeRow`s from either, which is what lets every nodes consumer
-  (`eval prior --dataset nodes --db`, `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably
-  with the live DB.
-- Rows loaded from a freeze have no parent and `depth=0`, which is how the diagnostics recognize that no tree
-  structure is available. The fork-regret view skips them, and the golden-anchored descent prints its loud "no
-  fork-tree data" row, so a freeze is evaluated through the leaf-level metrics without inventing fork groups.
+  (`eval prior --dataset nodes --db`, `Dataset.fold_node_rows`) take a freeze interchangeably with the live DB.
+- Rows loaded from a freeze have no parent and `depth=0`. That costs the consumers nothing: they read benched
+  leaves, and a freeze is leaf-only by construction.
 - Handing a freeze to something that expects the perf table (the `--dataset db` paths) fails at `open_readonly`, with
   a message that spells out the difference between a freeze and the nodes DB.
 
@@ -1366,8 +1364,8 @@ over the goldens, the tune DB's `node` table, or a measurement freeze, and it re
 prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
-(`--json`), so comparing two models is a `diff`. `emmy fit` still writes its own metrics layout and adopts these
-cells with the fold harness. The report computes nothing itself:
+(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
+the same `report.rank_metrics`. The report computes nothing itself:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
 both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
 where a score comes from.
@@ -1378,12 +1376,12 @@ where a score comes from.
   keep the measured best). This is the half that tracks deployed speed.
 - A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
-  aggregate is dominated by pools small enough to rank by accident, so golden cells are stratified by pool size.
+  aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
 
-**Every cell publishes what it covered.** Cells carry the axes they were keyed on as a dict — measured: `gpu` ×
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
 `H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
 many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
-cell holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
+summary holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
 so on the v3 freeze's 336 pools those counts are 297, 216 and 90. An aggregate that averaged the excluded pools in
 would be reporting mostly arithmetic.
 
@@ -1420,9 +1418,9 @@ the one that gates, and the strictly-better **optimistic** rank is reported besi
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**Golden evaluations build their features for the golden's own GPU.** They go through ONE case builder — `emmy fit`'s
-`build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the same corpus, the
-same sampling draw and the same rows. Each golden's compile context is rebuilt as
+**Golden evaluations build their features for the golden's own GPU.** They go through ONE golden group builder —
+`emmy fit`'s `build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the
+same corpus, the same sampling draw and the same rows. Each golden's compile context is rebuilt as
 `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
 count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
 because the occupancy features then describe tiles for a GPU that is not the one the row came from.
@@ -1432,69 +1430,29 @@ a property of the model being fitted, and the eval scores two model classes: the
 names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
 view drops and would otherwise be asked about a kernel with no shape.
 
-**Fork-sibling regret** (`eval prior --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
-GPU**, what following the prior's choice at each fork costs. It groups nodes by `parent_key` and computes
-`value_us(the child the prior predicted best) / value_us(the truly best child)`; 1.00x means the prior steers into the
-best subtree reachable from there, and ties in predicted score count against the prior, since greedy breaks them by
-the order the options were emitted in. This is the search-faithful evaluation that no view of leaves alone can give.
-Each fork is bucketed by which knob FAMILY its children decide (`TILE` / `REDUCE` / `STAGE` / …, read off the
-difference between child and parent knobs). That is the stable way to name a level of the tree, because the raw
-`depth` counts rule steps and renumbers whenever passes change. The result is rendered as a per-kernel × per-family
-regret table, with an aggregate line per family. `node_report` drops `bench_fail` rows up front — their `value_us` is
-the watchdog's placeholder, not a measurement — and splits each GPU's block by `H_opt`, so `-O1` and `-O3` latencies
-are never pooled. The per-GPU
-grouping matters for a cross-hardware dataset: two SKUs off the same die (H100/H200) share an `S_*` op signature but
-not their latencies, so mixing them would corrupt both metrics; the `gpu` key keeps their rows apart. `--db` also
-accepts a measurement freeze (Part 6) in place of the live DB — its rows are leaves with no parents, so the report
-falls back to the leaf-level metrics.
+**The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
+regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how
+far a golden's path was covered by the explored tree), and per-feature blame / ablation Δ. They are gone, with
+`Dataset.from_node_rows` and the `Prior.masking_exact` chain that existed only to caveat the ablation numbers.
 
-That block is rendered once per **half** of the prior, offline and online, each labeled. The composite would answer
-with whichever half is currently active, and the two halves' regrets point at different fixes — the cold-start weights
-versus the training data — so an unlabeled "prior" number would destroy the diagnostic.
+Two reasons, and the second is why nothing replaced them in kind. They answered questions about a SEARCH TREE, and
+the stores no longer hold one: every row in the current node table and in the v3 freeze is a parentless `depth=0`
+bench leaf, so the fork metrics had nothing to group by `parent_key` and degraded to leaf-level numbers that
+`eval prior`'s summaries now compute directly. And the ablation half rested on hiding one feature at a time, which
+attributes an effect among correlated features with no unique answer — hiding any one of a redundant block of
+geometry features costs the same Δ.
 
-**The report section labeled "golden-anchored descent"** covers what the regret view structurally cannot see. Regret
-only speaks about forks the search actually measured, so a golden sitting in a subtree the search never built — or a
-shape with no node data at all — was silence that read as health. That is how a past saturation bug hid from regret
-while the then-broken golden rank claimed top-1. Each GPU's block therefore ends with one row per golden recorded FOR
-that GPU (a golden is only ever matched against rows measured on its own GPU), reporting: how far its path is covered
-by the explored tree (branches are matched with the same family-aware, registry-canonical rule the A/B pin check
-uses), whether the prior's tie-pessimistic pick stays inside the golden's subtree at each fork (with the measured gap,
-at matching flags, where it does not), and the loud absences — `NO TREE DATA` for a golden whose path is nowhere in
-the tree, a count per GPU, and a closing line for GPUs that have recorded goldens but no node rows at all.
+What a tree could tell you that a pool of benched leaves cannot is real and unaddressed: a search is a sequence of
+partial decisions, most of whose subtrees are never explored, and a golden sitting in an unexplored one is silence
+that reads as health. The writer for such a store is not hypothetical — `policy/mcts.py`'s `_collect_node_records`
+walks the finished tree and emits parent-linked rows, and `working_golden.py` calls it into the same `node` table.
+What changed is the collection path: the budgeted leaf sweep the `collect-node-data` skill drives records benched
+leaves through `bench_record`, bypassing the tree writer. Per-fork evaluation returning is a question about which
+collection flow runs, not about building a new store.
 
-Coverage is always printed with a denominator. A fully followed path is exact (`followed 6/6 fork levels to a measured
-leaf`), while a partial match's total is an ESTIMATE, marked `~` (`followed 2 of ~7 fork levels`), taken from the
-deepest chain of siblings below the fork where the paths diverged — the golden's own branch was never built, so those
-siblings' depth is the only evidence of how much tree is left. Keeping the flags straight is essential: the golden's
-recorded µs is a deployable `-O3` number and never enters the `-O1` walk or its gaps, because the two systematically
-invert. It appears only in the `-O3 pick/golden` endpoint, computed over the op's `H_opt=3` rows with the fast-math
-setting matched (the `golden_deploy_perf` convention). This is a diagnostic, not a gate: losing a fork whose measured
-sibling is near-equal is fine, and the gap column is what tells you so.
-
-Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
-(`EMMY_ONLINE_FILE`), and `--offline-file` (env `EMMY_OFFLINE_FILE`) swaps the
-offline weights artifact — comparing two fits is running the same eval against two files and diffing the reports.
-
-**Which feature is to blame** (`eval prior --dataset nodes --blame / --ablate`). Both views consume one shared
-per-fork record (`diagnostics.fork_records`: the siblings, their rows in feature form, their scores, the
-tie-pessimistic pick and the measured best), so all three views agree on what "the pick" means by construction. They
-score through the `Prior`'s feature-level entry points — `mean_score_features` / `mean_scores_features` take a row
-that is already in feature form, and are contractually identical to `mean_score` on the raw knob dict. That is what
-lets the diagnostics hide individual `D_*` features that no knob value corresponds to.
-
-- **Blame** diffs `Prior.explain_features` — a signed breakdown of the quality score into one term per feature, exact
-  for the linear offline prior, with its hard-coded interactions included as `gate:*` pseudo-terms, and unit-tested to
-  sum back to the scored quality — between the pick and the sibling that measured best, weighted by regret and grouped
-  by fork family. A fork the prior missed where no term separates the two is reported **BLIND**: a gap in the
-  featurizer, not a problem with the weights.
-- **Ablation Δ** re-picks every fork with one feature hidden, using each model's own notion of an absent feature (a
-  `0.0` term for the linear prior, which removes it exactly; `NaN` routing for CatBoost, which is flagged as
-  out-of-distribution until a model trained with feature dropout exists) and reports the change in median regret per
-  family, along with how many forks that feature had any say in.
-
-Both are **diagnostics, never gate metrics**: attributing an effect among correlated features has no unique answer
-(hiding any one of a redundant block of geometry features costs the same Δ). Unlike the per-GPU regret tables,
-attribution POOLS GPUs and flag settings, which is safe because regret is a ratio computed within one fork.
+Both prior halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online
+checkpoint (`EMMY_ONLINE_FILE`), and `--offline-file` (env `EMMY_OFFLINE_FILE`) swaps the offline weights artifact —
+comparing two fits is running the same eval against two files and diffing the reports.
 
 ## Part 9: Tile lowering at the pipeline level
 

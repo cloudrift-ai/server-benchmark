@@ -8,8 +8,9 @@ Five subcommands:
   (``--dataset nodes``: Spearman + regret, what a wrong pick costs) or over the golden
   corpus (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
   golden). BOTH prior halves are reported, labelled — they fail for different reasons.
-  The cells are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
-  still emits its own metrics layout and moves onto these cells with the fold harness.
+  The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
+  writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
+  screen with one implementation rather than two that agree by coincidence.
 - ``eval golden``    — validate one canonical golden YAML against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
@@ -122,18 +123,6 @@ def register_eval_command(subparsers) -> None:
         "--features",
         action="store_true",
         help="--dataset golden: also print the exact feature vector the prior regresses on per golden config (features.knob_features).",
-    )
-    pp.add_argument(
-        "--blame",
-        action="store_true",
-        help="With --dataset nodes: per-feature blame table — which features' terms pushed each missed fork's wrong "
-        "pick, regret-weighted per fork family (diagnostic, not a gate metric).",
-    )
-    pp.add_argument(
-        "--ablate",
-        action="store_true",
-        help="With --dataset nodes: ablation Δ table — each family's median regret change with one feature masked "
-        "(<0 = actively misleading), with per-feature fork support.",
     )
     pp.set_defaults(func=handle_eval_prior)
 
@@ -248,41 +237,58 @@ def _prior_halves():
     return halves
 
 
-def _node_rows(args):
-    """The search-tree rows both node-dataset views read, loaded ONCE. ``--db`` takes a live tune DB or a
-    measurement-freeze directory; ``load_node_rows`` sniffs which.
+def _freeze_provenance(path: Path) -> dict:
+    """A freeze's ``sha256`` and the versions its rows are spelled in, for the report header.
+
+    Empty for anything that is not a freeze directory (a live tune DB), so the header shows what
+    a reader can act on rather than a placeholder. Read straight from the manifest — ``load_freeze``
+    has already verified the digest by the time a report is built, so this does not re-verify."""
+    manifest = path / "manifest.json"
+    if not manifest.is_file():
+        return {}
+    try:
+        m = json.loads(manifest.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {k: m[k] for k in ("sha256", "freeze_ver", "feat_ver", "knob_ver", "encoding_ver") if k in m}
+
+
+def _measured_report(args, halves):
+    """``eval prior --dataset nodes`` — the report over benched pools.
+
+    ``--db`` takes a live tune DB or a measurement-freeze directory; ``load_node_rows`` sniffs which. The
+    grouping, its key and every admission rule are :func:`group_measured`'s, so this reads the same pools the
+    training-data work will.
 
     ``--kernel`` matches the op LABEL, since the store's own op identity is a digest with nothing readable in
     it. The label is a function of the row's ``S_*`` features, which every node of one op shares, so a filter
     keeps or drops a whole op atomically — a pool is never split against its own siblings."""
+    from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data import load_node_rows, op_label  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries  # noqa: PLC0415
 
-    db_path = Path(args.db) if args.db else resolve_tune_db()
+    db_path = Path(args.db) if args.db else config.freeze_path()
     if not db_path.exists():
-        logger.error("no tune DB or measurement freeze at %s — pass --db or run `emmy tune` first.", db_path)
+        logger.error("no measurement freeze or tune DB at %s — pass --db to point at one.", db_path)
         sys.exit(2)
     rows = load_node_rows(db_path)
-    return db_path, [r for r in rows if args.kernel in op_label(r.features)] if args.kernel else rows
-
-
-def _measured_report(db_path, rows, args, halves):
-    """``eval prior --dataset nodes`` — the report over benched pools.
-
-    The grouping, its key and every admission rule are :func:`group_measured`'s, so this reads the same pools
-    the training-data work will."""
-    from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_cells  # noqa: PLC0415
-
+    if args.kernel:
+        rows = [r for r in rows if args.kernel in op_label(r.features)]
     groups, dropped = group_measured(rows)
     header = {
         "dataset": "nodes",
         "source": str(db_path),
+        # A freeze's identity travels with the numbers: two reports are comparable only when
+        # they were computed over the same rows, and the digest is what says so. Absent for a
+        # live DB, which has no such identity — that is the point of preferring a freeze.
+        **_freeze_provenance(db_path),
         "kernel": args.kernel,
         "rows": len(rows),
         "groups": len(groups),
         "dropped": dropped,
     }
-    return EvalReport(header, [c for half, prior in halves for c in measured_cells(half, groups, prior.score_rows)])
+    return EvalReport(header, [c for half, prior in halves for c in measured_summaries(half, groups, prior.score_rows)])
 
 
 def _golden_report(args, halves):
@@ -293,7 +299,7 @@ def _golden_report(args, halves):
     only its own weight names, so its ranks are identical either way, while the online half regresses on the
     ``S_*`` / ``H_*`` columns a narrow view drops and would otherwise be asked about a kernel with no shape."""
     from emmy.commands.fit import build_golden_groups  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_cells  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
 
     logger.info("Building golden pools (each golden under its own card's context) ...")
     groups, skipped = build_golden_groups("*", sample=args.pool_sample, kernel=args.kernel)
@@ -306,7 +312,7 @@ def _golden_report(args, halves):
         "positives": sum(len(g.golden_ids) for g in groups),
         "skipped": len(skipped),
     }
-    return EvalReport(header, [c for half, prior in halves for c in golden_cells(half, groups, prior.score_rows)])
+    return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
 
 def handle_eval_prior(args) -> None:
@@ -326,35 +332,30 @@ def handle_eval_prior(args) -> None:
         "or a measurement freeze). --dataset db reads only fully-decided leaf rows, with no op identity or compile "
         "regime to group them by — pass the same DB with --dataset nodes.",
     )
-    if (args.blame or args.ablate) and args.dataset != "nodes":
-        logger.error("--blame/--ablate attribute fork records — they need --dataset nodes.")
-        sys.exit(2)
     halves = _prior_halves()
-    nodes = None if args.dataset == "golden" else _node_rows(args)
-    report = _golden_report(args, halves) if nodes is None else _measured_report(*nodes, args, halves)
+    golden = args.dataset == "golden"
+    report = _golden_report(args, halves) if golden else _measured_report(args, halves)
     _emit_report(report)
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
-    if nodes is None:
+    if golden:
         _emit_golden_deploy_check(args)
-    else:
-        _emit_fork_blocks(nodes[1], args, halves)
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
-    """One metric value with the pools it was computed over, or ``—`` when nothing in the cell qualified.
+    """One metric value with the pools it was computed over, or ``—`` when nothing in the summary qualified.
 
     The count is appended only where the block carries one, which is where the metric has a size minimum and so
-    can cover fewer pools than the cell holds."""
+    can cover fewer pools than the summary holds."""
     value = block.get(key)
     if value is None:
         return "—"
     return f"{fmt.format(value)} ({block['groups']})" if "groups" in block else fmt.format(value)
 
 
-# Per dataset: the axis columns, then ``(header, cells(cell))`` for each metric column. The axes are the ones the
-# report keyed its cells on — the renderer names them rather than discovering them, so a column order is a
+# Per dataset: the axis columns, then ``(header, render(summary))`` for each metric column. The axes are the ones the
+# report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
     "nodes": (
@@ -389,10 +390,10 @@ _REPORT_CAPTIONS = {
 
 
 def _emit_report(report) -> None:
-    """Print an :class:`EvalReport` — the provenance header, then one table of cells.
+    """Print an :class:`EvalReport` — the provenance header, then one table of summaries.
 
-    Which columns appear follows the report's dataset, since that is what decided which metrics the cells carry.
-    The ``pools`` column is the cell's own total, annotated when the model could not score some of them: an
+    Which columns appear follows the report's dataset, since that is what decided which metrics the summaries carry.
+    The ``pools`` column is the summary's own total, annotated when the model could not score some of them: an
     unscored pool is not a small one, and a report that dropped it silently would show a healthy corpus with no
     sign that part of the deploy surface is unmeasured."""
     head = report.header
@@ -406,41 +407,23 @@ def _emit_report(report) -> None:
         logger.info("  %s", provenance)
     if dropped := head.get("dropped"):
         logger.info("  rows dropped before grouping: %s", ", ".join(f"{n} {why}" for why, n in sorted(dropped.items())))
-    if not report.cells:
+    if not report.summaries:
         logger.info("  no candidate pools to score")
         return
 
     axes, metrics = _REPORT_TABLES[head["dataset"]]
     columns = [Col(a) for a in (*axes, "pools")] + [Col(name) for name, _ in metrics]
     rows = [
-        [cell.axes.get(a, "") for a in axes]
-        + [str(cell.groups) + (f" ({cell.unscored} unscored)" if cell.unscored else "")]
-        + [render(cell) for _, render in metrics]
-        for cell in report.cells
+        [summary.axes.get(a, "") for a in axes]
+        + [str(summary.groups) + (f" ({summary.unscored} unscored)" if summary.unscored else "")]
+        + [render(summary) for _, render in metrics]
+        for summary in report.summaries
     ]
     logger.info("")
     for line in _REPORT_CAPTIONS[head["dataset"]]:
         logger.info("  %s", line)
     for line in render_table(columns, rows, rule=True, indent="  "):
         logger.info("%s", line)
-
-
-def _emit_fork_blocks(nodes, args, halves) -> None:
-    """The per-fork view over the search tree: what following the prior's pick at each FORK costs, bucketed by the
-    knob family the fork decides, plus the golden-anchored descent.
-
-    It answers something the cells above structurally cannot. They score pools of benched leaves, while a search is
-    a sequence of partial-knob decisions most of whose subtrees were never explored — a golden sitting in a subtree
-    nothing measured is silence that reads as health."""
-    from emmy.compiler.pipeline.search.prior import diagnostics  # noqa: PLC0415
-
-    for half, prior in halves:
-        logger.info("")
-        logger.info("=== %s prior — per-fork view ===", half)
-        logger.info("%s", diagnostics.node_report(prior, nodes))
-        if args.blame or args.ablate:
-            logger.info("")
-            logger.info("%s", diagnostics.attribution_report(prior, nodes, blame=args.blame, ablate=args.ablate))
 
 
 def _emit_golden_deploy_check(args) -> None:
@@ -732,8 +715,8 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, o3: dic
     """One kernel's leaderboard: measured leaf configs sorted by tune-ranking
     latency, the prior's pick marked, knobs in the canonical aligned columns
     (``tuning_knob_items`` — the same filtered view the ``run --bench`` kernel
-    table renders). Non-leaf rows (partial-knob fork nodes) are dropped,
-    mirroring ``diagnostics.reachability``; the ``-O3 us`` column appears only
+    table renders). Non-leaf rows (partial-knob fork nodes) are dropped —
+    a partial config is not a variant; the ``-O3 us`` column appears only
     when the reservoir holds any -O3 row at all."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
@@ -829,7 +812,7 @@ def _knob_cells(entry: tuple) -> dict[str, tuple[str, bool]]:
     :func:`~emmy.commands.table.knob_columns` puts the name in the column header).
     A ``("row", lead, gold, got)`` entry renders ``found/golden`` per knob, red where the
     two differ (``knob.values_equal`` — so a legacy golden spelling compares equal to the
-    site-form pick it realizes as); a ``("total", lead, cells)`` entry carries its cells
+    site-form pick it realizes as); a ``("total", lead, summaries)`` entry carries its summaries
     pre-built."""
     if entry[0] == "total":
         return entry[2]
@@ -848,7 +831,7 @@ def _knob_eq(k: str, gv, got: dict) -> bool:
 
 def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str) -> None:
     """Stream a golden table via ``logger``: ``lead_cols`` (kernel, m/t, …) plus the aligned
-    ``found/golden`` knob columns (knob name in the header, value-only cells). ``entries``
+    ``found/golden`` knob columns (knob name in the header, value-only summaries). ``entries``
     preserves config order — each is ``("row", lead_cells, gold, got)``,
     ``("total", lead_cells, knob_cells)`` (a pre-built aggregate row), or
     ``("err", kernel_name, message)``; an error row prints its kernel name (aligned to the
@@ -944,7 +927,7 @@ def _perf_color(ratio: float) -> str:
 
 
 def _perf_cell(perf: dict | None, name: str) -> tuple[str, str] | None:
-    """The ``vs gold`` lead cell for one shape: ``pick_us/golden_us`` as ``N.NNx``
+    """The ``vs gold`` lead summary for one shape: ``pick_us/golden_us`` as ``N.NNx``
     (green >3% faster, white within 3%, yellow/red slower), ``—`` when the shape has no
     -O3 measurement. ``None`` when ``perf`` wasn't supplied (column absent — e.g.
     ``eval golden``)."""

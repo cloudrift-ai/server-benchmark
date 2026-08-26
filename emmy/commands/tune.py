@@ -591,7 +591,7 @@ def handle_tune(args):
         sys.exit(2)
     if not args.code and not args.input and not getattr(args, "golden_file", None):
         # No op to tune → offline mode: refit the online prior on its persisted
-        # dataset and print diagnostics (reachability, calibration, golden coverage).
+        # dataset and print what that dataset covers.
         _tune_offline(args)
         return
 

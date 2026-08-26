@@ -204,8 +204,7 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     the store is censored in). Returns the number of rows offered to
     :meth:`SearchDB.record_nodes` (its plausibility gate and quality-aware leaf
     replacement still apply per row)."""
-    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB  # noqa: PLC0415
-    from emmy.compiler.structural import digest  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, node_key  # noqa: PLC0415
 
     if not leaves:
         return 0
@@ -214,10 +213,9 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     rows = []
     for leaf in leaves:
         features = {**h_feats, **leaf.knobs}
-        tun = tuple(sorted((k, str(v)) for k, v in features.items() if not k.startswith(("S_", "H_"))))
         rows.append(
             NodeRow(
-                node_key=digest(ctx_key, gpu, leaf.op_sig, tun),
+                node_key=node_key(ctx_key, gpu, leaf.op_sig, features),
                 parent_key=None,
                 context_key=ctx_key,
                 op_sig=leaf.op_sig,

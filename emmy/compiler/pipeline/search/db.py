@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,24 @@ class NodeRow:
     # version (writers construct rows with live code); rows read back from a pre-stamp DB carry 1
     # and are excluded from prior evaluation (cross-vocabulary features score as garbage).
     feat_ver: int = FEATURIZER_VERSION
+
+
+def node_key(context_key: str, gpu: str, op_sig: str, features: dict) -> str:
+    """THE ``node`` table's identity: a node within its operation *on its hardware* — a digest over
+    the deploy regime (``context_key``), the card identity (``gpu`` — ``Context.hardware_id``), the
+    kernel's ``S_*`` signature (``op_sig``), and the canonical tunable-knob set. ``gpu`` is folded in
+    because ``context_key`` (cc + opt only) can't tell same-die SKUs apart (H100 vs H200), so without
+    it their rows would collide and keep-min would silently drop one card's data. ``S_*`` / ``H_*``
+    features are excluded from the set — already folded via ``op_sig`` / ``context_key`` (and
+    ``gpu``) — so the key is the within-op node identity. ``str()``-ified values keep non-string knob
+    values stable, and the sorted tuple keeps :func:`digest` (order-sensitive) deterministic.
+
+    Lives here, with :class:`NodeRow`, because it is the row's identity rather than any one writer's
+    recipe: the tune walk and the ``run --bench`` recorder both key rows with it."""
+    from emmy.compiler.structural import digest  # noqa: PLC0415 — deferred: structural imports nothing here
+
+    tun = tuple(sorted((k, str(v)) for k, v in features.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))))
+    return digest(context_key, gpu, op_sig, tun)
 
 
 def implausible_value_reason(row: NodeRow) -> str | None:

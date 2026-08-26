@@ -44,11 +44,10 @@ from emmy.compiler.pipeline.knob import (
     tuning_knob_items,
 )
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
-from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
+from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, node_key
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
-from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.prior import Prior
@@ -502,20 +501,6 @@ class TuningSearch(Search):
             rows.append((knobs, 1.0 / node.best_reward))
         return rows
 
-    def _node_key(self, feats: dict, op_sig: str, context_key: str, gpu: str) -> str:
-        """Identity of a node within its operation *on its hardware*: a digest over the
-        deploy regime (``context_key``), the card identity (``gpu`` —
-        ``Context.hardware_id``), the op's ``S_*`` signature (``op_sig``), and the
-        canonical tunable-knob set. ``gpu`` is folded in because ``context_key`` (cc +
-        opt only) can't tell same-die SKUs apart (H100 vs H200), so without it their
-        rows would collide and keep-min would silently drop one card's data. ``S_*`` /
-        ``H_*`` features are excluded from the set — already folded via ``op_sig`` /
-        ``context_key`` (and ``gpu``) — so the key is the within-op node identity.
-        ``str()``-ified values keep non-string knob values stable, and the sorted tuple keeps :func:`digest`
-        (order-sensitive) deterministic."""
-        tun = tuple(sorted((k, str(v)) for k, v in feats.items() if not k.startswith(("S_", "H_"))))
-        return digest(context_key, gpu, op_sig, tun)
-
     def _collect_node_records(
         self,
         *,
@@ -615,7 +600,7 @@ class TuningSearch(Search):
                     route_depth = depth
                     if route_parent is None:
                         base_features = dict(self._base_knobs)
-                        route_parent = self._node_key(base_features, op_sig, context_key, gpu)
+                        route_parent = node_key(context_key, gpu, op_sig, base_features)
                         emit(
                             NodeRow(
                                 node_key=route_parent,
@@ -634,7 +619,7 @@ class TuningSearch(Search):
                         )
                         route_depth += 1
                     route_features = {**self._base_knobs, **structural_input}
-                    nk = self._node_key(route_features, op_sig, context_key, gpu)
+                    nk = node_key(context_key, gpu, op_sig, route_features)
                     emit(
                         NodeRow(
                             node_key=nk,
@@ -657,7 +642,7 @@ class TuningSearch(Search):
                     feats = node.realized_knobs if is_leaf else self._node_knobs(node)
                     value_us = 1.0 / node.best_reward
                     assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"
-                    nk = self._node_key(feats, op_sig, context_key, gpu)
+                    nk = node_key(context_key, gpu, op_sig, feats)
                     emit(
                         NodeRow(
                             node_key=nk,
@@ -686,7 +671,7 @@ class TuningSearch(Search):
                     # assert, no parent_value update, children keep the inherited nk.
                     emit(
                         NodeRow(
-                            node_key=self._node_key(node.realized_knobs, op_sig, context_key, gpu),
+                            node_key=node_key(context_key, gpu, op_sig, node.realized_knobs),
                             parent_key=parent_key,
                             context_key=context_key,
                             op_sig=op_sig,

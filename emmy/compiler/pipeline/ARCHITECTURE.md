@@ -556,7 +556,12 @@ Three definitions the list leans on:
 - **Which compile flags each tier applies under**: the reservoir tier applies only to a compile at deployable `-O3`
   flags (`H_opt=3`) — `-O3` evidence is true of the deployable settings only and must never settle an `-Xcicc -O1`
   compile. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the `compile` /
-  `run` default — count as 3, so a default deploy is always deployable. The DB tier applies under any flags: its
+  `run` default — count as 3, so a default deploy is always deployable. The identity a measurement is *stored* under
+  agrees with that reading: `Context.structural_key` folds the flags **split** into an opt level plus the other flags
+  (`context.split_opt_level`), never the raw string, so `""` and an explicit `-Xcicc -O3` are one key for the one
+  regime they physically are. Keyed on the raw string they were two, and a row a tune wrote under an explicit `-O3`
+  pin was declared deployable by `H_opt` and then unreadable at a default deploy. The DB tier applies under any
+  flags: its
   "deployable" half means any context key that is not the `-O1` one, so an `-O3` row decides outright even under an
   `-O1` compile. The two tests are deliberately not mirror images: only `-Xcicc -O1` counts as the ranking flags,
   while anything else counts as deployable for the DB tier. An explicit `-O2` pin therefore gets DB evidence but not
@@ -1109,7 +1114,10 @@ Each `node` row also carries **label-quality columns** (additive migration; old 
 - `is_leaf` — whether this is a real measurement or a minimum over explored descendants.
 - `variance` / `n_samples` — the leaf's own bench statistics.
 - `status` — `ok` / `bench_fail`. Failed leaves ARE recorded, with the watchdog's placeholder value as `value_us`;
-  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure.
+  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure. A config
+  whose **compile** ran past its budget is not one of these and is not recorded at all: nothing about its speed was
+  measured, and a stored row would make it a permanent cache hit that is never re-benched (see the two bench budgets
+  in `backend/cuda/ARCHITECTURE.md`).
 - `run_id` / `measured_at` — the tune session (one id per CLI invocation) and the time that produced the CURRENT
   `value_us`; both are replaced only when that value is.
 - `feat_ver` — the `features.FEATURIZER_VERSION` the row's feature dict was written under (Part 3). Rows written
@@ -1346,7 +1354,8 @@ fresh child — no escalation modes, no `os._exit`.
   child's profiled launches), so with `--bench` those two want a separate plain `run`.
 
 Plus `--json PATH` — a machine-readable record of the whole comparison (backends / greedy kernels / pinned rows with
-their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail`; a failed greedy block carries
+their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail` / `compile_timeout` (the config's compile ran
+past its budget, so nothing about it was measured and the row is reported but never recorded); a failed greedy block carries
 `status: bench_fail` and an `error`, with null timings), so a sweep's judgments can be traced to flagged fields
 instead of to parsed terminal text. Each kernel row also carries **`record_knobs`**: the tuning knobs the compile
 actually produced, with every schedule knob family (`knob.SCHEDULE_FAMILIES`: WORK / TILE / REDUCE / STAGE / RASTER)

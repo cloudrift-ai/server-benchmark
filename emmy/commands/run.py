@@ -886,6 +886,17 @@ def _sample_replay_knobs(sample) -> dict:
     return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
 
 
+def _failed_bench_status(exc: BaseException) -> str:
+    """The status a raised bench earns. A compile-budget overrun measured nothing about the
+    kernel, so it gets its own status and is therefore NOT recorded into the node store
+    (:func:`_recordable_bench_leaves` records ``bench_fail`` exactly) — recording it would put a
+    false negative into the very rows the prior trains on. Anything else compiled and then failed,
+    which IS evidence about the config, and stays the honest ``bench_fail`` it has always been."""
+    from emmy.compiler.backend.cuda.program import compile_budget_overrun  # noqa: PLC0415
+
+    return "compile_timeout" if compile_budget_overrun(exc) else "bench_fail"
+
+
 async def _bench_golden_variants(
     backend,
     source,
@@ -975,8 +986,9 @@ async def _bench_golden_variants(
                 g_compiled, run_inputs=ref_inputs, run_inputs_key=ref_key, warmup=warmup, num_iters=iters
             )
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
-            logger.warning("[golden] %s: bench of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
-            out.append(_GoldenBench(sample, g_compiled, None, [f"bench_fail: {exc}"], "bench_fail"))
+            st = _failed_bench_status(exc)
+            logger.warning("[golden] %s: bench of the pinned config failed (%s) — row kept as %s", sample.name, exc, st)
+            out.append(_GoldenBench(sample, g_compiled, None, [f"{st}: {exc}"], st))
             continue
         run_outputs = _comparison_outputs(run_outputs, g_compiled) if run_outputs is not None else None
         correctness = None
@@ -1017,8 +1029,9 @@ async def _bench_greedy_isolated(backend, compiled, *, warmup, iters):
     try:
         g_bench, _ = await backend.bench_pinned_async(compiled, warmup=warmup, num_iters=iters)
     except Exception as exc:  # noqa: BLE001 — an iso-bench failure must not abort the pinned rows
-        logger.warning("greedy isolated re-bench failed (%s) — row kept as bench_fail; pinned rows still bench", exc)
-        return _GoldenBench(sample, compiled, None, [f"bench_fail: {exc}"], "bench_fail")
+        st = _failed_bench_status(exc)
+        logger.warning("greedy isolated re-bench failed (%s) — row kept as %s; pinned rows still bench", exc, st)
+        return _GoldenBench(sample, compiled, None, [f"{st}: {exc}"], st)
     return _GoldenBench(sample, compiled, g_bench, [], "ok")
 
 
@@ -2402,8 +2415,9 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
         try:
             g_bench, _ = await backend.bench_pinned_async(g, warmup=warmup, num_iters=iters)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
-            logger.warning("[ab] %s: bench of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
-            out.append(_GoldenBench(sample, g, None, [f"bench_fail: {exc}"], "bench_fail"))
+            st = _failed_bench_status(exc)
+            logger.warning("[ab] %s: bench of the pinned config failed (%s) — row kept as %s", sample.name, exc, st)
+            out.append(_GoldenBench(sample, g, None, [f"{st}: {exc}"], st))
             continue
         out.append(_GoldenBench(sample, g, g_bench, []))
     return out

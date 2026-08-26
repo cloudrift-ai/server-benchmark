@@ -609,13 +609,14 @@ class EmmyGenModel(nn.Module, SupportsPP):
         self.runner.maybe_log_routing_histogram()
         device = positions.device
         t = int(positions.shape[0])
-        ids = None
+        # Every rank clamps the step's ids (vLLM hands them to all pipeline stages): the first rank
+        # embeds them, and any rank's hash-routed MoE layers select experts by them. The clamp
+        # guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
+        ids = input_ids.clamp(0, self.config.vocab_size - 1) if input_ids is not None else None
         if self._is_first_rank:
             if inputs_embeds is not None:
                 hidden = inputs_embeds
             else:
-                # clamp guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
-                ids = input_ids.clamp(0, self.config.vocab_size - 1)
                 hidden = self.runner.embed_device(ids)
         else:
             if intermediate_tensors is None:
@@ -631,7 +632,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
         decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
         prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
         if decode_ok or prefill_ok:
-            return self._forward_device(hidden, positions)
+            return self._forward_device(hidden, positions, ids)
         if self.fork_attn is not None:
             # The host numpy fallback carries q/k/v across the seam and has no stream form; a step
             # this wide would silently take the wrong path rather than run slowly.
@@ -657,7 +658,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
             return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
         return IntermediateTensors({"hidden_states": torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)})
 
-    def _forward_streams(self, hidden, positions):
+    def _forward_streams(self, hidden, positions, token_ids):
         """Device-resident forward for a hyper-connection architecture (DeepSeek V4).
 
         ``hidden`` is the flattened residual-stream carrier. Per layer: Emmy's ``pre`` collapses the
@@ -670,16 +671,16 @@ class EmmyGenModel(nn.Module, SupportsPP):
             x = self.runner.forward_layer_pre_device(layer, carrier)
             x = x[0] if isinstance(x, tuple) else x
             attn_out = self.fork_attn[layer](positions, x.to(self.dtype), None)
-            hidden = self.runner.forward_layer_post_device(layer, attn_out, carrier)
+            hidden = self.runner.forward_layer_post_device(layer, attn_out, carrier, token_ids=token_ids)
         if self._is_last_rank:
             return self.runner.final_norm_device(hidden)
         return IntermediateTensors({"hidden_states": hidden})
 
-    def _forward_device(self, hidden, positions):
+    def _forward_device(self, hidden, positions, token_ids=None):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
         if self.fork_attn is not None:
-            return self._forward_streams(hidden, positions)
+            return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)

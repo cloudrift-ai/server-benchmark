@@ -338,7 +338,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   a fork parameter the stream did not fully load), because vLLM's strict check waives fp8-quantized
   parameters the same way it waives the head's. The trunk, experts and embedding need no claim (the
   runner loaded them at construction), `head.weight` is the published spelling of `lm_head.weight`,
-  and the MTP head serves no twin.
+  and the MTP head serves no twin. The forward hands each layer's `post` the step's (clamped) token
+  ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
+  gate only weights the selection), and the runner refuses to route such a layer without them.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;

@@ -19,7 +19,7 @@ import pytest
 pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
-def _tiny_config(transformers):
+def _tiny_config(transformers, mlp="moe"):
     return transformers.DeepseekV4Config(
         vocab_size=64,
         hidden_size=128,
@@ -40,7 +40,7 @@ def _tiny_config(transformers):
         hc_mult=2,
         hc_sinkhorn_iters=3,
         layer_types=["sliding_attention"],
-        mlp_layer_types=["moe"],
+        mlp_layer_types=[mlp],
         compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
         sliding_window=16,
         swiglu_limit=10.0,
@@ -49,9 +49,9 @@ def _tiny_config(transformers):
     )
 
 
-def _model(transformers, torch):
+def _model(transformers, torch, mlp="moe"):
     torch.manual_seed(0)
-    config = _tiny_config(transformers)
+    config = _tiny_config(transformers, mlp)
     model = transformers.DeepseekV4ForCausalLM(config).to(torch.float16).eval()
     for parameter in model.parameters():
         torch.nn.init.normal_(parameter, std=0.02)
@@ -59,6 +59,8 @@ def _model(transformers, torch):
     torch.nn.init.uniform_(layer.attn_hc.scale, 0.5, 2.0)
     torch.nn.init.uniform_(layer.ffn_hc.scale, 0.5, 2.0)
     layer.mlp.gate.weight.data.mul_(20.0)  # spread the router so the tokens reach distinct experts
+    if getattr(layer.mlp, "is_hash", False):
+        layer.mlp.gate.tid2eid.copy_(torch.randint(0, config.n_routed_experts, layer.mlp.gate.tid2eid.shape))
     return config, model
 
 
@@ -174,3 +176,46 @@ def test_embed_opens_and_final_norm_closes_the_stream_carrier():
         # (the runner holds its own deep copies, so this cannot mask a missing move on its side).
         expected = model.model.norm.cuda()(model.model.hc_head.cuda()(per_stream.unsqueeze(0)).squeeze(0))
     torch.testing.assert_close(closed.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
+def test_hash_routed_layer_selects_experts_by_token_id_on_gpu():
+    """The serving path of a hash-MoE layer: the routed combine receives the step's token ids
+    (the frozen ``tid2eid`` table selects the experts; the learned gate only weights them) and
+    reproduces the eager layer — and refuses to route at all when the ids are missing."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("cupy")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    config, model = _model(transformers, torch, mlp="hash_moe")
+    tokens, hidden, hc = 8, config.hidden_size, config.hc_mult
+    runner = EmmyGenRunner.from_model(model, dtype_str="float16", decode_bucket=tokens, max_tokens=None)
+    assert runner._moe[0]["hash"], "the hash router was not recognized off its tid2eid table"
+
+    ids = torch.randint(0, config.vocab_size, (1, tokens))
+    position_ids = torch.arange(tokens).unsqueeze(0)
+    embeds = model.model.embed_tokens(ids)
+    attn_kwargs = {
+        "position_embeddings": {
+            kind: model.model.rotary_emb(embeds, position_ids=position_ids, layer_type=kind) for kind in ("main", "compress")
+        },
+        "position_ids": position_ids,
+        "attention_mask": torch.triu(torch.full((tokens, tokens), float("-inf"), dtype=torch.float16), diagonal=1)[None, None],
+    }
+    streams = (torch.randn(1, tokens, hc, hidden) * 0.1).to(torch.float16)
+    reference = _eager_reference(torch, model, streams, ids, attn_kwargs).reshape(tokens, hc * hidden)
+
+    carrier = streams.reshape(tokens, hc * hidden).cuda()
+    attention = model.model.layers[0].self_attn.cuda()
+    with torch.no_grad():
+        x = runner.forward_layer_pre_device(0, carrier)
+        x = x[0] if isinstance(x, tuple) else x
+        attn_out, _ = attention(x.unsqueeze(0), **_cuda_kwargs(torch, attn_kwargs))
+        with pytest.raises(RuntimeError, match="hash-routed"):
+            runner.forward_layer_post_device(0, attn_out.squeeze(0), carrier)
+        got = runner.forward_layer_post_device(0, attn_out.squeeze(0), carrier, token_ids=ids.reshape(-1).cuda())
+
+    np.testing.assert_allclose(got.float().cpu().numpy(), reference.float().numpy(), rtol=2e-2, atol=2e-2)

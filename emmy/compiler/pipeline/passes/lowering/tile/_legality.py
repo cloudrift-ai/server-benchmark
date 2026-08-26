@@ -39,7 +39,7 @@ from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
+from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
 from emmy.compiler.pipeline.search.space import (
@@ -75,7 +75,7 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     return False
 
 
-def direct_atomic_output(outputs) -> str | None:
+def _direct_atomic_output(outputs) -> str | None:
     """Whether direct cross-CTA partials avoid another low-precision rounding step.
 
     F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
@@ -88,6 +88,44 @@ def direct_atomic_output(outputs) -> str | None:
         f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
         "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
     )
+
+
+def atomic_finalize(states: tuple[str, ...], tail, outputs) -> str | None:
+    """Whether the cross-CTA split may take its DIRECT ``atomicAdd`` arm — every condition, once.
+
+    The deferred workspace finalize (``REDUCE=g<n>k``) carries any carrier and any projection, so
+    each refusal here names it as the alternative. Three things must hold, and they are stated
+    together because the enumeration, the pin, and ``030_split_reduce``'s realization all have to
+    agree: a pin that reaches the rewrite past a gate the enumeration applied would crash the
+    emitter instead of refusing.
+
+    - ONE additive state component. ``atomicAdd`` folds a scalar; a twisted carrier's
+      ``(maximum, denominator, …)`` tuple has no atomic instruction at all.
+    - An output the partials can round into once per CTA (:func:`_direct_atomic_output`).
+    - A projection that DISTRIBUTES over the add. The atomic arm applies the epilogue per
+      partition, before the combine, so anything but a linear-homogeneous map mis-scales each
+      CTA's contribution.
+
+    Storage is asked BEFORE the projection: a narrowing store spells its rounding as a conversion
+    in that same epilogue (``loop/lifting/090_spell_store_rounding``), which no linear-homogeneous
+    reading admits — so both refuse a low-precision output and the storage reason is the one that
+    names why.
+    """
+    if len(states) != 1:
+        return (
+            f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
+            f"({', '.join(states)}) — use the deferred f32 workspace finalize (REDUCE=g<n>k)"
+        )
+    storage = _direct_atomic_output(outputs)
+    if storage is not None:
+        return storage
+    if tail and not projection_distributes(tuple(tail), states):
+        return (
+            "atomic REDUCE applies the projection epilogue per partition, so it must distribute "
+            "over the add; this one does not (a fused bias / activation) — use the deferred "
+            "workspace finalize (REDUCE=g<n>k), which projects once after the combine"
+        )
+    return None
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #
@@ -304,8 +342,12 @@ def paired_fragment_register_budget(node: Fold, producer: Fold | None, tile: Til
 
 
 def splitk_width(k_axis: Axis, width: int) -> str | None:
-    """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
-    absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
+    """A cross-CTA split needs a STATIC reduce axis its width divides evenly — the σ-reindex
+    reconstructs an absolute k from ``ksplit·(K/w) + kslice``, which is a bijection only when the
+    extent is known and ``w`` divides it. Total over a symbolic axis rather than raising out of
+    ``as_static``, so the enumeration drops the row and a pin reports the reason."""
+    if not k_axis.extent.is_static:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is not built"
     big_k = k_axis.extent.as_static()
     if big_k % width == 0:
         return None

@@ -45,7 +45,7 @@ from emmy.compiler.ir.schedule import (
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
+from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import Placement, Store, TileOp
 from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import Site, sites
@@ -783,12 +783,16 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
             return True
         return legal.enforce(legal.coop_band_geometry(p, k_static, inner), pinned=pinned) and legal.enforce(epilogue, pinned=pinned)
 
+    atomic = legal.atomic_finalize(tuple(node.combine.results), projection_tail(term.tile), term.tile.outputs)
+
     pin = term.pin("REDUCE", node)
     if pin is not None:
         plan = _consumed_split(term, node, ReducePlan.parse(pin, Workers.parse(WORK.raw())))
         band_legal(plan, pinned=True)
         if plan.needs_split and plan.finalize == "atomic":
-            legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
+            # The SAME gate the catalog applies below. A pin that skipped it would reach
+            # ``030_split_reduce`` and crash the emitter instead of reporting a refusal.
+            legal.enforce(atomic, pinned=True)
         return [plan]
     extent = _hint_extent(node.axis)
     cands = [ReducePlan()]
@@ -797,7 +801,7 @@ def _reduce_specs(term: _Term, node) -> list[ReducePlan]:
             continue  # the axis is already a slice — its cross-CTA partition was consumed
         if not band_legal(p, pinned=False):
             continue
-        if p.finalize == "atomic" and not legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False):
+        if p.finalize == "atomic" and not legal.enforce(atomic, pinned=False):
             continue
         if p.coop <= extent and p.reg <= extent and p not in cands:
             cands.append(p)
@@ -994,7 +998,10 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
         legal.enforce(legal.coop_band_geometry(pinned, ext.as_static() if ext.is_static else None, _inner_free(term.place)), pinned=True)
         if pinned.needs_split:
             if pinned.finalize == "atomic":
-                legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=True)
+                # The SAME gate ``atomic_ok`` applies to the catalog below — a pin refuses here
+                # rather than reaching ``030_split_reduce`` with a carrier it cannot realize.
+                atomic = legal.atomic_finalize(tuple(node.combine.results), projection_tail(term.tile), term.tile.outputs)
+                legal.enforce(atomic, pinned=True)
             return [pinned]
         if pinned.coop > 1 or pinned.reg > 1:
             # A tiled candidate contracts K serially per register cell — the coop / ILP partition is
@@ -1021,11 +1028,8 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
             out.append(p)
     if splittable and _splittable_axis(term, node) and len(term.place.free) >= 2:
         step = plan.atom.atom_k * plan.bk if plan.is_warp else 1
-        tail = tuple(projection_tail(term.tile))
-        atomic_ok = (
-            len(node.channels) == 1
-            and (len(tail) == 0 or projection_distributes(tail, (node.acc,)))
-            and legal.enforce(legal.direct_atomic_output(term.tile.outputs), pinned=False)
+        atomic_ok = legal.enforce(
+            legal.atomic_finalize(tuple(node.combine.results), projection_tail(term.tile), term.tile.outputs), pinned=False
         )
         for sp in splitk_moves():
             if sp.finalize == "atomic" and not atomic_ok:

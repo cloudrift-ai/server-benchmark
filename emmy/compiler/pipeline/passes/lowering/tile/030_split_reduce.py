@@ -35,7 +35,6 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import FoldMove, Level
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
-from emmy.compiler.ir.stmt.passes import projection_distributes as _projection_distributes
 from emmy.compiler.ir.tile import (
     Placement,
     ReducePlan,
@@ -47,6 +46,7 @@ from emmy.compiler.ir.tile.ir import effect_tail
 from emmy.compiler.ir.tile.ops import head, projection_regions, projection_tail, reduce_plan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -231,19 +231,14 @@ def _split_contraction(
         restamped on the node."""
         return _project(node, body)
 
-    # The GRID stage decides the cross-CTA move; this rewrite only realizes it. Projection
-    # legality remains here because it needs the graph boundary.
+    # The GRID stage decides the cross-CTA move; this rewrite only realizes it. The arm's
+    # conditions are ``_legality.atomic_finalize``'s — the same call the enumeration and the pin
+    # made — so a divergence between what was chosen and what is realizable reports that predicate's
+    # reason rather than a second wording of it.
     (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
     if cross_move is FoldMove.ATOMIC:
-        if n_comp != 1:
-            raise NotImplementedError("atomic finalize needs an additive (1-component) carrier; pin the deferred g<w>k finalize")
+        legal.enforce(legal.atomic_finalize(states, epilogue, tile.outputs), pinned=True)
         if epilogue:
-            # Apply the projection per-partition before the atomicAdd — legal only if it distributes.
-            if not _projection_distributes(epilogue, states):
-                raise NotImplementedError(
-                    "atomic finalize can't carry a non-distributive projection on a split-K matmul; "
-                    "pin the deferred-kernel finalize (REDUCE=g<w>k)"
-                )
             atomic_epi = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in epilogue)
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
@@ -331,12 +326,10 @@ def rewrite(match: Match, root: Node) -> Graph:
     inner = fold_node.composed
     if inner is not None:
         return _split_contraction(match, root, tile, inner, fold_node, plan, rax, projection, projection_pieces)
-    if not rax.extent.is_static:
-        raise NotImplementedError("cross-CTA split of a symbolic reduce axis is not built yet")
-    extent = rax.extent.as_static()
-    if extent % cta != 0:
-        raise NotImplementedError(f"cross-CTA split needs a divisible reduce axis (extent {extent} % cta {cta})")
-    b = extent // cta
+    # Static-and-divisible is ``_legality.splitk_width``'s question, asked once for both the
+    # structurally factored split (through ``_factor_k``) and this direct one.
+    legal.enforce(legal.splitk_width(rax, cta), pinned=True)
+    b = rax.extent.as_static() // cta
     states = tuple(fold_node.combine.results)
     n_comp = len(states)
 
@@ -353,21 +346,12 @@ def rewrite(match: Match, root: Node) -> Graph:
     # derives from the one placement-keyed selector (ReduceStage.combine).
     (cross_move,) = next(st for st in plan.stages if st.level is Level.GRID).combine(warp_size=32)
     if cross_move is FoldMove.ATOMIC:
-        if n_comp != 1:
-            raise NotImplementedError("atomic finalize needs a single additive state component; use deferred finalization")
-        # The kernel's projection epilogue (``mean``'s ``×1/N``, a fused bias/activation, …) rides
-        # on ``after``; a bare carrier (``sum`` / a contraction matmul) has just the output ``Write``.
-        # Atomic finalize applies the projection PER-PARTITION before the ``atomicAdd``, so it must
-        # distribute over the add — else each CTA's contribution is mis-scaled. When it doesn't
-        # distribute, refuse loudly: the deferred-kernel finalize (``g<n>k``) projects once after the
-        # combine and is always correct.
+        # ``after`` is the kernel's projection epilogue (``mean``'s ``×1/N``, a fused
+        # bias/activation, …); a bare carrier (``sum`` / a contraction matmul) has just the output
+        # ``Write``. Whether the atomic arm can carry it — along with the carrier's arity and the
+        # output's storage width — is ``_legality.atomic_finalize``'s one answer.
+        legal.enforce(legal.atomic_finalize(states, after, tile.outputs), pinned=True)
         if after:
-            if not _projection_distributes(after, states):
-                raise NotImplementedError(
-                    "atomic finalize can't carry a non-distributive projection epilogue "
-                    "(e.g. a fused bias / activation on a split reduce); pin the deferred-kernel "
-                    "finalize instead (REDUCE=…g<n>k)"
-                )
             atomic_proj = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in after)
         else:
             # A bare carrier (``sum`` / a contraction matmul) — its grid-cell store is glue; synthesize

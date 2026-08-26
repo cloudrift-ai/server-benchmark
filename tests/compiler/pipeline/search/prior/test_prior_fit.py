@@ -113,7 +113,7 @@ def test_one_trainer_instance_refits_identically():
     # and says so in the provenance line the artifact records.
     static_only = trainer.fit([c for c in cases if not c.dynamic])
     assert static_only.model.weights_dynamic is None and static_only.dyn_ranks is None
-    assert "no dynamic cases" in static_only.notes and "dynamic top1" in first.notes
+    assert "no dynamic groups" in static_only.notes and "dynamic top1" in first.notes
 
 
 def test_fitting_one_slice_does_not_perturb_the_next():

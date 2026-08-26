@@ -93,7 +93,7 @@ every existing database at once. That happened, which is why the rule is what it
 
 ## Finding out where the prior is wrong
 
-`emmy eval` exists for the question "the prior chose badly — where?". Four views matter.
+`emmy eval` exists for the question "the prior chose badly — where?". Two views matter.
 
 **Where a golden ranks, with ties counted against it.** For each recorded golden configuration, the view reports how
 many candidates the prior scored better. A tie counts as a loss, because when scores are equal the compile takes
@@ -107,33 +107,19 @@ These evaluations rebuild each golden's compile context for **the GPU the golden
 running the evaluation. Building them for the host makes the ranks machine-dependent, since the geometry features
 would then be describing tiles for the wrong card.
 
-**Per-fork comparison of the choice against the truth.** Using the search-tree table, this groups rows by their
-parent and, for each fork, divides the measured time of the child the prior would pick by the measured time of the
-child that actually measured best. A ratio of 1.00 means the prior steers into the best subtree available from that
-point. Ties count against the prior, for the same reason as above. Results are grouped per GPU and split by
-optimization level — two cards off the same die share a structure signature but not their latencies, and the two
-compiler settings must never be pooled — and bucketed by which knob family the fork decides, which is the stable way
-to name a level of the tree.
+**What a wrong choice cost.** Over configurations that were all actually measured, this reports two things per card
+and compiler setting: how closely the model's ordering follows the hardware's, and how much slower its best guess is
+than the fastest configuration in the set. A ratio of 1.00 means the model's pick *is* the best available. This is
+the view that tracks deployed speed, and it is why the ranking view above is only a screen — a rank says where a good
+configuration landed in the ordering, never what missing it costs.
 
-The whole block is rendered **once per half of the prior, each labeled**. The composite would answer with whichever
-half is currently active, and the two halves' results point at different fixes — the shipped weights versus the local
+Both views are rendered **once per half of the prior, each labeled**. The composite would answer with whichever half
+is currently active, and the two halves' results point at different fixes — the shipped weights versus the local
 training data — so an unlabeled number would destroy the diagnostic.
 
-**What the per-fork view structurally cannot see.** It only speaks about forks the search actually measured. A golden
-sitting in a subtree the search never built, or a shape with no search data at all, is silence that reads as health —
-which is exactly how the saturation failure above hid. So each GPU's report ends with one row per golden recorded for
-that card: how far the golden's path is covered by the explored tree, whether the prior's choice stays inside the
-golden's subtree at each fork, and the loud absences. Coverage is always printed with a denominator, and where the
-golden's own branch was never built the total is marked as an estimate rather than passed off as exact.
-
-**Which feature is to blame.** Two views work at the level of individual features. The first breaks the score
-difference between the chosen candidate and the one that measured best into one term per feature. A fork the prior got
-wrong where *no* term separates the two is reported as `BLIND` — that is a gap in the features, not a problem with the
-weights, and no amount of refitting will fix it. The second hides one feature at a time and re-picks every fork, and
-reports how the results change.
-
-Both are **diagnostics, never gate metrics**. Attributing an effect among correlated features has no unique answer:
-hiding any one of a redundant block of geometry features costs about the same.
+Every figure carries the count of comparison sets behind it. The sets have different minimum sizes — a correlation
+needs more members than a ratio does — and the ones too small for a given figure are excluded rather than averaged
+in, so the count is what tells you how much of the data a number actually covers.
 
 ## Limitations
 
@@ -161,23 +147,17 @@ Gathered in one place, honestly.
 8. **The richest measurements are diagnostic-only.** The search-tree table is never consulted when deploying. Fitting
    the offline prior on a frozen snapshot of it is a planned path, not a current one — today `emmy fit` trains on the
    golden configurations only.
-9. **Feature attribution has no unique answer** among correlated features, so the blame and ablation views can point
-   at a plausible feature rather than the responsible one.
+9. **Nothing evaluates a fork the search never descended into.** Both views score configurations that were built
+   and offered as candidates. A search decides one fork at a time, and a fork it never took leaves no row
+   anywhere — a good configuration sitting past one is silence that reads as health.
 
 ## See it yourself
 
-The per-fork views need a tuning database, or a frozen snapshot in its place:
+The measured view needs a tuning database, or a frozen snapshot in its place:
 
 ```bash
 emmy eval prior --dataset nodes
-emmy eval prior --dataset nodes --blame
-emmy eval prior --dataset nodes --ablate
 ```
-
-The first of those also reports what the measurements can say and the golden rankings cannot: per card and compile
-setting, how closely each half's ordering follows the hardware's, and what its best guess costs against the fastest
-configuration measured. Every number carries the count of comparison sets behind it, because the small ones are
-excluded rather than averaged in — most sets in the current snapshot are too small for some of the numbers.
 
 And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two
 fits are judged against each other, with `--json` writing the report in the same shape a fit records:

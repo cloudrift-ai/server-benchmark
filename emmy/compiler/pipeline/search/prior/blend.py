@@ -33,7 +33,7 @@ class Blend(ABC):
     @abstractmethod
     def deploy_half(self, online: Prior, offline: Prior, *, trusted: bool) -> Prior:
         """Which half owns the deploy ranking — ``mean_score(s)``, the featurized scoring surface,
-        ``explain_features``, and the tie-break behind ``pick``."""
+        the packed-pool ``score_rows``, and the tie-break behind ``pick``."""
 
     def policy(self, online: Prior, offline: Prior, rows: list[dict], *, trusted: bool) -> list[float]:
         """PUCT's ``P`` over one fork's sibling set (higher = better, best sibling ``1.0``). The default is no

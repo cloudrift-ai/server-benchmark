@@ -483,7 +483,7 @@ class SearchDB:
         ("measured_at", "TEXT"),
         # Featurizer-vocabulary stamp (``features.FEATURIZER_VERSION``). Default 1 =
         # unknown/pre-stamp vocabulary: such rows are excluded from prior evaluation
-        # (``diagnostics.node_report``) — a cross-vocabulary row featurizes to garbage —
+        # (``data/group.group_measured``) — a cross-vocabulary row featurizes to garbage —
         # but kept in the DB and carried by ``merge_nodes`` (data, not judgement).
         # NOTE: rows written after the 2026-07 tile-IR rebuild but before this column
         # shipped are spelled in the v2 vocabulary yet default to 1 — they quarantine

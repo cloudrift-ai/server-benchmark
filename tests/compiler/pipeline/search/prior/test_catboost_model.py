@@ -3,7 +3,7 @@ decomposition, and the trainer that produces it. No GPU — CatBoost fits on CPU
 these sizes.
 
 The two model classes answer one surface (``mean_score_features`` / ``mean_scores_features`` /
-``explain_features``), so most of what matters here is that a tree honours the same contracts the linear model
+the packed-pool ``score_rows``), so most of what matters here is that a tree honours the contracts the linear model
 does, plus the two it deliberately does not: masking is no longer exact, and a fit is no longer byte-identical.
 """
 
@@ -216,26 +216,6 @@ def test_absent_features_are_nan_not_zero():
     assert math.isnan(ABSENT)
 
 
-def test_explain_features_sums_to_the_quality():
-    """The exactness contract the blame diagnostics rest on: the per-term decomposition totals the model's
-    own ranking quantity, so a two-row term diff IS the model's preference gap."""
-    model = _fit()
-    row = {"D_a": 20.0, "D_b": 2.0}
-    terms = model.explain_features(row)
-    quality = model.quality_rows(model.matrix([row]))[0]
-    assert sum(terms.values()) == pytest.approx(quality, rel=1e-6)
-    assert "base:expected" in terms
-
-
-def test_masking_is_not_exact_for_a_tree():
-    """The linear model's twin is True. The ablation diagnostics read this to decide whether to caveat
-    their Δ, and a tree re-routes its splits rather than dropping a term."""
-    from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
-
-    assert CatBoostModel.masking_exact is False
-    assert LinearModel.masking_exact is True
-
-
 # --- the artifact ------------------------------------------------------------------
 
 
@@ -305,7 +285,6 @@ def test_offline_prior_loads_a_tree_artifact(tmp_path, monkeypatch):
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     prior = OfflinePrior()
     assert isinstance(prior.model, CatBoostModel)
-    assert prior.masking_exact is False
     fast, slow = {"D_a": 29.0, "D_b": 1.0}, {"D_a": 0.0, "D_b": 1.0}
     assert prior.mean_score_features(fast) < prior.mean_score_features(slow)
     # ``policy`` prices the sibling set relative to its best — the PUCT surface, over a tree.

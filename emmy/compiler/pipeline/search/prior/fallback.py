@@ -96,15 +96,8 @@ class FallbackPrior(Prior):
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         return self._deploy.mean_scores_features(feats_list)
 
-    def explain_features(self, feats: dict) -> dict[str, float] | None:
-        return self._deploy.explain_features(feats)
-
     def score_rows(self, group):
         return self._deploy.score_rows(group)
-
-    @property
-    def masking_exact(self) -> bool:
-        return self._deploy.masking_exact
 
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         # Measured -O3 evidence lives in the ONLINE half's reservoir (the

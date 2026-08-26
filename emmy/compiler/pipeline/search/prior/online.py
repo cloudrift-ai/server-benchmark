@@ -106,10 +106,8 @@ class OnlinePrior(Prior):
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         """The featurized half of :meth:`mean_scores` — also the entry point the
-        attribution diagnostics mask features through: a deleted key fills to ``NaN``, CatBoost's absent
-        semantics. NOTE: masked queries are out-of-distribution for a model trained
-        without feature dropout (the attribution caller flags this) — the planned
-        offline fitter's masking augmentation is what makes them honest."""
+        featurized half of :meth:`mean_scores`: an absent key fills to ``NaN``, CatBoost's own
+        missing-value semantics, which is what the model was trained against."""
         if self._model is None:
             return [0.0] * len(feats_list)
         if not feats_list:

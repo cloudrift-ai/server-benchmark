@@ -484,6 +484,22 @@ class EmmyGenModel(nn.Module, SupportsPP):
         if self.runner._moe is not None and not mc.enforce_eager:
             cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
             if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
+                if self.runner.hc_mult > 1:
+                    # The hyper-connection combine always rides the routed dispatch (the placement
+                    # closes the layer AFTER the shard reduction) — no fixed-slot tier serves it,
+                    # so every decode step host-syncs and capture would crash mid-record.
+                    raise ValueError(
+                        "hyper-connection MoE decode capture is not supported (the routed combine "
+                        "host-syncs on every step); serve with --enforce-eager"
+                    )
+                if expert_range is not None:
+                    # The fixed-slot selector writes the router's GLOBAL expert ids into the slot
+                    # tables, which under sharding hold only this rank's experts — capture would
+                    # record reads past (or into the wrong rows of) the shard's tables.
+                    raise ValueError(
+                        "MoE decode capture is not supported with tensor-parallel expert shards "
+                        "(the fixed-slot selector is unsharded); serve with --enforce-eager"
+                    )
                 if not self.runner.has_moe_fixed_slot:
                     raise ValueError(
                         "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
@@ -841,6 +857,12 @@ class EmmyGenModel(nn.Module, SupportsPP):
                         raise ValueError(
                             f"EmmyGenModel: attention checkpoint key '{name}' maps to '{rel}', which is not a "
                             "parameter of the fork's attention sublayer — the ownership table is stale"
+                        )
+                    if shard in fork_loaded.get((local, rel), set()):
+                        raise ValueError(
+                            f"EmmyGenModel: attention checkpoint key '{name}' loads 'fork_attn.{local}.{rel}' "
+                            f"(shard {shard}) a second time — two checkpoint keys map to one destination, and "
+                            "the later one would silently win"
                         )
                     if rel == "attn_sink":
                         # Head-sharded copy, exactly as the fork loads it: each tensor-parallel rank

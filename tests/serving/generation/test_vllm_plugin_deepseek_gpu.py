@@ -61,7 +61,7 @@ def _tiny_deepseek(path, transformers, torch):
         # marks them per-layer-ambiguous on a save/load round-trip, and transformers' own router
         # then cannot read ``num_local_experts`` off the config at all.
         compress_ratios=list(RATIOS),
-        num_hash_layers=0,
+        num_hash_layers=1,  # the first MoE layer routes by token id, as the published model's do
         # NO ``compress_rates``: the published config does not carry it, and the twin and the fork
         # derive their compressor geometry consistently only under the published spelling.
         sliding_window=32,
@@ -70,6 +70,11 @@ def _tiny_deepseek(path, transformers, torch):
     )
     torch.manual_seed(0)
     model = transformers.DeepseekV4ForCausalLM(config).eval().to(torch.float16)
+    for layer in model.model.layers:
+        # The hash layer's frozen token-id → expert table initializes to zeros (every token to
+        # expert 0); randomize it so serving actually exercises the routing.
+        if getattr(layer.mlp, "is_hash", False):
+            layer.mlp.gate.tid2eid.copy_(torch.randint(0, config.n_routed_experts, layer.mlp.gate.tid2eid.shape))
     model.save_pretrained(path)
     # ``save_pretrained`` writes back the DERIVED per-layer lists, which the published checkpoint
     # does not carry; loading a config that has them marks those attributes ambiguous, and
@@ -83,7 +88,7 @@ def _tiny_deepseek(path, transformers, torch):
     # so write them back exactly as the checkpoint publishes them — they are what the config derives
     # its per-layer structure FROM.
     saved["compress_ratios"] = list(RATIOS)
-    saved["num_hash_layers"] = 0
+    saved["num_hash_layers"] = 1
     # The fork's attention sublayer consumes the rope declaration at config-parse time
     # (``rope_parameters["rope_type"]``), so it must sit in the file, spelled the legacy way the
     # checkpoint publishes it. Scaled to this fixture: 64 original positions x factor 4 = 256 max.

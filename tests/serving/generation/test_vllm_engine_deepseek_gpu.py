@@ -126,6 +126,10 @@ def test_tp2_pp2_greedy_token_ids_match_the_single_rank_engine(tmp_path, monkeyp
             continue
         step = next(j for j, (a, b) in enumerate(zip(ids_1, ids_2, strict=True)) if a != b)
         # BOTH topologies must agree the divergent step was a tie (a flat distribution can tie
-        # more than two tokens, so membership in the other run's top-2 is not required).
+        # more than two tokens, so membership in the other run's top-2 is not required), and the
+        # two arms' BEST scores must agree numerically — differing argmaxes over materially
+        # different distributions would slip a pure per-arm margin check.
         for arm, margin in (("single", _margin(lps_1[step])), ("tp2pp2", _margin(lps_2[step]))):
             assert margin < 0.08, f"prompt {prompt} step {step}: decisive {arm} pick flipped (margin {margin:.4f}): {ids_1} vs {ids_2}"
+        tops = [max(lp.logprob for lp in lps[step].values()) for lps in (lps_1, lps_2)]
+        assert abs(tops[0] - tops[1]) < 0.08, f"prompt {prompt} step {step}: the arms' best logprobs disagree ({tops})"

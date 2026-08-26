@@ -2054,8 +2054,9 @@ class EmmyGenRunner:
             shared = None
         # Single-token decode rides the FIXED-SLOT combine (capture-legal — no host sync, a
         # fixed launch set); every wider step keeps the routed dispatch, whose launch set
-        # varies with the routing (eager only).
-        if self._slots_ok and xn.shape[0] == 1:
+        # varies with the routing (eager only). NEVER on an expert shard: the slot selector
+        # writes GLOBAL expert ids into tables that hold only this rank's experts.
+        if self._slots_ok and xn.shape[0] == 1 and moe.get("expert_range") is None:
             combined = self._moe_combine_slots(moe, xn, token_ids)
         else:
             combined = self._moe_combine(moe, xn, token_ids)

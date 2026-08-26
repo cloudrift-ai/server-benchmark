@@ -209,3 +209,11 @@ def test_another_pipeline_ranks_attention_is_not_claimed():
     loaded = vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))
 
     assert {name for name in loaded if name.startswith("fork_attn.")} == {f"fork_attn.0.{EXPECTED_DEST[key][0]}" for key in SLIDING_KEYS}
+
+
+def test_a_double_loaded_attention_weight_is_a_loud_failure():
+    """Two checkpoint keys landing on one destination shard would silently let the later one win."""
+    model, _head = _model(_fake_layers())
+    stream = _stream() + [("layers.0.attn.wq_b.weight", torch.zeros(2))]
+    with pytest.raises(ValueError, match="second time"):
+        vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))

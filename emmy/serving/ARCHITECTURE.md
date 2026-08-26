@@ -650,15 +650,14 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
-- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) is captured but not yet served.** The attention-sublayer seam
-  above is the compiler side; `EmmyGenRunner` / `EmmyGenModel` still assume the q/k/v seam and a replicated trunk.
-  Serving it on the 16× V100 recipe (TP8 × PP2, the 1Cat sm_70 fork image) additionally needs: the fork's
-  `DeepseekV4Attention` constructed per layer inside the plugin (its weights load through the fork's own mapper from the
-  checkpoint's native `layers.N.attn.*` names); a loader lane for that native naming with its `.scale` ue8m0 block
-  scales and **MXFP4 routed experts** (`expert_dtype: fp4` — the compiler has no fp4 input format; decoded to fp16 the
-  experts are ~554 GB); and tensor-parallel expert sharding with an all-reduce in the runner, because one pipeline
-  rank's experts (~69 GB at fp4) do not fit a 32 GB card replicated per TP rank. The embedding broadcasts to
-  `hc_mult` streams before layer 0 and the final norm follows the `hc_head` collapse.
+- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves in-repo; the 16× V100 recipe is not yet validated.**
+  The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
+  block scales and compressed MXFP4 routed experts, tensor-parallel expert sharding with the group all-reduce, the
+  carrier-width pipeline transport — are implemented and gated (see the hyper-connection section), including a
+  real-engine TP2×PP2 greedy-parity test on a small config. Decode capture is unsupported for this architecture
+  (the routed combine host-syncs every step; the fixed-slot selector is unsharded) — the boot guard and
+  `emmy serve` both force eager. Still ahead: the TP8×PP2 boot of the published checkpoint in the pinned 1Cat
+  sm_70 image serving mixed prefill/decode, and real-checkpoint numerics/greedy gates.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

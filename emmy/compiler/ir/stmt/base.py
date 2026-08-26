@@ -609,6 +609,11 @@ class Stmt:
 
         return digest(form(self))
 
+    #: This key is DERIVED from ``form``, so ``form`` renders a Stmt by its fields rather than
+    #: calling back here. Every other :class:`~emmy.compiler.structural.Structural` implementor
+    #: owns a canonicalization of its own (``Fold``'s is α-invariant) and IS delegated to.
+    structural_key.derived_from_form = True
+
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this
         stmt with its child bodies replaced by ``bodies`` (positionally

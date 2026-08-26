@@ -59,6 +59,12 @@ class Structural(Protocol):
     def structural_key(self) -> str: ...
 
 
+#: Marks a ``structural_key`` that is DERIVED from :func:`form` rather than owning its own
+#: canonicalization. :func:`form` must not delegate to one, or it would call itself forever.
+#: Set on ``Stmt.structural_key``; every other implementor is authoritative and gets asked.
+DERIVED_FROM_FORM = "derived_from_form"
+
+
 def form(value: object) -> object:
     """The STRUCTURAL rendering of ``value`` — a nested ``(class name, *fields)`` tuple.
 
@@ -75,13 +81,21 @@ def form(value: object) -> object:
     - tuples / lists (``Body`` included — it is a ``tuple`` subclass) render elementwise;
     - sets render SORTED, because their iteration order is not stable and an unsorted rendering
       would key one object two ways;
+    - a value that OWNS its identity — anything implementing :class:`Structural` with its own
+      ``structural_key`` — renders as ``(class, its key)``. A ``Fold`` is the case that matters:
+      it is a dataclass, so the field walk below would happily render it by SSA spelling, while
+      its own key is α-invariant. Two renderings of one type is what this module exists to
+      prevent, so the type that knows better is asked. Checked AFTER the container rules, so a
+      ``Body`` still renders elementwise rather than through its own aggressive
+      normalize-and-collapse key;
     - dataclasses render as their fields, in declaration order;
     - anything else exposing a ``str`` ``name`` renders as ``(class, name)`` — the
       ``ElementwiseImpl`` case, whose name IS its identity (its algebraic traits are looked up by
       it) and which is not a dataclass;
-    - anything remaining falls back to ``(class, repr)``. That escape hatch is the one place a
-      ``__repr__`` still reaches a key, so a new field type that lands there deserves a rule above
-      rather than a shrug.
+    - anything remaining RAISES. There is no ``repr`` fallback: a silent one would be the very
+      thing this function exists to remove, and it would hide the moment a new field type started
+      keying kernels on its ``__repr__``. A type that lands here needs a rule above — one line,
+      decided by whoever knows what part of that value is identity and what part is incidental.
 
     ``DataType`` takes the dataclass route, so its numpy dtype rides along as a leaf. That is
     stable — ``numpy.dtype`` repr is a public API and equal dtypes render equal — just noisier
@@ -93,12 +107,19 @@ def form(value: object) -> object:
         return tuple(form(v) for v in value)
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((form(v) for v in value), key=repr))
+    own_key = getattr(type(value), "structural_key", None)
+    if own_key is not None and not getattr(own_key, "derived_from_form", False):
+        return (type(value).__name__, value.structural_key())
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return (type(value).__name__, *(form(getattr(value, f.name)) for f in dataclasses.fields(value)))
     name = getattr(value, "name", None)
     if isinstance(name, str):
         return (type(value).__name__, name)
-    return (type(value).__name__, repr(value))
+    raise TypeError(
+        f"structural.form has no rule for {type(value).__name__}, so this value cannot enter an "
+        "identity. Add a rule in structural.form: render the part of it that IS the identity, and "
+        "drop the part that is incidental. Do not fall back to repr — that is what this replaced."
+    )
 
 
 def digest(*parts: object) -> str:

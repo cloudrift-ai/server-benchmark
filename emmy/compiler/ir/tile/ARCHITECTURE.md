@@ -84,12 +84,10 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and boundary
 stores. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 
-Scheduling sees only the rewritten stored Fold tree. It does not derive alternate classified views. A shape for which
-the current scheduler has no row remains unmapped. When an exp-family Fold directly contains its score and value
-contractions, scheduling assigns compatible MMA tiles to those two child sites; it does not replace or annotate the
-Fold tree. When only the derived expectation contraction is present, its singleton reduce axis remains a structural
-marker; its output tile belongs to that child site, while its K chunk is resolved against the enclosing exp-family
-Fold's sweep axis. Independent root contractions remain in the same maximally fused TileOp. Their schedule catalogs
-combine only rows that assign equal tile widths and unit counts to the same physical output axes, including when the
-roots' algebraic M/N readings are reversed. Each compatible root binds through the ordinary Fold binder and the
-resulting regions share one grid; incompatible root tiles never reach materialization.
+Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
+not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis
+contraction inherits its enclosing Fold's reduction domain through the parent/child scheduling interface, while its
+output tile remains at the child site. Local catalogs compose lazily through one worker inventory and equal geometry
+on any shared physical axes. The same rule combines independent roots, including roots whose algebraic M/N readings
+reverse the same physical axes. A shape with no legal row remains unmapped, and scheduling never replaces or
+annotates the Fold tree.

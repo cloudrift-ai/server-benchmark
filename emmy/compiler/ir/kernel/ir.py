@@ -1139,6 +1139,55 @@ FRAG_COL = "__fcol"
 
 
 @dataclass(frozen=True)
+class FragmentLoad(Stmt):
+    """Load a tensor tile directly into the C-fragment element layout.
+
+    ``index`` is written over :data:`FRAG_ROW` and :data:`FRAG_COL`; ``row_base`` and
+    ``col_base`` locate one register cell.  This is the fragment-resident form of a scalar
+    :class:`Load`, used when a scheduled Fold consumes an already materialized tile rather than a
+    contraction child.
+    """
+
+    out: str
+    input: str
+    index: tuple[Expr, ...]
+    col_base: Expr
+    row_base: Expr | None = None
+    dtype: DataType | None = None
+    layout: FragLayout = M16N8
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.out,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.input,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())
+        return (*self.index, *bases)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentLoad({self.out} <- {self.input})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        pad = _pad(ctx.indent)
+        lay = self.layout
+        src_dtype = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
+        lines = [f"{pad}float {self.out}[{lay.n_elems}];", *_lane_preamble(ctx, pad, lay.lane_decl)]
+        for i in range(lay.n_elems):
+            sub = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
+            if self.row_base is not None:
+                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
+            flat = render_index(self.input, tuple(expr.substitute(sub) for expr in self.index), ctx)
+            value = ctx.target.convert(f"{self.input}[{flat}]", src_dtype, "f32")
+            lines.append(f"{pad}{self.out}[{i}] = {value};")
+        ctx.ssa_dtypes[self.out] = "f32"
+        return lines
+
+
+@dataclass(frozen=True)
 class FragmentSelect(Stmt):
     """Coordinate-predicated uniform values lifted over an mma C-fragment.
 
@@ -2778,6 +2827,19 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
+        layout=s.layout,
+    )
+
+
+@_rewrite.register
+def _(s: FragmentLoad, rename, sigma, axis_fn):
+    return FragmentLoad(
+        out=rename(s.out),
+        input=s.input,
+        index=tuple(sigma.apply(expr) for expr in s.index),
+        col_base=sigma.apply(s.col_base),
+        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
+        dtype=s.dtype,
         layout=s.layout,
     )
 

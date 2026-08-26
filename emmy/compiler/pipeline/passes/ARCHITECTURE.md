@@ -40,8 +40,8 @@ Concretely:
   regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
   replays exactly, and a `tune` turns it into evidence the hierarchy can use.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
-  boundedness reason (the compile must terminate with a tractable option set — the scheduler's `MAX_ROWS` is the
-  canonical instance and raises rather than truncates). "Measured slower",
+  boundedness reason. Schedule spaces are recursive and lazy, so a large legal Cartesian product is not itself a
+  refusal reason. "Measured slower",
   "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the tuner's and the
   prior's vocabulary, and a fix for a slow configuration is new evidence — a re-tune and a refreshed golden file —
   never a new compile-time condition.
@@ -72,16 +72,16 @@ post-decomposition Python source file for known format names.
 ## The tile scheduler: one stored tree
 
 `015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `020_schedule` then
-maps the free axes and enumerates schedule slices over the resulting stored Fold sites. It chooses the kernel's worker
-inventory, then forms the product of the legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values for those sites. Keys use
-the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
+maps the free axes and exposes a recursive, addressable product over every stored Fold site. It chooses the kernel's
+worker inventory, then composes legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values through generic worker and physical
+axis interfaces. Keys use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in
+`TileOp.schedule`. Candidate dictionaries are created only at addressed leaves; there is no eager row list or row cap.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
-rows is recovery over Fold-tree structure, not another recognition layer. A Fold step containing two contractions
-may therefore offer compatible tiles for both child sites directly; the parent only checks their shared blocked-axis
-geometry. A sole derived expectation contraction keeps its child output tile but resolves the staged K chunk over the
-enclosing exp-family Fold's sweep axis; the derived singleton axis is only the stored blocked-step marker.
+rows is recovery over Fold-tree structure, not another recognition layer. Child sites join when their tile widths and
+worker units agree on every shared physical axis. A derived contraction with a unit marker axis presents its enclosing
+Fold's sweep as its scheduling reduction domain. Neither rule inspects the operation family.
 
 ## No shape-specific pattern matching
 
@@ -205,14 +205,11 @@ without a placement or value-cut analysis.
 a maximum with additive exp-weighted components into the one `(maximum, denominator, expectations…)` twisted monoid.
 It reads both equivalent canonical spellings: sibling planar folds, and the contraction composition produced when
 canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
-in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the rewritten
-stored tree. Its blocked-composition rule can assign compatible MMA tiles to two direct contraction children without
-rewriting the tree. With a materialized score and one derived expectation contraction, the same rule assigns the
-child's output tile while using the enclosing exp-family sweep as contraction K. Independent root contractions also
-remain in the same TileOp: their catalogs combine only rows whose tile widths and unit counts agree on each physical
-output axis, even when the roots reverse their algebraic M/N readings. Materialization binds each root through the
-ordinary Fold binder and merges the compatible regions on one grid. Unsupported scheduling shapes remain unmapped;
-this is the intentional recovery boundary while schedule support is rebuilt over the complete tree.
+in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the complete
+rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
+when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
+parent/child interface. Materialization binds selected sites from their schedule slices; unsupported forms remain
+unmapped.
 
 ## The divide rule: `split` an iteration axis
 
@@ -275,8 +272,10 @@ contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; a
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
-(an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction or a product contraction over one
-materialized A enumerates its own warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
+(an ineligible spec degrades to uniform). A single-channel computed-A (fused-cone) contraction enumerates scalar
+register-tile rows with staging off: the scalar atom evaluates the cone once per operand row or column and reuses it
+across the sibling register cells. It also enumerates its warp rows with the mandatory resolved `sync` compute-fill
+stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
@@ -289,7 +288,8 @@ computed-A arm
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
 channel's raw C fragment to its `ws[comp, ksplit, *cell]` slice (the per-acc `RegStore` arm — no ⊗-combine in
 the partial), and the deferred finalize folds every component before applying the combine projection once.
-Still no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge is the anticipated
+Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
+is the anticipated
 `RoleKind` extension. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡
 `""` and `f64x1` ≡ `f64`: an explicit `TILE@<axis>` pin names one site and is authoritative there, while a BARE pin
 fans out to every eligible site and cannot say which it meant — so it narrows where it matches and leaves a site it

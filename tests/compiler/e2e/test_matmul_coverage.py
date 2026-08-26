@@ -1757,10 +1757,10 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     assert "mma.sync.aligned.m16n8k16" in src and "int seq_len" in src
     assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
     lines = src.splitlines()
-    masked = [ln for ln in lines if "__km__c" in ln and ln.strip().startswith("float ")]
-    assert masked, "the compute fill must predicate its stored value on the runtime K"
-    assert all("< seq_len) ?" in ln for ln in masked), f"every masked lane selects on the runtime K: {masked[:1]}"
-    assert any("__kid = 0.0f;" in ln for ln in lines), "the overhanging lane must store the additive fold identity 0"
+    score_loads = [ln for ln in lines if "scores[" in ln and "__half2float" in ln]
+    assert score_loads and all("< seq_len) ?" in ln for ln in score_loads), "score loads must clamp the runtime K"
+    masked = [ln for ln in lines if ">= seq_len) in0__f" in ln]
+    assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
     fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
     assert "< seq_len) ?" in fill and "seq_len - 1" in fill, f"the B slab fill must clamp its overhanging K row: {fill}"
 

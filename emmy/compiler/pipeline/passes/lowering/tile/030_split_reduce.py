@@ -44,7 +44,7 @@ from emmy.compiler.ir.tile import (
     split_effects,
 )
 from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import head, projection_tail, reduce_plan
+from emmy.compiler.ir.tile.ops import head, projection_regions, projection_tail, reduce_plan
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.knob import consume_kernel_row
 
@@ -105,7 +105,7 @@ def _piece_inputs(root: Node, body, *first: str) -> list[str]:
 
 
 def _add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str]) -> Graph:
-    """Add a fresh piece with every output port and arrange their splice identities."""
+    """Add a fresh piece with its owned output ports and arrange their splice identities."""
     buffers = root.buffer_names()
     renamed = {name: f"{name}__split" for name in buffers}
     piece = replace(
@@ -119,8 +119,10 @@ def _add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inpu
         *(replace(tensor, name=renamed[name]) for name, tensor in zip(buffers[1:], root.outputs[1:], strict=True)),
     )
     frag.add_node(op=piece, inputs=inputs, outputs=tensors, node_id=renamed[buffers[0]])
-    frag.outputs = list(renamed.values())
-    match.output = renamed
+    frag.outputs.extend(renamed.values())
+    output = dict(match.output) if isinstance(match.output, dict) else {}
+    output.update(renamed)
+    match.output = output
     return frag
 
 
@@ -157,11 +159,61 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
 
 
 def _project(fold: Fold, body) -> Fold:
+    """Attach a pure projection body to one Fold, dropping the empty wrapper."""
     body = Body.coerce(body)
     return Fold.projection(operands=(fold,), body=body) if body else fold
 
 
-def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold, plan: ReducePlan, split: Axis, projection=()):
+def _output_root(root: Node, outputs: set[str]) -> Node:
+    """A graph-node view containing only the output ports owned by one projection Fold."""
+    by_name = dict(zip(root.buffer_names(), root.outputs, strict=True))
+    ordered = tuple(name for name in root.buffer_names() if name in outputs)
+    if outputs != set(ordered):
+        raise ValueError(f"projection stores target unknown output buffers: {sorted(outputs - set(ordered))}")
+    tensors = tuple(replace(by_name[name], name=name) for name in ordered)
+    return replace(root, id=ordered[0], outputs=tensors)
+
+
+def _split_projection(tile: TileOp, root: Node, selected: Fold):
+    """Separate an independent MIMO projection into output-owning Fold pieces."""
+    op = tile.op
+    if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
+        return root, tuple(projection_tail(tile)), ()
+
+    pieces = []
+    chosen = None
+    for fold, body, stores in projection_regions(op, tile.stores):
+        node = _output_root(root, {store.write.output for store in stores})
+        entry = (node, fold, body, stores)
+        if fold is selected:
+            chosen = entry
+        else:
+            pieces.append(entry)
+    if chosen is None:
+        raise ValueError("the scheduled Fold does not own an independent projection region")
+    node, _, body, stores = chosen
+    return node, tuple(effect_tail(body, stores)), tuple(pieces)
+
+
+def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
+    """Add the unsplit independent projection Folds as fresh schedulable kernels."""
+    for root, fold, body, stores in pieces:
+        tile = _piece(_project(fold, body), free, stores=stores)
+        _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
+    return frag
+
+
+def _split_contraction(
+    match: Match,
+    root: Node,
+    tile: TileOp,
+    node,
+    outer: Fold,
+    plan: ReducePlan,
+    split: Axis,
+    projection=(),
+    projection_pieces: tuple = (),
+):
     """Realize a structural split-K whose inner bilinear Fold is already factored."""
     out = root.output
     grid = tile.place.grid
@@ -196,7 +248,8 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
         else:
             atomic_epi = (Write(output=out.name, index=cell, value=acc, atomic=True),)
         p_body, p_stores = _boundary(atomic_epi)
-        return _one(match, frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
+        result = _one(match, frag, root, _piece(_partial(p_body), (split, *grid), stores=p_stores))
+        return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``.
     # The workspace shape MUST match the rank of the index the writes/loads use — or
@@ -239,7 +292,8 @@ def _split_contraction(match: Match, root: Node, tile: TileOp, node, outer: Fold
     # features fold in its operands' dtypes, which only resolve once the buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(_project(fin_fold, fin_proj), grid, stores=fin_stores)
-    return _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
 
 def rewrite(match: Match, root: Node) -> Graph:
@@ -271,12 +325,12 @@ def rewrite(match: Match, root: Node) -> Graph:
     # retarget the root ``Write`` exactly as when it rode the zero-axis ``Fold`` body. A projection whose
     # only stmt was the root ``Write`` leaves a BARE fold behind (the zero-axis ``Fold`` wrapper dropped
     # with its last in-body stmt), so the reconstitution keys off the TileOp, not the node shape.
-    projection = tuple(projection_tail(tile))
+    root, projection, projection_pieces = _split_projection(tile, root, fold_node)
     # The split node's inner contraction — multi-channel included — rides the outer reduce's
     # identity-lift operand composition (the one composition rule; ``Fold.composed``).
     inner = fold_node.composed
     if inner is not None:
-        return _split_contraction(match, root, tile, inner, fold_node, plan, rax, projection)
+        return _split_contraction(match, root, tile, inner, fold_node, plan, rax, projection, projection_pieces)
     if not rax.extent.is_static:
         raise NotImplementedError("cross-CTA split of a symbolic reduce axis is not built yet")
     extent = rax.extent.as_static()
@@ -322,7 +376,8 @@ def rewrite(match: Match, root: Node) -> Graph:
         proj_body, proj_stores = _boundary(atomic_proj)
         frag = _frag(match, root)
         piece = _piece(_project(partial_fold, proj_body), (split, *grid), stores=proj_stores)
-        return _one(match, frag, root, piece)
+        result = _one(match, frag, root, piece)
+        return _add_projection_pieces(match, result, projection_pieces, tuple(grid))
 
     # The ``__partial`` workspace packs every carrier-state component: ``ws[comp, cta, *free]``
     # (the ``comp`` leading axis is dropped for a single-component additive carrier, so the
@@ -368,4 +423,5 @@ def rewrite(match: Match, root: Node) -> Graph:
     # kernel's structural features fold in its operands' dtypes.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(_project(fin_fold, fin_proj), grid, stores=fin_stores)
-    return _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    return _add_projection_pieces(match, result, projection_pieces, tuple(grid))

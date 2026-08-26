@@ -30,7 +30,7 @@ from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 
@@ -67,7 +67,7 @@ def _multi_output_matmul() -> Graph:
 def _resolve(passes, graph=None):
     """Option-0 resolution — the no-evidence emission-order pick, so the assertions are about what
     the pipeline BUILDS rather than about what a prior happens to rank first."""
-    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: flatten_leaves(fp.options)[0])
+    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: next(iter_leaves(fp.options)))
 
 
 def _kernels(out) -> dict[str, dict]:
@@ -81,7 +81,7 @@ def _tile_pieces(graph=None) -> list[TileOp]:
     )
     tiled, _ = Run(pipeline=Pipeline.build(["lowering/tile"]), ctx=_CTX).resolve(
         loop,
-        lambda fp: flatten_leaves(fp.options)[0],
+        lambda fp: next(iter_leaves(fp.options)),
     )
     return [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 

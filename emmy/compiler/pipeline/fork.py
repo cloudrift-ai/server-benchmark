@@ -7,8 +7,8 @@ Implementations hold their producer's state as data:
 :class:`OptionFork` (a concrete ``Op``/``Graph`` leaf) and the tree node
 classes :class:`_Branch` / :class:`_Leaf` built by :func:`build_fork_tree`.
 
-The tree builder converts a flat list of variant knob rows (plain dicts)
-into the ROOT :class:`_Branch` of a lazy tree: each ``Level`` groups
+The tree builder reads an addressable sequence of variant knob rows through
+the root :class:`_Branch`: each ``Level`` groups
 siblings by a (sub)tuple of knob values and collapses levels whose key has
 a single distinct value across the group (rows with an empty key skip the
 level). Below the last level every row becomes one :class:`_Leaf` carrying
@@ -17,8 +17,9 @@ its COMPLETE row as ``knobs`` — the row IS the variant identity (the
 the online prior key leaves and branches by knobs alone, no structural
 probing. ``expand()`` yields ``materialize(row)`` once the search engine
 resolves a leaf.
-Everything is lazy: no Fork below the root exists until the search expands
-it. Siblings are emitted in grouping order — RANKING IS SEARCH POLICY: the
+Everything is lazy: construction reads no row, no Fork below the root exists until search expands
+it, and branches retain indices into the shared sequence rather than row copies. Siblings are
+emitted in grouping order — RANKING IS SEARCH POLICY: the
 policies rank the frontier with the online prior (Forks carry no score).
 
 The engine in ``pipeline.py`` consumes ``fork.knobs`` flat (it doesn't walk
@@ -29,7 +30,7 @@ the whole row.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -72,6 +73,13 @@ class Fork(ABC):
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...
 
+    def leaves(self) -> Iterator[Op | Graph | Fork]:
+        """Stream complete descendants without retaining the expanded tree."""
+        if self.is_leaf:
+            yield self
+        else:
+            yield from iter_leaves(self.expand())
+
 
 @dataclass(frozen=True)
 class OptionFork(Fork):
@@ -87,24 +95,25 @@ class OptionFork(Fork):
         return [self.option]
 
 
+def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
+    """Yield complete leaves depth-first without retaining the expanded tree."""
+    for option in options:
+        if isinstance(option, Fork):
+            yield from option.leaves()
+        else:
+            yield option
+
+
 def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fork]:
     """Expand every option down to its leaf options, **depth-first in emission
     order** — each option's leaves precede the next's, so a tie in a prior's
     scores still falls to enumeration order (option-0 first). Branch Forks
     expand recursively — cheap, building only the next levels' knob dicts;
     leaf Forks and concrete ``Op`` / ``Graph`` options terminate, their
-    materialization deferred to whoever applies the one chosen leaf. Used by
-    deciders that must rank COMPLETE knob rows (the greedy compile pick): a
-    branch pins only a partial tile, and the prior can't featurize the tile's
-    area / occupancy until the row is complete — so the lazy tree collapses to
-    its flat leaf set for one scoring pass."""
-    out: list[Op | Graph | Fork] = []
-    for o in options:
-        if isinstance(o, Fork) and not o.is_leaf:
-            out.extend(flatten_leaves(o.expand()))
-        else:
-            out.append(o)
-    return out
+    materialization deferred to whoever applies the one chosen leaf. Used for
+    small non-schedule forks whose alternatives must be compared together;
+    schedule spaces instead retain this hierarchy during greedy descent."""
+    return list(iter_leaves(options))
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +138,7 @@ class Level:
 
     knob_names: tuple[str, ...]
     key: Callable[[dict], tuple]
+    partition_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,7 +150,7 @@ class _Tree[P]:
     levels: tuple[Level, ...]
     materialize: Callable[[dict], Op | Graph]
 
-    def build_level(self, group: list[dict], depth: int) -> list[Fork]:
+    def build_level(self, group: _Rows, depth: int) -> list[Fork]:
         """Build the sibling Forks one level down from a branch at
         ``depth`` (in grouping order — ranking is the search's job)."""
         if depth == len(self.levels):
@@ -149,31 +159,71 @@ class _Tree[P]:
             # every knob, e.g. FK).
             return [_Leaf(tree=self, knobs=dict(row)) for row in group]
         level = self.levels[depth]
-        keyed: dict[tuple, list[dict]] = {}
-        # Rows whose key is empty skip the level (it doesn't apply to
-        # them) — their next-level subtree splices up as siblings of the
-        # keyed branches below.
-        skipped: list[dict] = []
-        for row in group:
-            key = level.key(row)
-            if not key:
-                skipped.append(row)
-            else:
-                keyed.setdefault(key, []).append(row)
+        # Rows whose key is empty skip the level (it doesn't apply to them) — their next-level
+        # subtree splices up as siblings of the keyed branches below. Addressable products supply
+        # this partition structurally; ordinary sequences use the indexed fallback.
+        keyed, skipped = group.partition(level)
         if not keyed:
             # Level applies to nothing in this group — skip it wholesale.
             return self.build_level(group, depth + 1)
         # Single-value collapse: the level adds no choice, so skip the
         # 1-child Fork wrapper and recurse straight into the next level.
-        if not skipped and len(keyed) == 1:
-            return self.build_level(next(iter(keyed.values())), depth + 1)
+        if skipped is None and len(keyed) == 1:
+            return self.build_level(keyed[0][1], depth + 1)
         siblings: list[Fork] = [
-            _Branch(tree=self, group=sub, next_depth=depth + 1, knobs=dict(zip(level.knob_names, key, strict=True)))
-            for key, sub in keyed.items()
+            _Branch(tree=self, group=sub, next_depth=depth + 1, knobs=dict(zip(level.knob_names, key, strict=True))) for key, sub in keyed
         ]
-        if skipped:
+        if skipped is not None:
             siblings.extend(self.build_level(skipped, depth + 1))
         return siblings
+
+
+@dataclass(frozen=True)
+class _Rows:
+    """An index view over one shared addressable row space.
+
+    Branches retain integer indices, never copies of the row dictionaries. The root uses a
+    ``range`` and therefore does not read or allocate anything proportional to the schedule space
+    until that branch is expanded.
+    """
+
+    source: Sequence[dict]
+    indices: Sequence[int]
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __iter__(self) -> Iterator[dict]:
+        return (self.source[index] for index in self.indices)
+
+    def indexed(self) -> Iterator[tuple[int, dict]]:
+        return ((index, self.source[index]) for index in self.indices)
+
+    def subset(self, indices: Sequence[int]) -> _Rows:
+        return _Rows(self.source, tuple(indices))
+
+    def partition(self, level: Level) -> tuple[list[tuple[tuple, _Rows]], _Rows | None]:
+        """Partition this view at ``level``, delegating to a structural row space when available."""
+        full = isinstance(self.indices, range) and self.indices == range(len(self.source))
+        structural = getattr(self.source, "partition", None)
+        if full and level.partition_key is not None and structural is not None:
+            keyed = []
+            skipped = None
+            for value, source in structural(level.partition_key):
+                view = _Rows(source, range(len(source)))
+                if value == "":
+                    skipped = view
+                else:
+                    keyed.append(((value,), view))
+            return keyed, skipped
+
+        keyed: dict[tuple, list[int]] = {}
+        skipped: list[int] = []
+        for index, row in self.indexed():
+            key = level.key(row)
+            (keyed.setdefault(key, []) if key else skipped).append(index)
+        groups = [(key, self.subset(indices)) for key, indices in keyed.items()]
+        return groups, self.subset(skipped) if skipped else None
 
 
 @dataclass(frozen=True)
@@ -183,12 +233,22 @@ class _Branch(Fork):
     branch and ``expand()`` builds the next level."""
 
     tree: _Tree
-    group: list[dict]
+    group: _Rows
     next_depth: int
     knobs: dict
 
     def expand(self) -> list[Op | Graph | Fork]:
         return self.tree.build_level(self.group, self.next_depth)
+
+    def leaves(self) -> Iterator[Fork]:
+        """Stream the subgroup's complete rows directly when a policy needs every leaf.
+
+        Branch construction exists for recursive search.  An exhaustive policy already needs the
+        full rows, so replaying every grouping level would only rescan and regroup the same index
+        set.
+        """
+        for row in self.group:
+            yield _Leaf(tree=self.tree, knobs=dict(row))
 
 
 @dataclass(frozen=True)
@@ -217,8 +277,8 @@ def build_fork_tree(
     enumerate has no fork point — skip the rule instead) and ``levels``
     non-empty; both raise ``ValueError``.
 
-    Nothing is built at call time — the root is a :class:`_Branch` over
-    the whole row list; each branch's ``expand()`` builds the next level
+    Nothing is built at call time — the root is a :class:`_Branch` over a range into the shared row
+    sequence; each branch's ``expand()`` builds the next level
     on demand, so greedy descent instantiates O(path) Forks instead of
     one per row (~42k for a matmul-class kernel) and MCTS pays one level
     per pop. Siblings are emitted in grouping order; ranking is the
@@ -229,4 +289,4 @@ def build_fork_tree(
     if not levels:
         raise ValueError("build_fork_tree: at least one Level required")
     tree = _Tree(levels=tuple(levels), materialize=materialize)
-    return _Branch(tree=tree, group=list(params), next_depth=0, knobs={})
+    return _Branch(tree=tree, group=_Rows(params, range(len(params))), next_depth=0, knobs={})

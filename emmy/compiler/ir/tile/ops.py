@@ -17,23 +17,20 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
     deep_reads,
     edge_refs_axis,
     is_contraction,
-    operand_name,
     refs_axis,
     splice_operands,
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Assign, Body
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.tile.ir import TileOp, effect_tail
-from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters
 from emmy.compiler.ir.tile.path import resolve, sites, spell
 
 
@@ -63,20 +60,6 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
     stats = tuple(sorted(pro_results & deep_reads(list(cell))))
     return (pro, cell, stats) if stats else ((), cell, ())
-
-
-def chain_edge(cone, k_name: str):
-    """The cone's K-VARYING producer edge when it is a CONTRACTION over its own axis — attention's
-    score, read by the cone's ``exp(s − m)`` — or ``None`` (no such edge, or it is not a
-    contraction, so only the per-cell evaluation exists).
-
-    A node-boundary read like :func:`cone_seam`, and asked by both sides of the seam: the scheduler
-    sizes the score's key slab into the sync stage's smem budget, and the materializer realizes the
-    score on the tensor core (``lowering/kernel/_atom``'s chained fills)."""
-    if not isinstance(cone, Fold) or cone.axis is not None:
-        return None
-    kv = [e for e in cone.operands if isinstance(e, Fold) and e.axis is not None and edge_refs_axis(e, k_name)]
-    return kv[0] if len(kv) == 1 and is_contraction(kv[0]) and isinstance(kv[0].a, Load) else None
 
 
 def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
@@ -122,16 +105,6 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
         prologue = Fold.projection(body=pro_body, operands=pro_ops, results=(*prologue.lift.results, *bridged))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
     return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
-
-
-def same_score_cone(a, b, a_axis: str, b_axis: str) -> bool:
-    """Whether two score cones are the SAME program modulo their own bound names and the axis each
-    streams — asked of two nodes that reached lowering separately (a split-K partition re-indexes
-    the weight's keys while the statistic keeps spanning the whole axis, and a lowering that folds
-    the two passes into one sweep may only do so while they still read the same keys)."""
-    left = Lambda(params=(a_axis,), body=Body((a,)), results=(operand_name(a),))
-    right = Lambda(params=(b_axis,), body=Body((b,)), results=(operand_name(b),))
-    return lambda_equivalent_clusters(((left, (a_axis,)), (right, (b_axis,)))) == ((0, 1),)
 
 
 def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
@@ -246,11 +219,11 @@ class Sched:
         - a ROOT contraction, including one directly under a zero-axis projection that groups
           several kernel outputs, tiles the kernel grid's trailing pair (``Placement.root_mn``,
           the same reading the scheduler binds through at option assembly);
-        - a DERIVED site (flash's synthesized PV) tiles the placement's trailing free pair — it
-          lives below the seam lattice, so the grid says nothing about it;
-        - any other nested contraction (flash's hoisted QK edge) takes the free m axis and its
-          PARENT fold's axis as n — read through a slice partial's window PARENT, so the view
-          carries the pre-slice geometry the fragment clamps were built against.
+        - a derived unit-axis contraction inherits its parent Fold's reduction domain, so its
+          result tiles the placement's trailing free pair;
+        - any other nested contraction takes the free m axis and its PARENT fold's axis as n —
+          read through a slice partial's window PARENT, so the view carries the pre-slice geometry
+          the fragment clamps were built against.
         """
         free = tuple(self.place.free)
         site = next((s for s in self._all_sites() if s.node is node), None)
@@ -274,7 +247,7 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived:
+        if site.derived and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
             return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
         ax = getattr(parent.node, "axis", None) if parent is not None else None
@@ -345,6 +318,34 @@ def projection_tail(tile) -> list[Stmt]:
     return effect_tail(body, tile.stores)
 
 
+def projection_regions(op: Fold, stores: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
+    """Partition an independent projection's pure body and stores by producing Fold.
+
+    Each boundary store must read exactly one root, the roots' backward cones must be disjoint,
+    and together those cones must cover the projection body. This is the structural ownership
+    rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
+    """
+    roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
+    by_name = {name: root for root in roots for name in root.defines()}
+    members: dict[int, set] = {id(root): set() for root in roots}
+    grouped: dict[int, list] = {id(root): [] for root in roots}
+    for store in stores:
+        cone = op.body.backward_cone((store.write.value,))
+        used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
+        if len(used) != 1:
+            raise ValueError("an output-tiled root must own each boundary store independently")
+        owner = used.pop()
+        members[owner].update(cone.members)
+        grouped[owner].append(store)
+
+    claimed: set = set().union(*members.values()) if members else set()
+    if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
+        raise ValueError("an output-tiled root forest must cover the complete projection")
+    if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
+        raise ValueError("output-tiled root projections may not share tail statements")
+    return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
+
+
 def seal_workers(tile) -> None:
     """Derive and STAMP the kernel's ONE worker inventory (``TileOp.work`` + the ``WORK`` knob —
     the step-7 value-grammar family): the per-site ``w``/``n`` worker tokens factored out of the
@@ -412,9 +413,9 @@ __all__ = [
     "cone_seam",
     "head",
     "make_cone",
+    "projection_regions",
     "projection_tail",
     "reduce_plan",
-    "same_score_cone",
     "sched_of",
     "seal_workers",
     "split_invariant_factors",

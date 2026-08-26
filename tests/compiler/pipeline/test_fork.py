@@ -10,6 +10,8 @@ through the engine in ``tests/compiler/pipeline/search/test_thunk_forks.py``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
@@ -185,6 +187,34 @@ def test_materialize_is_lazy():
     assert len(calls) == 1
     leaves[1].expand()
     assert len(calls) == 2
+
+
+def test_addressable_space_is_not_materialized_at_construction():
+    """The root retains the addressable space and reads rows only when a branch expands."""
+
+    class Rows(Sequence):
+        def __init__(self):
+            self.reads: list[int] = []
+
+        def __len__(self):
+            return 3
+
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("the fork copied the schedule space")
+            self.reads.append(index)
+            return _row(index, 0, 0)
+
+        def __iter__(self):
+            raise AssertionError("the fork eagerly iterated the schedule space")
+
+    rows = Rows()
+    tree = build_fork_tree(params=rows, levels=_LEVELS, materialize=_stub_materialize)
+    assert rows.reads == []
+
+    branches = tree.expand()
+    assert rows.reads == [0, 1, 2]
+    assert [branch.knobs["A"] for branch in branches] == [0, 1, 2]
 
 
 def test_leaf_expand_returns_own_param_materialization():

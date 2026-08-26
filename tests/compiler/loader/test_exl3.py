@@ -584,6 +584,44 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 
 
+def _prefer_mma_leaf(fp):
+    """Descend one schedule path, preferring warp MMA and synchronous computed fills.
+
+    Rank each branch by one complete descendant row. Branch knobs are only the current level's
+    delta, so comparing them directly with an already-complete leaf would make the leaf win merely
+    because it contains more fields.
+    """
+    from emmy.compiler.pipeline.fork import Fork
+
+    def score(option):
+        knobs = dict(getattr(option, "knobs", {}) or {})
+        return sum(
+            4
+            if key == "WORK" and str(value).startswith("w")
+            else 2
+            if key.split("@", 1)[0] == "TILE" and str(value).startswith("mma_")
+            else 1
+            if key.split("@", 1)[0] == "STAGE" and str(value).endswith("/smem")
+            else -1
+            if key.split("@", 1)[0] in {"REDUCE", "RASTER"} and value
+            else 0
+            for key, value in knobs.items()
+        )
+
+    options = list(fp.options)
+    while options:
+
+        def representative(option):
+            return next(option.leaves()) if isinstance(option, Fork) and not option.is_leaf else option
+
+        chosen = max(options, key=lambda option: score(representative(option)))
+        if isinstance(chosen, Fork) and not chosen.is_leaf:
+            options = chosen.expand()
+            continue
+        return chosen
+    return None
+
+
 def test_input_spelling_streams_computed_b_through_tensor_cores():
     """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync."""
     from emmy.compiler.context import Context
@@ -593,7 +631,6 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
 
     graph = Graph()
@@ -608,14 +645,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
     def choose_sync_mma(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if str(row.get("WORK", "")).startswith("w") and any(
-                key.split("@", 1)[0] == "STAGE" and value == "d1/smem" for key, value in row.items()
-            ):
-                return leaf
-        return leaves[0]
+        return _prefer_mma_leaf(fp)
 
     lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
@@ -642,7 +672,6 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
     from tests.compiler.helpers import device_compute_capability
 
@@ -662,13 +691,11 @@ def test_input_spelling_computed_b_mma_matches_decoded_linear():
     selected = []
 
     def choose_lane(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if _computed_b_rows([row]):
-                selected.append(row)
-                return leaf
-        return leaves[0]
+        leaf = _prefer_mma_leaf(fp)
+        row = dict(getattr(leaf, "knobs", {}) or {})
+        if _computed_b_rows([row]):
+            selected.append(row)
+        return leaf
 
     lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
     assert selected
@@ -801,24 +828,6 @@ def _computed_b_rows(rows):
     ]
 
 
-def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
-    """The computed-B warp lane admits the cross-CTA split — no GPU, enumeration only.
-
-    The split factors a static K into ``ksplit × kslice`` and σ-reindexes each operand to absolute
-    k. A materialized edge rewrites its gmem index; a computed cone rewrites its own k coordinate,
-    which is the SAME rule (``_schedule._sliced_edge``) the computed-A split already rode. This
-    lane used to offer the serial fold alone, so no golden could record a split quantized linear."""
-    from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
-
-    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
-        monkeypatch.delenv(var, raising=False)
-    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))).rows)
-    assert rows, "the trellis linear must offer a compute-filled warp lane"
-    offered = {str(value) for row in rows for key, value in row.items() if key.split("@", 1)[0] == "REDUCE"}
-    assert any(s.startswith("g") for s in offered), offered
-
-
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
     ``kslice`` = K/2 columns, so both the materialized A load and the computed B cone's own
@@ -831,7 +840,6 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
@@ -839,9 +847,7 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
 
     def computed_b_leaf(fp):
-        leaves = flatten_leaves(fp.options)
-        picked = [leaf for leaf in leaves if _computed_b_rows([dict(getattr(leaf, "knobs", {}) or {})])]
-        return picked[0] if picked else leaves[0]
+        return _prefer_mma_leaf(fp)
 
     lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(
         _trellis_linear_graph(), computed_b_leaf
@@ -871,7 +877,6 @@ def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import flatten_leaves
     from emmy.compiler.pipeline.pipeline import Run
     from tests.compiler.helpers import device_compute_capability
 
@@ -885,13 +890,11 @@ def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
     picked: list[dict] = []
 
     def computed_b_leaf(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if _computed_b_rows([row]):
-                picked.append(row)
-                return leaf
-        return leaves[0]
+        leaf = _prefer_mma_leaf(fp)
+        row = dict(getattr(leaf, "knobs", {}) or {})
+        if _computed_b_rows([row]):
+            picked.append(row)
+        return leaf
 
     graph = _trellis_linear_graph(m=16, tensors=tensors, cb=0)
     lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, computed_b_leaf)

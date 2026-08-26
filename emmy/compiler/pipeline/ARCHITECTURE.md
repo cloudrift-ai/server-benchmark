@@ -109,16 +109,18 @@ A worked example, to fix the vocabulary. Take `emmy compile` on a machine with a
 rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
-2. `greedy_decide` **flattens** the fork to its complete leaves — knob dicts only; no kernel is built yet (Part 4).
-3. Each leaf becomes one row: the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
-   an earlier pass wrote onto the op (a summary of its body and loop extents), and the leaf's complete knob values
-   (Part 6).
+2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
+   it lazily compares one complete representative beneath each sibling and opens only the chosen branch; no kernel
+   is built yet (Part 4).
+3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
+   an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
 4. **Tier 1, reservoir.** The leaf that agrees with the fastest reservoir row of the same op that was itself
    measured at `-O3` (`H_opt=3`) — agreement means every knob the leaf has decided has the same value in the row.
    Deployable flags only.
 5. **Tier 2, `perf` rows.** Otherwise: measured rows for this exact op — a row measured at deployable flags decides
    ahead of a row measured at the `-Xcicc -O1` flags a tune sweep uses.
-6. **Tier 3, the prior.** Otherwise: the `mean_scores` argmin over all leaves, in one batched predict.
+6. **Tier 3, the prior.** Otherwise: at each level, the `mean_scores` argmin over one complete representative per
+   sibling, followed by the winning branch.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -721,21 +723,20 @@ tune winner is an automatic exact pin; verified rows remain automatic pins as be
 only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
 observations come from independent command invocations, not a second orchestration layer inside `run`.
 
-**Greedy flattens forks before ranking.** The lazy fork tree is an MCTS structure — it stages knob choices across
-levels (`BR` → `BM/BN` → `FM/FN`) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level: a branch
-carries only a *partial* tile, and `features.knob_features` can't compute its area / occupancy until `FM/FN` are
-pinned, so the prior would be blind at the `BM/BN` choice. Instead `greedy_decide` flattens each fork point to its
-complete leaves (`fork.flatten_leaves` expands branches depth-first; only knob dicts — materialization stays deferred
-to the chosen leaf) and picks the lowest `Prior.mean_scores` over the full `{H_*, S_*, complete-knob-row}` vector in
-one batched `predict`, invariant to the tree's level order. With no online prior the `OfflinePrior` ranks (including a
+**Greedy compares complete branch representatives lazily.** A branch carries only a partial tile, so each sibling is
+represented by one complete descendant before featurization. The prior sees the full
+`{H_*, S_*, complete-knob-row}` vector, chooses one sibling, and repeats inside that subtree. This is a deliberately
+hierarchical greedy policy, not the global argmin of an eagerly flattened Cartesian product. Verified and measured
+rows already spell complete schedules, so those tiers descend to the exact offered row without model approximation.
+Structural forks remain small and use `flatten_leaves`. With no online prior the `OfflinePrior` ranks (including a
 positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing
 entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
-**And it flattens each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
+**And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
 keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
-blocklist content, so N same-shape kernels flatten-and-score once and the rest replay by descending the lazy tree's
+blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
 while a validate-retry with a blocked tile is a different key and re-decides.
 

@@ -105,8 +105,8 @@ When the scheduler tiles contractions directly inside an exp-family Fold, `_bind
 codegen reading needed by the existing contraction factorization. With two children, the first supplies score
 fragments and the normalized weight becomes the computed A edge of the second. With only the derived expectation
 child, the enclosing Fold supplies the materialized score and its sweep axis becomes the contraction K. The stored
-Fold tree is unchanged, and `reduce_codegen` plus `store_sink` remain the only MMA realization path for ordinary
-contractions, SDPA, and softmax followed by a value contraction.
+Fold tree is unchanged, and `reduce_codegen` plus the generic contraction or Fold sink remain the one MMA realization
+path for ordinary contractions, SDPA, and softmax followed by a value contraction.
 
 **The contraction factorization — two atoms.** `_bind`'s output-tiled arm is atom-generic — there is no per-atom
 variant, and **no per-atom geometry object**. It expands any contraction-shaped `Fold` by tiling a **leaf atom**
@@ -198,83 +198,29 @@ are never offered and a `smem-tma` pin declines to `smem-async` / gmem-direct �
 resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays
 authoritative.
 
-**Inline operands — the `smem` compute fill.** A matmul with a pure producer cone on either operand reaches
-the warp tier through a COMPUTED edge: recognition stores the producer tree inline on that edge
-(`ir/tile/ops.make_cone`), and the schedule offers a MANDATORY resolved `smem` `Stage` (no gmem-direct sibling —
-a byte transport cannot evaluate a cone). `_staged` builds a `SyncTransport` whose computed A or B fill evaluates
-ordinary scalar tensor algebra per shared-memory slab cell, feeding the unchanged `ldmatrix` drain. A is stored in
-canonical `(tile_m × bk)` geometry and B in canonical `(bk × tile_n)` geometry. Materialized peer operands use the
-same vectorized `cp.async` path as ordinary staged matmul, so a generic compact-storage B producer can be evaluated
-directly into Tensor Core fragments without first constructing its expanded dense matrix. This facility is defined
-entirely in generic tensor/loop IR; checkpoint formats are already dissolved before it is selected.
+**Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
+producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
+scheduled contraction, directly in fragments before storing the slab consumed by `ldmatrix`. Materialized peers keep
+using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
+materializer do not recognize operation families.
 
-The compute fill assigns each thread a contiguous run of slab cells (the row/col derivation hoists out of the
-per-cell code and the cone replicates with a `__c<j>` SSA suffix). A materialized canonical B uses the K-major
-`(bk × tile_n)` slab; a transposed B (the serving `F.linear` layout) uses the N-major `(tile_n × bk)` slab in its own
-gmem orientation (`Operand.trans`). When a two-slot ring also fits the smem budget, the stage resolves at `depth=2`
-and copied peer chunks can stay in flight across the current chunk's drain. A
-**reduce-bearing (MONOID) cone** — when explicitly stored as a computed operand — is an inline node tree whose
-SOURCE is the row-invariant prologue (the per-row statistic) and whose `body` is the per-cell normalize, so the K seam
-IS the node boundary — read by `ops.cone_seam` in `_sync_operands` — and the prologue runs ONCE per tile row as the
-transport prologue
-(`_stage.sync_stat_fill` — one row per WARP: the 32 lanes stride the row's reduce coalesced and close the fold with
-the stat fold's shuffle butterfly (`emit_combine` off the threaded `Reduction`), lane 0 writing the bridged stat into its smem row; one barrier);
-the per-cell compute fill reads the bridged values back from the stat rows. A cone edge that DOES index K (attention's
-score contraction, read by the cone's `exp(s − m)`) is the **CHAINED** fill where it reads as a CONTRACTION and the
-atom can mma it: the slab comes from a nested contraction — `mma(Q, Kᵀ)` into C fragments, the cone folded into their
-fragment store (`RegStore` + `RegEpilogue`) and written straight into the slab the `ldmatrix` drain reads. There is no
-second mma emitter: the score is a contraction, so it is built out of the SAME atom strategy (`_atom_ops` on the score
-node — `state` declares the fragments, `reduce` emits the `ldmatrix` + `mma.sync` K-loop, `store` writes them),
-namespaced (`_AtomOps.frag_ns`) so the nested fragments never shadow the accumulators the enclosing drain carries
-across the same loop. That slab SWIZZLES like every other one: the fragment store applies the same flattened-index XOR
-the `ldmatrix` drain undoes (`RegStore.swizzle`, stamped through the fill's `Write`), so the weight tile costs no more
-bank conflicts than the operands beside it. The nested score's own staged operands (its per-chunk keys, its
-loop-invariant query tile) carry their mode on the cp.async fill the same way.
+The fragment Fold evaluator assigns each live value one of three residences: CTA-cell uniform, one scalar per fragment
+row, or one C fragment. It interprets the stored `Lambda` directly. `Assign` broadcasts to the highest input residence,
+`Select` substitutes the fragment layout's absolute coordinates, and coordinate-dependent `Load` becomes
+`FragmentLoad`. A symbolic reduce boundary adds `FragmentMask` with the Fold identity. The same evaluator applies the
+stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
 
-A `RegEpilogue` predicate carries the semantic cell origin captured from the producer's substitution plus
-per-fragment row/column placeholders. The destination index remains only an address: a chained fill may rebase that
-index to a tile-local slab, but it must not rebase a causal or other coordinate predicate. Later cell replication
-substitutes the predicate's real coordinate variables and the store fills only its element offsets. Inferring the
-predicate origin from `RegStore.dst_index` would make every nonzero chunk compare slab-local coordinates instead.
-Fragment lifting follows the unique fragment-valued argument rather than requiring it to occupy a particular operand
-position, so canonical commutative ordering does not disqualify a causal score expression.
-The epilogue also retains every captured `Assign.dtype`: fragment-local pointwise operations use the same promotion,
-native-operation, and final-conversion rules as the scalar Loop tail. In particular, an f32 accumulator crossing a
-declared f16 tensor boundary narrows before a later activation consumes it; register fusion cannot erase that store/load
-semantic boundary.
+A scheduled child contraction is supplied through the evaluator's structural callback. The ordinary atom strategy
+declares and drains its fragments; `FragmentRowReduce` derives row-resident partials; the parent Fold's `combine`
+Lambda merges those partials and fragment-resident channels. `SyncOperand.producer` and `_stage.LeadSegment` merely
+describe the resulting whole-slab producer and its live range to the common staged-loop scheduler. A materialized
+source follows the same path through `FragmentLoad`. No separate blocked, chain, or attention emitter remains.
 
-The chained fill takes one of two forms, and the first is preferred wherever it reads:
-
-- **SINGLE-PASS** (`_atom.chain_stream_fill`) — the statistic and the weight come off ONE pass of the score. The two
-  cannot share a pass while the weight names a denominator the sweep has not finished, so the cone's state-only
-  factors are split off (`_cone_weight` over `ir/tile/ops.split_invariant_factors`) and multiplied back onto the output
-  fragments after the loop. What remains is the twisted monoid's streaming law: per KV chunk the block's scores land
-  in C fragments, its row pivot advances the carried one, and the ψ-RESCALE that advance puts on every carried channel
-  (`carrier.exp_rescale`) is applied to the ENCLOSING drain's output fragments — the one channel that lives outside
-  the fold's state. Nothing is bridged through smem: the carried `(pivot, denominator)` pair stays in registers at the
-  fragment layout's own rows, seeded once by the chunk loop's own `Accum` placement. A coordinate-predicated scalar
-  `Select` in the score lift stays exact through the generic `FragmentSelect`: every branch value must be uniform, and
-  its predicates use each physical fragment's existing row/column base plus layout offsets. Fragment-valued or
-  per-cell branches decline the single-pass form instead of being broadcast.
-- **TWO-PASS** (`_atom.chain_stat_fill` as the transport prologue, then `_atom.chain_a_fill`) — the statistic finishes
-  over the whole axis first and bridges through the stat smem rows, and the weight fill recomputes the score to read
-  it. The single-pass form declines to it wherever the two halves do not cover the same keys (a split-K partition
-  contracts a slice while its statistic still spans the whole axis, so each partition divides by the whole
-  denominator) or the cone does not read as the exp family's weight times state-only factors.
-
-The nested score's OWN operands stage like any other, through the same transports and the same `LdmatrixLoad` drain
-(`_atom.score_key_operand` / `score_query_operand`), so it crosses L1 once per CTA instead of once per warp. The two
-axes swap the roles the enclosing operands give them: what advances per chunk is the score's N (which is the
-contraction's K — the keys), and the score's own K (the head dim) is stationary and stages whole. So the KEY slab is
-`chunk × <score K>`, N-major, refilled per chunk; the QUERY slab is `tile_m × <score K>`, loop-INVARIANT
-(`SyncTransport.invariant_operands` — one fill ahead of the loop, no ring, no live range to schedule). The scheduler
-reserves both whenever a cone composes a score (`_legality.resolve_sync_stage`), so a tile that fits the budget still
-fits once realized.
-
-That is also why a chained fill is its own pipeline SEGMENT (`_stage.LeadSegment`) instead of running inside the
-transport's fill: the key slab's live range ends before the drain, so `pipelined_kloop` waits for it ahead of the
-score, barriers after it, and refills it under the P·V drain — while the drain's own group refills the values under the
-next chunk's score. The alternating pipeline falls out of the two live ranges; nothing about it is attention-specific.
+Fragment stores preserve semantic coordinates independently of their destination address, and retain every
+`Assign.dtype`; rebasing a producer into a tile-local slab therefore cannot rebase a causal predicate or erase a
+store/load conversion. The producer's `RegStore` carries the same slab swizzle the consumer's `ldmatrix` undoes.
+Loop-invariant and chunk-varying child operands use the same ordinary staging transports and liveness rules as every
+other contraction.
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
@@ -339,24 +285,22 @@ Unstaged is byte-identical gmem-direct.
 partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
 the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
 
-## A TWISTED carrier lowers through the generic reduce tiers
+## Fold carriers lower at their scheduled residence
 
-There is no attention emitter. A `TWISTED` reduce lowers at scalar residence through the same reduce-axis tiling every
-`PLANAR` fold takes (`_tile_reduce_axis` — coop lanes / ILP chains / serial), its multi-component streaming merge
-regenerated off the node's `Reduction` view — with ONE fragment-residence arm, and it is a fill, not an emitter: a
-computed-A cone's per-row statistic over a COMPOSED score sweeps at fragment residence
-(the chained fills above). Per KV block the tile's scores land in mma C-fragments (`_score_block`), the block's row
-statistic comes off them through the layout's shuffle butterfly (`FragmentRowReduce`), and the carrier's OWN generated
-program merges the block into the running state — `exp_merge` at a BLOCK singleton `(rowmax, rowsum)` instead of an
-element singleton, the same generator and the same stability certificate. Each lane ends holding the statistic for the
-two rows the fragment layout gives it. In the two-pass form one lane per column group publishes them to the stat rows
-the weight fill reads; in the single-pass form they never leave the registers, and the carried state's advance also
-rescales the enclosing drain's output fragments (`carrier.exp_rescale` — the same ψ the merge puts on every carried
-channel, named on its own for an accumulator outside the fold's state). Everything else about the fold is unchanged.
-The fold MOVE itself is never re-decided per site: `ReduceStage.combine` (`ir/schedule.py`) is the ONE
-placement-keyed selector — within-warp → `SHFL`, within-block → `SHFL`+`SMEM` tree, cross-CTA → `ATOMIC`/`KERNEL`
-(a multi-component carrier is kernel-finalize only) — and every emitter consumes its output (`emit_combine` at
-scalar residence, `030_split_reduce` as the graph rewrite).
+Scalar Fold carriers use the common reduce-axis tiling (`_tile_reduce_axis` — cooperative lanes, register ILP, or
+serial). A Fold whose value-producing child is a scheduled contraction uses the residence evaluator above: child
+fragments become row partials through `FragmentRowReduce`, and the Fold's stored `combine` Lambda merges them into
+row- and fragment-resident state. This applies equally to planar and twisted monoids; the materializer reads only the
+Fold algebra and schedule.
+
+Boundary writes consume those residences directly. Fragment state stores in place; row and uniform state broadcasts
+through the fragment layout before storing, so split partial kernels preserve every carrier component without
+assuming that all components share the contraction accumulator's residence.
+
+The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
+within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
+(a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
+`030_split_reduce` realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

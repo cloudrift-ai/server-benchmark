@@ -1,6 +1,6 @@
 """The greedy compile pick — :func:`greedy_decide`, a ``Run.resolve`` decide
-factory picking each fork point's globally-best **complete** leaf via the
-global online prior when one is trained, else option-0.
+factory choosing one **complete** leaf via direct evidence or lazy branch
+descent with the global online prior, else option-0.
 
 This is the deterministic pick for ``compile`` / ``run``, the structural
 pricing probes, and the assembled-graph lowering. It is NOT a search and not
@@ -11,21 +11,20 @@ is :meth:`Run.resolve`'s returned trace, never accumulated policy attributes.
 It can only *use* a prior trained earlier by ``tune``, never train one.
 Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 
-**Flatten, don't descend.** The lazy fork tree (``lowering/tile`` planner) is an
+**Evaluate complete branch representatives.** The lazy fork tree (``lowering/tile`` planner) is an
 MCTS data structure — it stages knob choices across levels (``BR`` → ``BM/BN`` →
 ``FM/FN``) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level:
 a branch carries only a *partial* tile, and ``features.knob_features`` can't compute
 the tile's area / occupancy until ``FM/FN`` are pinned — so the prior is blind at
-the ``BM/BN`` choice and defaults to ``BN=16`` for every shape. Instead greedy
-**flattens** each fork point to its complete leaves
-(:func:`~emmy.compiler.pipeline.fork.flatten_leaves` — cheap, ``expand``
-builds only knob dicts; materialization stays deferred to the one chosen leaf)
-and picks the one with the lowest :meth:`Prior.mean_scores` over the
-full feature vector the prior trained on: the ``H_*`` host/hardware regime + the
-op's ``S_*`` structural knobs (read off the offer op) + the leaf's complete knob
-row. The pick equals scoring the flat candidate set, invariant to the tree's
-level order. With no trained prior the model is unfit → it falls back to the first
-emitted sibling.
+the ``BM/BN`` choice and defaults to ``BN=16`` for every shape. Greedy therefore scores one complete
+canonical completion per sibling, selects that branch, and repeats at the next level. Non-schedule forks use
+:func:`~emmy.compiler.pipeline.fork.flatten_leaves`. Materialization stays deferred to the one
+chosen leaf. Each branch decision uses the full feature vector the prior trained on: the ``H_*``
+host/hardware regime + the op's ``S_*`` structural knobs (read off the offer op) + one canonical
+complete row beneath each sibling. This is deliberately a hierarchical greedy policy: it does not
+claim the global argmin of an unopened Cartesian product. Direct measured and verified rows bypass
+that approximation and descend to their exact spelling. With no trained prior the model is unfit →
+it falls back to the first emitted sibling.
 
 **Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
 goldens, then measurements, then the fitted prior — every one of them a
@@ -48,7 +47,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, flatten_leaves
+from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves
 from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 
 logger = logging.getLogger(__name__)
@@ -589,15 +588,6 @@ def _audit_record(
         )
 
 
-def _live_leaf_rows(leaves: list, node_blocked) -> list[tuple[object, dict]]:
-    """The fork's enumerated schedule rows — every non-structural leaf paired with its complete
-    knob row, minus the tiles this node already failed to lower."""
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-
-    rows = [(o, _leaf_knobs(o)) for o in leaves if not _is_structural_option(o)]
-    return rows if node_blocked is None else [(o, k) for o, k in rows if not _tile_blocked(k, node_blocked)]
-
-
 def _verified_index(ctx: Context) -> dict:
     """The card's recorded goldens keyed by STRICT structural identity — the recognized term's
     algebra digest + dtype fingerprint (``_schedule.deploy_identity``), derived record-side from
@@ -643,28 +633,68 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    leaves = flatten_leaves(fp.options)
-    if any(_is_structural_option(o) for o in leaves):
-        return None
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
         return None
     identity = deploy_identity(root)
     recs = sched_idx.get(identity)
     node_blocked = blocked.get(fp.node_id) if blocked else None
-    if not recs:
-        if _AUDIT_SINK is not None:  # the row count is the audit's alone — never paid on a deploy
-            _audit_record(fp.node_id, identity, "GAP", None, None, len(_live_leaf_rows(leaves, node_blocked)))
+    if not recs and _AUDIT_SINK is None:
         return None
-    live = _live_leaf_rows(leaves, node_blocked)
+
+    def find_recorded(options, record, target):
+        """Descend only branches compatible with one recorded row."""
+        for option in options:
+            if _is_structural_option(option):
+                return None
+            if isinstance(option, Fork) and not option.is_leaf:
+                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                    found = find_recorded(option.expand(), record, target)
+                    if found is not None:
+                        return found
+                continue
+            knobs = _leaf_knobs(option)
+            if schedule_row_key(knobs) == target and (node_blocked is None or not _tile_blocked(knobs, node_blocked)):
+                return option, knobs
+        return None
+
+    if recs and _AUDIT_SINK is None:
+        for rec in recs:
+            if (hit := find_recorded(fp.options, rec.knobs, schedule_row_key(rec.knobs))) is not None:
+                return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
+        logger.warning(
+            "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "
+            "the recording no longer realizes under the current enumeration (drift); falling through to measured "
+            "evidence / the prior. Records: %s",
+            fp.node_id,
+            len(recs),
+            ", ".join(g.name for g in recs),
+        )
+        return None
+
     # Both sides normalize through the ONE schedule-row identity (``schedule_row_key``: the
     # recording canonicalizer restricted to what THIS fork decides) — equality after it is exact
     # realized identity, never a prefix or any-of acceptance.
-    by_key = {schedule_row_key(k): (o, k) for o, k in live}
+    targets = {schedule_row_key(g.knobs): g for g in recs or ()}
+    by_key = {}
+    live_count = 0
+    for leaf in iter_leaves(fp.options):
+        if _is_structural_option(leaf):
+            return None
+        knobs = _leaf_knobs(leaf)
+        if node_blocked is not None and _tile_blocked(knobs, node_blocked):
+            continue
+        live_count += 1
+        key = schedule_row_key(knobs)
+        if key in targets:
+            by_key[key] = (leaf, knobs)
+    if not recs:
+        _audit_record(fp.node_id, identity, "GAP", None, None, live_count)
+        return None
     # Per-entry realizability, computed only under an active audit sink: the ``eval golden`` offer
     # audit reads which records the enumeration no longer offers. The deploy below still stops at
     # the first record whose row is offered.
@@ -672,9 +702,9 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     for rec in recs:
         hit = by_key.get(schedule_row_key(rec.knobs))
         if hit is not None:
-            _audit_record(fp.node_id, identity, "MATCH", rec.name, float(rec.emmy_us or 0.0), len(live), unrealized=unrealized)
+            _audit_record(fp.node_id, identity, "MATCH", rec.name, float(rec.emmy_us or 0.0), live_count, unrealized=unrealized)
             return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
-    _audit_record(fp.node_id, identity, "DRIFT", ", ".join(g.name for g in recs), None, len(live), unrealized=unrealized)
+    _audit_record(fp.node_id, identity, "DRIFT", ", ".join(g.name for g in recs), None, live_count, unrealized=unrealized)
     logger.warning(
         "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "
         "the recording no longer realizes under the current enumeration (drift); falling through to measured "
@@ -686,6 +716,123 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     return None
 
 
+def _branch_schedule_pick(fp: ForkPoint, blocked, prior) -> tuple[object, dict, float | None] | None:
+    """Greedily descend the schedule tree using complete branch representatives.
+
+    Each sibling is represented by its first complete row, so every prior evaluation has the full
+    feature vocabulary while the Cartesian product below unchosen branches remains unopened.
+    """
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+    base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+    node_blocked = blocked.get(fp.node_id) if blocked else None
+    options = list(fp.options)
+    price = None
+
+    def pick(rows: list[dict]) -> tuple[int, float]:
+        batched = getattr(prior, "mean_scores", None)
+        if batched is not None:
+            scores = batched(rows)
+            best = min(range(len(rows)), key=lambda index: (scores[index], canonical_row_key(rows[index])))
+            return best, scores[best]
+        return prior.pick(rows)
+
+    while options:
+        if len(options) == 1:
+            option = options[0]
+            if isinstance(option, Fork) and not option.is_leaf:
+                options = option.expand()
+                continue
+            knobs = _leaf_knobs(option)
+            if node_blocked is None or not _tile_blocked(knobs, node_blocked):
+                if price is None:
+                    _, price = pick([{**base, **knobs}])
+                return option, knobs, price
+            return None
+        representatives = []
+        for option in options:
+            descendants = option.leaves() if isinstance(option, Fork) and not option.is_leaf else (option,)
+            for leaf in descendants:
+                knobs = _leaf_knobs(leaf)
+                if node_blocked is None or not _tile_blocked(knobs, node_blocked):
+                    representatives.append((option, leaf, knobs, {**base, **knobs}))
+                    break
+        if not representatives:
+            return None
+        rows = [row for _, _, _, row in representatives]
+        best, price = pick(rows)
+        option, leaf, knobs, _ = representatives[best]
+        if isinstance(option, Fork) and not option.is_leaf:
+            options = option.expand()
+            continue
+        return leaf, knobs, price
+    return None
+
+
+def _direct_measured_pick(fp: ForkPoint, blocked, prior, db_index: dict) -> tuple[object, dict, float] | None:
+    """Descend directly to the fastest offered measured row.
+
+    Evidence rows already spell complete schedules, so scoring branch representatives would be
+    both slower and less exact. Expansions are memoized across records; each tree branch is opened
+    at most once during the lookup.
+    """
+    from emmy.compiler.pipeline.knob import canonical_row_key, evidence_row_vouches, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.base import _O3_OPT  # noqa: PLC0415
+
+    base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+    prior_signature = frozenset((key, value) for key, value in base.items() if key.startswith("S_"))
+    db_signature = frozenset((key, str(value)) for key, value in base.items() if key.startswith("S_"))
+    node_blocked = blocked.get(fp.node_id) if blocked else None
+    expanded: dict[int, list] = {}
+
+    def children(option: Fork):
+        if id(option) not in expanded:
+            expanded[id(option)] = option.expand()
+        return expanded[id(option)]
+
+    def find(options, record):
+        for option in options:
+            if isinstance(option, Fork) and not option.is_leaf:
+                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                    found = find(children(option), record)
+                    if found is not None:
+                        return found
+                continue
+            knobs = _leaf_knobs(option)
+            tunable = {key: str(value) for key, value in knobs.items() if not key.startswith(("S_", "H_"))}
+            if node_blocked is not None and _tile_blocked(knobs, node_blocked):
+                continue
+            if evidence_row_vouches(tunable, record):
+                return option, knobs
+        return None
+
+    def offered(records):
+        ordered = sorted(records, key=lambda item: (item[1], canonical_row_key(item[0])))
+        for record, price in ordered:
+            if (hit := find(fp.options, record)) is not None:
+                return hit[0], hit[1], float(price)
+        return None
+
+    if float(base.get("H_opt", _O3_OPT)) == _O3_OPT:
+        owner = getattr(prior, "online", prior)
+        try:
+            index = owner._o3_evidence()
+            records = [entry for group in _sig_groups(index, prior_signature) for entry in group]
+        except Exception:  # noqa: BLE001 — evidence lookup is best-effort
+            records = []
+        if records and (picked := offered(records)) is not None:
+            return picked
+
+    if db_index:
+        groups = _sig_groups(db_index, db_signature)
+        deployable = [(row, price) for group in groups for row, price, is_deployable in group if is_deployable]
+        ranking = [(row, price) for group in groups for row, price, is_deployable in group if not is_deployable]
+        for records in (deployable, ranking):
+            if records and (picked := offered(records)) is not None:
+                return picked
+    return None
+
+
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
@@ -694,9 +841,9 @@ def greedy_decide(
     db: object | None = None,
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
-    flatten the fork point to its complete leaves (:func:`flatten_leaves`),
-    skip ``blocked`` tile identities, and take the prior's ``mean_scores``
-    argmin — the ``OnlinePrior`` once trained, the ``OfflinePrior``
+    lazily descend a schedule fork using complete branch representatives, skip ``blocked`` tile
+    identities, and take the prior's ``mean_scores`` argmin at each level. Non-schedule forks flatten through
+    :func:`flatten_leaves`. The prior is the ``OnlinePrior`` once trained and the ``OfflinePrior``
     cold-start heuristic otherwise (both behind ``load_prior``'s
     ``FallbackPrior``). With no prior at all (a failed load, or the explicit
     ``prior=None`` emission-order resolve) every fork falls to emission order
@@ -727,7 +874,7 @@ def greedy_decide(
     memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
     #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
     #: the price memo, one compile attempt. A repeat offer replays by :func:`_find_decided_leaf`
-    #: descent; only genuinely new (key, blocklist) states pay the flatten-and-score.
+    #: descent; only genuinely new (key, blocklist) states pay the stream-and-score.
     decisions: dict[tuple, tuple[dict, float | None]] = {}
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
@@ -778,6 +925,16 @@ def greedy_decide(
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
             # (``prior=None``): emission order (option-0, first leaf).
             return _first_leaf(fp.options[0])
+        if dkey is not None:
+            picked = _direct_measured_pick(fp, blocked, the_prior, db_index())
+            if picked is None:
+                picked = _branch_schedule_pick(fp, blocked, the_prior)
+            if picked is None:
+                return _first_leaf(fp.options[0])
+            leaf, row, price = picked
+            fp.score = price
+            decisions[dkey] = (dict(row), price)
+            return leaf
         # Flatten: greedy benches nothing, so it must pick the globally best
         # COMPLETE tile, not a partial branch — see ``flatten_leaves`` (the
         # prior is blind at a partial ``BM/BN`` branch: ``knob_features``

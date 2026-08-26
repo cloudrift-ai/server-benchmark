@@ -218,6 +218,16 @@ def test_literal_axis_name_wins_over_an_ordinal_reading() -> None:
     assert resolve(root, "REDUCE@k2").node is root
 
 
+def test_digit_suffixed_axis_round_trips_with_an_ordinal() -> None:
+    f1 = _planar_fold("a2", acc="s0", val="v1", load="x")
+    f2 = _planar_fold("a2", acc="t0", val="w1", load="z")
+    root = Fold.projection(body=Body((Assign(name="o", op="add", args=(f1.out, f2.out)),)), operands=(f1, f2))
+    assert spell(root, "REDUCE", f1) == "REDUCE@map.fold.a21"
+    assert spell(root, "REDUCE", f2) == "REDUCE@map.fold.a22"
+    assert resolve(root, "REDUCE@map.fold.a21").node is f1
+    assert resolve(root, "REDUCE@map.fold.a22").node is f2
+
+
 # ---- reserved grammar ---------------------------------------------------------------------------- #
 
 

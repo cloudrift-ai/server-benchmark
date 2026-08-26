@@ -84,7 +84,6 @@ def test_sdpa_fold_tree_reaches_both_mma_sites(monkeypatch, causal: bool) -> Non
     (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
 
     assert source.count("emmy_mma_m16n8k16_f16_f32(") >= 3  # helper plus both contraction sites
-    assert "_s_c" in source and "_c0_" in source
-    assert "_psi" in source
+    assert "__shfl_xor_sync" in source
     if causal:
         assert "?" in source

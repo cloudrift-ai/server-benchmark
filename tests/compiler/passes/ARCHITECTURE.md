@@ -108,9 +108,11 @@ numpy backends in three places:
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
-sites through the CUDA pipeline. `test_pool_space.py` checks that the two child sites receive compatible MMA schedule
-rows. `test_move_catalog.py` checks that independent roots with reversed M/N readings combine only when their tile
-widths and unit counts match on the physical output axes. The generated carrier's numerical laws are covered
+sites through the CUDA pipeline. `test_pool_space.py` addresses large spaces by boundary/sample indices and narrows
+paired MMA checks with exact pins; it never exhausts a live catalog. `test_move_catalog.py` checks that independent
+roots with reversed M/N readings combine only when their tile
+widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
+output-tile rows when no MMA atom applies. The generated carrier's numerical laws are covered
 independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
 attention accuracy remain covered by the e2e suites.
 

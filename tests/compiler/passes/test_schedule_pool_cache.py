@@ -16,10 +16,10 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.space import TILE
+from emmy.compiler.pipeline.search.space import REDUCE, TILE
 
 
 def _matmul_graph(n: int = 1, dtype: str = "f32") -> Graph:
@@ -36,16 +36,15 @@ def _matmul_graph(n: int = 1, dtype: str = "f32") -> Graph:
 
 
 def _resolve(ctx: Context, graph: Graph) -> list[tuple]:
-    """Resolve ``graph``'s forks on option-0, returning every TILE-fork leaf's row identity."""
+    """Resolve ``graph``'s forks on the first emitted leaf, returning its row per TILE fork."""
     idents: list[tuple] = []
 
     def decide(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if any("TILE" in family_of(k) for k in row):
-                idents.append(canonical_row_key(row))
-        return leaves[0]
+        leaf = next(iter_leaves(fp.options))
+        row = dict(getattr(leaf, "knobs", {}) or {})
+        if any("TILE" in family_of(k) for k in row):
+            idents.append(canonical_row_key(row))
+        return leaf
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
     return idents
@@ -91,10 +90,19 @@ def test_a_dtype_change_keys_a_different_pool() -> None:
     original incident: one shared ctx, an f16 then an f32 SDPA trace, and the f32 fork came back
     with 24 warp geometries."""
     ctx = Context.from_target((12, 0))
-    f32 = _resolve(ctx, _matmul_graph())
-    f16 = _resolve(ctx, _matmul_graph(dtype="f16"))
+    _resolve(ctx, _matmul_graph())
+    before = set(ctx.session_cache._store)
+    _resolve(ctx, _matmul_graph(dtype="f16"))
     assert ctx.session_cache.misses >= 2, "an f16 twin must enumerate its own pool"
-    assert set(f16) != set(f32), "the f16 pool must differ (the warp tier is dtype-gated)"
+    new = set(ctx.session_cache._store) - before
+    assert len(before) == len(new) == 1
+    f32 = ctx.session_cache._store[next(iter(before))]
+    f16 = ctx.session_cache._store[next(iter(new))]
+
+    def sample(pool):
+        return tuple(canonical_row_key(dict(pool.rows[i])) for i in {0, len(pool.rows) // 2, len(pool.rows) - 1})
+
+    assert (f16.total, sample(f16)) != (f32.total, sample(f32)), "the f16 pool must differ (the warp tier is dtype-gated)"
 
 
 def test_a_precision_gate_pin_keys_a_different_pool() -> None:
@@ -114,10 +122,14 @@ def test_a_precision_gate_pin_keys_a_different_pool() -> None:
 def test_a_live_pin_keys_a_different_pool() -> None:
     ctx = Context.from_target((12, 0))
     unpinned = _resolve(ctx, _matmul_graph())
+    (unpinned_pool,) = ctx.session_cache._store.values()
+    before = set(ctx.session_cache._store)
     with TILE.pinned("f2x8"):
-        pinned = _resolve(ctx, _matmul_graph())
+        _resolve(ctx, _matmul_graph())
+    (pinned_key,) = set(ctx.session_cache._store) - before
+    pinned_pool = ctx.session_cache._store[pinned_key]
     assert ctx.session_cache.misses >= 2, "a pin state must never share the unpinned pool"
-    assert 0 < len(pinned) < len(unpinned), "the pinned fork must be a narrowing of the unpinned one"
+    assert 0 < len(pinned_pool.rows) < len(unpinned_pool.rows), "the pinned fork must be a narrowing of the unpinned one"
     # And back: the unpinned pool is still served intact after the pin lifts.
     assert _resolve(ctx, _matmul_graph()) == unpinned
 
@@ -135,9 +147,15 @@ def test_a_live_context_never_samples() -> None:
     sampled = replace(ctx, pool_sample=PoolSample(rows=8))
     assert sampled.session_cache is ctx.session_cache, "the shared memo is the hazard this test exists for"
 
-    drawn = _resolve(sampled, _matmul_graph())
-    full = _resolve(ctx, _matmul_graph())
-    assert 0 < len(drawn) < len(full), "the sampled Context sees a draw, the live one the whole pool"
-    assert set(drawn) < set(full), "and the draw is a SUBSET of the pool, not some other pool"
-    assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
-    assert _resolve(ctx, _matmul_graph()) == full
+    with REDUCE.pinned(""):
+        drawn = _resolve(sampled, _matmul_graph())
+        (drawn_pool,) = ctx.session_cache._store.values()
+        before = set(ctx.session_cache._store)
+        full = _resolve(ctx, _matmul_graph())
+        (full_key,) = set(ctx.session_cache._store) - before
+        full_pool = ctx.session_cache._store[full_key]
+        assert 0 < len(drawn_pool.rows) < len(full_pool.rows), "the sampled Context sees a draw, the live one the whole pool"
+        assert drawn_pool.total == full_pool.total
+        assert set(map(canonical_row_key, drawn_pool.rows)) < set(map(canonical_row_key, full_pool.rows))
+        assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
+        assert _resolve(ctx, _matmul_graph()) == full

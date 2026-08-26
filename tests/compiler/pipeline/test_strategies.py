@@ -20,7 +20,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy, structure_features
 from emmy.compiler.pipeline.passes.provenance import ProvenanceStrategy
@@ -52,7 +52,7 @@ def _norm_linear(m: int = 2, h: int = 16) -> Graph:
 
 def _resolve(passes, graph):
     """Option-0 resolution over a freshly built pipeline (strategies discovered)."""
-    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph, lambda fp: flatten_leaves(fp.options)[0])
+    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph, lambda fp: next(iter_leaves(fp.options)))
 
 
 # --- discovery --------------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
         passes=pipeline.passes,
         strategies=tuple(s for s in pipeline.strategies if not isinstance(s, ProvenanceStrategy)),
     )
-    out, _ = Run(pipeline=stripped, ctx=_CTX).resolve(_matmul(), lambda fp: flatten_leaves(fp.options)[0])
+    out, _ = Run(pipeline=stripped, ctx=_CTX).resolve(_matmul(), lambda fp: next(iter_leaves(fp.options)))
     assert all(not provenance.get(n) for n in out.nodes.values()), "no strategy → no provenance anywhere"
 
 
@@ -180,7 +180,7 @@ def test_events_fire_in_loop_order() -> None:
 
     rec = Recorder()
     run = Run(pipeline=Pipeline.build(LOOP_PASSES).with_strategies(rec), ctx=_CTX)
-    run.resolve(_matmul(), lambda fp: flatten_leaves(fp.options)[0])
+    run.resolve(_matmul(), lambda fp: next(iter_leaves(fp.options)))
     assert rec.events[0] == "run_start"
     assert any(ev.startswith("splice:frontend/decomposition") for ev in rec.events)
     # Every pre-splice event has its post-splice receipt event.

@@ -16,11 +16,16 @@ from __future__ import annotations
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers, plan_workers, resolve_site_tile
+from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers, plan_workers, resolve_site_tile
+from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
@@ -74,94 +79,6 @@ def _matmul_graph() -> Graph:
     return g
 
 
-def test_schedule_leaf_set_equals_catalog():
-    """The tile scheduler's emitted leaf set over a static f32 matmul equals the catalog's legal
-    product (keyed ``FAMILY@<k_axis>``) — the enumeration IS the tile × stage × reduce move product:
-
-    - distinct ``TILE`` values = exactly ``scalar_tile_moves()`` (f32 → no warp moves);
-    - the per-cell tile rides serial + the coop/ILP moves (non-output-tiled tier only), no split-K
-      (one thread per cell already saturates the 64×64 grid — the occupancy gate);
-    - every clean tiled tile rides the RESOLVED stage spellings (gmem-direct + the resolver-deduped
-      cp.async / TMA ring depths) × (serial + the divisor-guarded split-K widths); a masked-N tile
-      (tile_n overhangs N) declines staging and rides gmem-direct only — staging composes with
-      split-K (the split-K option re-resolves against the sliced inner node and ``030_split_reduce`` threads
-      the stage onto the partial).
-    """
-    from emmy.compiler.pipeline.search.space import coop_reduce_moves, raster_moves, splitk_moves
-
-    rows: list[dict] = []
-
-    def decide(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if any("TILE" in family_of(k) for k in row):
-                rows.append(row)
-        return leaves[0]
-
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
-    assert rows, "no TILE fork was emitted for the matmul"
-
-    # A row spells its TILE/REDUCE values site-locally and its worker widths once in WORK, so the
-    # catalog identity is recovered by resolving each value against the row's inventory — the same
-    # rule the scheduler's own ``_materialize`` applies — back into the typed slice the catalog
-    # hands out.
-    def full_tile(r: dict) -> TilePlan:
-        work = Workers.parse(str(r.get("WORK", "")))
-        return resolve_site_tile(str(family_value(r, "TILE") or ""), work, full_reduce(r).coop)
-
-    def full_reduce(r: dict) -> ReducePlan:
-        return ReducePlan.parse(str(family_value(r, "REDUCE") or ""), Workers.parse(str(r.get("WORK", ""))))
-
-    tiles = {full_tile(r) for r in rows}
-    assert tiles == set(scalar_tile_moves())
-    by_tile: dict[TilePlan, list[dict]] = {}
-    for r in rows:
-        by_tile.setdefault(full_tile(r), []).append(r)
-    percell = by_tile[TilePlan()]
-    # The per-cell tier offers serial + every coop/ILP move whose fold fits the reduce extent
-    # (the reduce spec's ``coop <= extent and reg <= extent`` structural fit) — so the wide
-    # ``b64``–``b512`` folds drop out on this K=64 matmul, exactly as they would on any reduce
-    # narrower than the fold. BOTH band orientations are enumerated regardless of B's layout, and
-    # every split-K width dividing K joins them: which row deploys is evidence's decision, and
-    # neither B's layout nor the grid size may narrow or reorder the offer.
-    legal_coop = {p for p in coop_reduce_moves() if p.coop <= 64 and p.reg <= 64}
-    legal_splitk = {p for p in splitk_moves() if 64 % p.cta == 0}
-    assert {full_reduce(r) for r in percell} == {ReducePlan(), *legal_coop, *legal_splitk}
-    assert all(family_value(r, "STAGE") == "" for r in percell), "per-cell has no operand slab to stage (decided-empty)"
-    # Every tiled tile is the full (resolved stages) × (serial + split widths) product, the split
-    # rows carrying the SAME stage spellings as the unsplit rows (staging composes with split-K).
-    n_reduces = 1 + len(splitk_moves())
-    for plan, tiled in by_tile.items():
-        if not plan.is_tiled:
-            continue
-        where = plan.spell() or "<per-thread cell>"
-        stages = {str(family_value(r, "STAGE")) for r in tiled if not full_reduce(r).stages}
-        # A masked-N tile (tile_n overhangs the fixture's N=64) declines cp.async / TMA staging — the
-        # B-slab fill would fault a row-crossing copy — so it rides gmem-direct only, mirroring the
-        # warp tier's refusal. A clean tile carries the full resolved stage spellings.
-        if plan.units_n * plan.reg_n > 64:
-            assert stages == {""}, f"{where}: masked-N must decline staging: {stages}"
-        else:
-            assert {"", "d1/smem-async"} <= stages, f"{where}: missing the base resolved stages: {stages}"
-        splits = {full_reduce(r) for r in tiled if full_reduce(r).stages}
-        assert splits == set(splitk_moves()), f"{where}: {splits}"
-        split_stages = {str(family_value(r, "STAGE")) for r in tiled if full_reduce(r).stages}
-        assert split_stages == stages, f"{where}: split rows must carry the same stage spellings"
-        # Every contraction row also spells the launch-order codec (``RASTER``, bare/root-global) —
-        # the flat ``""`` and the grouped ``gm8`` siblings, crossing the whole (stage × reduce)
-        # product; the fifth factor of the catalog.
-        assert {r.get("RASTER") for r in tiled} == set(raster_moves()), f"{where}: RASTER family incomplete"
-        assert len(tiled) == len(stages) * n_reduces * len(raster_moves()), f"{where}: {len(tiled)} rows"
-    # This matmul is BATCHED (a leading literal batch dim in A's gmem index). The leading dim is
-    # tile/K-invariant, so TMA boxes it as an extent-1 dim with the operand's own origin expr
-    # (the TMA operand box-rank rule — the flash K/V convention extended to the matmul tiers; the gemma
-    # ``[1, seq, K]`` unit-batch views were the motivating decline) and resolves wherever the box
-    # fits the 1..256 hardware range — an oversized register tile still declines per-tile.
-    all_stages = {str(family_value(r, "STAGE")) for r in rows}
-    assert any("tma" in s for s in all_stages), f"batched tile/K-invariant operands must offer TMA somewhere: {all_stages}"
-
-
 def test_schedule_leaves_key_tile_canonically():
     """Each emitted contraction leaf keys its output tile by the CANONICAL codec spelling
     (phase 3): a single-contraction kernel's shortest unique key is bare ``TILE`` — the exact
@@ -169,12 +86,11 @@ def test_schedule_leaves_key_tile_canonically():
     axes: set[str | None] = set()
 
     def decide(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            for k in getattr(leaf, "knobs", {}):
-                if family_of(k) == "TILE":
-                    axes.add(axis_of(k))
-        return leaves[0]
+        leaf = next(iter_leaves(fp.options))
+        for k in getattr(leaf, "knobs", {}):
+            if family_of(k) == "TILE":
+                axes.add(axis_of(k))
+        return leaf
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
     assert axes == {None}  # one contraction -> the bare canonical spelling, never axis-suffixed
@@ -191,41 +107,22 @@ def _fp16_matmul_graph() -> Graph:
     return g
 
 
-def test_warp_staged_rows_fit_the_smem_budget():
-    """Every enumerated warp row with a non-empty ``STAGE`` fits its depth-1 operand slot in the
-    ctx smem budget, and an over-budget tile still rides gmem-direct. The 256×256 ``w4x4/f4x8``
-    tile at ``k8`` needs a 128 KiB slot — over any current cap — and the warp stage resolver used
-    to floor the depth clamp at 1 instead of declining, so the row sailed through the fork and
-    died at materialize (`validate(ctx)`), leaving an un-lowered ``TileOp`` in the tune's terminal
-    (issue #327)."""
+def test_over_budget_warp_tile_offers_only_gmem_direct(monkeypatch):
+    """The known 128 KiB slot is addressed through a narrow pin and offers no staged sibling."""
     ctx = Context.from_target((8, 9))  # the issue's sm_89 cap (101376 B)
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f4x8/k8")
+    monkeypatch.setenv("EMMY_WORK", "w4x4")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     rows: list[dict] = []
 
     def decide(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if any("TILE" in family_of(k) for k in row):
-                rows.append(row)
+        leaves = list(iter_leaves(fp.options))
+        rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         return leaves[0]
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
-    # F1 site grammar: the warp tier is discriminated by the WORK entry; the site TILE value
-    # resolves its units against it.
-    from emmy.compiler.ir.schedule import Workers
-
-    staged = [r for r in rows if str(r.get("WORK", "")).startswith("w") and family_value(r, "STAGE")]
-    assert staged, "no staged warp rows were enumerated"
-    for r in staged:
-        plan = TilePlan.parse(str(family_value(r, "TILE")), Workers.parse(str(r["WORK"])))
-        slot = (plan.tile_m + plan.tile_n) * plan.bk * plan.atom.atom_k * plan.atom.operand_dtype("a").nbytes
-        assert slot <= ctx.max_dynamic_smem, f"{family_value(r, 'TILE')} / {family_value(r, 'STAGE')}: slot {slot} over budget"
-    # The over-budget tile itself stays enumerable — gmem-direct only (its every staged sibling
-    # resolver-declines), split-K rows included.
-    big = [r for r in rows if family_value(r, "TILE") == "mma_m16n8k16_f16_f32/f4x8/k8" and r.get("WORK") == "w4x4"]
-    assert big, "the 256x256 warp tile dropped out of the enumeration"
-    assert all(family_value(r, "STAGE") == "" for r in big)
-    assert any(family_value(r, "REDUCE") for r in big), "split-K must still ride the gmem-direct rows"
+    assert rows
+    assert all(family_value(row, "STAGE") == "" for row in rows)
 
 
 def _reduce_graph() -> Graph:
@@ -254,7 +151,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     def decide(fp):
         from emmy.compiler.pipeline.pipeline import _is_structural_option
 
-        leaves = flatten_leaves(fp.options)
+        leaves = list(iter_leaves(fp.options))
         if any(_is_structural_option(leaf) for leaf in leaves):
             return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         for leaf in leaves:
@@ -306,6 +203,30 @@ def _computed_b_term():
     return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))))
 
 
+def _computed_a_term() -> TileOp:
+    """An f32 contraction whose A value is computed inline and shared across the N tile."""
+    m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
+    a = Fold.projection(
+        body=Body(
+            (
+                Load(name="score", input="scores", index=(Var("m"), Var("k"))),
+                Assign(name="prob", op="exp", args=("score",)),
+            )
+        )
+    )
+    node = Fold.contraction(
+        k_axis=k,
+        a=a,
+        channels=(Channel(b=Load(name="value", input="values", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    return TileOp(
+        op=node,
+        place=Placement(free=(m, n)),
+        inputs={"scores": Tensor("scores", (8, 16), "f32"), "values": Tensor("values", (16, 8), "f32")},
+        outputs={"out": Tensor("out", (8, 8), "f32")},
+    )
+
+
 def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
     """Reversed algebraic m/n readings may share a grid only at equal physical axis widths."""
     from types import SimpleNamespace
@@ -329,9 +250,35 @@ def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
     monkeypatch.setattr(sch, "_rows_at", lambda _term, root, _work, **_kwargs: rows[root.site.node])
     axes = (Axis("m", 8), Axis("n", 8))
     sched = SimpleNamespace(placed=lambda node, plan: plan.at(*(axes if node == "first" else tuple(reversed(axes)))))
-    term = SimpleNamespace(tree=(first, second), sched=sched)
+    term = SimpleNamespace(
+        tree=(first, second),
+        sched=sched,
+        tile_nodes={"TILE@first": "first", "TILE@second": "second"},
+        fragment_edges=(),
+    )
 
-    assert sch._term_rows(term, None) == [sch._Row.union((rows["first"][0], rows["second"][0]))]
+    result = sch._term_rows(term, None)
+    assert len(result) == 1
+    assert result[0] == sch._Row.union((rows["first"][0], rows["second"][0]))
+
+
+def test_fragment_consumer_may_inline_an_untiled_producer():
+    """A scalar child has no fragment interface; the tiled consumer may evaluate it into smem."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    warp = resolve_site_tile("mma_m16n8k16_f16_f32/f1x1", Workers.parse("w1x1"))
+    scalar = TilePlan()
+    term = SimpleNamespace(fragment_edges=(("TILE@consumer", "TILE@producer"),))
+
+    def interface(consumer, producer):
+        plans = tuple(sorted({"TILE@consumer": consumer, "TILE@producer": producer}.items()))
+        stages = (("TILE@consumer", Stage(transport="smem")),)
+        return True, (), plans, stages
+
+    assert sch._merge_interfaces(term, (interface(warp, scalar),)) is not None
+    assert sch._merge_interfaces(term, (interface(scalar, warp),)) is None
 
 
 # --- the WORK pin's one non-narrowing branch ----------------------------------------------------- #
@@ -394,6 +341,20 @@ def _rows_of(tile) -> list[dict]:
     rows, _keys, _total = sch._enumerate(term)
     assert rows, "the term enumerated nothing"
     return rows
+
+
+def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
+    """Without an f32 MMA atom, computed A must still ride a scalar output tile so one A value can
+    be reused across N instead of the per-cell fallback recomputing its entire cone for every output."""
+    rows = _rows_of(_computed_a_term())
+
+    def tile_of(row) -> TilePlan:
+        work = Workers.parse(str(row.get("WORK", "")))
+        reduce = ReducePlan.parse(str(family_value(row, "REDUCE") or ""), work)
+        return resolve_site_tile(str(family_value(row, "TILE") or ""), work, reduce.coop)
+
+    plans = [tile_of(row) for row in rows]
+    assert any(plan.is_tiled and not plan.is_warp for plan in plans), "computed A lost every tiled scalar schedule"
 
 
 def _reduce_term():

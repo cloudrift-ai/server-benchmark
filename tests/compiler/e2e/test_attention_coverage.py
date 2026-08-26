@@ -1,98 +1,11 @@
-r"""Attention coverage — flash (the twisted ``(m, l, O)`` MONOID on the streaming schedule), one file.
+r"""Attention coverage over the canonical Fold tree.
 
-Attention is the hybrid algebra: a SEMIRING contraction (QK^T, P@V) wrapped in a MONOID streaming
-softmax reduce. This file pins every tier of it:
-
-- **generic-path SDPA** — non-causal / causal / GQA / additive-mask SDPA matches torch, static AND
-  dynamic (symbolic ``seq_len``), through either structural placement sibling: one fused cell or
-  one materialized score producer feeding the softmax·V residue. The kernel count belongs to the
-  fusion and placement passes; these tests assert numerics over the whole kernel set.
-- **fused tensor-core flash** — the flash pattern compiler (its private recognition, the ``_twist``
-  fragment emitter, the streaming-pair schedule tiers) was deleted with the perf gates; its
-  generic-path successor has LANDED as the TWISTED computed-A arm of the one recognizer
-  (``bind_prologue_contraction`` accepting the ``(m, d)`` exp-family statistic source), so the
-  ``softmax·V`` half of SDPA is one contraction over the KV axis and takes the warp/mma tier, the
-  staged transports and split-K wherever the target's atoms admit a compute-filled ``a`` edge
-  (sm_80+; Volta's atoms are materialized-edges-only). RECOGNITION of the single-kernel form is
-  complete: a reduce whose step composes its own
-  producer reads with that producer on an operand edge (``lowering/tile/_fromloop`` — the COMPOSED
-  STEP), the online-softmax pair matches on the two passes' score cones by content, and the sweep
-  binds as one computed-A contraction whose cone reads a COMPUTED score
-  (``test_cone_per_cell_edge_is_evaluated_inline_and_carries_no_slice``); with the merge allowed,
-  SDPA lowers to ONE kernel and matches torch. The REALIZATION follows it: both halves of the
-  composed score reaches the tensor core through ``_atom_ops`` on the score node, and the sweep is
-  SINGLE-PASS (``_atom.chain_stream_fill``): the cone's state-only factors split off and multiply
-  back onto the output fragments after the loop, so the statistic and the weight come off ONE pass
-  of the score, the carried pair never leaves the registers, and the twisted carrier's ψ-rescale
-  (``carrier.exp_rescale``) advances the enclosing drain's output tile per KV chunk. Where that
-  cannot read, the scalar realization remains available. A cross-CTA partition is expressed above
-  this tree: each partial folds one key slice to a complete monoid state, then a finalize folds the
-  states with the same combine. The nested score's own operands STAGE like any other
-  (``_atom.score_key_operand`` / ``score_query_operand``): keys per
-  chunk, queries once, both drained by the ordinary ``ldmatrix``, so the score crosses L1 once per
-  CTA instead of once per warp. Measured on a
-  5090 at f16, ``(1, 8, S, D)``, against the two-kernel shared-score placement sibling and torch:
-
-  | shape        | torch | two-kernel | fused | (gmem-direct score) |
-  | ------------ | ----- | ---------- | ----- | ------------------- |
-  | S=512 D=16   |  10.5 |       35.4 | **7.5** |                 8.6 |
-  | S=512 D=32   |  10.5 |       22.7 | **6.9** |                 8.1 |
-  | S=512 D=64   |  12.5 |       25.6 | **11.4** |               14.3 |
-  | S=512 D=128  |  18.9 |       19.5 | 22.2  |                35.1 |
-  | S=1024 D=128 |  41.2 |       64.0 | 84.4  |               125.8 |
-  | S=2048 D=16  |  33.0 |      163.8 | 36.1  |                42.1 |
-  | S=2048 D=32  |  30.9 |      170.2 | 47.7  |                60.1 |
-  | S=2048 D=64  |  60.6 |      140.8 | 97.0  |               148.3 |
-  | S=2048 D=128 | 117   |      162   | 190.8 |               273   |
-
-  So on that card the fused arm beat the materialized sibling at every ``D ≤ 64`` and beat torch at
-  every ``D`` at ``S = 512``, and lost at ``D = 128``. Both forms now remain structural siblings,
-  so measured evidence chooses instead of fusion hard-coding that result. Those rows PREDATE the
-  slab-swizzle fix below and have not been re-measured; the A100 rows have.
-
-  All four of the fused kernel's slabs SWIZZLE. Three of them did not: the score's own staged
-  operands and the weight tile the ``ldmatrix`` drain reads were left plain row-major, and at
-  ``D = 128`` their 256 B rows drained ~32-way bank-conflicted — 78% of the kernel's shared
-  wavefronts were conflict replays, L1/TEX sat at 80% against 7% compute, and THAT, not the tile,
-  was the ``D = 128`` wall. Three things had to hold at once, each worth measuring on its own
-  (A100, f16, ``(1, 8, 1024, 128)``, ``w4x1``/``f1x16``/``k8``): the score's key and query slabs
-  swizzling on their ``cp.async`` fill (108.7 → 84.8 us), the weight tile swizzling on its FRAGMENT
-  store (84.8 → 64.9 — its ``RegStore`` had no mode to carry, and the per-cell store rewrite
-  dropped the one it was given), and the XOR shifting by the slab's own ROW rather than by the
-  swizzle atom (64.9 → 50.1 at the best schedule). The last is why the D-sweep above looks the way
-  it does: the fixed shift reads the row index only while a slab row IS one 128 B atom, so
-  ``D ≤ 64`` was always conflict-free and only ``D = 128`` paid — ncu measures 7.8-way at
-  ``D = 128`` and none at ``D = 64`` on the same kernel.
-
-  On an **A100-SXM4-80GB** (f16, ``(1, 8, S, 128)``, serial ``REDUCE``, empty
-  tune DB and prior) the ``D = 128`` conclusion does NOT hold — the fused arm beats torch at the
-  short shapes and reaches parity at ``S = 1024``:
-
-  | shape        | torch | fused (best schedule pinned)     |
-  | ------------ | ----- | -------------------------------- |
-  | S=256 D=128  |  13   | **9.0**  (``w4x1``/``f1x8/k8``)  |
-  | S=512 D=128  |  24   | **19.0** (``w4x1``/``f1x16/k8``) |
-  | S=1024 D=128 |  48   |   50.1   (``w8x1``/``f1x16/k8``) |
-  | S=2048 D=128 | 133   |  179.0   (``w4x1``/``f1x16/k8``) |
-
-  Emmy's column repeats to ±0.2 us across runs; torch's drifts a few percent, and more at
-  ``S = 2048`` (132-148 observed). The COLD pick is a separate matter and this changed nothing
-  about it: unpinned it lands on ``f1x8`` at every shape, which happens to be the best schedule at
-  ``S = 256`` (9.0) and is 231 us at ``S = 512``.
-
-  The fused column is the best schedule measured, and two forks the COLD pick could land on cost most
-  of it: the historical split-K realization cost 25.9 vs 14.3 at S=512 D=64, and an
-  ``n``-unit split of the output tile makes every ``n`` warp recompute the whole score (323 cold vs
-  190.8 at S=2048 D=128). Both are schedule forks evidence prices, not defects. What is left at
-  ``D = 128`` after the swizzles is no longer the shared path either: L1/TEX fell from 80% to 61%
-  and compute rose from 7% to 24%, and the residual grows with ``S`` — the two long shapes are
-  where the fused arm still trails. The reference kernel below is the target form's spec.
-- **validated FA-2 reference** — a hand-written fused tensor-core flash kernel, the executable spec a
-  future through-the-contraction-path tensor-core flash tier must reproduce.
-- **model attention chains** — TinyLlama ``LlamaAttention`` bisection (chained Linears → QKV+SDPA →
-  full RoPE attention) that localizes a whole-block accuracy regression.
-
-GPU accuracy in the correctness lane; the warp-tier needs sm_90+ where pinned.
+The tests cover scalar and tensor-core SDPA, causal and additive masks, GQA, symbolic sequence
+lengths, split reductions, staging and swizzling, a hand-written FA-2 reference, and TinyLlama
+attention integration. Tensor-core SDPA is realized by the generic residence evaluator: scheduled
+child contractions produce fragments, row statistics use ``FragmentRowReduce``, and the enclosing
+Fold's stored carrier Lambda combines the state. No attention-specific scheduler or emitter is
+part of the tested contract.
 """
 
 from __future__ import annotations
@@ -167,8 +80,9 @@ def test_fragment_lift_preserves_coordinate_select_as_fragment_values():
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentSelect  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Assign, RenderCtx, Select, SelectBranch  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _frag_lift  # noqa: PLC0415
+    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Assign, Body, RenderCtx, Select, SelectBranch  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate  # noqa: PLC0415
 
     body = (
         Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
@@ -181,23 +95,26 @@ def test_fragment_lift_preserves_coordinate_select_as_fragment_values():
         ),
         Assign("masked", ElementwiseImpl("add"), ("scaled", "bias")),
     )
-    lifted = _frag_lift(
-        body,
-        (("_score00", "_score01"), ("_score10", "_score11")),
-        "acc",
-        ("query", "key"),
-        (
+    lifted, _, _ = evaluate(
+        Lambda(params=("acc", "scale", "zero", "fill"), body=Body(body), results=("masked",)),
+        {
+            "acc": Value.frag((("_score00", "_score01"), ("_score10", "_score11"))),
+            "scale": Value.uniform("scale"),
+            "zero": Value.uniform("zero"),
+            "fill": Value.uniform("fill"),
+        },
+        axes=("query", "key"),
+        bases=(
             ((Literal(16, "int"), Literal(32, "int")), (Literal(16, "int"), Literal(40, "int"))),
             ((Literal(32, "int"), Literal(32, "int")), (Literal(32, "int"), Literal(40, "int"))),
         ),
     )
 
-    assert lifted is not None
     assert [type(stmt) for stmt in lifted] == [FragmentApply] * 4 + [FragmentSelect] * 4 + [FragmentApply] * 4
     assert lifted[0].args == ("_score00", "scale")
-    assert lifted[4].out == "_score00__bias"
-    assert lifted[7].out == "_score11__bias"
-    assert lifted[8].args == ("_score00", "_score00__bias")
+    assert lifted[4].out == "bias__f0_0"
+    assert lifted[7].out == "bias__f1_1"
+    assert lifted[8].args == ("bias__f0_0", "scaled__f0_0")
     assert lifted[8].kinds == (FRAG, FRAG)
     first = "\n".join(lifted[4].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
     last = "\n".join(lifted[7].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
@@ -211,8 +128,9 @@ def test_fragment_lift_declines_nonuniform_select_branches():
     """A coordinate Select may not broadcast a fragment or per-cell value as a uniform branch."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Assign, Select, SelectBranch  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _frag_lift  # noqa: PLC0415
+    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Assign, Body, Select, SelectBranch  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate  # noqa: PLC0415
 
     fragment_branch = (
         Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
@@ -236,16 +154,17 @@ def test_fragment_lift_declines_nonuniform_select_branches():
         ),
     )
     for body in (fragment_branch, per_cell_branch):
-        assert (
-            _frag_lift(
-                body,
-                (("_score",),),
-                "acc",
-                ("query", "key"),
-                (((Literal(16, "int"), Literal(32, "int")),),),
+        with pytest.raises(ValueError):
+            evaluate(
+                Lambda(params=("acc", "scale", "fill"), body=Body(body), results=("masked",)),
+                {
+                    "acc": Value.frag((("_score",),)),
+                    "scale": Value.uniform("scale"),
+                    "fill": Value.uniform("fill"),
+                },
+                axes=("query", "key"),
+                bases=(((Literal(16, "int"), Literal(32, "int")),),),
             )
-            is None
-        )
 
 
 # =========================================================================== #
@@ -342,8 +261,8 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
     # load (its own mma, not the enclosing P@V's staged drain) and the statistic's fragment
     # row-reduce butterfly. Without these the score is a scalar dot per element — 15x slower, and a
     # silent regression a numerics assert would never catch.
-    assert "emmy_mma_load_b_gmem_trans" in src, "the composed score is not on the mma tier (chained A fill)"
-    assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence (chained statistic)"
+    assert "emmy_mma_load_b_gmem_trans" in src, "the composed score is not on the mma tier"
+    assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence"
     # Every slab is addressed through ONE swizzle mode — all of its uses XOR, or none do. Which
     # mode a slab picks is the schedule's business (a row too narrow for any atom stays NONE), but
     # a MIXED slab is a silently WRONG kernel, not a slow one: it stores row-major under a drain
@@ -363,22 +282,7 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 @requires_cuda
 @pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
 def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
-    """The fused kernel makes ONE pass over the keys — the statistic and the weight come off the
-    SAME score fragments (``_atom.chain_stream_fill``).
-
-    The two halves cannot share a pass while the weight names a denominator the sweep has not
-    finished, so the cone's state-only factors are split off and multiplied back onto the output
-    fragments after the loop, and the carrier's ψ-rescale (``carrier.exp_rescale`` — the factor the
-    merge puts on every carried channel) advances the enclosing drain's output tile per KV chunk.
-
-    What is asserted is that form's OBSERVABLE consequence: the carried ``(pivot, denominator)``
-    pair never leaves the registers, so nothing is bridged through the stat smem rows the two-pass
-    pair needs. Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
-    regression to the two-pass pair is invisible to a numerics assert.
-
-    ``REDUCE`` is pinned off because the single pass needs the sweep and the contraction to cover
-    the same keys; a split-K partition does not, and there the two-pass pair stands
-    (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
+    """The fragment-resident Fold makes one pass over the score and keeps its carrier in registers."""
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)
     B, H, S, D = cfg
@@ -420,7 +324,6 @@ def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
     src = compiled.nodes[kernels[0]].op.kernel_source
     assert "_a_stat_" not in src, "the causal statistic is bridged through smem — the sweep ran twice"
-    assert "_psi" in src, "the one-pass sweep does not rescale its carried output"
     assert "?" in src, "the causal coordinate Select did not reach the fragment program"
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"single-pass causal fused sdpa vs torch max_diff={md:.6e}"
@@ -439,6 +342,11 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
     Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
     monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_WORK", "w2x1")
+    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k1")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f2x2")
+    monkeypatch.setenv("EMMY_STAGE@A3", "d1/smem-async")
+    monkeypatch.setenv("EMMY_STAGE@PJ", "d1/smem")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))

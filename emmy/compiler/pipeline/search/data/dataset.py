@@ -111,7 +111,10 @@ class Dataset:
         - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's whole search tree and its
           ``bench_fail`` leaves share one ``op_sig`` (and ``parent_key`` edges never leave an
           op's tree), so the whole op moves to one side atomically — a row-level split would leak
-          the value-correlated parent/child chains. A store written before sweeps moved to the
+          the value-correlated parent/child chains. The per-kernel rows a multi-kernel terminal
+          records carry their OWN kernel's ``op_sig``, so they can fall on the other side from the
+          branch rows above them: those rows are a different kernel, but they came from one
+          measurement, so the separation is not total. A store written before sweeps moved to the
           deployable regime also holds that op's rows under two opt levels; those move together
           too, for the same reason.
         - ``"gpu"`` — key on ``gpu``: leave-one-GPU-out (cross-hardware transfer).

@@ -356,7 +356,11 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
     - **The KERNEL's own signature, not the offer site's** (:func:`kernel_sig`, the digest the row's
-      recorded ``op_sig`` column holds when the two agree, which is 83% of the RTX 5090 freeze). Two kernels
+      recorded ``op_sig`` column holds when the two agree, which is 83% of the RTX 5090 freeze —
+      note the columns are not expected to agree on a warp-eligible kernel even now that both
+      writers record the kernel that RAN: ``op_sig`` is the stamp it was born with, while these
+      features also carry the ``S_warp_eligible`` descent adds, and 315 of that freeze's 327
+      disagreements are exactly that key). Two kernels
       of the same structure on the same card are ONE tuning problem whatever produced them — which is
       already how the deploy path joins evidence (``Prior.evidence_pick`` and
       ``policy/greedy._db_measured_pick`` both index on the ``S_*`` signature), so this makes the

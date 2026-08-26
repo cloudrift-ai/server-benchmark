@@ -22,8 +22,10 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   directly measured whole-slice structural route. ``backend`` partitions the
   table so the loop interpreter and the CUDA backend can coexist in the same DB.
 - ``node`` — one row per search-tree node (every partial branch + leaf of a
-  per-kernel autotune search), keyed by ``digest(context_key, op_sig,
-  tunable-knob set)``. Each row carries the full feature dict passed to the
+  per-kernel autotune search) plus one row per measured KERNEL for a leaf that
+  lowered to several (parentless at ``depth=0``, since a measured kernel is a
+  measurement rather than a position in the tree that minted it), keyed by
+  :func:`node_key` over ``(context_key, gpu, op_sig, tunable-knob set)``. Each row carries the full feature dict passed to the
   prior (``H_*`` + ``S_*`` + knobs), a value-of-position latency (``1/best_reward``
   — the best latency reachable below the node; keep-min across sessions for
   branches, newest-measurement for leaves), and

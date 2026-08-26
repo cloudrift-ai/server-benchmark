@@ -847,10 +847,10 @@ Within one trajectory, structurally identical fork points all take the same side
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
 of *unique* kernels rather than as `2^n` in the number of such points. Fusion itself is still deterministic (no rule
 offers a multi-option fusion fork), so a graph with no structural forks yields exactly one terminal and the whole
-thing reduces to "tune each op once, sum, assemble". The global prior drives the outer PUCT too: each terminal emits
-one combined Σ row per structural decision it took (features `{ctx, op knobs before the decision, the decision's knob
-delta}`, label = the Σ of that side's per-kernel bests), so a re-tune on a warm machine descends into the kernel set
-predicted to be cheaper first.
+thing reduces to "tune each op once, sum, assemble". The global prior drives the outer PUCT too — it scores the fork
+prefixes the outer tree offers — but the outer search emits no training row of its own: rows come from the inner
+per-kernel searches (`_collect_rows` is only ever called on an inner search), and a kernel SET has no per-kernel row
+to give. Pricing one is a Σ over its kernels, computed at the decision (`greedy._resolved_price`), never stored.
 
 **Separable scoring** (`TwoLevelStrategy._evaluate_terminal`) tunes each finalized kernel **independently** in
 its own single-node slice (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes
@@ -1023,6 +1023,13 @@ every node with a benched descendant:
   `SPLITK` / `STAGE`) are captured too, not only the knobs the fork itself decided.
 - A **branch** falls back to `_node_knobs`: the partly-decided `fork.knobs` it carries, on top of the op's `S_*` /
   `H_*` base, labeled with the best latency among the descendants that were benched.
+- A leaf a structural fork made **several kernels** of emits one row per KERNEL instead
+  (`_measured_kernel_rows`), each labeled with that kernel's own measured µs. A terminal is a Σ over its kernels, and
+  no single row can carry that total: the deploy prices such a realization by summing a per-kernel price
+  (`greedy._resolved_price`), so one kernel's cost is the quantity a row must describe. Merging the pieces into one
+  row would also fabricate a configuration no kernel realized, since the pieces hold different decisions. A repeated
+  piece — a split's combine kernel does not vary with the fork being explored, so every variant re-mints it — counts
+  once, or the reservoir would weight one config by how often it was re-minted.
 
 **Why CatBoost** (chosen by `scripts/prior_bakeoff.py`): the model's greedy pick must not run off to a degenerate
 extreme. A linear model is monotone in every knob, so its optimum always sits at a corner of the box of candidate
@@ -1091,7 +1098,9 @@ don't invent a third:
   structural/decision hops).
 - **A backend-partitioned `perf` table** — full stats + `backend` + `status` + `knobs` + `captured`.
 - **A `node` table** — one row per **search-tree node**, meaning every partly-decided branch and every leaf of a
-  per-kernel search. It is keyed by `digest(context_key, gpu, op_sig, tunable-knob set)` and carries the full feature
+  per-kernel search, plus one row per **measured kernel** for the leaves that lowered to several (those are
+  parentless at `depth=0`, like the bench recorder's rows: a measured kernel is a measurement, not a position in the
+  tree that minted it). It is keyed by `digest(context_key, gpu, op_sig, tunable-knob set)` and carries the full feature
   dict the prior sees, a latency for that position in the tree, a `parent_key` pointer, a `gpu` column and depth
   bookkeeping (all written by `record_nodes`). Branch rows and leaf rows are updated by different rules: a branch row
   keeps the minimum, because its latency is a bound over the subtree that a faster descendant genuinely tightens,
@@ -1180,16 +1189,22 @@ pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with 
 default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes` turns it off. It
 is what stops measurements from a manual sweep evaporating.
 
-- **The row must be keyed to the same set of candidates the tuner used.** That means recovering, for each kernel, the
-  fork point it descended from, via `source_chain`: descent writes further `S_*` values onto the op, so keying off the
-  final op's own stamps would key the row to the wrong candidate set. The recorder takes the deepest ancestor in the
-  loop dialect that carries `S_*` features, and falls back to the deepest one in the tile dialect. The mma
-  tile-lowering keeps no `LoopOp` in `.source`, so without that fallback every tensor-core kernel was silently
-  unrecordable. Both paths digest to the same `op_sig` a tune would write, verified on an RTX 4090.
-- The kernels of one variant (a split-K main kernel plus its combine kernel) are grouped under one fork point and
-  recorded as ONE leaf for the whole variant. If every kernel in a graph loses its fork point, the recorder warns
-  loudly rather than silently recording nothing. Rows that were flagged (a pin that did not match, a wrong answer, an
-  implausible arithmetic intensity) and anything from the `--ir` path are never recorded.
+- **The row must be keyed to the same set of candidates the tuner used**, which means recovering each kernel's
+  identity from its rewrite chain rather than from the op in hand (`passes/identity.chain_op_sig`, shared with the
+  tune's bench). Tile materialization merges the winning row's `S_*` onto the op it builds — `S_warp_eligible`, which
+  prices "a scalar tile where tensor cores were on offer" — so a realized op carries a stamp its kernel was not born
+  with, and digesting the op's own knobs would key the row to the wrong candidate set. The identity is the NEAREST
+  loop-dialect ancestor's stamps: that is the only dialect the identity strategy writes to, and a kernel minted during
+  lowering is stamped at birth as a `LoopOp`, so a deeper ancestor would be the op a split replaced — a kernel that
+  did not run. The mma tile-lowering keeps no `LoopOp` in `.source`, so there the deepest tile-dialect ancestor stands
+  in, being the one tile op that predates the merge; without that fallback every tensor-core kernel was silently
+  unrecordable.
+- **One row per kernel**, nothing grouped and no latency summed — the same rule the tune walk records by, which is
+  what lets a kernel benched here and the same kernel tuned by the search meet on one `node_key`. A variant that
+  lowered to several kernels contributes several rows, since no kernel ran at their total. If every kernel in a graph
+  lacks a stamp the recorder warns loudly rather than silently recording nothing. Rows that were flagged (a pin that
+  did not match, a wrong answer, an implausible arithmetic intensity) and anything from the `--ir` path are never
+  recorded, and a failed bench records a sentinel only for a single-kernel variant.
 - `record_nodes` protects the leaf update by **comparing measurement quality**: a newer measurement that is
   unambiguously worse (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a casual bench
   cannot overwrite tune-grade data. When quality is comparable or unknown, newest simply wins, so an honest

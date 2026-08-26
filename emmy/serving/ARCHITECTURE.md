@@ -219,7 +219,15 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
-  `h`. The expert layout (orientation / interleave / bias — gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
+  `h`. **Tensor-parallel expert sharding** rides that same combine: one rank loads a contiguous expert shard
+  (`load_quantized_split`'s `expert_range`, stacked rank-locally) and `combine_routed_experts` filters the router's
+  GLOBAL selection against it via `local_expert_slice`, translating each owned hit to the rank's own index and
+  skipping the rest. The router is replicated so every rank selects identically; each routed contribution therefore
+  belongs to exactly one shard, and summing the ranks' partials — the caller's all-reduce — reproduces the unsharded
+  result exactly. A rank that wins no token returns zeros, so the reduction needs no special case. This is what makes
+  a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts are ~9.4 GB sharded eight ways against a 32
+  GB card that also carries attention, arenas and the KV cache. The expert layout (orientation / interleave / bias —
+  gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
   layers are
@@ -306,6 +314,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   tensor inputs through pointer tables, replay their factorized compiler programs, and combine the routed outputs in
   fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
+
+  A **hyper-connection** architecture (DeepSeek V4) changes what the seam carries, and the runner
+  follows it end to end. `carrier_size` is `hc_mult * hidden`, not `hidden`: every `pre` / `post`
+  example, the activation arenas and every pipeline boundary are sized on it. `embed_device` opens
+  the carrier by copying the gathered row into each residual stream (the model's own `expand`), and
+  `final_norm_device` closes it through the model's learned `hc_head` collapse before the final norm
+  — a module held beside the norm, not a mean. The `post` program returns THREE tensors of three
+  different widths (`mixed[T, hc·H]`, `xn[T, H]`, `mix[T, hc]`), so the rider path sizes each
+  destination on its own width; the routed combine runs on `xn`, is reduced across the expert shards,
+  and lands on the streams through `place_routed_streams`. Verified on an sm_70 V100: the compiled
+  seam reproduces the eager `DeepseekV4DecoderLayer`, and per-shard expert partials sum to the
+  unsharded combine (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;

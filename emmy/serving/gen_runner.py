@@ -196,7 +196,19 @@ class _Program:
             return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
 
 
-def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
+def local_expert_slice(expert: int, expert_range):
+    """This rank's own index for a GLOBAL expert id, or ``None`` when another rank owns it.
+
+    A tensor-parallel rank loads one contiguous expert shard (``load_quantized_split``'s
+    ``expert_range``) and stacks it from index 0, so the router's global selection has to be
+    translated before it can index the rank's own expert table."""
+    if expert_range is None:
+        return expert
+    lo, hi = expert_range
+    return expert - lo if lo <= expert < hi else None
+
+
+def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, expert_range=None):
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
@@ -205,7 +217,14 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     return fp32 scores, and ``index_add_`` requires matching dtypes. A router whose scaled
     weights can overflow individual fp16 partials requests ``accumulate_float32``; that lane
     returns the float32 weighted sum so its caller can combine every marked MoE contribution
-    before one final model-dtype cast. Ordinary routers keep the fp16 hot path."""
+    before one final model-dtype cast. Ordinary routers keep the fp16 hot path.
+
+    ``expert_range`` is one tensor-parallel rank's expert shard. Every rank runs the SAME router
+    over the whole expert space (the router is replicated, so its selection is identical) and
+    contributes only the hits it owns, indexed rank-locally; summing the ranks' partials — the
+    all-reduce the caller issues — reproduces the unsharded result exactly, because each routed
+    contribution belongs to exactly one shard. A rank that wins no token returns zeros, which is
+    why the reduction stays correct without any special case."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
@@ -213,8 +232,11 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     scores = scores.to(accumulate_dtype)
     out = torch.zeros_like(xn, dtype=accumulate_dtype)
     for e in indices.unique().tolist():
+        local = local_expert_slice(e, expert_range)
+        if local is None:
+            continue  # another rank owns this expert and adds its contribution to the same sum
         tok, pos = torch.where(indices == e)
-        partial = run_expert(e, xn[tok]).to(accumulate_dtype)
+        partial = run_expert(local, xn[tok]).to(accumulate_dtype)
         out.index_add_(0, tok, partial * scores[tok, pos, None])
     return out
 
@@ -591,6 +613,7 @@ class EmmyGenRunner:
         embed_weight,
         norm,
         hidden_size=None,
+        hc_head=None,
         layer_ids=None,
         pre,
         post,
@@ -612,6 +635,8 @@ class EmmyGenRunner:
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
+        # The hyper-connection stack's learned final collapse, a module beside the norm.
+        self._hc_head = hc_head
         if hidden_size is None:
             if embed_weight is None:
                 raise ValueError("hidden_size is required when this runner does not own the embedding table")
@@ -713,6 +738,17 @@ class EmmyGenRunner:
         return len(self._attn_meta)
 
     @property
+    def carrier_size(self) -> int:
+        """Width of the residual the seam carries — ``hidden`` classically, ``hc_mult * hidden`` for a
+        hyper-connection architecture. Sizes the activation arenas AND every pipeline boundary."""
+        return getattr(self, "_carrier_size", None) or self._hidden_size
+
+    @property
+    def hc_mult(self) -> int:
+        """Number of hyper-connection residual streams (1 when the architecture has none)."""
+        return getattr(self, "_hc_mult", 1) or 1
+
+    @property
     def decode_bucket(self) -> int:
         return self._decode_bucket
 
@@ -793,6 +829,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
+        expert_range=None,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
@@ -845,6 +882,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
+                expert_range=expert_range,
             )
             with torch.device("cpu"):
                 return cls.from_model(
@@ -857,6 +895,7 @@ class EmmyGenRunner:
                     layer_range=layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
+                    expert_range=expert_range,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
@@ -886,6 +925,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
+        expert_range=None,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
@@ -902,6 +942,7 @@ class EmmyGenRunner:
             build_attention_split_wrapper,
             build_moe_split_wrapper,
             deinterleave_gate_up,
+            hyper_connection_seam,
             moe_block_parts,
             moe_expert_layout,
         )
@@ -928,9 +969,15 @@ class EmmyGenRunner:
             # Per-layer attention dims. Gemma-4's global layers use a larger head_dim
             # (``global_head_dim``) than its sliding layers, so this is NOT uniform across layers.
             hd = attn.head_dim
+            if getattr(attn, "q_proj", None) is None:
+                # A hyper-connection architecture hands the WHOLE attention sublayer to the engine
+                # (DeepSeek V4 → the 1Cat fork's paged MLA), so there is no external q/k/v to size.
+                # The declared head count still describes what that sublayer returns.
+                return hd, int(getattr(attn, "num_heads", 0) or 0), 1, float(getattr(attn, "scaling", hd**-0.5))
             return hd, attn.q_proj.out_features // hd, attn.k_proj.out_features // hd, attn.scaling
 
         attn_meta = []  # per-layer (head_dim, num_heads, num_kv, scaling)
+        carrier = hidden  # the seam's residual width; a hyper-connection layer widens it below
         from emmy.compiler.backend.cuda.program import BufferArena
 
         pre_programs, post_programs = [], []
@@ -1246,6 +1293,12 @@ class EmmyGenRunner:
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
+            # A hyper-connection layer carries hc_mult residual STREAMS across the seam, flattened to
+            # ``[num_tokens, hc_mult * hidden]``, and takes the attention sublayer's own ``[T, hidden]``
+            # output back rather than a per-head attention result.
+            seam = hyper_connection_seam(block)
+            if seam is not None:
+                carrier, attn_width = seam
             logger.info(
                 "[gen_runner] compiling layer %d (rank-local %d/%d, pre + post%s)...",
                 i,
@@ -1290,6 +1343,9 @@ class EmmyGenRunner:
                         "num_experts": int(next(iter(einputs.values())).shape[0]),
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
+                        # This rank's expert shard, if any: the router selects over the GLOBAL expert
+                        # space on every rank, so the combine translates and filters against it.
+                        "expert_range": expert_range,
                         "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
                     }
                 )
@@ -1329,7 +1385,7 @@ class EmmyGenRunner:
                         build(
                             f"L{i:02d}.pre.sym",
                             pre_w,
-                            [torch.zeros(8, hidden, dtype=residual_dtype)],
+                            [torch.zeros(8, carrier, dtype=residual_dtype)],
                             ["hidden"],
                             np_dtype,
                             dev_consts=pre_consts,
@@ -1342,7 +1398,7 @@ class EmmyGenRunner:
                         build(
                             f"L{i:02d}.post.sym",
                             post_w,
-                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, hidden, dtype=residual_dtype)],
+                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, carrier, dtype=residual_dtype)],
                             ["attn_out", "residual"],
                             np_dtype,
                             dev_consts=post_consts,
@@ -1360,7 +1416,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.decode",
                                 pre_w,
-                                [torch.zeros(decode_bucket, hidden, dtype=residual_dtype)],
+                                [torch.zeros(decode_bucket, carrier, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1374,7 +1430,7 @@ class EmmyGenRunner:
                                 post_w,
                                 [
                                     torch.zeros(decode_bucket, attn_width, dtype=dtype),
-                                    torch.zeros(decode_bucket, hidden, dtype=residual_dtype),
+                                    torch.zeros(decode_bucket, carrier, dtype=residual_dtype),
                                 ],
                                 None,
                                 np_dtype,
@@ -1402,7 +1458,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.m1",
                                 pre_w,
-                                [torch.zeros(1, hidden, dtype=residual_dtype)],
+                                [torch.zeros(1, carrier, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1414,7 +1470,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.m1",
                                 post_w,
-                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, hidden, dtype=residual_dtype)],
+                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, carrier, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1434,7 +1490,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.prefill",
                                 pre_w,
-                                [torch.zeros(prefill_bucket, hidden, dtype=residual_dtype)],
+                                [torch.zeros(prefill_bucket, carrier, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=pre_consts,
@@ -1448,7 +1504,7 @@ class EmmyGenRunner:
                                 post_w,
                                 [
                                     torch.zeros(prefill_bucket, attn_width, dtype=dtype),
-                                    torch.zeros(prefill_bucket, hidden, dtype=residual_dtype),
+                                    torch.zeros(prefill_bucket, carrier, dtype=residual_dtype),
                                 ],
                                 None,
                                 np_dtype,
@@ -1569,6 +1625,7 @@ class EmmyGenRunner:
         runner = cls(
             embed_weight=embed_weight,
             norm=trunk.norm if include_norm else None,
+            hc_head=getattr(trunk, "hc_head", None) if include_norm else None,
             hidden_size=hidden,
             layer_ids=[i for i, _block in layer_items],
             pre=pre_programs,
@@ -1590,6 +1647,11 @@ class EmmyGenRunner:
             activation_dtype=dtype,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
+        # The seam's residual width. It is the hidden size for a classic layer and the flattened
+        # hyper-connection stream stack (hc_mult * hidden) for DeepSeek V4; the plugin sizes its
+        # pipeline transport on it, so it must not be re-derived from the config there.
+        runner._carrier_size = carrier
+        runner._hc_mult = carrier // hidden
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
@@ -1710,6 +1772,9 @@ class EmmyGenRunner:
                 self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
         if self._norm is not None:
             self._norm_dev = copy.deepcopy(self._norm).to("cuda")
+        if self._hc_head is not None and not getattr(self, "_hc_head_on_device", False):
+            self._hc_head = copy.deepcopy(self._hc_head).to("cuda")
+            self._hc_head_on_device = True
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
             # vLLM's profiled footprint (same contract as the embed table above). The expert
@@ -1867,7 +1932,7 @@ class EmmyGenRunner:
                 rows = rows.to(self._embed_weight_dev.dtype)
         elif self._residual_float32:
             rows = rows.float()
-        return rows
+        return self._broadcast_streams(rows)
 
     def _rider_dest(self, name, rows, cols, ref, *, dtype=None):
         """A3: the shared joint destination for a rider step's combined result — one persistent
@@ -1949,6 +2014,18 @@ class EmmyGenRunner:
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
             return outs[0]
+        if len(outs) == 3 and self.hc_mult > 1:
+            # Hyper-connection seam: the post program already mixed the attention output onto the
+            # streams and placed the shared expert, and returns the per-stream weights the ROUTED
+            # result still needs. Under expert sharding the combine yields THIS rank's partial, so
+            # the reduction runs before the placement closes the layer.
+            from emmy.compiler.trace.huggingface import place_routed_streams
+
+            mixed, xn, mix = outs
+            routed = self._moe_combine(moe, xn)
+            if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
+                routed = reduce_routed(routed)
+            return place_routed_streams(mixed, routed, mix)
         if len(outs) == 3:
             h, xn, shared = outs
         else:
@@ -1961,6 +2038,8 @@ class EmmyGenRunner:
             combined = self._moe_combine_slots(moe, xn)
         else:
             combined = self._moe_combine(moe, xn)
+        if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
+            combined = reduce_routed(combined)  # tensor-parallel expert shard: sum the ranks' partials
         if shared is not None:
             if not moe.get("accumulate_float32", False):
                 raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
@@ -1986,15 +2065,28 @@ class EmmyGenRunner:
             # post uploads its residual (this dest) before its own halves overwrite it.
             pb = self._prefill_bucket
             output_count = len(self._post_prefill[layer].output_names)
+            width = residual.shape[1]
             if output_count == 1:
-                specs = (("hidden", residual.dtype),)
+                specs = (("hidden", residual.dtype, width),)
             elif output_count == 2:
-                specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype))
+                specs = (("hidden", residual.dtype, width), ("moe_xn", self._activation_dtype, width))
+            elif output_count == 3 and self.hc_mult > 1:
+                # A hyper-connection post returns three DIFFERENT widths: the mixed carrier, the
+                # hidden-width normed activation the experts consume, and the per-stream weights.
+                specs = (
+                    ("hidden", residual.dtype, width),
+                    ("moe_xn", self._activation_dtype, self._hidden_size),
+                    ("moe_mix", residual.dtype, self.hc_mult),
+                )
             elif output_count == 3:
-                specs = (("hidden", residual.dtype), ("moe_xn", self._activation_dtype), ("shared_expert", torch.float32))
+                specs = (
+                    ("hidden", residual.dtype, width),
+                    ("moe_xn", self._activation_dtype, width),
+                    ("shared_expert", torch.float32, width),
+                )
             else:
                 raise RuntimeError(f"unexpected post program output count {output_count}")
-            dests = [self._rider_dest(nm, t, residual.shape[1], residual, dtype=dt) for nm, dt in specs]
+            dests = [self._rider_dest(nm, t, w, residual, dtype=dt) for nm, dt, w in specs]
             self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[d[:pb] for d in dests])
             self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[d[pb:] for d in dests])
             return dests
@@ -2024,6 +2116,7 @@ class EmmyGenRunner:
                 gated,
                 lambda e, rows: self._launch_expert(moe, e, rows),
                 accumulate_float32=moe.get("accumulate_float32", False),
+                expert_range=moe.get("expert_range"),
             )
 
     def _moe_combine_slots(self, moe, xn):
@@ -2238,13 +2331,32 @@ class EmmyGenRunner:
             view = views[(layer, tier)] = torch.from_dlpack(arr)
         return view[:rows]
 
+    def _broadcast_streams(self, rows):
+        """Open the hyper-connection carrier: ``[T, H]`` → ``[T, hc_mult * H]``.
+
+        DeepSeek V4 enters its stack with the embedding copied across every residual stream
+        (``inputs_embeds.unsqueeze(2).expand(-1, -1, hc_mult, -1)``), and the seam carries those
+        streams flattened. A classic architecture has one stream and passes through."""
+        hc = self.hc_mult
+        return rows if hc == 1 else rows.unsqueeze(-2).expand(*rows.shape[:-1], hc, rows.shape[-1]).reshape(rows.shape[0], -1)
+
+    def _collapse_streams(self, hidden):
+        """Close the carrier before the final norm: ``[T, hc*H]`` → ``[T, H]`` through the model's
+        own learned head collapse (``hc_head``), which is a module like the norm, not a mean."""
+        head = getattr(self, "_hc_head", None)
+        if head is None:
+            return hidden
+        t = hidden.shape[0]
+        return head(hidden.view(1, t, self.hc_mult, self._hidden_size)).view(t, self._hidden_size)
+
     def final_norm_device(self, hidden):
-        """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor."""
+        """Apply the final norm on CUDA to a ``hidden[T,H]`` CUDA tensor (a hyper-connection stack
+        collapses its streams through the model's own ``hc_head`` first)."""
         import torch
 
         if self._norm is None:
             raise RuntimeError("this pipeline stage does not own the final norm")
         self._ensure_device()
         with torch.no_grad():
-            out = self._norm_dev(hidden)
+            out = self._norm_dev(self._collapse_streams(hidden))
             return out.to(self._activation_dtype) if self._residual_float32 else out

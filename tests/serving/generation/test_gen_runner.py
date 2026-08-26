@@ -166,7 +166,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True):
+    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_range=None):
         seen.update(
             path=path,
             dtype=dtype,
@@ -174,6 +174,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
             layer_range=layer_range,
             include_embed=include_embed,
             include_norm=include_norm,
+            expert_range=expert_range,
         )
         return fake_model, fake_store
 
@@ -190,3 +191,30 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     assert seen["compress_trunk"] is coded_trunk
     assert seen["model"] is fake_model
     assert seen["kwargs"]["expert_store"] is fake_store
+
+
+def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypatch):
+    """A tensor-parallel rank's expert shard must reach the checkpoint read, not just the routing:
+    holding every expert is what does not fit the card in the first place."""
+    import json
+
+    from emmy.compiler.loader import safetensors
+    from emmy.compiler.trace import huggingface
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
+    seen = {}
+    monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
+    monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
+
+    def fake_load(path, dtype, **kwargs):
+        seen.update(kwargs)
+        return object(), {"fmt": "mxfp4"}
+
+    monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)
+    monkeypatch.setattr(EmmyGenRunner, "from_model", classmethod(lambda cls, model, **kwargs: kwargs))
+
+    built = EmmyGenRunner.create(model_id=str(tmp_path), expert_range=(64, 96))
+
+    assert seen["expert_range"] == (64, 96), "the shard never reached the checkpoint read"
+    assert built["expert_range"] == (64, 96), "the shard never reached the runner"

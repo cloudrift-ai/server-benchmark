@@ -184,6 +184,37 @@ def test_best_realized_rejects_a_structural_parent_that_names_a_different_child_
     assert search.best_realized() is None
 
 
+def test_best_realized_uses_a_compatible_multi_cuda_placement_route() -> None:
+    tree = SearchTree()
+    tree.root.children = [
+        _ok_leaf(
+            6.0,
+            realized_knobs={"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "PLACE@a": "cut"},
+            cuda_ops=2,
+            cuda_knobs=[{"WORK": "w1x1"}, {"WORK": ""}],
+        )
+    ]
+
+    search = TuningSearch.__new__(TuningSearch)
+    search.tree = tree
+
+    assert search.best_realized() == ({"PLACE@a": "cut"}, 6.0, 2, True)
+
+
+def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
+    tree = SearchTree()
+    route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE@a": "cut", "WORK": "w1x1"}), parent=tree.root)
+    fast = _ok_leaf(6.0, realized_knobs=None, cuda_ops=2, cuda_knobs=[{"WORK": "w1x1"}, {"WORK": ""}])
+    fast.parent = route
+    route.children = [fast]
+    tree.root.children = [route]
+
+    search = TuningSearch.__new__(TuningSearch)
+    search.tree = tree
+
+    assert search.best_realized() == ({"PLACE@a": "cut"}, 6.0, 2, True)
+
+
 def test_best_realized_returns_an_ordinary_one_kernel_row() -> None:
     tree = SearchTree()
     tree.root.children = [_ok_leaf(6.0, realized_knobs={"WORK": "t64"}, cuda_ops=1)]

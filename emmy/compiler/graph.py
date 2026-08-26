@@ -1297,6 +1297,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     composed Σ rows group by it)."""
     from emmy.compiler.ir.loop import Load, LoopOp, Write
     from emmy.compiler.ir.pure.fold import Fold
+    from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tile import TileOp
 
     if not isinstance(op, (LoopOp, TileOp)):
@@ -1332,6 +1333,17 @@ def _rename_buf_in_op(op, old: str, new: str):
         renamed = LoopOp(body=op.body.map(fn))
     else:
 
+        def rename_body(body):
+            return Body(rename_member(member) for member in body)
+
+        def rename_member(member):
+            if isinstance(member, Fold):
+                return rename_term(member)
+            nested = member.nested()
+            if nested:
+                member = member.with_bodies(tuple(rename_body(body) for body in nested))
+            return fn(member)
+
         def rename_term(term):
             if isinstance(term, Load):
                 return fn(term)
@@ -1340,7 +1352,7 @@ def _rename_buf_in_op(op, old: str, new: str):
             return replace(
                 term,
                 operands=tuple(rename_term(edge) for edge in term.operands),
-                lift=replace(term.lift, body=term.lift.body.map(rename_term)),
+                lift=replace(term.lift, body=rename_body(term.lift.body)),
             )
 
         renamed = replace(

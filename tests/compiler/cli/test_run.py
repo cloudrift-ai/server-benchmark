@@ -87,6 +87,22 @@ def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch
     assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem"
 
 
+def test_pinned_knobs_restores_scoped_placement_keys(monkeypatch):
+    import os
+
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
+    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
+    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@A"] == "cut"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
+    assert os.environ["EMMY_PLACE@A"] == "fuse"
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
+
+
 def _symbolic_input_graph():
     """Frontend-ish graph with one symbolic input (``x``, seq axis 1) and one
     static input (``w``) — enough for ``_hint_sized_inputs``' input pairing."""

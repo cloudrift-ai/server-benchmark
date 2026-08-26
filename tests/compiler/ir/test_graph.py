@@ -352,6 +352,50 @@ def test_mimo_rename_node_keeps_aux_buffer():
     g.validate()
 
 
+def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold, Lambda
+    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.tile import Placement, TileOp
+
+    def addition(name: str) -> Lambda:
+        other = f"{name}__o"
+        return Lambda(
+            params=(name, other),
+            body=Body((Assign(name=name, op="add", args=(name, other)),)),
+            results=(name,),
+        )
+
+    inner = Fold(
+        axis=Axis("k", 4),
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)),
+            results=("value",),
+        ),
+        init=(0.0,),
+        combine=addition("inner_acc"),
+    )
+    outer = Fold(
+        axis=Axis("m", 4),
+        lift=Lambda(params=("m",), body=Body((inner,)), results=(inner.out,)),
+        init=(0.0,),
+        combine=addition("outer_acc"),
+    )
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 4)), node_id="x")
+    graph.add_node(TileOp(op=outer, place=Placement()), ["x"], Tensor("out", ()), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    graph.rename_node("x", "renamed_x")
+
+    nested = graph.nodes["out"].op.op.lift.body[0]
+    assert isinstance(nested, Fold)
+    assert nested.lift.body.loads[0].input == "renamed_x"
+
+
 def test_mimo_remove_orphans_keeps_producer_alive_via_aux_edge():
     """A consumer reading ONLY the aux buffer still keeps the producer alive."""
     g = Graph()

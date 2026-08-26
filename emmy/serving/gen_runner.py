@@ -837,10 +837,10 @@ class EmmyGenRunner:
         snapshot, the coded allocation, the pack key — goes through the tagged id, so a repo
         publishing one rung per branch serves the rung that was asked for."""
         import torch
-        from transformers import AutoConfig, AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM
 
         from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
-        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, quantized_checkpoint_dir
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
@@ -900,14 +900,11 @@ class EmmyGenRunner:
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
         with torch.device("cpu"):
-            # Resolve the config EXPLICITLY, the way the quantized lane already does. Inside a vLLM
-            # process, letting ``from_pretrained`` resolve it can attach Transformers' per-layer
-            # heterogeneity spec, after which the architecture's OWN modeling code can no longer read
-            # its per-layer fields off the config (DeepSeek V4: "no attribute 'layer_types'").
-            config = AutoConfig.from_pretrained(repo, revision=revision)
-            model = AutoModelForCausalLM.from_pretrained(
-                repo, revision=revision, dtype=getattr(torch, dtype_str), config=config
-            ).eval()
+            # Resolve the config through the shared helper: a host vLLM process re-registers some
+            # model types onto its own minimal config class (no derived fields — DeepSeek V4 loses
+            # ``layer_types``), and the helper reloads with Transformers' native class in that case.
+            config = _auto_config_from_pretrained(repo, revision=revision)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str), config=config).eval()
             return cls.from_model(
                 model,
                 dtype_str=dtype_str,

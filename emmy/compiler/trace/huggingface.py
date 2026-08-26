@@ -1344,21 +1344,33 @@ _EXL3_EXPERT_LEAF = {"trellis": "", "suh": "_suh", "svh": "_svh"}
 _PER_EXPERT_LEAF = {"weight": "", "weight_scale_inv": "_scale", "weight_scale": "_scale"}
 
 
-def _auto_config_from_pretrained(model_dir):
+def _auto_config_from_pretrained(model_dir, **kwargs):
     """Load an architecture config, trusting repository code only when required.
 
     Keep the quantized-twin path aligned with the ordinary Hugging Face trace path:
     built-in architectures stay on Transformers' implementation, while repositories
     whose config explicitly requires custom code get one guarded retry.
+
+    A host process can re-register a model type onto its own minimal config class
+    (vLLM's ``HFConfigParser`` does, via ``AutoConfig.register``), after which
+    ``AutoConfig.from_pretrained`` returns that class instead of Transformers' own —
+    dropping every derived field its ``__init__`` computes (DeepSeek V4 derives
+    ``layer_types`` from ``compress_ratios``). When Transformers exports a native class
+    of the same name, reload with it: the twin must see the architecture's own config.
     """
+    import transformers  # noqa: PLC0415
     from transformers import AutoConfig  # noqa: PLC0415
 
     try:
-        return AutoConfig.from_pretrained(model_dir)
+        config = AutoConfig.from_pretrained(model_dir, **kwargs)
     except ValueError as e:
         if "trust_remote_code" not in str(e):
             raise
-        return AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        return AutoConfig.from_pretrained(model_dir, trust_remote_code=True, **kwargs)
+    native = getattr(transformers, type(config).__name__, None)
+    if isinstance(native, type) and not isinstance(config, native):
+        config = native.from_pretrained(model_dir, **kwargs)
+    return config
 
 
 def _auto_model_from_config(config, **kwargs):

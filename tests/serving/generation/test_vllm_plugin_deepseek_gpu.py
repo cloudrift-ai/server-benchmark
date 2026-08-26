@@ -66,6 +66,10 @@ def _tiny_deepseek(path, transformers, torch):
     # its per-layer structure FROM.
     saved["compress_ratios"] = [0, 0]
     saved["num_hash_layers"] = 0
+    # The fork's attention sublayer consumes the rope declaration at config-parse time
+    # (``rope_parameters["rope_type"]``), so it must sit in the file, spelled the legacy way the
+    # checkpoint publishes it. Scaled to this fixture: 64 original positions x factor 4 = 256 max.
+    saved["rope_scaling"] = {"type": "yarn", "factor": 4, "beta_fast": 32, "beta_slow": 1, "original_max_position_embeddings": 64}
     config_path.write_text(json.dumps(saved))
     return config
 
@@ -81,22 +85,27 @@ def _vllm_config(vllm, model_dir):
         max_model_len=128,
         max_num_batched_tokens=256,
         enforce_eager=True,
-        hf_overrides={"architectures": ["EmmyGenModel"]},
+        kv_cache_dtype="fp8",  # the fork's paged attention supports no other cache format
+        # ``quantization_config`` rides in as an override rather than in the file: the fork's
+        # attention requires the published fp8 declaration (``scale_fmt``), but writing it into
+        # config.json would flip the RUNNER's load onto the quantized lane — and this fixture's
+        # weights are plain fp16. The real checkpoint declares it in the file and both sides read it.
+        hf_overrides={
+            "architectures": ["EmmyGenModel"],
+            "quantization_config": {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "scale_fmt": "ue8m0",
+                "weight_block_size": [128, 128],
+            },
+        },
     )
     config = args.create_engine_config()
     assert isinstance(config, VllmConfig)
     return config
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Inside a vLLM process this architecture's config loses its per-layer structure: "
-        "AutoConfig.from_pretrained returns layer_types=[] (it reads correctly outside one), so the "
-        "twin cannot be constructed at all. Reproduced with the REAL checkpoint's config, not just "
-        "this fixture, so it blocks the production loader lane too and is the next thing to fix."
-    ),
-    strict=False,
-)
 def test_fork_attention_registers_one_cache_set_per_absolute_layer(tmp_path):
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
@@ -124,7 +133,10 @@ def test_fork_attention_registers_one_cache_set_per_absolute_layer(tmp_path):
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(world_size=1, rank=0, distributed_init_method=f"tcp://127.0.0.1:{port}", local_rank=0)
         initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
-        model = EmmyGenModel(vllm_config=vllm_config, prefix="model")
+        # vLLM's model loader constructs models under the target device; the fork's rotary cache
+        # build relies on that (it mixes default-device tensors with explicitly-cuda ones).
+        with torch.device("cuda"):
+            model = EmmyGenModel(vllm_config=vllm_config, prefix="model")
 
     # One engine-owned sublayer per local layer, and NO vLLM Attention / external RoPE: this
     # architecture has no q/k/v seam to place them in.

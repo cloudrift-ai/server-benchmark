@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from emmy.compiler.pipeline.passes.identity import kernel_sig
 from emmy.compiler.pipeline.search.db import PerfStats, node_key
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
 
@@ -26,6 +25,10 @@ REGIME = {"H_cc": 12.0, "H_opt": 3.0}
 # strategy stamps a minted piece at birth) and its own schedule decisions.
 MAIN = {"S_n_load": 2.0, "S_n_accum": 1.0, "WORK": "w4x2", "REDUCE": "split4"}
 COMBINE = {"S_n_load": 1.0, "S_n_accum": 0.0, "WORK": "", "REDUCE": ""}
+# The identity each piece was STAMPED with, which the bench recovers from the rewrite chain. It is
+# deliberately not ``kernel_sig`` of the row above: tile materialization merges ``S_warp_eligible``
+# onto the op, so a realized row's own stamps are a superset of the kernel's birth identity.
+MAIN_SIG, COMBINE_SIG = "sig-main", "sig-combine"
 
 
 def _stats(us: float, *, n: int = 32, var: float = 0.5) -> PerfStats:
@@ -34,6 +37,15 @@ def _stats(us: float, *, n: int = 32, var: float = 0.5) -> PerfStats:
 
 def _search(**kw) -> TuningSearch:
     return TuningSearch(base_knobs={**REGIME, "S_n_load": 2.0}, **kw)
+
+
+def _split_rows(main_us: float = 10.0, combine_us: float = 2.0, *, main=None, combine=None, combine_sig: str | None = COMBINE_SIG):
+    """The two receipts a cross-CTA split's bench hands back: each piece's knobs under the run's
+    regime, its own stats, and the identity the bench recovered from its rewrite chain."""
+    return [
+        ({**REGIME, **(main or MAIN)}, _stats(main_us), "ok", MAIN_SIG),
+        ({**REGIME, **(combine or COMBINE)}, _stats(combine_us), "ok", combine_sig),
+    ]
 
 
 def _multi_kernel_leaf(*, rows, total_us: float, status: str = "ok") -> SearchNode:
@@ -72,11 +84,11 @@ def test_observe_stashes_each_kernels_own_row_under_the_run_regime() -> None:
     search = _search()
     token = SearchNode(candidate=None)
 
-    search.observe(token, _stats(12.0), "ok", kernels=[(MAIN, _stats(10.0), "ok"), (COMBINE, _stats(2.0), "ok")])
+    search.observe(token, _stats(12.0), "ok", kernels=[(MAIN, _stats(10.0), "ok", MAIN_SIG), (COMBINE, _stats(2.0), "ok", COMBINE_SIG)])
 
-    assert [feats for feats, _stats_, _status in token.kernel_rows] == [{**REGIME, **MAIN}, {**REGIME, **COMBINE}]
-    assert [s.median for _f, s, _st in token.kernel_rows] == [10.0, 2.0]
-    assert [st for _f, _s, st in token.kernel_rows] == ["ok", "ok"]
+    assert [feats for feats, *_ in token.kernel_rows] == [{**REGIME, **MAIN}, {**REGIME, **COMBINE}]
+    assert [s.median for _f, s, *_ in token.kernel_rows] == [10.0, 2.0]
+    assert [(st, sig) for _f, _s, st, sig in token.kernel_rows] == [("ok", MAIN_SIG), ("ok", COMBINE_SIG)]
 
 
 def test_observe_leaves_kernel_rows_unset_when_the_bench_handed_over_none() -> None:
@@ -96,13 +108,13 @@ def test_observe_leaves_kernel_rows_unset_when_the_bench_handed_over_none() -> N
 
 def test_reservoir_trains_on_each_kernel_not_on_the_sum() -> None:
     tree = SearchTree()
-    tree.root.children = [_multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.0), "ok")], total_us=12.0)]
+    tree.root.children = [_multi_kernel_leaf(rows=_split_rows(), total_us=12.0)]
 
     rows = _collect_reservoir(tree)
 
     assert sorted(us for _knobs, us in rows) == [2.0, 10.0]
     assert 12.0 not in [us for _knobs, us in rows]
-    assert {"WORK": knobs["WORK"] for knobs, _us in rows} != {}
+    assert sorted(knobs["WORK"] for knobs, _us in rows) == ["", "w4x2"], "each row carries its own kernel's knobs"
 
 
 def test_reservoir_keeps_the_single_kernel_terminals_value_of_position_label() -> None:
@@ -112,7 +124,7 @@ def test_reservoir_keeps_the_single_kernel_terminals_value_of_position_label() -
     node.best_reward = 1.0 / 7.0
     node.realized_knobs = {**REGIME, **MAIN}
     node.realized_cuda_ops = 1
-    node.kernel_rows = [({**REGIME, **MAIN}, _stats(7.0), "ok")]
+    node.kernel_rows = [({**REGIME, **MAIN}, _stats(7.0), "ok", MAIN_SIG)]
     node.bench_status = "ok"
     node.bench_stats = _stats(7.0)
     tree = SearchTree()
@@ -127,8 +139,8 @@ def test_reservoir_weights_a_repeated_piece_once() -> None:
     by the number of variants."""
     tree = SearchTree()
     tree.root.children = [
-        _multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.0), "ok")], total_us=12.0),
-        _multi_kernel_leaf(rows=[({**REGIME, **MAIN, "WORK": "w2x2"}, _stats(9.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.5), "ok")], total_us=11.5),
+        _multi_kernel_leaf(rows=_split_rows(), total_us=12.0),
+        _multi_kernel_leaf(rows=_split_rows(9.0, 2.5, main={**MAIN, "WORK": "w2x2"}), total_us=11.5),
     ]
 
     rows = _collect_reservoir(tree)
@@ -145,12 +157,12 @@ def test_reservoir_weights_a_repeated_piece_once() -> None:
 
 def test_node_rows_are_one_per_kernel_keyed_by_that_kernels_own_shape() -> None:
     tree = SearchTree()
-    tree.root.children = [_multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.0), "ok")], total_us=12.0)]
+    tree.root.children = [_multi_kernel_leaf(rows=_split_rows(), total_us=12.0)]
 
     rows = sorted(_collect_nodes(tree), key=lambda r: r.value_us)
 
     assert [r.value_us for r in rows] == [2.0, 10.0]
-    assert [r.op_sig for r in rows] == [kernel_sig(COMBINE), kernel_sig(MAIN)]
+    assert [r.op_sig for r in rows] == [COMBINE_SIG, MAIN_SIG]
     assert [r.features for r in rows] == [{**REGIME, **COMBINE}, {**REGIME, **MAIN}]
     assert all(r.parent_key is None and r.depth == 0 for r in rows), "a measured kernel is not a position in this tree"
     assert all(r.is_leaf and r.status == "ok" and r.visits == 1 for r in rows)
@@ -161,35 +173,36 @@ def test_the_same_kernel_from_two_sites_lands_on_one_key() -> None:
     """The whole point of keying by the kernel's own shape: a piece minted here and the same
     kernel tuned as its own enrolled target are one row, not two."""
     tree = SearchTree()
-    tree.root.children = [_multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.0), "ok")], total_us=12.0)]
+    tree.root.children = [_multi_kernel_leaf(rows=_split_rows(), total_us=12.0)]
 
-    [combine] = [r for r in _collect_nodes(tree) if r.op_sig == kernel_sig(COMBINE)]
+    [combine] = [r for r in _collect_nodes(tree) if r.op_sig == COMBINE_SIG]
 
-    assert combine.node_key == node_key(CTX, GPU, kernel_sig(COMBINE), {**REGIME, **COMBINE})
+    assert combine.node_key == node_key(CTX, GPU, COMBINE_SIG, {**REGIME, **COMBINE})
 
 
 def test_a_terminal_whose_kernels_agree_still_records_per_kernel() -> None:
     """The old rule fired on a knob CONFLICT, so two kernels that happened to agree got one
     row carrying the Σ. Kernel count is what decides, not whether the pieces disagree."""
-    node = _multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **MAIN}, _stats(2.0), "ok")], total_us=12.0)
-    node.realized_knobs = {**REGIME, **MAIN}  # no conflict, so a merged row exists
+    node = _multi_kernel_leaf(rows=_split_rows(), total_us=12.0)
+    node.realized_knobs = {**REGIME, **MAIN}  # the kernels' decisions agree, so a merged row exists
     tree = SearchTree()
     tree.root.children = [node]
 
     rows = _collect_nodes(tree)
 
-    assert [r.value_us for r in rows] == [2.0], "one row per kernel, deduped by identity — never the 12.0 Σ"
+    assert sorted(r.value_us for r in rows) == [2.0, 10.0], "one row per kernel — never the 12.0 Σ"
+    assert 12.0 not in [r.value_us for r in rows]
 
 
 def test_a_stampless_kernel_is_skipped_rather_than_keyed_to_an_empty_shape() -> None:
     """No stamps means no shape; digesting the empty set would collide every unstamped
     auxiliary in the store onto one row."""
     tree = SearchTree()
-    tree.root.children = [_multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, "WORK": ""}, _stats(2.0), "ok")], total_us=12.0)]
+    tree.root.children = [_multi_kernel_leaf(rows=_split_rows(combine={"WORK": ""}, combine_sig=None), total_us=12.0)]
 
     rows = _collect_nodes(tree)
 
-    assert [r.op_sig for r in rows] == [kernel_sig(MAIN)]
+    assert [r.op_sig for r in rows] == [MAIN_SIG]
 
 
 def test_a_failed_multi_kernel_terminal_records_nothing() -> None:
@@ -199,7 +212,7 @@ def test_a_failed_multi_kernel_terminal_records_nothing() -> None:
     tree = SearchTree()
     tree.root.children = [
         _multi_kernel_leaf(
-            rows=[({**REGIME, **MAIN}, sentinel, "bench_fail"), ({**REGIME, **COMBINE}, sentinel, "bench_fail")],
+            rows=[({**REGIME, **MAIN}, sentinel, "bench_fail", MAIN_SIG), ({**REGIME, **COMBINE}, sentinel, "bench_fail", COMBINE_SIG)],
             total_us=2_000_000.0,
             status="bench_fail",
         )
@@ -214,7 +227,7 @@ def test_the_fan_out_leaves_an_ancestors_own_row_alone() -> None:
     branch = SearchNode(candidate=SimpleNamespace(fork=None, resolved_knobs=None))
     branch.visits = 1
     branch.best_reward = 1.0 / 12.0
-    leaf = _multi_kernel_leaf(rows=[({**REGIME, **MAIN}, _stats(10.0), "ok"), ({**REGIME, **COMBINE}, _stats(2.0), "ok")], total_us=12.0)
+    leaf = _multi_kernel_leaf(rows=_split_rows(), total_us=12.0)
     leaf.parent = branch
     branch.children = [leaf]
     tree = SearchTree()

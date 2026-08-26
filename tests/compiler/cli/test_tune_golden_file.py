@@ -16,7 +16,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.identity import IdentityStrategy
+from emmy.compiler.pipeline.passes.identity import IdentityStrategy, chain_op_sig
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
@@ -373,7 +373,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             leaf.best_reward = 1.0 / 59.61
             leaf.realized_knobs = None
             leaf.realized_cuda_ops = 2
-            leaf.kernel_rows = [(dict(node.op.knobs), search.last_stats, "ok") for node in terminal.nodes.values()]
+            leaf.kernel_rows = [(dict(node.op.knobs), search.last_stats, "ok", chain_op_sig(node.op)) for node in terminal.nodes.values()]
             leaf.bench_status = "ok"
             leaf.bench_stats = search.last_stats
             search.tree.root.children = [leaf]

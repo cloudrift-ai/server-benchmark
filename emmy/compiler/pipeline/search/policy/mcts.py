@@ -43,7 +43,6 @@ from emmy.compiler.pipeline.knob import (
     stamp_schedule_families,
     tuning_knob_items,
 )
-from emmy.compiler.pipeline.passes.identity import kernel_sig, stamped_row
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, node_key
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
@@ -84,7 +83,7 @@ class SearchNode:
     # that lowered to several kernels is recorded as (no single row can carry a Σ), and what
     # structural winners read to reject a parent row whose ordinary schedule pins describe a
     # different independently tuned child than the terminal actually measured.
-    kernel_rows: list[tuple[dict, PerfStats, str]] | None = field(default=None, repr=False)
+    kernel_rows: list[tuple[dict, PerfStats, str, str | None]] | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -217,10 +216,11 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
-        # Each kernel's own row: its own knobs (its own ``S_*`` stamps included) under this run's
-        # regime, so a consumer needs no further context to key or featurize it.
+        # Each kernel's own row: its own knobs under this run's regime, plus the identity the
+        # bench recovered from its rewrite chain — so a consumer needs no further context, and no
+        # op, to key or featurize it.
         regime = context_view(self._base_knobs)
-        token.kernel_rows = [({**regime, **knobs}, kstats, st) for knobs, kstats, st in kernels] if kernels is not None else None
+        token.kernel_rows = [({**regime, **knobs}, kstats, st, sig) for knobs, kstats, st, sig in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -272,21 +272,21 @@ class TuningSearch(Search):
         row earned the whole measurement. When a structural fork made it several, no row can
         carry the total: the deploy prices such a realization by SUMMING a per-kernel price
         (``greedy._resolved_price``), so the quantity a row must describe is one kernel's cost.
-        Each kernel carries its own decisions, its own µs and — since the identity strategy
-        stamps a minted piece at birth — its own ``S_*`` shape, which is the identity the row
-        keys on, so the same kernel measured at another site or tuned as its own enrolled target
-        is the same row.
+        Each kernel carries its own decisions, its own µs, and the identity the bench recovered
+        from its rewrite chain (:func:`~...passes.identity.chain_op_sig` — the stamp it was born
+        with, which is NOT the same as its own knobs' ``S_*``). That identity is what the row keys
+        on, so a piece minted here and the same kernel tuned as its own enrolled target are one
+        row rather than two.
 
         Answers ``[]`` in three more cases, each for its own reason: a terminal whose bench
         FAILED (the watchdog pins one sentinel latency on every kernel, so per-piece rows would
         each carry a number no kernel measured — the failure is the terminal's), a leaf whose
         bench handed over no per-kernel receipts (a cache hit, a stub backend), and a branch.
 
-        A kernel with no ``S_*`` stamps anywhere is dropped: it has no shape, so there is no
-        identity to key it by, and digesting the empty stamp set would collide every unstamped
-        auxiliary in the store onto one row. (``bench_record`` answers that question differently
-        — it can attribute such a kernel to its producer through the graph edge, which this walk,
-        holding knob dicts rather than a graph, cannot.)"""
+        A kernel whose chain carries no stamps at all is dropped: it has no identity to key by,
+        and digesting the empty stamp set would collide every unstamped auxiliary in the store
+        onto one row. (``bench_record`` answers that question differently — it can attribute such
+        a kernel to its producer through the graph edge, which this walk cannot.)"""
         stats, rows = node.bench_stats, node.kernel_rows or ()
         if stats is None or (node.realized_knobs is not None and len(rows) <= 1):
             return []
@@ -298,10 +298,9 @@ class TuningSearch(Search):
         # no measurement order to call newest, so the walk's order stands in — the invariant is
         # the weighting, not which of two identical-config measurements survives.
         out: dict[tuple, tuple[dict, PerfStats, str]] = {}
-        for feats, kstats, status in rows:
-            if status != "ok" or not stamped_row(feats):
+        for feats, kstats, status, sig in rows:
+            if status != "ok" or sig is None:
                 continue
-            sig = kernel_sig(feats)
             out[(sig, canonical_row_key(feats))] = (feats, kstats, sig)
         return list(out.values())
 
@@ -385,7 +384,7 @@ class TuningSearch(Search):
             structural = self._structural_row(validated_input_route)
         if structural is not None:
             place_only = all(family_of(key) == "PLACE" for key in structural)
-            cuda_knobs = [dict(decision_view(feats)) for feats, _stats, _status in node.kernel_rows or ()]
+            cuda_knobs = [dict(decision_view(feats)) for feats, *_rest in node.kernel_rows or ()]
             if not place_only and (not cuda_knobs or unreproducible_pin_flag(structural, cuda_knobs, reject_conflicts=True) is not None):
                 return None
             return structural, float(node.bench_stats.median), node.realized_cuda_ops, True

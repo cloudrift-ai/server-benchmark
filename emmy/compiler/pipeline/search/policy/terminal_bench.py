@@ -16,6 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.kernel.ir import KernelOp
 from emmy.compiler.ir.loop.ir import LoopOp
+from emmy.compiler.pipeline.passes.identity import chain_op_sig
 from emmy.compiler.pipeline.search.db import PerfStats
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
@@ -47,16 +48,21 @@ class TerminalBench:
         # for the whole matmul).
         self.unlowered = [nid for nid in order if not isinstance(self.graph.nodes[nid].op, (CudaOp, InputOp, ConstantOp))]
         self.backend_name = getattr(backend, "name", "stub")
-        #: Per-KERNEL measurements, ``[(knobs, PerfStats, status), ...]`` in launch order — what
-        #: the search records a multi-kernel terminal as. A terminal is a Σ over its kernels; when
-        #: a structural fork made it several, they hold DIFFERENT rows and there is no single row
-        #: to attribute the total to. Each kernel carries its own decisions and earns its own
+        #: Per-KERNEL measurements, ``[(knobs, PerfStats, status, op_sig), ...]`` in launch order —
+        #: what the search records a multi-kernel terminal as. A terminal is a Σ over its kernels;
+        #: when a structural fork made it several, they hold DIFFERENT rows and there is no single
+        #: row to attribute the total to. Each kernel carries its own decisions and earns its own
         #: sample — including its own variance / sample count, which the node store's
         #: quality-aware leaf replacement compares.
-        self.per_kernel: list[tuple[dict, PerfStats, str]] = []
+        #:
+        #: ``op_sig`` is recovered HERE, where the op is in hand: the row's knobs alone cannot give
+        #: it, because tile materialization merges ``S_warp_eligible`` onto the op and a kernel's
+        #: identity is what it was stamped with at birth (:func:`chain_op_sig`). ``None`` for a
+        #: kernel whose chain carries no stamps at all.
+        self.per_kernel: list[tuple[dict, PerfStats, str, str | None]] = []
 
     def _note(self, op, stats: PerfStats, status: str) -> None:
-        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), stats, status))
+        self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), stats, status, chain_op_sig(op)))
 
     @staticmethod
     def _point_stats(us: float):
@@ -294,7 +300,7 @@ async def bench_terminal_async(cand, *, backend, db):
     """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
     rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
     ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
-    backend measurement was required, and ``per_kernel`` the ``(knobs, PerfStats, status)`` of each
+    backend measurement was required, and ``per_kernel`` the ``(knobs, PerfStats, status, op_sig)`` of each
     kernel — the terminal's Σ decomposed into the rows that earned it. The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`TerminalBench`."""

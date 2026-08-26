@@ -119,6 +119,35 @@ def stamped_row(knobs: dict | None) -> tuple:
     return tuple(sorted((k, float(v)) for k, v in (knobs or {}).items() if k.startswith(STRUCT_PREFIX)))
 
 
+def chain_op_sig(op) -> str | None:
+    """The identity of the kernel a compiled ``op`` realizes, recovered from its rewrite chain —
+    the one spelling every writer of a measured row keys by, and ``None`` when the chain carries
+    no stamps at all.
+
+    The NEAREST loop-dialect ancestor's stamps, because that is where :class:`IdentityStrategy`
+    writes a kernel's identity and the only dialect it writes to: a kernel minted during lowering
+    (a placement cut's fragment, a cross-CTA split's piece) is stamped at birth as a ``LoopOp``, so
+    the nearest one is the PIECE's own identity while a deeper one is the identity of the op the
+    split replaced — a different kernel, which did not run.
+
+    Not the op's own knobs: tile materialization merges the winning row's ``S_*`` onto the op it
+    builds (``S_warp_eligible``, which prices "a scalar tile where tensor cores were on offer"), so
+    a ``TileOp`` and everything lowered from it carry stamps the kernel was not born with. On the
+    tensor-core path no ``LoopOp`` survives in the chain at all; there the DEEPEST tile-dialect
+    ancestor stands in, since it is the one tile op that predates that merge."""
+    nearest_loop = deepest_tile = None
+    for anc in op.source_chain():
+        if not stamped_row(getattr(anc, "knobs", None)):
+            continue
+        if anc.dialect == "loop":
+            if nearest_loop is None:
+                nearest_loop = anc
+        elif anc.dialect == "tile":
+            deepest_tile = anc
+    site = nearest_loop if nearest_loop is not None else deepest_tile
+    return None if site is None else kernel_sig(site.knobs)
+
+
 def kernel_sig(feats: dict) -> str:
     """The same function :meth:`IdentityStrategy.op_sig` computes, asked of a recorded row's
     stamps instead of a live op — the identity of the kernel that RAN rather than of the site

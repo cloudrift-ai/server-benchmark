@@ -111,6 +111,39 @@ def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
     return frozenset(axis for axis in axes if edge_refs_axis(operand, axis))
 
 
+def _ordered_projection(members: Iterable, results: tuple[str, ...]) -> Fold:
+    """Factor an ordered pure cone without moving a Fold ahead of an earlier scalar producer.
+
+    A projection evaluates every operand before its scalar body.  When the source sequence is
+    ``Fold; scalar; Fold``, the prefix must therefore become a source projection of the latter
+    Fold instead of flattening both Folds into sibling operands.
+    """
+    members = Body(members)
+    scalar_seen = False
+    split = None
+    for index, stmt in enumerate(members):
+        if isinstance(stmt, Fold):
+            if scalar_seen:
+                split = index
+                break
+        else:
+            scalar_seen = True
+
+    if split is not None:
+        prefix, suffix = members[:split], members[split:]
+        needed = set(results)
+        for stmt in suffix:
+            needed.update(_member_reads(stmt))
+        bridge = tuple(name for stmt in prefix for name in stmt.defines() if name in needed)
+        assert bridge, "a separated pure prefix must feed its suffix"
+        source = _ordered_projection(prefix, bridge)
+        return _ordered_projection((source, *suffix), results)
+
+    operands = tuple(stmt for stmt in members if isinstance(stmt, Fold))
+    body = Body(stmt for stmt in members if not isinstance(stmt, Fold))
+    return Fold.projection(operands=operands, body=body, results=results)
+
+
 def _extract_operand(body: Body, name: str):
     """Factor one product argument into a materialized load or a pure projection edge."""
     cone = body.backward_cone((name,))
@@ -122,11 +155,9 @@ def _extract_operand(body: Body, name: str):
     if any(not stmt.pure for stmt in cone.members):
         return None
 
-    nested = tuple(stmt for stmt in cone.members if isinstance(stmt, Fold))
-    members = Body(stmt for stmt in cone.members if not isinstance(stmt, Fold))
-    if not members and len(nested) == 1 and operand_name(nested[0]) == name:
-        return nested[0], cone.members
-    edge = Fold.projection(operands=nested, body=members, results=(name,))
+    if len(cone.members) == 1 and isinstance(cone.members[0], Fold) and operand_name(cone.members[0]) == name:
+        return cone.members[0], cone.members
+    edge = _ordered_projection(cone.members, (name,))
     return (edge, cone.members) if operand_name(edge) == name else None
 
 
@@ -194,12 +225,7 @@ def _merge_operand_cones(body: Body, extracted: dict[str, tuple]) -> tuple[tuple
         else:
             ids = set().union(*(member_ids[name] for name in group))
             members = tuple(stmt for stmt in body if id(stmt) in ids)
-            nested = tuple(stmt for stmt in members if isinstance(stmt, Fold))
-            edge = Fold.projection(
-                operands=nested,
-                body=Body(stmt for stmt in members if not isinstance(stmt, Fold)),
-                results=tuple(group),
-            )
+            edge = _ordered_projection(members, tuple(group))
         operands.append(edge)
         by_root.update((name, edge) for name in group)
     return tuple(operands), by_root

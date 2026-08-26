@@ -228,6 +228,66 @@ def test_contraction_factors_both_computed_operand_cones_idempotently() -> None:
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
 
 
+def test_contraction_preserves_computed_operand_statement_order() -> None:
+    j, k = Axis("j", Dim(32)), Axis("k", Dim(64))
+    max_init, max_combine = M(ElementwiseImpl("maximum"), names=("row_max",))
+    row_max = Fold(
+        axis=j,
+        lift=Lambda(
+            params=("j",),
+            body=Body((Load(name="score", input="s", index=(Var("m"), Var("j"))),)),
+            results=("score",),
+        ),
+        init=max_init,
+        combine=max_combine,
+    )
+    sum_init, sum_combine = M(ElementwiseImpl("add"), names=("value",))
+    value = Fold(
+        axis=j,
+        lift=Lambda(
+            params=("j",),
+            body=Body(
+                (
+                    Load(name="v", input="v", index=(Var("j"), Var("k"))),
+                    Assign(name="weighted", op="multiply", args=("inv", "v")),
+                )
+            ),
+            results=("weighted",),
+        ),
+        init=sum_init,
+        combine=sum_combine,
+    )
+    outer_init, outer_combine = M(ElementwiseImpl("add"), names=("out",))
+    outer = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    row_max,
+                    Assign(name="inv", op="reciprocal", args=("row_max",)),
+                    value,
+                    Load(name="weight", input="w", index=(Var("k"), Var("n"))),
+                    Assign(name="product", op="multiply", args=("value", "weight")),
+                )
+            ),
+            results=("product",),
+        ),
+        init=outer_init,
+        combine=outer_combine,
+    )
+
+    tile = TileOp(op=outer, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    computed = tile.op.a
+    lowered = computed.lower()
+    assert isinstance(lowered[0], Loop) and lowered[0].axis.name == "j"
+    assert isinstance(lowered[1], Assign) and lowered[1].name == "inv"
+    assert isinstance(lowered[2], Loop) and lowered[2].axis.name == "j"
+    assert TileOp(op=tile.op, place=tile.place).op is tile.op
+
+
 def test_lambda_equivalent_clusters_include_captured_axes() -> None:
     first = Lambda(
         params=("k",),

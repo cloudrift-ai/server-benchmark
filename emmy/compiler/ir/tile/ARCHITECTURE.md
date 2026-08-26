@@ -53,6 +53,10 @@ single. A semiring without one shared product argument remains a general planar 
 in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed when factoring makes a
 contraction the root compute node. Multiple stores in one output sweep retain one sweep axis and reconstitute one Loop.
 
+Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
+Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
+scalar. The stored Fold tree therefore lowers to the same dependency order as the canonical Loop IR input.
+
 Scoped lambda equivalence uses that normalized order. It therefore ignores SSA spelling and harmless interleaving
 without weakening buffer or axis identity. The emit-side same-score legality query uses this same mechanism rather
 than maintaining a second cone canonicalizer.

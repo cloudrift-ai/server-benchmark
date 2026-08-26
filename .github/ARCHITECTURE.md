@@ -136,19 +136,19 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
-The workflow also attaches the exact-SHA `onboard-model`, `tune-kernels`, and `run-experiment` skills plus the
-`prompts/onboard-model/` qualification and investigation prompts as authoritative agent inputs, and loads the OpenCode
-agent and plugin directory from that same commit; older copies on the rolling branch cannot silently override a
-proposed artifact contract. As in discovery, the workflow renders only a compact task object — mode, model, exact
-target, SSH handles, deadline, publication authorization, and summary path — while the shared prompt owns the run
-policy, so the skill and GitHub Actions share one prompt source. The named onboarding agent may delegate bounded
-read-only compatibility research or failure diagnosis to the hidden `onboard-investigator` subagent, which follows the
-attached investigation prompt. The parent retains every edit and measurement. When an official engine image tag is
-missing, qualification checks official registries, release notes, and upstream documentation for a renamed repository
-or current compatible tag before failing, then pins the exact working tag or digest. A necessary small,
-model-independent compatibility fix may touch at most eight implementation/test/architecture files and 500 changed
-lines, and any Python source change requires a focused test change. Broader changes fail artifact validation and
-remain follow-up work.
+The workflow also attaches the exact-SHA README related-project map, the `onboard-model`, `tune-kernels`, and
+`run-experiment` skills, and the `prompts/onboard-model/` qualification, benchmarking, and investigation prompts as
+authoritative agent inputs. It loads the OpenCode agent and plugin directory from that same commit; older copies on the
+rolling branch cannot silently override a proposed artifact contract. As in discovery, the workflow renders only a
+compact task object — mode, model, exact target, SSH handles, deadline, publication authorization, and summary
+path — while the shared prompts own the run policy, so the skill and GitHub Actions share the same prompt sources.
+The named onboarding agent may delegate bounded read-only compatibility research or failure diagnosis to the hidden
+`onboard-investigator` subagent, which follows the attached investigation prompt. The parent retains every edit and
+measurement. When an official engine image tag is missing, qualification checks official registries, release notes,
+and upstream documentation for a renamed repository or current compatible tag before failing, then pins the exact
+working tag or digest. A necessary small, model-independent compatibility fix may touch at most eight
+implementation/test/architecture files and 500 changed lines, and any Python source change requires a focused test
+change. Broader changes fail artifact validation and remain follow-up work.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
 allowed recipe (including `golden/<gpu-slug>_<compute-cap>.yaml`), experiment, serving-image, and bounded

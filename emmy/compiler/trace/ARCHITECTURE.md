@@ -195,60 +195,98 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
   The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
   gate, query-projection, and head widths, covering older built-in Laguna modules without a model-name special case.
+  The `F.linear` expert form applies the module's `swiglu_limit` when the experts carry one (DeepSeek V4: gate clamped
+  above, up clamped on both sides, then SwiGLU and the down projection); OLMoE has no limit and is unchanged.
   Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
-  DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
-  above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
+  DeepSeek V4 requires that replacement to be confirmed and preserves the same clamp. Missing the replacement fails
+  closed.
 
-- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
-  quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
-  trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
-  (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
-  and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An NVFP4 dense-trunk weight
-  streams as values too: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on
-  read and consumes the scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert
-  lane has no packed-trio decode.
+  A DeepSeek V4 block (`hyper_connection_seam(block)` is not `None`: it carries `attn_hc` / `ffn_hc`) takes the
+  **attention-sublayer seam** instead of the q/k/v one, because the 1Cat vLLM fork's paged MLA attention owns the
+  whole sublayer — low-rank q projection, shared-KV projection, HCA/CSA compressors, the lightning indexer and the
+  grouped output projection are fused with its paged caches, and nothing external can hand it compressed latents.
+  The carrier is the `hc_mult` hyper-connection residual streams flattened to `[num_tokens, hc_mult * hidden]`:
+  `pre(hidden[T, hc·H]) → x[T, H]` is the attention-site stream collapse plus `input_layernorm` (exactly what the
+  fork's `DeepseekV4Attention.forward(positions, x)` consumes); `post(attn_out[T, H], residual[T, hc·H]) → (mixed[T,
+  hc·H], xn[T, H], mix[T, hc])` recomputes the attention-site collapse weights from the carrier (one small GEMM, so
+  only the carrier crosses the seam), mixes the attention output onto the streams, runs the feed-forward collapse and
+  `post_attention_layernorm`, places the shared expert on the streams, and returns the feed-forward per-stream `post`
+  weights. The routed combine runs in torch as before and lands through `place_routed_streams(mixed, routed, mix)`
+  (`mixed + mix ⊗ routed`). Both halves call the block's own `DeepseekV4HyperConnection` modules on a `[1, T, hc, H]`
+  view, so the sigmoid / Sinkhorn / float32 contract is the installed modeling code's. `build_attention_split_wrapper`
+  rejects these blocks (no dense DeepSeek V4 layer exists), and the seam has no coded-trunk or float32-residual form
+  (`tests/serving/test_deepseek_v4_split.py` proves the carve against the eager layer for sliding, HCA and CSA
+  layers with both hash and top-k routers).
 
-  Checkpoint keys are translated to the twin's own parameter names before any of that
-  (`_checkpoint_key_renamer`). They are not always the same names: a vision-language release stores its text
-  decoder one module deeper than a text-only twin has it — Qwen3.5 puts every decoder weight under
-  `model.language_model.layers.N.*`, of which a text-only twin matched one name in 851. Nothing raises when they
-  disagree; the load is `strict=False, assign=True`, so unmatched parameters keep their meta tensors and the twin
-  comes back looking complete. Transformers registers that translation per model type and applies it inside
-  `from_pretrained`, a path this loader does not take, so the loader reads the same conversion mapping
-  (`get_model_conversion_mapping`) and applies it with upstream's own `rename_source_key`, rather than
-  hand-writing one family's rule. RENAMINGS only: the mapping also carries converters, which combine or divide the
-  tensors themselves (stacking a per-expert stack, concatenating a hybrid model's three separate q/k/v convolution
-  weights into one), work this loader does not do — so a converter's key still goes unmatched, though its spelling
-  may now differ. Pre-existing loads are unchanged not because unmapped families exist but because the mappings
-  they do carry — four legacy `LayerNorm.gamma`/`weight_g` renames attach to every model — match no modern
-  checkpoint key. An EXL3 checkpoint takes the same split at the trellis format's own shapes
-  (`fmt == "exl3"`). Laguna EXL3 additionally stores routed up projections with the architecture's
-  `interm_div=128` scale; the loader folds the inverse and the model's base routed scale into selected routing
-  weights and marks their combine for fp32 accumulation, matching the reference runtime without scaling expert
-  partials in fp16. The architecture's residual stream is fp32 from embedding through every decoder block. Norms,
-  q/k/v, attention output, and gate/up intermediates stay fp16; the marked trace promotes exactly the
-  checkpoint-provenanced attention `o_proj`, dense and routed `down_proj`, and the shared-expert activation/down
-  cone to fp32 before trellis spelling. Operands remain compressed. The final norm returns fp16 for the head. The
-  precision marker is limited to Laguna EXL3; ordinary and other EXL3 graphs keep their existing dtypes. Its
-  explicit reference API may decode trunk values, while serving passes `compress_trunk=True`: the twin parameters
+- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
+  quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
+  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
+  attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
+  program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
+  blocks with uint8 E8M0 scales; biases stay in the requested value dtype. An NVFP4 dense-trunk weight streams as
+  values: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on read and consumes the
+  scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane has no packed-trio
+  decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
+  rank-locally, so a rank never reads bytes it does not own.
+
+  Checkpoint keys are translated to the twin's own parameter names before any of that, by two composed translations.
+  Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
+  its meta tensor and the twin comes back looking complete.
+
+  The FAMILY translation (`_checkpoint_key_renamer`) places a key where THIS twin holds its parameters. A
+  vision-language release stores its text decoder one module deeper than a text-only twin has it — Qwen3.5 puts every
+  decoder weight under `model.language_model.layers.N.*`, of which a text-only twin matched one name in 851.
+  Transformers registers that translation per model type and applies it inside `from_pretrained`, a path this loader
+  does not take, so the loader reads the same conversion mapping (`get_model_conversion_mapping`) and applies it with
+  upstream's own `rename_source_key`, rather than hand-writing one family's rule. Pre-existing loads are unchanged not
+  because unmapped families exist but because the mappings they do carry — four legacy `LayerNorm.gamma`/`weight_g`
+  renames attach to every model — match no modern checkpoint key.
+
+  The NATIVE translation runs first, since the family one matches on module-namespace names. A checkpoint published in
+  its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming Transformers itself
+  publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second copy that can drift
+  from the modeling code the twin is built from. Only its `WeightRenaming` entries apply: the accompanying
+  `WeightConverter` entries merge routed experts into one dense parameter, which is exactly what a serving load must not
+  do — the same RENAMINGS-only restriction both translations take, so a converter's key still goes unmatched even when
+  its spelling now differs. DeepSeek V4 is the architecture that needs this today — `layers.N.attn.wq_a`,
+  `layers.N.ffn.experts.E.w1`, `hc_attn_fn`, `embed`/`head`, and `.scale` for every block-scale sibling. Two rules
+  finish it: routed `w1`/`w3`/`w2` take their gate/up/down module names, and a `.scale` leaf becomes the `weight_scale`
+  sibling ONLY when the module's `.weight` is also present — the hyper-connection blocks carry a LEARNED `hc_attn_scale`
+  parameter whose name ends the same way, and renaming it leaves the twin's stream mixing on meta. Sibling lookups
+  therefore run in the module namespace, or a natively spelled block scale never pairs and every fp8 trunk weight loads
+  unscaled. That checkpoint also declares an fp8 trunk while storing routed experts as native MXFP4 (`expert_dtype:
+  fp4`, `I8 [out, in/2]` nibble pairs beside `F8_E8M0 [out, in/32]` exponents), which the loader views — never casts —
+  onto the uint8 blocks/scales carrier the expert programs bind.
+
+  A multi-token-prediction head is never owned by this loader: no twin instantiates it, and on DeepSeek V4 its 256
+  routed experts are 4,608 of the checkpoint's tensors, read in full on every rank only to be discarded. An EXL3
+  checkpoint takes the same split at the trellis format's own shapes (`fmt == "exl3"`). Laguna EXL3 additionally
+  stores routed up projections with the architecture's `interm_div=128` scale; the loader folds the inverse and the
+  model's base routed scale into selected routing weights and marks their combine for fp32 accumulation, matching the
+  reference runtime without scaling expert partials in fp16. The architecture's residual stream is fp32 from embedding
+  through every decoder block. Norms, q/k/v, attention output, and gate/up intermediates stay fp16; the marked trace
+  promotes exactly the checkpoint-provenanced attention `o_proj`, dense and routed `down_proj`, and the shared-expert
+  activation/down cone to fp32 before trellis spelling. Operands remain compressed. The final norm returns fp16 for
+  the head. The precision marker is limited to Laguna EXL3; ordinary and other EXL3 graphs keep their existing dtypes.
+  Its explicit reference API may decode trunk values, while serving passes `compress_trunk=True`: the twin parameters
   stay uninitialized placeholders and the caller re-sources each coded linear from the checkpoint
-  (`serving/gen_runner.py`). There is no automatic dense serving fallback; an unsupported coded linear fails
-  during birth-time spelling. Either way every routed expert keeps its PACKED CODES. EXL3 stores experts as
-  per-expert MODULES, so `_expert_slot` reports an expert index and `_stack_exl3_experts` stacks each
-  `(layer, projection, leaf)` triple into one E-leading tensor, putting `suh` in its 128-blocked form and
-  trimming `svh` to the logical out extent — the shapes `spell_trellis_inputs` declares, so a launch's
-  per-expert slice needs no reshape. DeepSeek-lineage FP8 checkpoints use the same per-expert module layout for
-  ordinary 2-D weights and block scales; `_stack_expert_modules` preserves FP8 bits on the uint8 carrier, stacks scales
-  as float32, concatenates gate and up along the output axis, and leaves down weights in checkpoint orientation. Ignored
-  dense layers take the same path without scales. The store also carries
-  `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
-  `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
-  whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
-  whole-dict eager/accuracy twin for models small enough to hold (fp8, NVFP4, and EXL3 checkpoints alike); on the way in
-  it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
-  round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
-  the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
+  (`serving/gen_runner.py`). There is no automatic dense serving fallback; an unsupported coded linear fails during
+  birth-time spelling. Either way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert
+  MODULES, so `_expert_slot` reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)`
+  triple into one E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent
+  — the shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. DeepSeek-lineage FP8
+  checkpoints use the same per-expert module layout for ordinary 2-D weights and block scales; `_stack_expert_modules`
+  preserves FP8 bits on the uint8 carrier, stacks scales as float32, concatenates gate and up along the output axis,
+  and leaves down weights in checkpoint orientation. Ignored dense layers take the same path without scales. The store
+  also carries `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus
+  `dir` and `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the whole dict at
+  once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the whole-dict
+  eager/accuracy twin for models small enough to hold (FP8, NVFP4, native MXFP4, and EXL3 checkpoints alike). A
+  selected-layer native-MXFP4 eager twin instead decodes and attaches only its shard-streamed expert store, preserving
+  the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode padding back to
+  the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode time) and packs
+  per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`, the DeepSeek/GLM lineage) into the v5 3-D
+  expert params (`_pack_expert_state`).
 
   Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
   asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call

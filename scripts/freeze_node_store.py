@@ -16,7 +16,7 @@ same DB twice yields the same digests.
     ./venv/bin/python scripts/freeze_node_store.py --note "three-slice sweep, 4090+5090"
 
 The source DB is never modified. Evals accept the freeze wherever they accept the DB:
-``emmy eval online --dataset nodes --db <freeze-dir>``.
+``emmy eval prior --dataset nodes --db <freeze-dir>``.
 """
 
 from __future__ import annotations

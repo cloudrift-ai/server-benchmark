@@ -12,6 +12,8 @@ import logging
 import statistics
 
 from emmy import config
+from emmy.compiler.backend.cuda.program import compile_budget_overrun
+from emmy.compiler.context import split_opt_level
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.kernel.ir import KernelOp
@@ -33,7 +35,7 @@ async def rebench_o3_async(cand, backend):
     median latency in µs, or ``None`` when the sweep is already at -O3 or the bench
     errors (best-effort — a re-bench hiccup must never abort the sweep). The winner
     already benched OK at -O1, so the only added cost is one -O3 compile (cubin-cached)."""
-    if "-O3" in config.nvcc_flags():
+    if split_opt_level(config.nvcc_flags())[0] == 3:  # already deployable, however it is spelled
         return None
     try:
         result = await backend.benchmark_async(cand.graph, nvcc_flags=O3_NVCC_FLAGS)
@@ -250,6 +252,18 @@ class TerminalBench:
         return "bench", None
 
     def finalize_exc(self, exc):
+        if compile_budget_overrun(exc):
+            # Nothing was measured, so nothing is recorded (see ``CompileBudgetExceeded``). The
+            # status stays in memory: ``_collect_node_records`` emits fail rows for ``bench_fail``
+            # exactly, so this writes no node row either. Loud, because a whole tile family
+            # overrunning the budget is a finding, not noise.
+            logger.warning(
+                "[tune] COMPILE BUDGET EXCEEDED for %d kernel(s) (%s) — nothing recorded; "
+                "raise bench_compile_timeout_s if this repeats on a whole tile family",
+                len(self.cuda_nodes),
+                exc,
+            )
+            return self._point_stats(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
         logger.warning(
             "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d kernel(s)",
@@ -309,7 +323,7 @@ async def bench_terminal_async(cand, *, backend, db):
     if kind == "done":
         return *payload, False, b.per_kernel
     try:
-        result = await backend.benchmark_async(b.graph, num_iters="auto")
+        result = await backend.benchmark_async(b.graph, warmup=1, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
         return *b.finalize_exc(exc), True, b.per_kernel
     return *b.finalize_result(result), True, b.per_kernel

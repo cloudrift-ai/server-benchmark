@@ -9,11 +9,12 @@ would mean the fitter optimizing something other than what deploys. :meth:`Linea
 door onto the matrix shape rather than a third shape: it takes a whole candidate pool and decides, once and here,
 which columns this model class wants out of it.
 
-The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features``,
-``mean_scores_features`` and ``explain_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this
-module's own vocabulary, not ``Prior``'s). That is deliberate: ``FallbackPrior`` and the attribution
-diagnostics already compose priors on exactly those, so a holder can delegate to any model through them without a
-second vocabulary. :mod:`.catboost_model` is the other model class answering the same surface.
+The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
+``mean_scores_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this module's own vocabulary, not
+``Prior``'s). That is deliberate: ``FallbackPrior`` composes priors on exactly those, so a holder can delegate to
+any model through them without a second vocabulary. :mod:`.catboost_model` is the other model class answering the
+same surface. ``explain_features`` is NOT part of it — it is this model's internal per-term breakdown, and
+:meth:`LinearModel.quality` is its only caller.
 :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
 quantity a derivative-free descent walks, which a tree model has no additive equivalent of (its matrix entry
 point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
@@ -142,9 +143,6 @@ class LinearModel:
     # exp() argument scale — keeps the deployed proxy in a finite, sane range. Rank-neutral (a monotone
     # transform of the quality), so it is carried between fits rather than fitted.
     scale: float
-    # Deleting a feature from a row removes its term exactly, so the ablation diagnostics need no caveat here.
-    # The tree model's twin is False.
-    masking_exact = True
     # The atomic-free interaction's fitted pair (see :func:`atomic_free_term`). Both ARE fitted — they are the
     # one term the fit cannot express as a linear weight, so ``emmy fit`` searches them as descent coordinates
     # alongside the weights. A constant the fit cannot see is a constant the fit optimizes around.

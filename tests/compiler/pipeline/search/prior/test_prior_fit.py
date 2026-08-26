@@ -7,7 +7,7 @@ guarantees the extraction from the original fit script must keep:
 2. The fit-time rank evaluation and the deployed :class:`OfflinePrior` scoring
    order candidates identically for the shipped incumbent weights — including the
    atomic-free interaction, which both sides now read through one shared definition.
-   That is the invariant that makes fit-time golden ranks transfer to ``eval offline``
+   That is the invariant that makes fit-time golden ranks transfer to ``eval prior``
    and greedy-deploy ranks.
 """
 
@@ -113,7 +113,7 @@ def test_one_trainer_instance_refits_identically():
     # and says so in the provenance line the artifact records.
     static_only = trainer.fit([c for c in cases if not c.dynamic])
     assert static_only.model.weights_dynamic is None and static_only.dyn_ranks is None
-    assert "no dynamic cases" in static_only.notes and "dynamic top1" in first.notes
+    assert "no dynamic groups" in static_only.notes and "dynamic top1" in first.notes
 
 
 def test_fitting_one_slice_does_not_perturb_the_next():

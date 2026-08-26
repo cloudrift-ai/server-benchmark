@@ -383,6 +383,22 @@ dependencies, stages the distribution tree, and builds both artifacts used by th
 recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
 links to absolute GitHub URLs, which the workflow runs because PyPI renders the README detached from the repo.
 
+## Related Projects
+
+These repositories provide the platform, serving runtimes, and deployment services that Emmy integrates with. The
+CloudRift repositories are typically checked out beside Emmy, so use `../<repository-name>` for local code inspection
+when that sibling exists, and verify the remote source when current compatibility matters. Some are internal and
+require CloudRift organization access.
+
+| Project | Relationship to Emmy |
+| --- | --- |
+| [CloudRift](https://github.com/cloudrift-ai/cloudrift) | GPU cloud platform and API/protocol implementation behind Emmy's CloudRift provisioning and deployments. |
+| [1Cat-vLLM](https://github.com/cloudrift-ai/1Cat-vLLM) | Volta/SM70 vLLM fork and source for `docker/1cat-vllm-sm70`; consult it when stock vLLM lacks target-GPU support. |
+| [Rift Provisioning](https://github.com/cloudrift-ai/rift-provisioning) | Ansible automation for CloudRift provider nodes and the CI and agent runner hosts used by Emmy workflows. |
+| [Rift Relay](https://github.com/cloudrift-ai/rift-relay) | OpenAI-compatible inference proxy and model-offering service that consumes Emmy recipes and invokes Emmy deployments. |
+| [vLLM](https://github.com/vllm-project/vllm) | Primary serving engine upstream and authoritative model-support, release, and image source. |
+| [SGLang](https://github.com/sgl-project/sglang) | Alternative serving engine upstream and model-support source. |
+
 ## Project Structure
 
 - [AGENTS.md](AGENTS.md) — shared coding-agent instructions; [CLAUDE.md](CLAUDE.md) imports the same guidance for

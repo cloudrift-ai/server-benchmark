@@ -646,6 +646,11 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     import torch
     import torch.nn as nn
 
+    if hyper_connection_seam(block) is not None:
+        raise NotImplementedError(
+            "build_attention_split_wrapper: a hyper-connection block (DeepSeek V4) carries hc_mult residual streams and a "
+            "self-contained attention sublayer; it takes the attention-sublayer seam of build_moe_split_wrapper"
+        )
     pre = _build_pre_wrapper(block, float32_residual=float32_residual)  # carries PLE / clip_qkv rejects before attribute reads
     attn = block.self_attn
 
@@ -910,6 +915,41 @@ def deinterleave_gate_up(t):
     return torch.cat([t[..., 0::2], t[..., 1::2]], dim=-1).contiguous()
 
 
+def _interleave_gate_up(t):
+    """Invert :func:`deinterleave_gate_up` for an eager gpt-oss architecture twin."""
+    import torch  # noqa: PLC0415
+
+    if t.shape[-1] % 2:
+        raise ValueError(f"gate/up output dimension must be even, got {tuple(t.shape)}")
+    half = t.shape[-1] // 2
+    return torch.stack((t[..., :half], t[..., half:]), dim=-1).flatten(-2).contiguous()
+
+
+def _materialize_mxfp4_expert_store(model, layers_store: dict[int, dict], dtype) -> None:
+    """Decode a shard-streamed MXFP4 store into the selected eager-reference layers."""
+    import torch  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import decode_mxfp4  # noqa: PLC0415
+
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    for layer, store in layers_store.items():
+        experts = trunk.layers[layer].mlp.experts
+        values = {
+            "gate_up_proj": _interleave_gate_up(
+                torch.from_numpy(decode_mxfp4(store["w_gate_up"].numpy(), store["w_gate_up_scale"].numpy())).to(dtype)
+            ),
+            "down_proj": torch.from_numpy(decode_mxfp4(store["w_down"].numpy(), store["w_down_scale"].numpy())).to(
+                dtype=dtype, memory_format=torch.contiguous_format
+            ),
+        }
+        if "b_gate_up" in store:
+            values["gate_up_proj_bias"] = _interleave_gate_up(store["b_gate_up"]).to(dtype)
+        if "b_down" in store:
+            values["down_proj_bias"] = store["b_down"].to(dtype)
+        experts.load_state_dict(values, strict=True, assign=True)
+
+
 def retarget_constants_to_model(graph, wrapper, model) -> None:
     """Re-address wrapper-relative trace *parameters* to their full model paths.
 
@@ -940,6 +980,87 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
             op.source_path = key_map[op.source_path]
         if op.source_parts:
             op.source_parts = tuple((key_map.get(path, path), shape) for path, shape in op.source_parts)
+
+
+def hyper_connection_seam(block):
+    """``(carrier_width, attn_out_width)`` of a hyper-connection decoder block, or ``None``.
+
+    DeepSeek V4 keeps ``hc_mult`` parallel residual streams per token (mHC); the serving carrier is
+    that stack flattened to ``[num_tokens, hc_mult * hidden]``, and the attention seam carries the whole
+    attention sublayer's ``[num_tokens, hidden]`` output rather than q/k/v (the 1Cat fork's paged MLA
+    attention owns the projections, compressors, indexer and output projection)."""
+    attn_hc = getattr(block, "attn_hc", None)
+    if attn_hc is None:
+        return None
+    hidden = int(block.input_layernorm.weight.shape[0])
+    return int(attn_hc.hc_mult) * hidden, hidden
+
+
+def place_routed_streams(mixed, routed, mix):
+    """Close the hyper-connection MoE seam: ``mixed[T, hc·H] + mix[T, hc] ⊗ routed[T, H]``.
+
+    The post program already placed the shared expert and mixed the streams (``post ⊗ shared +
+    combᵀ · streams``); the routed combine runs in torch afterwards and lands on the streams through the
+    same per-stream ``post`` weights, which the program returns as ``mix``."""
+    t = routed.shape[0]
+    return mixed + (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1)
+
+
+def _build_hyper_connection_split(block):
+    """``(pre, post)`` of one DeepSeek V4 layer over the flattened stream carrier.
+
+    - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site stream collapse and ``input_layernorm``:
+      exactly what the fork's ``DeepseekV4Attention.forward(positions, x)`` consumes.
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` —
+      attention-site stream mixing (the collapse weights are recomputed from ``residual``, one small
+      GEMM, so nothing but the carrier crosses the seam), feed-forward collapse + ``post_attention_layernorm``,
+      the always-on shared expert placed on the streams, and the feed-forward ``post`` weights for the
+      routed combine (:func:`place_routed_streams`).
+
+    Both mirror ``DeepseekV4DecoderLayer.forward`` by calling the block's own hyper-connection modules on a
+    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's."""
+    import torch
+    import torch.nn as nn
+
+    hc = int(block.attn_hc.hc_mult)
+    hidden_size = int(block.input_layernorm.weight.shape[0])
+    shared_experts = block.mlp.shared_experts
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hc = block.attn_hc
+            self.input_layernorm = block.input_layernorm
+
+        def forward(self, hidden):  # ``hidden`` is the seam's arg name (the symbolic num_tokens spec keys on it)
+            t = hidden.shape[0]
+            _post, _comb, collapsed = self.attn_hc(hidden.view(1, t, hc, hidden_size))
+            return self.input_layernorm(collapsed).view(t, hidden_size)
+
+    class Post(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hc = block.attn_hc
+            self.ffn_hc = block.ffn_hc
+            self.post_attention_layernorm = block.post_attention_layernorm
+            self.shared_experts = shared_experts
+
+        def forward(self, attn_out, residual):
+            t = attn_out.shape[0]
+            dtype = residual.dtype
+            streams = residual.view(1, t, hc, hidden_size)
+            post, comb, _ = self.attn_hc(streams)
+            streams = post.to(dtype).unsqueeze(-1) * attn_out.view(1, t, 1, hidden_size) + torch.matmul(
+                comb.to(dtype).transpose(-1, -2), streams
+            )
+            post, comb, collapsed = self.ffn_hc(streams)
+            xn = self.post_attention_layernorm(collapsed)
+            mixed = post.to(dtype).unsqueeze(-1) * self.shared_experts(xn).unsqueeze(-2) + torch.matmul(
+                comb.to(dtype).transpose(-1, -2), streams
+            )
+            return mixed.view(t, hc * hidden_size), xn.view(t, hidden_size), post.to(dtype).view(t, hc)
+
+    return Pre(), Post()
 
 
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
@@ -998,7 +1119,10 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     expert_scaling_factor = 1.0 if routed_scale_folded else routed_scaling_factor
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
-    pre = _build_pre_wrapper(block, float32_residual=float32_residual)
+    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
+    if hyper is not None and (float32_residual or split_gate_up):
+        raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
+    pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
     attn = block.self_attn
 
     class PostAttn(nn.Module):
@@ -1081,15 +1205,23 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 return (((up + 1) * glu) @ w_down + b_down) * expert_scaling_factor
 
     elif not transposed and not has_bias and act_fn is not None:
+        # DeepSeek V4 clamps both SwiGLU branches before the activation (``swiglu_limit``); OLMoE has no limit.
+        limit = getattr(experts, "limit", None)
+        limit = None if limit is None else float(limit)
+        if limit is not None and not limit > 0:
+            raise ValueError(f"build_moe_split_wrapper: expert clamp limit must be positive, got {limit!r}")
 
         class ExpertFFN(nn.Module):
-            # OLMoE: (out, in) weights applied via F.linear; plain gated activation.
+            # OLMoE / DeepSeek: (out, in) weights applied via F.linear; gated activation, optionally clamped.
             def __init__(self) -> None:
                 super().__init__()
                 self.act_fn = act_fn
 
             def forward(self, x, w_gate_up, w_down):
                 gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
                 return nn.functional.linear(self.act_fn(gate) * up, w_down) * expert_scaling_factor
 
     else:
@@ -1099,7 +1231,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
         )
 
-    return pre, PostAttn(), ExpertFFN()
+    return pre, hyper[1] if hyper is not None else PostAttn(), ExpertFFN()
 
 
 def promote_shared_expert_float32(graph) -> None:
@@ -1291,14 +1423,18 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, NVFP4 packed trios, AWQ GEMM int4, or EXL3 trellis-coded siblings)."""
-    from emmy.compiler.loader.quant import _awq_quant_config, _exl3_quant_config, _fp4_quant_config, _fp8_quant_config  # noqa: PLC0415
+    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, AWQ GEMM int4, or EXL3 siblings)."""
+    from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        _awq_quant_config,
+        _exl3_quant_config,
+        _fp4_quant_config,
+        _fp8_quant_config,
+        _mxfp4_quant_config,
+    )
 
-    return (
-        _fp8_quant_config(p) is not None
-        or _fp4_quant_config(p) is not None
-        or _awq_quant_config(p) is not None
-        or _exl3_quant_config(p) is not None
+    return any(
+        config(p) is not None
+        for config in (_fp8_quant_config, _fp4_quant_config, _mxfp4_quant_config, _awq_quant_config, _exl3_quant_config)
     )
 
 
@@ -1346,8 +1482,12 @@ def quantized_checkpoint_dir(model_id_or_path: str, revision: str | None = None)
 _EXPERT_LEAVES = {
     "gate_up_proj": "w_gate_up",
     "down_proj": "w_down",
+    "gate_up_proj_blocks": "w_gate_up",
+    "down_proj_blocks": "w_down",
     "gate_up_proj_scale": "w_gate_up_scale",
     "down_proj_scale": "w_down_scale",
+    "gate_up_proj_scales": "w_gate_up_scale",
+    "down_proj_scales": "w_down_scale",
     "gate_up_proj_bias": "b_gate_up",
     "down_proj_bias": "b_down",
 }
@@ -1481,18 +1621,62 @@ def _stack_expert_modules(layer: int, by_name: dict, model) -> dict:  # noqa: AR
     return out
 
 
-def _checkpoint_to_model_key(key: str, rename=None) -> str:
-    """Translate a checkpoint tensor name to the twin's own parameter name.
+def _native_checkpoint_renamer(config, keys=()):
+    """The checkpoint→module key translation for an architecture published in its own namespace.
 
-    Two translations compose. ``rename`` is the model-family one Transformers itself would apply
-    (:func:`_checkpoint_key_renamer`); the two literal substitutions below are original Laguna
-    checkpoint names. Transformers registers those two as well, so on a Laguna twin they are now
-    redundant — they stay because this function is also reached with no model-derived renamer at
-    all, and dropping them is a separate change that wants a Laguna checkpoint to verify.
+    DeepSeek V4 ships the flat V3-style spelling no module ever sees: ``layers.N.attn.wq_a``,
+    ``layers.N.attn_norm``, ``layers.N.ffn.experts.E.w1``, ``hc_attn_fn``, ``embed`` / ``head``, and
+    ``.scale`` for every fp8 block-scale sibling. Transformers publishes that renaming itself
+    (:func:`transformers.conversion_mapping.get_checkpoint_conversion_mapping`), so reuse it rather
+    than keeping a second copy that can drift from the modeling code the twin is built from. Only its
+    ``WeightRenaming`` entries apply here: the accompanying ``WeightConverter`` entries MERGE the
+    routed experts into one dense stacked parameter, which is exactly what the serving load must not
+    do — the experts stay compressed and per-expert until :func:`_stack_expert_modules`.
+
+    Two normalizations finish the job, both keeping downstream name maps untouched: the routed
+    ``w1``/``w3``/``w2`` projections take their ``gate``/``up``/``down`` module names (the same
+    convention Transformers applies to this checkpoint's SHARED expert), and a quantization block
+    scale becomes the ``weight_scale`` sibling spelling the fp8 pairing and :data:`_PER_EXPERT_LEAF`
+    already read. A ``.scale`` leaf earns that second rule ONLY when the checkpoint also holds the
+    module's ``.weight``: the hyper-connection blocks carry a LEARNED ``hc_attn_scale`` parameter
+    whose name ends the same way, and renaming it would leave the twin's ``attn_hc.scale`` on meta.
+
+    Returns identity for every other architecture: a checkpoint already in module naming must not be
+    put through a rename chain.
     """
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return lambda key: key
+    present = set(keys)  # hoisted: this checkpoint has 72k keys, and rebuilding the set per key is quadratic
+    block_scales = {key for key in present if key.endswith(".scale") and key[: -len(".scale")] + ".weight" in present}
+    from transformers.conversion_mapping import WeightRenaming, get_checkpoint_conversion_mapping  # noqa: PLC0415
+
+    renames = [entry for entry in get_checkpoint_conversion_mapping("deepseek_v4") or [] if isinstance(entry, WeightRenaming)]
+    if not renames:
+        raise ValueError("transformers publishes no deepseek_v4 checkpoint renaming; cannot translate the native checkpoint")
+    routed = re.compile(r"(\.experts\.\d+\.)w([123])\.")
+    projections = {"1": "gate_proj.", "2": "down_proj.", "3": "up_proj."}
+
+    def rename(key: str) -> str:
+        quantization_scale = key in block_scales
+        for entry in renames:
+            renamed = entry.rename_source_key(key)
+            key = renamed[0] if isinstance(renamed, tuple) else renamed
+        key = routed.sub(lambda m: m.group(1) + projections[m.group(2)], key)
+        if quantization_scale:
+            key = key[: -len(".scale")] + ".weight_scale"
+        # Transformers renames into the BARE base-model namespace and re-attaches the prefix at load
+        # time; this loader assigns straight onto a head model, so carry it here. ``lm_head`` is the
+        # one leaf that lives outside the trunk.
+        return key if key.startswith("lm_head.") else "model." + key
+
+    return rename
+
+
+def _checkpoint_to_model_key(key: str) -> str:
+    """Translate original Laguna checkpoint names to built-in Transformers names."""
     key = key.replace(".mlp.shared_expert.", ".mlp.shared_experts.")
     key = key.replace(".mlp.experts.e_score_correction_bias", ".mlp.gate.e_score_correction_bias")
-    return key if rename is None else rename(key)
+    return key
 
 
 def _checkpoint_key_renamer(model, *, reverse: bool = False):
@@ -1602,7 +1786,14 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
     this loader when PP is active: ``EmmyGenModel`` owns and decodes it on the last stage. Unknown
     model-level leaves stay replicated; they are small architecture state and some model families
     require them while tracing a local layer.
+
+    A multi-token-prediction head is never owned. It is a separate speculative-decoding model that no
+    twin instantiates, and on DeepSeek V4 it is not small: its 256 routed experts are 4,608 of the
+    checkpoint's tensors, which this loader would otherwise read in full on every rank only to
+    discard them as unexpected state.
     """
+    if key.startswith("mtp.") or ".mtp." in key:
+        return False
     if layer_range is None:
         return True
     if ".layers." in key:
@@ -1625,11 +1816,12 @@ def load_quantized_split(
     layer_range=None,
     include_embed=True,
     include_norm=True,
+    expert_range=None,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
-    The serving load path for a quantized checkpoint whose experts must stay fp8 (gpt-oss
-    and the DeepSeek / Laguna per-expert-module lineage):
+    The serving load path for a quantized checkpoint whose experts must stay compressed
+    (native MXFP4 gpt-oss, or the FP8 DeepSeek / Laguna per-expert-module lineage):
     never materializes the whole dequantized dict (a 20B checkpoint dequantizes to ~42 GB of
     host values — the whole-dict ``load_dequantized_state_dict`` OOMs a 60 GB box). Instead:
 
@@ -1640,10 +1832,11 @@ def load_quantized_split(
       casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
       expert params are skipped — they stay meta on the twin.
     - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
-      INPUT names: fp8 weights as RAW BITS on the uint8 carrier plus their f32 scale
-      tensors (the runner spells the dequant in-graph via ``spell_quantized_inputs`` and
-      uploads 1-byte weights — the whole point of the fp8 checkpoint), biases (and any
-      unquantized expert weights) as ``dtype`` value tensors. Per-expert checkpoint modules
+      INPUT names: FP8 weights as raw bits plus their f32 scale tensors, or MXFP4 blocks
+      plus their uint8 E8M0 scales (the runner spells reconstruction in-graph and uploads
+      one-byte storage instead of dense weights); biases remain ``dtype`` value tensors.
+      Native MXFP4 serving requires every routed-expert layer to use that storage; a config
+      that skips any routed experts is rejected instead of mixing formats in one store. Per-expert checkpoint modules
       stack into the same E-leading inputs, concatenating gate and up along the output axis.
       An interleaved gate/up layout de-interleaves here — bits, scale and bias alike
       (:func:`deinterleave_gate_up`).
@@ -1671,7 +1864,7 @@ def load_quantized_split(
     decoder interval. ``include_embed`` and ``include_norm`` assign the two boundary tensors;
     all unowned parameters remain meta and must never be read by that stage.
 
-    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "f8e4m3" | "exl3" | None,
+    Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
     ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
     speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory) and
@@ -1691,6 +1884,7 @@ def load_quantized_split(
         _fp4_quant_config,
         _fp8_quant_config,
         _is_skipped,
+        _mxfp4_quant_config,
         _skip_patterns,
         dequantize,
         dequantize_awq4,
@@ -1705,18 +1899,32 @@ def load_quantized_split(
         delattr(config, "quantization_config")
     with torch.device("meta"):
         model = _auto_model_from_config(config)
-    # Checkpoint names are not the twin's parameter names for every family — a vision-language
-    # release stores its text decoder one module deeper than a text-only twin has it. Read the
-    # translation off the model rather than assuming identity (:func:`_checkpoint_key_renamer`).
-    rename = _checkpoint_key_renamer(model)
-
-    qc = _fp8_quant_config(model_dir) or {}
+    mxfp4_qc = _mxfp4_quant_config(model_dir)
+    # DeepSeek V4 declares an fp8 TRUNK while storing its routed experts as native MXFP4: the expert
+    # storage is named by ``expert_dtype``, not by ``quant_method``.
+    native_mxfp4_experts = str(getattr(config, "expert_dtype", "") or "") == "fp4"
+    qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc)
     qc4 = _fp4_quant_config(model_dir)
     patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
+    # Two independent checkpoint→module translations, and a checkpoint can need both. The native one
+    # undoes an architecture published in its own flat namespace (DeepSeek V4); it is the identity for
+    # every other architecture. The family one places the result where THIS twin holds its parameters —
+    # a vision-language release stores its text decoder one module deeper than a text-only twin has it,
+    # so read the depth off the model rather than assuming identity. Native first: the family renamer
+    # matches on module spelling, which is what the native one produces.
+    to_module = _native_checkpoint_renamer(config, index)
+    to_twin = _checkpoint_key_renamer(model) or (lambda key: key)
+
+    def rename(key: str) -> str:
+        return to_twin(to_module(key))
+
+    # The module-namespace view of the same index, so sibling lookups (block scales, coded leaves)
+    # can be spelled the way the modules name them whatever the checkpoint calls them.
+    renamed = {rename(key): key for key in index}
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
         by_shard.setdefault(str(shard), []).append(key)
@@ -1749,7 +1957,7 @@ def load_quantized_split(
                 key
                 for key in sorted(by_shard[shard_path])
                 if _quantized_stage_owns(
-                    _checkpoint_to_model_key(key, rename),
+                    _checkpoint_to_model_key(rename(key)),
                     layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
@@ -1764,7 +1972,7 @@ def load_quantized_split(
                     qzeros_key, scales_key = base + ".qzeros", base + ".scales"
                     if qzeros_key not in index or scales_key not in index:
                         raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
-                    model_key = _checkpoint_to_model_key(base + ".weight", rename)
+                    model_key = _checkpoint_to_model_key(rename(base + ".weight"))
                     if compress_trunk:
                         coded_trunk.add(model_key)
                     else:
@@ -1781,16 +1989,38 @@ def load_quantized_split(
                     base = k.rsplit(".", 1)[0]
                     if base + ".qweight" in index:
                         continue
-                slot = _expert_slot(k)
+                slot = _expert_slot(rename(k))
                 if slot is not None:
                     layer, name, expert = slot
+                    if expert is not None and expert_range is not None:
+                        if not expert_range[0] <= expert < expert_range[1]:
+                            continue  # another tensor-parallel rank owns this expert; never read its bytes
+                        # The store's expert axis is RANK-LOCAL: a shard stacks its own experts from
+                        # index 0, and the router maps global selections onto that axis at dispatch.
+                        expert -= expert_range[0]
                     t = f.get_tensor(k)
-                    if qc4 is not None and t.dtype == torch.uint8 and k + "_scale_2" in index:
+                    if native_mxfp4_experts:
+                        # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
+                        # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW
+                        # (never cast) and give the blocks the ``(out, groups, 16)`` shape the
+                        # decode contract declares.
+                        fmt = "mxfp4"
+                        t = t.view(torch.uint8)
+                        if not name.endswith("_scale"):
+                            t = t.reshape(t.shape[0], t.shape[1] // 16, 16)
+                    elif mxfp4_qc is not None and name in {"w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"}:
+                        if t.dtype != torch.uint8:
+                            raise ValueError(
+                                f"native MXFP4 serving does not support an unconverted routed expert: "
+                                f"tensor {k!r} must be uint8 blocks/scales, got {t.dtype}"
+                            )
+                        fmt = "mxfp4"
+                    elif qc4 is not None and t.dtype == torch.uint8 and k + "_scale_2" in index:
                         raise NotImplementedError(
                             f"NVFP4 expert weight {k!r}: the expert lane has no packed-trio decode yet; "
                             "casting the raw bytes would silently corrupt the values"
                         )
-                    if t.dtype in torch_f8:
+                    elif t.dtype in torch_f8:
                         fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
                         t = t.view(torch.uint8)
                     elif name.endswith("_scale"):
@@ -1814,13 +2044,18 @@ def load_quantized_split(
                         logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
                         continue
                     if compress_trunk:
-                        coded_trunk.add(_checkpoint_to_model_key(base + ".weight", rename))  # placeholder; real bytes stay coded
+                        coded_trunk.add(_checkpoint_to_model_key(rename(base + ".weight")))  # placeholder; real bytes stay coded
                         continue
                     w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
-                    state[_checkpoint_to_model_key(base + ".weight", rename)] = torch.from_numpy(w).to(dtype)
+                    state[_checkpoint_to_model_key(rename(base + ".weight"))] = torch.from_numpy(w).to(dtype)
                     continue
-                if k.endswith(("_scale", "_scale_inv", "_scale_2")) and k[: k.rfind("_scale")] in index:
+                # Sibling pairing runs in the MODULE namespace: a natively named checkpoint spells the
+                # block scale ``.scale``, which only becomes the ``<weight>_scale`` sibling the fp8
+                # dequant looks for after renaming. Matching raw keys here would leave every fp8 trunk
+                # weight silently unscaled.
+                mk = rename(k)
+                if mk.endswith(("_scale", "_scale_inv")) and mk[: mk.rfind("_scale")] in renamed:
                     continue  # consumed by its base weight's dequant
                 if qc4 is not None and k + "_scale" in index and k + "_scale_2" in index and not _is_skipped(k, patterns4):
                     t = f.get_tensor(k)
@@ -1842,14 +2077,15 @@ def load_quantized_split(
                     continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
-                    scale_key = next((c for c in (k + "_scale", k + "_scale_inv") if c in index), None)
+                    scale_key = next((c for c in (mk + "_scale", mk + "_scale_inv") if c in renamed), None)
                     if scale_key is not None and not _is_skipped(k, patterns):
+                        scale_key = renamed[scale_key]
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))
-                        state[_checkpoint_to_model_key(k, rename)] = torch.from_numpy(vals).to(dtype)
+                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                state[_checkpoint_to_model_key(k, rename)] = t.to(dtype) if t.is_floating_point() else t
+                state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
 
     # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB
@@ -1870,9 +2106,19 @@ def load_quantized_split(
             break
     if interleaved:
         for store in layers_store.values():
-            for name in ("w_gate_up", "w_gate_up_scale", "b_gate_up"):
-                if name in store:
-                    store[name] = deinterleave_gate_up(store[name])
+            if fmt == "mxfp4":
+                # Packed MXFP4 uses (E, out, groups[, 16]); its interleaved output
+                # axis is dim 1, unlike the logical/FP8 tensors whose output is last.
+                for name in ("w_gate_up", "w_gate_up_scale"):
+                    if name in store:
+                        t = store[name]
+                        store[name] = torch.cat([t[:, 0::2], t[:, 1::2]], dim=1).contiguous()
+                if "b_gate_up" in store:
+                    store["b_gate_up"] = deinterleave_gate_up(store["b_gate_up"])
+            else:
+                for name in ("w_gate_up", "w_gate_up_scale", "b_gate_up"):
+                    if name in store:
+                        store[name] = deinterleave_gate_up(store[name])
 
     if coded_trunk:
         # UNINITIALIZED placeholders, deliberately: the twin needs a real tensor at the declared
@@ -2034,8 +2280,8 @@ def load_quantized_twin(model_dir, dtype):
     is a property of the checkpoint, not the architecture; see the FP8 plan).
     So: build the plain architecture from config with ``quantization_config``
     stripped, then load the checkpoint's tensors with every quantized weight
-    decoded (``loader.quant.load_dequantized_state_dict`` — fp8 scale pairs
-    and EXL3 trellis siblings alike) — the returned module is both the trace
+    decoded (``loader.quant.load_dequantized_state_dict`` — FP8 scale pairs,
+    native MXFP4 blocks/scales, and EXL3 trellis siblings alike) — the returned module is both the trace
     subject and the eager / accuracy reference. Per-expert checkpoint weights
     pack into the v5 3-D expert params (:func:`_pack_expert_state`).
     ``strict=False`` tolerates non-persistent buffers absent from the
@@ -2165,13 +2411,15 @@ def load_quantized_layer_twin(model_dir, dtype, layer: int):
     split loader with one stage interval, then reconstruct decoder-level
     non-persistent rotary modules on CPU exactly as the architecture twin does.
     """
-    model, _store = load_quantized_split(
+    model, store = load_quantized_split(
         model_dir,
         dtype,
         layer_range=(layer, layer + 1),
         include_embed=False,
         include_norm=False,
     )
+    if store.get("fmt") == "mxfp4":
+        _materialize_mxfp4_expert_store(model, store["layers"], dtype)
     decoder = find_text_decoder(model)
     rotary_type = type(decoder.rotary_emb)
     decoder.rotary_emb = rotary_type(decoder.config)

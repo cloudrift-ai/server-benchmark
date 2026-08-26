@@ -1,9 +1,9 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
 Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Reverified 2026-08-21 on 16× V100 SXM3 at
-repository revision `fd7b09041`. Emmy serving remains ineligible: the DeepSeek V4 compressor and hyper-connection
-path has no executable external-attention serving ABI, so `EMMY_FAST_MATH` is not set and there is no Emmy
-comparison lane.
+repository revision `fd7b09041`. Emmy serving remains ineligible: the attention-sublayer seam is captured by the
+compiler, but the runner has no loader lane for the checkpoint's MXFP4 experts and no tensor-parallel expert sharding,
+so `EMMY_FAST_MATH` is not set and there is no Emmy comparison lane.
 
 ## Qualified deployment
 
@@ -67,12 +67,12 @@ What does not exist for this model is the other arm: vLLM **with** Emmy kernels.
 `emmy serve <model> --bench` against `emmy serve <model> --bench --stock`, and neither side of it can run here, for two
 independent reasons.
 
-**The Emmy side has no executable serving path for this architecture.** `emmy/serving/twins.py` routes DeepSeek V4 away
-from the serving twins to a config-only provider, because "its HCA/CSA compressors and hyper-connection residual
-streams do not fit the classic external-attention seam"; `emmy/serving/ARCHITECTURE.md` adds that they "cannot be
-represented by the classic `(q, k, v)` serving seam, so claiming split twins would omit deployed operations", and that
-executable split capture rejects DeepSeek's shared-`kv_proj` layout. That provider exists for the in-model golden
-audit, not for serving. Consistent with that, `docker/vllm-emmy-serve/models/` holds serving configs only for
+**The Emmy side has no executable serving path for this architecture.** The compiler seam exists —
+`emmy/serving/twins.py` captures DeepSeek V4 through the attention-sublayer seam (hyper-connection streams as the
+carrier, the 1Cat fork's paged MLA attention as the sublayer; see `emmy/serving/ARCHITECTURE.md`) — but the runner and
+plugin cannot serve it: the checkpoint's native naming with MXFP4 routed experts has no loader lane, the runner has no
+tensor-parallel expert sharding, and the `post` twin's lowering sits in the same Loop-splicer stall this report records
+below for fresh layer traces. Consistent with that, `docker/vllm-emmy-serve/models/` holds serving configs only for
 `gemma-4-12b`, and no `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` image exists. This is the same Emmy-eligibility
 gate recorded at the top of this report.
 

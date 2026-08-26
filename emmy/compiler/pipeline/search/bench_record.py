@@ -223,7 +223,7 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
                 op_sig=leaf.op_sig,
                 features=features,
                 value_us=leaf.value_us,
-                depth=0,  # no tree schema — the marker the fork diagnostics skip
+                depth=0,  # a bench leaf has no search tree above it
                 gpu=gpu,
                 visits=1,
                 is_leaf=True,

@@ -36,6 +36,7 @@ _CUDA_NAME: dict[DataType, str] = {
     _dtype.I16: "short",
     _dtype.I32: "int",
     _dtype.I64: "long long",
+    _dtype.U8: "unsigned char",
     _dtype.U16: "unsigned short",
     _dtype.U32: "unsigned int",
     _dtype.U64: "unsigned long long",
@@ -47,7 +48,19 @@ _CUDA_NAME: dict[DataType, str] = {
 # subsequent Load on the same smem buffer picks the right local C type.
 # Unknown C names (e.g. ``"unsigned long long"`` for mbarriers) map to
 # None and the caller treats the smem buffer as "not a tensor".
-_CANONICAL_FROM_CUDA_NAME: dict[str, str | None] = {v: k.name for k, v in _CUDA_NAME.items()}
+#
+# NOT a bijection: ``f4e2m1x2`` and ``u8`` are both one raw byte and both spell ``unsigned char``,
+# so the inverse has to choose. It chooses DELIBERATELY rather than by dict order, because the
+# order is invisible and the next byte-wide dtype would flip it silently. The consumer is a
+# kernel-level one — an ``unsigned char`` smem slab in this compiler is a packed byte slab, which
+# is what the byte-gather drains read back — while ``u8`` is a graph-level storage carrier that
+# reaches reconstruction algebra and never declares a slab. Both give the same C type and the same
+# width either way; what the choice decides is which canonical NAME downstream predicates see.
+_SHARED_CUDA_NAMES: dict[str, str] = {"unsigned char": _dtype.F4E2M1x2.name}
+_CANONICAL_FROM_CUDA_NAME: dict[str, str | None] = {
+    **{v: k.name for k, v in _CUDA_NAME.items()},
+    **_SHARED_CUDA_NAMES,
+}
 
 
 def canonical_from_cuda_name(name: str) -> str | None:
@@ -91,6 +104,7 @@ _C_NAME_BYTES: dict[str, int] = {
     "bf16": 2,
     "__nv_fp8_e4m3": _dtype.F8E4M3.nbytes,
     "__nv_fp8_e5m2": _dtype.F8E5M2.nbytes,
+    # One byte either way — ``f4e2m1x2`` (two packed 4-bit values) and ``u8`` share this spelling.
     "unsigned char": _dtype.F4E2M1x2.nbytes,
     "i16": 2,
     "i32": 4,

@@ -161,12 +161,6 @@ class OfflinePrior(Prior):
         return self._model
 
     @property
-    def masking_exact(self) -> bool:
-        """Whether deleting a feature from a row is exact term removal — the model's own answer (true for the
-        linear model, false for a tree), read by the ablation diagnostics to caveat their Δ."""
-        return self._model.masking_exact
-
-    @property
     def fitted(self) -> bool:
         return True
 
@@ -203,17 +197,19 @@ class OfflinePrior(Prior):
         return self._model.quality(feats)
 
     def mean_score_features(self, feats: dict) -> float:
-        """:meth:`mean_score` from an already-featurized row — the entry point the attribution diagnostics use
-        to mask individual features. A deleted key carries the model's own absent semantics: the linear model's
-        ``0.0`` no-opinion default (exact term removal), the tree's ``NaN`` missing bucket (a re-route, hence
-        :attr:`masking_exact`)."""
+        """:meth:`mean_score` from an already-featurized row — the entry point for a caller that featurized
+        once and wants to score without a knob dict to hand. An absent key carries the model's own semantics:
+        the linear model's ``0.0`` no-opinion default, the tree's ``NaN`` missing bucket."""
         return self._model.mean_score_features(feats)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
         """Batched :meth:`mean_score_features` — one scoring pass over the whole set."""
         return self._model.mean_scores_features(feats_list)
 
-    def explain_features(self, feats: dict) -> dict[str, float]:
-        """Per-term decomposition of the quality score, summing to it exactly — the linear model's per-weight
-        terms or the tree's TreeSHAP values. See each model's ``explain_features`` for its invariant."""
-        return self._model.explain_features(feats)
+    def score_rows(self, group):
+        """The whole packed pool's ranking quality — straight through to the model, which is the object that
+        knows its own columns. This adapter adds nothing here precisely because there is no knob dict to
+        featurize: the pool arrives already packed, which is the same form ``emmy fit`` trains and scores it
+        in, so a golden's rank under a fitted artifact and under this deployed prior are the same number by
+        construction rather than by two paths agreeing."""
+        return self._model.score_rows(group)

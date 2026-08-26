@@ -89,7 +89,7 @@ TREE_FEATURES = (
 DEFAULT_NEGATIVES = 500
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
 # golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
-# only measurement of it says it hurts: over the 1278-case golden dataset, round 1 moved top-1 from 545 to 517
+# only measurement of it says it hurts: over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517
 # and the mean log2 rank from 2.08 to 2.35, i.e. worse on the fit's own objective, scored over full pools.
 #
 # The likely reason is that our negatives are UNLABELED, not known-bad. Mining selects the rows the model ranks
@@ -226,7 +226,7 @@ class CatBoostFit:
 
     The linear fit's ``(static_ranks, dyn_ranks)`` pair has no counterpart — one model ranks every pool, so there
     is one rank list, and :meth:`score_rows` never returns ``None`` (the "this fold could not fit the weight set
-    your holdout needs" case cannot arise)."""
+    your holdout needs" group cannot arise)."""
 
     model: CatBoostModel
     ranks: list[int]

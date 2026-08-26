@@ -88,9 +88,10 @@ fork = build_fork_tree(list(space), levels=[WORK, *site keys, RASTER], materiali
 ```
 
 **The pool is a SPACE, not a list** (`lowering/tile/_pool.py`). A site offers BLOCKS — one rectangle per assignment
-of everything but `STAGE`, crossed with the stages legal for it — because legality never reads the transport:
-`_work_holds` and the row union see the resolved tiles and the cooperative width alone, so `STAGE` and the
-kernel-global `RASTER` multiply through the filter unconditionally. A row therefore stands for
+of everything but `STAGE`, crossed with the stages legal for it. Stage resolution and its resource checks first
+filter that stage axis; `_work_holds` and the row union then see only the resolved tiles and cooperative width, so
+the remaining `STAGE` values and kernel-global `RASTER` multiply through the row filter unconditionally. A row
+therefore stands for
 `width x len(rasters)` candidates rather than one, the validation runs once per legal `(TILE, REDUCE)` assignment
 (~10k instead of ~122k on a static f16 square matmul), and the exact candidate count is a prefix-sum lookup that
 builds nothing. `PoolSpace` reads that structure two ways — iterate every member, or address member *i* — through
@@ -146,8 +147,16 @@ Three layers own three different questions, and keeping them apart is what stops
   inner stride); the categorical ones (operand dtype, transport, a fragment-unrealizable gather epilogue) are plain
   predicates. The smem budget is enforced by the stage RESOLVERS there, which return the largest legal `Stage` or
   decline — a size, not a yes/no. These are also the recursion's downward filter.
+  A paired score + value contraction has one additional resource lower bound: the enclosing C fragments stay live
+  while the score block's `RegFragment` families are emitted; the enclosing A/B fragments begin afterwards. The
+  larger of that overlap and the ordinary enclosing A/B/C drain must fit both the 255-register thread limit and the
+  64K-register CTA file. This is not an occupancy or profitability heuristic: it counts the fragment arrays under
+  their stated lifetimes, before scalar state and address temporaries, and refuses only a row whose required state
+  cannot reside in the register-file envelope. Standalone contractions and smaller worker inventories remain
+  governed by their ordinary per-tile fragment bound.
 - **CHOICE** is the walk itself: which families a SITE offers and how a row becomes a `TileOp` — which values are
-  legal here, never which of them is better. Dispatch is TWO stored-param predicates on the node — `node.axis is None` (the register
+  legal here, never which of them is better. Dispatch is TWO stored-param predicates on the node —
+  `node.axis is None` (the register
   strip) and `is_contraction(node)` (tile × stage × reduce), else the reduce partition. **Not `AxisRole`**: the role
   never selected a fourth arm, `TWISTED` is derived by matching the combine's operation family (an operation match
   wearing an algebraic name), and `PLANAR` is the residue. The role stays a loop annotation and a materializer read.
@@ -343,9 +352,13 @@ decided by whichever match the enumeration hit first, and one order costs a 1-la
 `loop/prefusion` runs the same splice through the same `_merge.merge_region` with the same refusals, and
 differs from `loop/fusion` in one predicate: it takes only merges whose sink is no wider than the producer.
 Those can only shrink what gets written, so draining them first means every contraction has CLOSED before
-anything is offered a chance to splice into its open product. It **refuses nothing** — a widening merge is
-DEFERRED, and `loop/fusion` offers every one of them afterwards, where the existing refusals decide. That is
-why this is an ordering and not a gate: no legal form leaves the enumeration, so the doctrine above is intact.
+anything is offered a chance to splice into its open product. A same-width pure index-map chain ending at a
+graph output is deferred with the widening merges: dissolving that output-coordinate change first can hide a
+grouped placement inverse which becomes exact only after the producer closes. Ordinary fusion then preserves
+the existing inverse or merges the layout normally when none exists; the graph-output identity rule may also
+retarget the producer's `Write` when the layout is a flat-memory identity. `loop/prefusion` **refuses nothing** —
+every deferred merge is offered again by `loop/fusion`, where the existing refusals decide. This remains an
+ordering rather than a gate: no legal form leaves the enumeration, so the doctrine above is intact.
 
 It must be a PASS, not another rule inside `loop/fusion`. The cursor advances rule-by-rule within a pass and
 re-enumerates, so two rules' batches interleave — measured, the same predicate as a `009_` rule left the trunk

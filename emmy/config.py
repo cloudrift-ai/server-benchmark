@@ -33,6 +33,7 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
+FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
@@ -61,7 +62,9 @@ GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
+GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
@@ -168,6 +171,27 @@ def tune_db_path() -> Path:
     advisory — the engine only opens it when the file exists."""
     override = os.environ.get(TUNE_DB)
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
+
+
+def freeze_path() -> Path:
+    """The measurement freeze the prior is evaluated against: ``EMMY_FREEZE_DIR`` → the
+    repo-checked ``search/freezes/``.
+
+    A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
+    digest-pinned (``manifest.sha256``), stamped with the featurizer / knob / encoding versions
+    its rows are spelled in, and identical row-for-row on any machine that has it — so two
+    evaluations of two models are a fair comparison, and a number in a report is one someone
+    else can reproduce. The tune DB and the online prior's reservoir are neither: both are
+    machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
+    bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
+    score the same. They stay reachable through ``--db`` for looking at a specific machine's
+    data; they are not what a reported number should mean.
+
+    Advisory, like :func:`tune_db_path`: callers check it exists."""
+    override = os.environ.get(FREEZE_DIR)
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
 
 
 def golden_identity_cache_path() -> Path:
@@ -376,6 +400,26 @@ def gen_prefill_capacity(default: int = -1) -> int:
     return int_env(GEN_PREFILL_CAPACITY, default)
 
 
+def gen_chunk_capture(default: int = 1) -> int:
+    """``EMMY_GEN_CHUNK_CAPTURE`` — capture WHOLE chunk-prefill and mixed prefill+decode steps
+    as vLLM CUDA graphs (default 1 = ON). ``emmy serve --generate`` then asks for
+    ``cudagraph_mode: FULL`` instead of ``FULL_DECODE_ONLY``, extends the capture sizes with
+    token-count rungs spanning the prefill widths (the exact chunk width and the rider top
+    included), and selects the ``TRITON_ATTN`` attention backend — the one broadly-available
+    backend whose full-graph support covers mixed batches (FA2 declares uniform-batch support
+    only, and vLLM silently downgrades ``FULL`` back to ``FULL_DECODE_ONLY`` on such a
+    backend). Eager mixed steps were the measured c64 TPOT loss (~5 ms/step of host framing
+    plus ~170 MB/step of staging D2D on the 2026-08-12 5090 re-baseline) and the short-prompt
+    TTFT loss (the eager symbolic-prefill burst); with capture on, small_c1 TTFT closed from
+    1.36x to 1.09x of stock and greedy chat outputs stayed content-identical (2026-08-15 5090
+    validation). Set 0 to restore decode-only capture and vLLM's own attention-backend choice.
+    Off automatically under speculative decoding (the chunk rungs are not spec-adjusted).
+    Rungs above ``--max-model-len`` rely on the plugin's dummy-run seq-lens clamp
+    (``serving/vllm_patches.py``). See ``commands/serve.py`` and
+    `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_CHUNK_CAPTURE, default)
+
+
 def gen_embed_host(default: int = 0) -> int:
     """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
     **mapped host memory** instead of device memory (default 0 = device-resident).
@@ -393,6 +437,16 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_routing_histogram_interval(default: int = 0) -> int:
+    """``EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL`` — emit a cumulative routed-buffer
+    selection histogram every N uncaptured generative-model forwards (default 0 = off).
+
+    Selection counters stay on the GPU and their updates are CUDA-graph-safe, so captured
+    decode replays remain visible. Snapshotting synchronizes the counters to the host and is
+    therefore attempted only from an uncaptured forward. See `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_ROUTING_HISTOGRAM_INTERVAL, default)
 
 
 def gen_m1_tier(default: int = 1) -> int:

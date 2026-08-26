@@ -14,11 +14,6 @@ everything the linear model needed *because* it is additive:
 - **No fitted scalar interaction.** The atomic-free split-K gate is a hand-built term in the linear model because
   the deployed quality cannot express it as a weight. A tree forms ``D_finalize_kernel × D_splitk`` from the two
   columns, so nothing here corresponds to it.
-- **No exact decomposition by construction.** :meth:`CatBoostModel.explain_features` returns TreeSHAP values,
-  which ARE exactly additive to the raw prediction, so the ``Σ(term(a) − term(b))`` preference-gap contract the
-  blame diagnostics rest on still holds. Masking a feature is nonetheless no longer exact term removal — see
-  :attr:`CatBoostModel.masking_exact`.
-
 **Absent features are ``NaN``**, CatBoost's own missing-value bucket (``nan_mode="Min"``), matching the online
 prior. "This knob is not decided / not stamped on this row" is a different fact from a knob that is present and
 legitimately zero (``WM=0``, ``STAGE="00"`` → popcount 0.0), and only a tree can act on the difference. It matters
@@ -121,11 +116,6 @@ class CatBoostModel:
     cols: tuple[str, ...]
     scale: float = DEFAULT_SCALE
 
-    # Masking a feature is NOT exact term removal for a tree — it re-routes every split that reads the column, and
-    # a masked row is out of distribution for a model trained without feature dropout. The ablation diagnostics
-    # read this to caveat their Δ. The linear model's twin is True.
-    masking_exact = False
-
     # --- the shared model surface (Prior's own names) ---------------------------------------------------
 
     def mean_score_features(self, feats: dict) -> float:
@@ -142,20 +132,6 @@ class CatBoostModel:
         if not feats_list:
             return []
         return [latency_proxy(q, self.scale) for q in self.quality_rows(self.matrix(feats_list))]
-
-    def explain_features(self, feats: dict) -> dict[str, float]:
-        """Per-term decomposition of one row's :meth:`quality_rows`, as TreeSHAP values.
-
-        Satisfies the same exactness contract the linear decomposition does — SHAP values for a tree ensemble sum
-        to the prediction, the trailing element CatBoost returns being the base value (carried as
-        ``base:expected``) — so a two-row term diff is still the model's exact preference gap. Zero contributions
-        are dropped, matching the linear spelling: they are neutral in the total and would only pad the report."""
-        from catboost import Pool  # noqa: PLC0415
-
-        shap = self.booster.get_feature_importance(Pool(self.matrix([feats])), type="ShapValues")[0]
-        terms = {name: float(v) for name, v in zip(self.cols, shap[:-1], strict=True) if v}
-        terms["base:expected"] = float(shap[-1])
-        return terms
 
     # --- the packed-pool path ---------------------------------------------------------------------------
 

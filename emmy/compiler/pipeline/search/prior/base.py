@@ -39,10 +39,14 @@ import math
 import statistics
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from emmy.compiler.pipeline.search.metrics import spearman
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.data.group import Group
 
 logger = logging.getLogger(__name__)
 
@@ -190,15 +194,6 @@ class Prior(ABC):
         the gate is a tripwire for measured failure, not a proof-of-quality demand."""
         return self.fitted and (self.calibration is None or self.calibration >= CALIBRATION_MIN)
 
-    @property
-    def masking_exact(self) -> bool:
-        """Whether deleting a key from a featurized row removes that feature's contribution
-        EXACTLY, which the ablation diagnostics need to know before quoting a Δ. False by
-        default — true only for the linear offline model, where a deleted key is exact term
-        removal. A tree re-routes the splits reading that column, and a model trained without
-        feature dropout has never seen a masked row at all."""
-        return False
-
     @abstractmethod
     def fit(self) -> None:
         """Refit the model on the current :attr:`_dataset`."""
@@ -232,13 +227,14 @@ class Prior(ABC):
         its per-call overhead once per fork rather than once per candidate."""
         return normalize_policy(self.mean_scores(knobs_list))
 
-    # --- scoring already-featurized rows (attribution / ablation / offline fitting) ----------
+    # --- scoring already-featurized rows (the model classes' own seam) ------------------------
 
     def mean_score_features(self, feats: dict) -> float:
         """:meth:`mean_score` on an ALREADY-featurized row (``features.knob_features``
-        output). The entry point the attribution diagnostics and the offline fitter
-        score through: they featurize once, then mask / perturb individual features —
-        which no knob value maps back to — before scoring. Contract:
+        output). The seam each model class implements: :meth:`mean_score` featurizes and
+        delegates here, so a model never has to know how a knob dict becomes features. A pool is
+        scored through :meth:`score_rows` instead — the dict form does not survive that size.
+        Contract:
         ``mean_score_features(knob_features(knobs)) == mean_score(knobs)``, and a
         DELETED key carries each model's own absent-feature semantics (``0.0`` term
         for the linear offline prior, ``NaN`` routing for CatBoost)."""
@@ -248,15 +244,30 @@ class Prior(ABC):
         """Batched :meth:`mean_score_features`; override for a vectorized predict."""
         return [self.mean_score_features(f) for f in feats_list]
 
-    def explain_features(self, feats: dict) -> dict[str, float] | None:
-        """Signed per-term decomposition of this model's opinion on a featurized row,
-        in the model's own ranking-quality units (HIGHER = predicted faster) — the
-        attribution report diffs two rows' terms to attribute a misranking to features.
-        ``None`` when the model has no decomposition (the default; the offline
-        prior returns an exact one, a tree model may return SHAP values). Exactness
-        contract, when implemented: the terms sum to the model's full quality score
-        for the row, so ``Σ (term(a) − term(b))`` IS the model's preference gap."""
-        return None
+    @abstractmethod
+    def score_rows(self, group: Group) -> np.ndarray | None:
+        """This model's ranking QUALITY for every row of a packed candidate pool — higher = predicted faster.
+        ``None`` when this model cannot score the pool at all (the linear model asked for a dynamic weight set
+        it never fit); a model with nothing fitted yet still answers, with a constant.
+
+        The pool-shaped scoring surface, and the third one this class has after :meth:`mean_scores` (knob dicts)
+        and :meth:`mean_scores_features` (feature dicts). It exists because the dict surfaces cannot be used on
+        the pools these questions are actually asked over: a matmul enumeration runs to ~10^5 rows, and the
+        per-row dict of ~63 floats that made the fit OOM would make an evaluation OOM for the same reason. The
+        packed matrix is that representation done once, and each implementation here projects it onto its OWN
+        column list with its OWN absent-value fill (see :meth:`Group.matrix`) — which is the whole reason this
+        cannot be one shared function over ``feat_names``.
+
+        Polarity is deliberately the opposite of :meth:`mean_score`'s. This returns quality because that is what
+        the fitted model classes compute and what the rank metrics take; the deployed score is the monotone
+        ``exp(-scale·quality)`` of it, and a caller wanting the cost family (:func:`~..metrics.topk_regret`,
+        :func:`~..metrics.spearman`) negates. Both orders are read as ORDER only, so the negation is exact.
+
+        The pool must carry every column the model reads. A group packed under a narrow feature view — the fit's
+        ``D_*`` view, say — answers the linear model correctly, because its weight names are inside that view,
+        while the online model's ``S_*`` / ``H_*`` columns would all fill absent and its predictions would be
+        about a kernel with no shape. Which columns a group carries is the BUILDER's decision, so an evaluation
+        that scores both halves builds its pools over the full featurization."""
 
     # --- deployable-evidence pick ------------------------------------------
 

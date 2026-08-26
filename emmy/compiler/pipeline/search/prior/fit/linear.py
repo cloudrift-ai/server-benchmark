@@ -83,13 +83,13 @@ def l2_penalty(w: np.ndarray, sd: np.ndarray) -> float:
 
 
 def mean_log_rank(ranks: list[int]) -> float:
-    """The default fit loss: mean ``log2(rank+1)`` over the cases, unweighted. Lower is better.
+    """The default fit loss: mean ``log2(rank+1)`` over the groups, unweighted. Lower is better.
 
     Rewards pushing every golden up and is dominated by the worst offenders. Cases count ONE each —
     the retired ``1/count(tier)`` weighting gave every tier an equal share of the loss regardless of
-    size, so with 396 warp against 13 thread cases a single fp32 golden outweighed 30 fp16 ones (and
-    on a single-tier slice one case could carry half the loss). Its comment justified that by "fp16
-    warp is only ~7/32 cases" — a ratio that inverted long ago.
+    size, so with 396 warp against 13 thread groups a single fp32 golden outweighed 30 fp16 ones (and
+    on a single-tier slice one group could carry half the loss). Its comment justified that by "fp16
+    warp is only ~7/32 groups" — a ratio that inverted long ago.
 
     Any ``list[int] -> float`` may replace it via :attr:`LinearTrainer.objective`; the fit records
     which one it ran under, since two fits are only comparable under the same loss."""
@@ -230,13 +230,13 @@ class LinearTrainer:
     @staticmethod
     def unfittable(train: list[GoldenGroup], hold: list[GoldenGroup]) -> str | None:
         """Why a cross-validation fold cannot be fit under this model class, or ``None``. Both reasons are about
-        the two weight sets: the dynamic stage seeds from the static one, so a slice with no static cases fits
+        the two weight sets: the dynamic stage seeds from the static one, so a slice with no static groups fits
         nothing at all, and a holdout needing the dynamic set cannot be scored by a model that never fit one.
         The fold harness (:func:`~.cv._unfittable`) asks; a model class without weight sets answers nothing."""
         if not any(not c.dynamic for c in train):
-            return "static weight set unfittable (0 static cases in training)"
+            return "static weight set unfittable (0 static groups in training)"
         if any(c.dynamic for c in hold) and not any(c.dynamic for c in train):
-            return "dynamic weight set unfittable (0 dyn cases in training)"
+            return "dynamic weight set unfittable (0 dyn groups in training)"
         return None
 
     def fit(self, groups: list[GoldenGroup]) -> LinearFit:
@@ -257,7 +257,7 @@ class LinearTrainer:
         rng = np.random.default_rng(self.random_state)
         seed_weights = self.init.weights if self.warm_start else {}
 
-        logger.info("== static fit (%d cases) ==", len(static_groups))
+        logger.info("== static fit (%d groups) ==", len(static_groups))
         static_w, params, static_ranks, _, static_sd = fit_weights(
             static_groups,
             names,
@@ -278,7 +278,7 @@ class LinearTrainer:
         if not dyn_groups:
             return LinearFit(model, static_ranks, None)
 
-        logger.info("== dynamic fit (%d cases) ==", len(dyn_groups))
+        logger.info("== dynamic fit (%d groups) ==", len(dyn_groups))
         dyn_w, _, dyn_ranks, _, dyn_sd = fit_weights(
             dyn_groups,
             names,
@@ -307,7 +307,7 @@ class LinearFit:
     dyn_ranks: list[int] | None
 
     def score_rows(self, group: GoldenGroup) -> np.ndarray | None:
-        """The trainer protocol's scoring entry point (:func:`~.cv.case_ranks` calls it), answered by the
+        """The trainer protocol's scoring entry point (:func:`~.cv.group_ranks` calls it), answered by the
         fitted model itself — the column choice and the weight-set routing are the model's, not a copy of
         them kept here."""
         return self.model.score_rows(group)
@@ -316,6 +316,6 @@ class LinearFit:
     def notes(self) -> str:
         """The one-line provenance summary the artifact records — rank tables per weight set plus
         the fitted scalar params."""
-        dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic cases"
+        dyn = f"dynamic {topk_table(self.dyn_ranks)}" if self.dyn_ranks is not None else "no dynamic groups"
         params = ", ".join(f"{n}={getattr(self.model, n):g}" for n in sorted(FITTED_PARAMS))
         return f"static {topk_table(self.static_ranks)}; {dyn}; params {params}"

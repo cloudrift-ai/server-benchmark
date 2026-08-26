@@ -615,6 +615,26 @@ class HungKernelError(RuntimeError):
     ``bench_fail`` unchanged."""
 
 
+class CompileBudgetExceeded(RuntimeError):
+    """The compile stage ran past ``compile_timeout_s``, before any launch happened.
+
+    Distinct from a plain ``RuntimeError`` because **nothing about the kernel's speed was
+    measured**: cicc was slow, which is a fact about the compiler and the tile's unroll size, not
+    about the kernel. Callers must record no latency for it — inventing one mislabels the config,
+    and a persisted row is worse than mislabelled, because it is then served as a cache hit and
+    the config is never re-benched. Subclasses ``RuntimeError`` so existing handlers still catch
+    it. The budget is checked when the compile RETURNS, so it can only fire for a compile that
+    finished: any wall cap over it must exceed it, or the SIGKILL pre-empts this distinction."""
+
+
+def compile_budget_overrun(exc: BaseException) -> bool:
+    """``True`` iff ``exc`` is :class:`CompileBudgetExceeded`, from either bench path — the class
+    itself in-process, or the flag :class:`BenchWorkerJobError` carries when the exception was
+    raised in the worker subprocess (the protocol pickles ``error`` as a string, losing the
+    class). Lives here, beside the two classes it bridges."""
+    return isinstance(exc, CompileBudgetExceeded) or bool(getattr(exc, "compile_budget", False))
+
+
 class GraphCaptureError(RuntimeError):
     """CUDA graph capture of the bench launch loop failed.
 
@@ -810,7 +830,7 @@ class CompiledProgram:
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
-            raise RuntimeError(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — variant marked bench_fail")
+            raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
         logger.info(
             "[cuda] CompiledProgram.build: %d launch(es) compile+alloc=%.2fs kernels=[%s]",
             len(compiled.launches),
@@ -1533,11 +1553,15 @@ def _samples_to_result(
 class BenchWorkerJobError(RuntimeError):
     """A worker job that ran and failed (``ok: False`` response — the child is alive).
     ``cache_miss`` marks the one retryable kind: a job referenced a ``run_inputs_key``
-    a freshly-respawned child no longer holds."""
+    a freshly-respawned child no longer holds. ``compile_budget`` marks a
+    :class:`CompileBudgetExceeded` raised in the child — the exception CLASS cannot cross the
+    process boundary (the protocol carries ``error`` as a string), so the child flags the kind
+    and the parent rebuilds the distinction here."""
 
-    def __init__(self, message: str, *, cache_miss: bool = False) -> None:
+    def __init__(self, message: str, *, cache_miss: bool = False, compile_budget: bool = False) -> None:
         super().__init__(message)
         self.cache_miss = cache_miss
+        self.compile_budget = compile_budget
 
 
 class _AsyncBenchWorker:
@@ -1771,7 +1795,11 @@ class _AsyncBenchWorker:
                 # their cause before exiting) would otherwise be silently discarded.
                 if resp.get("traceback"):
                     logger.error("[bench-worker] job failed in the child; traceback:\n%s%s", resp["traceback"], self._tail_suffix())
-                raise BenchWorkerJobError(f"bench worker error: {resp.get('error', '?')}", cache_miss=bool(resp.get("cache_miss")))
+                raise BenchWorkerJobError(
+                    f"bench worker error: {resp.get('error', '?')}",
+                    cache_miss=bool(resp.get("cache_miss")),
+                    compile_budget=bool(resp.get("compile_budget")),
+                )
             if resp.pop("_retire_worker", False):
                 # The child returned a completed same-input reference after its later greedy
                 # timing hit the hung-kernel watchdog. Retire it before returning the reference:

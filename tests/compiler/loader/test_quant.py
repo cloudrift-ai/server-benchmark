@@ -17,6 +17,7 @@ from emmy.compiler.loader.quant import (
     _fp8_quant_config,
     _static_fp4_activation_declared,
     decode_f8,
+    decode_mxfp4,
     dequantize,
     dequantize_awq4,
     dequantize_nvfp4,
@@ -25,6 +26,7 @@ from emmy.compiler.loader.quant import (
     fuse_nvfp4_scales,
     quantize_nvfp4,
     spell_dynamic_fp8_activations,
+    spell_mxfp4_inputs,
     spell_quantized_constants,
     spell_quantized_inputs,
     spell_static_fp4_activations,
@@ -177,6 +179,7 @@ def test_dequantize_rejects_rank_mismatch():
 
 _FP8_QC = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic", "modules_to_not_convert": []}
 _AWQ_QC = {"quant_method": "awq", "bits": 4, "group_size": 4, "zero_point": True, "version": "gemm"}
+_MXFP4_QC = {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}
 
 # The two NVFP4 dialects, pruned to the fields the recognizer reads plus ``ignore``
 # (which the spellers consume). Field shapes mirror nvidia/Qwen3-8B-NVFP4 (modelopt)
@@ -235,6 +238,76 @@ def _pack_awq4(values):
         for slot, logical in enumerate(order):
             packed[:, word] |= values[:, word * 8 + logical].astype(np.uint32) << np.uint32(slot * 4)
     return packed.view(np.int32)
+
+
+def _pack_mxfp4(codes):
+    """Pack logical nibble codes ``(..., out, in)`` into MXFP4 blocks."""
+    codes = np.asarray(codes, dtype=np.uint8)
+    assert codes.ndim >= 2 and codes.shape[-1] % 32 == 0 and np.all(codes < 16)
+    pairs = codes.reshape(*codes.shape[:-1], codes.shape[-1] // 32, 16, 2)
+    return pairs[..., 0] | (pairs[..., 1] << np.uint8(4))
+
+
+# ===================================================================
+# Native MXFP4: nibble/E8M0 decode and input-sourced expert spelling
+# ===================================================================
+
+
+def test_decode_mxfp4_matches_exact_codebook_and_e8m0_scale():
+    codes = np.arange(16, dtype=np.uint8).repeat(2)[None, :]
+    blocks = _pack_mxfp4(codes)
+    scales = np.array([[127]], dtype=np.uint8)
+    got = decode_mxfp4(blocks, scales)
+    values = np.array((0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6), dtype=np.float32)
+    np.testing.assert_array_equal(got, values.repeat(2)[:, None])
+
+
+def test_decode_mxfp4_applies_per_group_power_of_two_scales():
+    codes = np.ones((2, 64), dtype=np.uint8)
+    blocks = _pack_mxfp4(codes)
+    scales = np.array([[126, 128], [127, 129]], dtype=np.uint8)
+    got = decode_mxfp4(blocks, scales)
+    ref = np.stack((np.r_[np.full(32, 0.25), np.full(32, 1.0)], np.r_[np.full(32, 0.5), np.full(32, 2.0)]), axis=1)
+    np.testing.assert_array_equal(got, ref.astype(np.float32))
+
+
+def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
+    shape = (64, 8)
+    graph = _input_graph(shape)
+    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}) == {"w": "w_scale"}
+    graph.validate()
+    assert graph.inputs == ["x", "w", "w_scale"]
+    assert graph.nodes["w"].output.dtype.name == "u8"
+    assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (8, 2, 16)
+    assert graph.nodes["w_scale"].output.dtype.name == "u8"
+
+    codes = (np.arange(8 * 64, dtype=np.uint16).reshape(8, 64) * 7 % 16).astype(np.uint8)
+    blocks = _pack_mxfp4(codes)
+    scales = np.full((8, 2), 127, dtype=np.uint8)
+    x = np.linspace(-1, 1, np.prod(shape), dtype=np.float32).reshape(shape)
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={"x": x, "w": blocks, "w_scale": scales})
+    expected = x * decode_mxfp4(blocks, scales)
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], expected)
+
+    from emmy.compiler.backend import torch_ref
+
+    assert torch_ref.is_runnable(graph)
+    fn, inputs = torch_ref.build_callable(
+        graph,
+        {"x": torch.from_numpy(x), "w": torch.from_numpy(blocks), "w_scale": torch.from_numpy(scales)},
+    )
+    np.testing.assert_array_equal(fn(*inputs).numpy(), expected)
+
+
+def test_quantized_checkpoint_dir_detects_mxfp4(tmp_path):
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    _write_checkpoint(tmp_path, {"plain.weight": torch.ones(1)}, _MXFP4_QC)
+    assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
 
 
 def _spelled(tmp_path, *, scale_shape=(8, 1), fmt="f8e4m3", inverse=False, dtype="f32", qc=_FP8_QC):

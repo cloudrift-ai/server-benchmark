@@ -1,4 +1,4 @@
-# Neptune, modern PyTorch, and untuned Emmy on A100
+# Neptune, modern PyTorch, and Emmy on A100
 
 ## Conclusion
 
@@ -17,12 +17,46 @@ sequence lengths, with per-shape speedups from 1.68x to 4.54x. Inductor itself w
 that family, so Neptune's advantage remains after using a recent compiler baseline rather than the PyTorch 2.6 stack
 inside the published artifact.
 
-Untuned Emmy is not competitive in this run, as expected. It produced correct captured timings for 22 of 24 prefill
-setups, but those rows were much slower than PyTorch. Its two largest causal/GQA prefill kernels tripped the watchdog,
-and all 16 decode setups failed strict eager correctness. Those failures are retained as results, not silently dropped;
-an independent PyTorch fallback preserved eager and Inductor measurements for every affected setup.
+Untuned Emmy is not competitive in the starter run, as expected. It produced correct captured timings for 22 of 24
+prefill setups, but those rows were much slower than PyTorch. Its two largest causal/GQA prefill kernels tripped the
+watchdog, and all 16 decode setups failed strict eager correctness. Those failures are retained as results, not silently
+dropped; an independent PyTorch fallback preserved eager and Inductor measurements for every affected setup.
+
+A later tuned decode-causal row passed every required replay and strict source check. The tuned schedules were 4.32x
+faster than untuned greedy Emmy by geometric mean, but eager PyTorch and `torch.compile` remained 3.82x and 4.02x
+faster, respectively. This is a substantial Emmy tuning result, not parity with the external baselines.
+
+## Tuned Emmy decode-causal follow-up
+
+The follow-up measured the eight committed decode-causal goldens at revision
+`5642d020259d0e09d49cbdab04e8e96408616b3e`. All eight shapes completed two deployable-O3 golden replays and two
+strict source-reference invocations: 32/32 required invocations succeeded. Every replay realized exactly the two
+expected golden schedules, every source comparison passed, and the largest Emmy absolute error was `2.59e-4` under
+the experiment's `1e-3` tolerance.
+
+Each latency below is the arithmetic mean of two independently launched repetitions; each repetition reports the
+minimum of 15 captured GPU measurements. Replay latency is the sum of the two golden kernels. The final column compares
+the same-input untuned greedy Emmy latency recorded beside each replay, so values above 1.00x favor the tuned schedules.
+
+| Sequence | Tuned replay (us) | Eager (us) | `torch.compile` (us) | Untuned greedy Emmy (us) | Tuned vs greedy |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 24.522 | 13.102 | 12.651 | 73.179 | 2.98x |
+| 512 | 38.306 | 17.262 | 16.603 | 149.285 | 3.90x |
+| 1024 | 59.048 | 24.064 | 22.357 | 311.296 | 5.27x |
+| 2048 | 125.897 | 38.912 | 33.280 | 640.000 | 5.08x |
+| 4096 | 274.970 | 57.856 | 53.248 | 1281.024 | 4.66x |
+| 8192 | 535.962 | 93.696 | 88.576 | 2551.808 | 4.76x |
+| 16384 | 1152.640 | 163.328 | 175.616 | 5081.600 | 4.41x |
+| 32768 | 2334.208 | 323.072 | 316.416 | 9318.400 | 3.99x |
+
+Across the eight shapes, tuned replay was 4.32x faster than untuned greedy Emmy by geometric mean. It remained 3.82x
+slower than eager and 4.02x slower than `torch.compile`. This row qualifies decode-causal only; it does not qualify the
+other four Emmy operator families or change the broader Neptune comparison.
 
 ## Common operator measurements
+
+This table retains the full starter sweep. Its Emmy column describes the original untuned run; the tuned decode-causal
+follow-up above is reported separately so historical failures are not rewritten.
 
 The Neptune columns report `Inductor latency / Neptune latency`, so values above 1.00x favor Neptune. "Best" selects
 the fastest measured manual or tuned Neptune schedule; "manual" uses only the artifact's fixed manual schedules. Each
@@ -151,11 +185,16 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 
 ## Durable files
 
-- Experiment record: `a100x1_e246bb6279fd.experiment.yaml`
+- Starter experiment record: `a100x1_e246bb6279fd.experiment.yaml`
+- Tuned decode-causal experiment record: `a100x1_lemmy_od-c_9f8816b4a4fb.experiment.yaml`; SHA-256
+  `07a4b79cf046bfb16b766bc830974dc42f5cc291c87874c3de7f25d7fb7b81d3`
 - Raw-results archive: `results.tar.gz`; SHA-256
-  `617f44ee6c6c5cff6dc637d1924a8071b8bc547f6edbb77d3e61e7548bbfee03`
-- Archived root: `2026-08-16_00-41-38/`
-- Composite task artifact: `a100x1_artifacts.tar.gz`; SHA-256
+  `f3d9047ce43f84b64470430b36085b9de135f26ded73bae74e9ec5138ec080e0`
+- Archived roots: `2026-08-16_00-41-38/` and `2026-08-24_22-35-24/`
+- Starter composite task artifact: `a100x1_artifacts.tar.gz`; SHA-256
   `015951d7cccf187c69dd2712bcaf966f3de179b53508942312a0e8e6cc31e4b5`
+- Tuned decode-causal composite task artifact: `a100x1_lemmy_od-c_9f8816b4a4fb_artifacts.tar.gz`; SHA-256
+  `6c288facacb05cf46b20c4d7be8a6bf56c1495a96ffdbe58c79f41b744412d4b`
 - Raw evidence includes 80 `.nsys-rep` profiles, 80 CSV exports, all tune/profile logs, 40 modern PyTorch JSON rows,
-  Emmy dumps and logs, environment freezes, runner hashes, source/recovery status files, and both run records/logs.
+  Emmy dumps and logs, the tuned decode-causal replay/reference JSON rows, environment freezes, runner hashes,
+  source/recovery status files, and all run records/logs.

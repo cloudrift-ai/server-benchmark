@@ -405,11 +405,11 @@ What a newcomer needs to know about the fit:
   `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
   fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
   the metrics header, along with the loss — two fits are only comparable under the same one.
-- **A case is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
+- **A group is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
   set of rows in that pool a golden verified: usually one, several when the builder matched
   several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
   goldens share a pool is settled before any group is built, so a group's labels are final at construction.
-  The per-case term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  The per-group term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
   config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
   At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
@@ -422,7 +422,7 @@ What a newcomer needs to know about the fit:
   raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
   so a full-pool refit reproduces byte for byte.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  each case counting once — plus an L2 penalty in
+  each group counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
   the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
@@ -481,7 +481,7 @@ The names below recur throughout this document; together they are the whole publ
 | `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the verified tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
 | `sig_groups` | both measured-evidence tiers | How a candidate is matched to measured rows by its `S_*` features. It still matches when the feature set has changed since those rows were written (Part 4) — one rule shared by the reservoir tier and the DB tier. |
 | `trustworthy` | the check that lets the online model decide | `fitted` AND passing the calibration gate. |
-| `mean_score_features` / `explain_features` | diagnostics only | Scoring / decomposing a row that is ALREADY in feature form (Part 8) — which is what lets the attribution views hide individual features that no knob value corresponds to. |
+| `mean_score_features` / `mean_scores_features` | the model classes' own seam | Scoring a row that is ALREADY in feature form. `mean_score` / `mean_scores` featurize and delegate here, so a model class implements the featurized half only. Not a pool-scoring surface — that is `score_rows`, which projects a packed matrix and is what the fitter and the evaluation report use. |
 
 ### The deploy evidence hierarchy
 
@@ -556,7 +556,12 @@ Three definitions the list leans on:
 - **Which compile flags each tier applies under**: the reservoir tier applies only to a compile at deployable `-O3`
   flags (`H_opt=3`) — `-O3` evidence is true of the deployable settings only and must never settle an `-Xcicc -O1`
   compile. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the `compile` /
-  `run` default — count as 3, so a default deploy is always deployable. The DB tier applies under any flags: its
+  `run` default — count as 3, so a default deploy is always deployable. The identity a measurement is *stored* under
+  agrees with that reading: `Context.structural_key` folds the flags **split** into an opt level plus the other flags
+  (`context.split_opt_level`), never the raw string, so `""` and an explicit `-Xcicc -O3` are one key for the one
+  regime they physically are. Keyed on the raw string they were two, and a row a tune wrote under an explicit `-O3`
+  pin was declared deployable by `H_opt` and then unreadable at a default deploy. The DB tier applies under any
+  flags: its
   "deployable" half means any context key that is not the `-O1` one, so an `-O3` row decides outright even under an
   `-O1` compile. The two tests are deliberately not mirror images: only `-Xcicc -O1` counts as the ranking flags,
   while anything else counts as deployable for the DB tier. An explicit `-O2` pin therefore gets DB evidence but not
@@ -682,8 +687,8 @@ touches the µs scale a deploy sees.
   more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine drops to
   goldens → DB `perf` rows → offline prior, with no warning at deploy time.
 - **The autotune DB's `node` rows** (a `feat_ver` column, added without rewriting old rows):
-  `diagnostics.node_report` excludes rows from another version and prints how many it dropped. Rows written before the
-  column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
+  `data/group.group_measured` excludes rows from another version and counts how many it dropped. Rows written before
+  the column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version then
 age out instead of poisoning the model.
@@ -1109,7 +1114,10 @@ Each `node` row also carries **label-quality columns** (additive migration; old 
 - `is_leaf` — whether this is a real measurement or a minimum over explored descendants.
 - `variance` / `n_samples` — the leaf's own bench statistics.
 - `status` — `ok` / `bench_fail`. Failed leaves ARE recorded, with the watchdog's placeholder value as `value_us`;
-  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure.
+  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure. A config
+  whose **compile** ran past its budget is not one of these and is not recorded at all: nothing about its speed was
+  measured, and a stored row would make it a permanent cache hit that is never re-benched (see the two bench budgets
+  in `backend/cuda/ARCHITECTURE.md`).
 - `run_id` / `measured_at` — the tune session (one id per CLI invocation) and the time that produced the CURRENT
   `value_us`; both are replaced only when that value is.
 - `feat_ver` — the `features.FEATURIZER_VERSION` the row's feature dict was written under (Part 3). Rows written
@@ -1154,11 +1162,9 @@ a `configs` list), beside a `manifest.json` holding the provenance header and th
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
   `load_node_rows` sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze
   pointer) and yields `NodeRow`s from either, which is what lets every nodes consumer
-  (`eval online --dataset nodes --db`, `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably
-  with the live DB.
-- Rows loaded from a freeze have no parent and `depth=0`, which is how the diagnostics recognize that no tree
-  structure is available. The fork-regret view skips them, and the golden-anchored descent prints its loud "no
-  fork-tree data" row, so a freeze is evaluated through the leaf-level metrics without inventing fork groups.
+  (`eval prior --dataset nodes --db`, `Dataset.fold_node_rows`) take a freeze interchangeably with the live DB.
+- Rows loaded from a freeze have no parent and `depth=0`. That costs the consumers nothing: they read benched
+  leaves, and a freeze is leaf-only by construction.
 - Handing a freeze to something that expects the perf table (the `--dataset db` paths) fails at `open_readonly`, with
   a message that spells out the difference between a freeze and the nodes DB.
 
@@ -1218,6 +1224,9 @@ cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no t
 backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
 backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
 lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
+Tune terminals request one nominal warmup; the CUDA benchmark's existing clock-ramp floor extends that warmup until
+it covers 10 ms of GPU time. A slow candidate therefore spends one iteration warming instead of exhausting the
+run-stage budget on discarded repeats. Pinned and deployable comparisons retain their caller-selected warmup count.
 
 ## Part 7: Golden records and the A/B integrity gates
 
@@ -1345,7 +1354,8 @@ fresh child — no escalation modes, no `os._exit`.
   child's profiled launches), so with `--bench` those two want a separate plain `run`.
 
 Plus `--json PATH` — a machine-readable record of the whole comparison (backends / greedy kernels / pinned rows with
-their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail`; a failed greedy block carries
+their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail` / `compile_timeout` (the config's compile ran
+past its budget, so nothing about it was measured and the row is reported but never recorded); a failed greedy block carries
 `status: bench_fail` and an `error`, with null timings), so a sweep's judgments can be traced to flagged fields
 instead of to parsed terminal text. Each kernel row also carries **`record_knobs`**: the tuning knobs the compile
 actually produced, with every schedule knob family (`knob.SCHEDULE_FAMILIES`: WORK / TILE / REDUCE / STAGE / RASTER)
@@ -1356,12 +1366,58 @@ come from an unpinned `REDUCE`. Golden rows attach to the run's SHAPE rather tha
 whose shape matches no greedy kernel — because greedy deployed a split partial+finalize pair — still prints and still
 lands in the record.
 
-## Part 8: Evaluating the prior (`emmy eval`)
+## Part 8: Evaluating the prior (`emmy eval prior`)
 
-`emmy eval` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. The views
-below run over the goldens, the tune DB's `node` table, or a measurement freeze.
+`emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
+over the goldens, the tune DB's `node` table, or a measurement freeze, and it reports BOTH halves of the composite
+prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
-**A golden's rank counts ties against it** (`eval offline` / `eval online`, via `golden_eval.evaluate_record`). The
+**Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
+(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
+the same `report.rank_metrics`. The report computes nothing itself:
+`search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
+both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
+where a score comes from.
+
+- A MEASURED pool (`--dataset nodes`: freeze or `node`-table rows, every candidate benched, grouped by
+  `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1
+  (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten,
+  keep the measured best). This is the half that tracks deployed speed.
+- A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
+  known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
+  aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
+
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
+`H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
+many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
+summary holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
+so on the v3 freeze's 336 pools those counts are 297, 216 and 90. An aggregate that averaged the excluded pools in
+would be reporting mostly arithmetic.
+
+**A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the row's own `S_*`
+stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
+structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
+evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
+because the identity strategy stamps a kernel **at birth**, in recognition, before `020_schedule` offers the first
+fork — so nothing a schedule fork decides can move an `S_*` value, and sibling schedules cannot be split apart.
+
+Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
+**over-merges**, because `op_sig` digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
+megakernel with a row for just one kernel of the same op's unfused realization — a 5.9 µs norm kernel filed as a
+rival of a 131 ms whole-op row, where the unfused pair actually costs 24–191 µs. And it **fragments**: 73 structures
+were searched in two separate pools, the losing pool's best landing a median 1.46× behind the winning pool's (p90
+3.89×, worst 14×) — the same kernel tuned twice because a placement cut minted one copy of it. Against `op_sig` the
+kernel key gives 336 pools rather than 401, but more rows sitting beside a rival (3778 of 3817 against 3760) and a
+median pool of 7 rather than 5; the pool count falls because merging is the point.
+
+**`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
+pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it
+(`golden_deploy_perf`, read from the reservoir with no re-bench).
+
+**`--dataset db` is rejected.** Those rows are fully-decided leaves with no op identity or compile regime to group a
+comparison set by; the same DB read as `--dataset nodes` has both.
+
+**A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
@@ -1371,76 +1427,41 @@ the one that gates, and the strictly-better **optimistic** rank is reported besi
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**Golden evaluations build their features for the golden's own GPU.** `eval offline` / `eval online` rebuild each
-golden's compile context as `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file
-along with its known SM count and smem specs — never the host's. Building them for the host's context makes golden
-ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
-from. The offline fitter's case builder always did this correctly; the
-eval now matches it.
+**Golden evaluations build their features for the golden's own GPU.** They go through ONE golden group builder —
+`emmy fit`'s `build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the
+same corpus, the same sampling draw and the same rows. Each golden's compile context is rebuilt as
+`Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
+count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
+because the occupancy features then describe tiles for a GPU that is not the one the row came from.
 
-**Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
-GPU**, what following the prior's choice at each fork costs. It groups nodes by `parent_key` and computes
-`value_us(the child the prior predicted best) / value_us(the truly best child)`; 1.00x means the prior steers into the
-best subtree reachable from there, and ties in predicted score count against the prior, since greedy breaks them by
-the order the options were emitted in. This is the search-faithful evaluation that no view of leaves alone can give.
-Each fork is bucketed by which knob FAMILY its children decide (`TILE` / `REDUCE` / `STAGE` / …, read off the
-difference between child and parent knobs). That is the stable way to name a level of the tree, because the raw
-`depth` counts rule steps and renumbers whenever passes change. The result is rendered as a per-kernel × per-family
-regret table, with an aggregate line per family. `node_report` drops `bench_fail` rows up front — their `value_us` is
-the watchdog's placeholder, not a measurement — and splits each GPU's block by `H_opt`, so `-O1` and `-O3` latencies
-are never pooled. The per-GPU
-grouping matters for a cross-hardware dataset: two SKUs off the same die (H100/H200) share an `S_*` op signature but
-not their latencies, so mixing them would corrupt both metrics; the `gpu` key keeps their rows apart. `--db` also
-accepts a measurement freeze (Part 6) in place of the live DB — its rows are leaves with no parents, so the report
-falls back to the leaf-level metrics.
+The eval builds its pools over the FULL featurization while a fit trains under its trainer's feature view. The view is
+a property of the model being fitted, and the eval scores two model classes: the linear half reads only its own weight
+names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
+view drops and would otherwise be asked about a kernel with no shape.
 
-That block is rendered once per **half** of the prior, offline and online, each labeled. The composite would answer
-with whichever half is currently active, and the two halves' regrets point at different fixes — the cold-start weights
-versus the training data — so an unlabeled "prior" number would destroy the diagnostic.
+**The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
+regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how
+far a golden's path was covered by the explored tree), and per-feature blame / ablation Δ. They are gone, with
+`Dataset.from_node_rows` and the `Prior.masking_exact` chain that existed only to caveat the ablation numbers.
 
-**The report section labeled "golden-anchored descent"** covers what the regret view structurally cannot see. Regret
-only speaks about forks the search actually measured, so a golden sitting in a subtree the search never built — or a
-shape with no node data at all — was silence that read as health. That is how a past saturation bug hid from regret
-while the then-broken golden rank claimed top-1. Each GPU's block therefore ends with one row per golden recorded FOR
-that GPU (a golden is only ever matched against rows measured on its own GPU), reporting: how far its path is covered
-by the explored tree (branches are matched with the same family-aware, registry-canonical rule the A/B pin check
-uses), whether the prior's tie-pessimistic pick stays inside the golden's subtree at each fork (with the measured gap,
-at matching flags, where it does not), and the loud absences — `NO TREE DATA` for a golden whose path is nowhere in
-the tree, a count per GPU, and a closing line for GPUs that have recorded goldens but no node rows at all.
+Two reasons, and the second is why nothing replaced them in kind. They answered questions about a SEARCH TREE, and
+the stores no longer hold one: every row in the current node table and in the v3 freeze is a parentless `depth=0`
+bench leaf, so the fork metrics had nothing to group by `parent_key` and degraded to leaf-level numbers that
+`eval prior`'s summaries now compute directly. And the ablation half rested on hiding one feature at a time, which
+attributes an effect among correlated features with no unique answer — hiding any one of a redundant block of
+geometry features costs the same Δ.
 
-Coverage is always printed with a denominator. A fully followed path is exact (`followed 6/6 fork levels to a measured
-leaf`), while a partial match's total is an ESTIMATE, marked `~` (`followed 2 of ~7 fork levels`), taken from the
-deepest chain of siblings below the fork where the paths diverged — the golden's own branch was never built, so those
-siblings' depth is the only evidence of how much tree is left. Keeping the flags straight is essential: the golden's
-recorded µs is a deployable `-O3` number and never enters the `-O1` walk or its gaps, because the two systematically
-invert. It appears only in the `-O3 pick/golden` endpoint, computed over the op's `H_opt=3` rows with the fast-math
-setting matched (the `golden_deploy_perf` convention). This is a diagnostic, not a gate: losing a fork whose measured
-sibling is near-equal is fine, and the gap column is what tells you so.
+What a tree could tell you that a pool of benched leaves cannot is real and unaddressed: a search is a sequence of
+partial decisions, most of whose subtrees are never explored, and a golden sitting in an unexplored one is silence
+that reads as health. The writer for such a store is not hypothetical — `policy/mcts.py`'s `_collect_node_records`
+walks the finished tree and emits parent-linked rows, and `working_golden.py` calls it into the same `node` table.
+What changed is the collection path: the budgeted leaf sweep the `collect-node-data` skill drives records benched
+leaves through `bench_record`, bypassing the tree writer. Per-fork evaluation returning is a question about which
+collection flow runs, not about building a new store.
 
-Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
-(`EMMY_ONLINE_FILE`), and `--offline-file` (on `eval offline` / `eval online`; env `EMMY_OFFLINE_FILE`) swaps the
-offline weights artifact — comparing two fits is running the same eval against two files and diffing the reports.
-
-**Which feature is to blame** (`eval online --dataset nodes --blame / --ablate`). Both views consume one shared
-per-fork record (`diagnostics.fork_records`: the siblings, their rows in feature form, their scores, the
-tie-pessimistic pick and the measured best), so all three views agree on what "the pick" means by construction. They
-score through the `Prior`'s feature-level entry points — `mean_score_features` / `mean_scores_features` take a row
-that is already in feature form, and are contractually identical to `mean_score` on the raw knob dict. That is what
-lets the diagnostics hide individual `D_*` features that no knob value corresponds to.
-
-- **Blame** diffs `Prior.explain_features` — a signed breakdown of the quality score into one term per feature, exact
-  for the linear offline prior, with its hard-coded interactions included as `gate:*` pseudo-terms, and unit-tested to
-  sum back to the scored quality — between the pick and the sibling that measured best, weighted by regret and grouped
-  by fork family. A fork the prior missed where no term separates the two is reported **BLIND**: a gap in the
-  featurizer, not a problem with the weights.
-- **Ablation Δ** re-picks every fork with one feature hidden, using each model's own notion of an absent feature (a
-  `0.0` term for the linear prior, which removes it exactly; `NaN` routing for CatBoost, which is flagged as
-  out-of-distribution until a model trained with feature dropout exists) and reports the change in median regret per
-  family, along with how many forks that feature had any say in.
-
-Both are **diagnostics, never gate metrics**: attributing an effect among correlated features has no unique answer
-(hiding any one of a redundant block of geometry features costs the same Δ). Unlike the per-GPU regret tables,
-attribution POOLS GPUs and flag settings, which is safe because regret is a ratio computed within one fork.
+Both prior halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online
+checkpoint (`EMMY_ONLINE_FILE`), and `--offline-file` (env `EMMY_OFFLINE_FILE`) swaps the offline weights artifact —
+comparing two fits is running the same eval against two files and diffing the reports.
 
 ## Part 9: Tile lowering at the pipeline level
 

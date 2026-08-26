@@ -258,8 +258,7 @@ Start with:
 ```bash
 emmy eval variants --kernel <substring>
 emmy eval failures
-emmy eval online --dataset nodes --kernel <substring>
-emmy eval online --dataset nodes --blame --ablate --kernel <substring>
+emmy eval prior --dataset nodes --kernel <substring>
 ```
 
 For a serving golden, run the unified release audit on the pinned GPU; it validates that every structural target has
@@ -267,15 +266,15 @@ the exact config-derived realization matrix before reproducing and auditing it:
 
 ```bash
 emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
-emmy eval offline --kernel <substring>
-emmy eval online --dataset golden --kernel <substring>
+emmy eval prior --dataset golden --kernel <substring>
 ```
 
 Classify every meaningful loss:
 
 1. **Search shortfall:** the best measured or replayed configuration exists, but the prior or patience does not reach
-   it. Use variant rank, fork sibling regret, and per-feature blame. Keep offline-prior and online-prior evidence
-   separate because cold-start feature errors and learned-model calibration errors require different fixes.
+   it. Use variant rank, and the rank correlation and regret `eval prior --dataset nodes` reports per card and
+   compile regime. Keep offline-prior and online-prior evidence separate because cold-start feature errors and
+   learned-model calibration errors require different fixes.
 2. **Eligibility or optimization lockout:** the desired schedule family is never offered. Cite the lowering or
    scheduler gate and the target property that triggers it.
 3. **Code generation quality:** the correct execution tier is present but loses. Inspect emitted CUDA and profile the
@@ -328,8 +327,8 @@ report. Include:
 - whole-model and serving tables when applicable;
 - one finding per root cause, ordered by deployable latency at stake, with symptom, evidence, root cause or
   distinguishing diagnostic, embedded program target, and recommended fix;
-- an offline-prior versus online-prior table for fork sibling regret, reachability, calibration, and labeled blame
-  whenever search steering is implicated;
+- an offline-prior versus online-prior table for rank correlation, regret and calibration whenever search steering
+  is implicated (`eval prior` already labels both halves);
 - promoted, tied, rejected, and unresolved candidates, plus exact working and canonical artifact paths;
 - workflow notes covering slow steps, retries or flakiness, multi-command detours, output friction, and a concrete CLI
   or skill improvement for each.

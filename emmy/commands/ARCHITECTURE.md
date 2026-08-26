@@ -178,11 +178,8 @@ enough that re-reading it per target dominates the replay: the 279-target DeepSe
 15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
 read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
 
-The in-model audit normally uses those serving twins. An architecture that cannot fit their external-attention ABI is
-dispatched through a sound config-only provider instead: DeepSeek V4 traces one complete representative decoder layer
-per attention/MLP pairing at sequence length 512, retaining its HCA/CSA compressor and hyper-connection operations.
-This provider is audit-only; `emmy trace --serving-twins` does not claim a DeepSeek serving split it cannot execute,
-and the file-scoped audit rejects a serving matrix the fixed full-layer provider cannot represent.
+The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
+attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
 
 `emmy tune --golden-file PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
 specialized from their named bindings and grouped by target, bindings, and input pins. Knob-bearing
@@ -221,7 +218,11 @@ process unless `--target` narrows the file to one exact or unambiguous substring
 Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
 graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
 proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps, so `run --golden` replays it through the full compiler pipeline. When that replay has
+derived structural stamps. Registered Boolean values in an explicit `--ab` row remain input pins, so false values are
+not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
+no realized graph reports the precision lane requested by those parsed input pins, including explicit false
+overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
+compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
@@ -451,8 +452,12 @@ the handler splits it into the bare id plus `--revision` before building either 
 apart and, left joined, the id resolves nowhere — every local config probe then returns `None` and the checkpoint
 special cases those feed (the coded-checkpoint unquantized override, the MoE capture-size cap) silently no-op. An
 explicit `--revision` wins. So a served rung can be reproduced off the CLI. Generative serving
-defaults to **whole-step decode CUDA graphs** (a `--compilation-config` with `FULL_DECODE_ONLY` + capture sizes
-laddered up to `--max-num-seqs` — sizes above the decode bucket capture the device-resident symbolic programs; see
+defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--compilation-config` with
+`cudagraph_mode: FULL` + capture sizes laddered up to `--max-num-seqs` plus the chunk rungs, and
+`--attention-backend TRITON_ATTN` — mixed-batch full capture needs a backend declaring always-supported capture;
+`EMMY_GEN_CHUNK_CAPTURE=0` restores the decode-only `FULL_DECODE_ONLY` config; capture sizes above
+`--max-model-len` — the rider-top rung — are made safe by the plugin's dummy-run seq-lens clamp
+(`serving/vllm_patches.py`); see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
 cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
@@ -643,19 +648,20 @@ golden matched into that pool as a positive: `--iterations N`, `--negatives K` (
 drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still covers
 whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from what
 the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
-from 545 to 517 over the 1278-case golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
+from 545 to 517 over the 1278-group golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
 the expected direction when the negatives are unlabeled rather than known-bad). Its fits are not byte-reproducible
 — CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a
 checksum.
 
-**A case is a candidate pool, not a golden.** The case builder enumerates each golden's pool and joins a golden to
-an existing case when the featurized pool it enumerates is byte-identical to that case's — so a shape recorded under
-two names, or one name recorded twice, becomes ONE case carrying several verified rows, and its rank is the best of
-them. Membership is decided that way rather than by any metadata key, because most same-name duplicates are
-`FAST_MATH` siblings whose pools are genuinely disjoint (the fast-math enumeration offers an f16-accumulate atom the
-standard one never emits): merging them on the name would pin row indices that do not exist in the other pool. The
-realized merge count is therefore an output of the run — the header's `cases` block records groups, positives and
-merged, and every `per_golden` row carries `positives`, so a case count that dropped against an earlier fit says why
+**A group is a candidate pool, not a golden.** The golden group builder enumerates each golden's pool and joins a
+golden to an existing group when the featurized pool it enumerates is byte-identical to that group's — so a shape
+recorded under two names, or one name recorded twice, becomes ONE group carrying several verified rows, and its rank
+is the best of them. Membership is decided that way rather than by any metadata key, because most same-name
+duplicates are `FAST_MATH` siblings whose pools are genuinely disjoint (the fast-math enumeration offers an
+f16-accumulate atom the standard one never emits): merging them on the name would pin row indices that do not exist
+in the other pool. The
+realized merge count is therefore an output of the run — the header's `groups` block records the total, positives and
+merged, and every `per_golden` row carries `positives`, so a group count that dropped against an earlier fit says why
 instead of looking like lost data. A golden whose signature matches no row in its pool is unchanged: it is skipped
 and counted per card as `unranked`.
 
@@ -664,7 +670,7 @@ that many candidates per pool while the pool is still an addressable space, befo
 the corpus is millions of rows and tens of gigabytes otherwise, and one golden's pool alone is past the
 scheduler's materialization budget, so an unsampled `--data golden` fit does not finish. The draw is a pure
 function of `(pool size, N, --seed)` and never looks at a row, so a refit of the same corpus is byte-identical
-and two goldens over one pool still retain identical rows and still merge into one case. Every recorded
+and two goldens over one pool still retain identical rows and still merge into one group. Every recorded
 config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
 always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the
 draw with the true pool size beside them (`per_golden` carries both `pool` and `sampled`), never scaled: a
@@ -686,14 +692,19 @@ ranking — the rest are either constant within every pool or affine copies of a
 expressiveness-neutral. `--out DIR` defaults to
 `_tune/fits/<timestamp>-<trainer>-<data>/`.
 
-A run writes `metrics.json` — the per-run record two fits
-are diffed by: `full_train` (the shippable artifact's per-golden dual ranks + per-card aggregates) and the `cv.shape`
-block (pooled holdout / train tables, per-card gap, per-fold detail); folds group by shape, so goldens sharing a
-candidate pool are held out together rather than scored by a model trained on that pool — and `weights.json`, the
+A run writes `metrics.json` — the per-run record two fits are diffed by: `full_train` (per-golden dual ranks plus
+per-card **summaries**) and the `cv` block (holdout and train summaries, per-card gap, per-fold detail); folds
+group by shape, so goldens sharing a candidate pool are held out together rather than scored by a model trained on
+that pool. The per-card blocks are the same `Summary` `emmy eval prior` emits — same four fields, built by the same
+`prior/report.rank_metrics` — so a fit's file and an eval report state the golden screen identically rather than
+agreeing by coincidence; each summary's `axes` carry the `cv_split` (`full_train` / `holdout` / `train`) beside the
+card, because one file holds all three. Goldens that never produced a candidate pool sit BESIDE the summaries in
+`full_train.skipped`, keyed by card: they have no pool and no rank, so they are a fact about the corpus rather than
+about a scored card, and keeping them out preserves the shared summary shape. Also written: `weights.json`, the
 full-train artifact in the shipped format (a `catboost` fit also writes the booster as a `weights.cbm` sidecar
 beside it, named after its own JSON so several artifacts can share a directory); `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
-`scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden case builder
+`scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden group builder
 (`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
 the file writing; the run harness and fold/metrics machinery are library code in
 `emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline

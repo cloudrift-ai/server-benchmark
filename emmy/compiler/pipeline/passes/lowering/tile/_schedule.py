@@ -1185,10 +1185,12 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     out = []
     for plan in plans:
         for red in _contraction_reduces(term, node, plan):
+            pinned = pin is not None
             stages = tuple(
                 stage
                 for stage in _stage_values(term, node, plan)
                 if not (work is not None and work.producer) or legal.enforce(legal.producer_transport(stage), pinned=False)
+                if red.needs_split or legal.enforce(legal.paired_fragment_register_budget(node, plan, stage), pinned=pinned)
             )
             if stages:
                 out.append(Block({"TILE": plan, "REDUCE": red}, stages))

@@ -26,6 +26,21 @@ def _tiny_olmoe_config(transformers):
     )
 
 
+def _tiny_gpt_oss_config(transformers):
+    return transformers.GptOssConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+    )
+
+
 def _tiny_laguna_config(transformers):
     return transformers.LagunaConfig(
         vocab_size=64,
@@ -554,7 +569,7 @@ def test_exl3_routed_scale_leaves_other_architectures_untouched():
     assert model.marker is marker
 
 
-def test_laguna_exl3_precision_contract_invalidates_old_pack_key(tmp_path, monkeypatch):
+def test_precision_contracts_invalidate_old_pack_key(tmp_path, monkeypatch):
     from emmy.compiler.backend import pack
     from emmy.serving.gen_runner import _generation_precision_contract
 
@@ -563,8 +578,39 @@ def test_laguna_exl3_precision_contract_invalidates_old_pack_key(tmp_path, monke
     contract = _generation_precision_contract("laguna", {"fmt": "exl3"})
     assert contract == "laguna-exl3-precision-v4"
     assert pack.pack_path(tmp_path, old_key) != pack.pack_path(tmp_path, {**old_key, "precision_contract": contract})
+    gpt_oss_contract = _generation_precision_contract("gpt_oss", {"fmt": "mxfp4"})
+    assert gpt_oss_contract == "gpt-oss-mxfp4-fp32-residual-v1"
+    assert pack.pack_path(tmp_path, old_key) != pack.pack_path(tmp_path, {**old_key, "precision_contract": gpt_oss_contract})
     assert _generation_precision_contract("laguna", {"fmt": "fp8"}) is None
+    assert _generation_precision_contract("gpt_oss", {"fmt": "fp8"}) is None
     assert _generation_precision_contract("glm4_moe", {"fmt": "exl3"}) is None
+
+
+def test_gpt_oss_float32_residual_contract_prevents_late_layer_add_overflow():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer
+
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+    from emmy.serving.gen_runner import _combine_moe_output
+
+    block = GptOssDecoderLayer(_tiny_gpt_oss_config(transformers), layer_idx=0).half().eval()
+    block.self_attn.o_proj.weight.data.zero_()
+    block.self_attn.o_proj.bias.data.zero_()
+    pre, post, _expert = build_moe_split_wrapper(block, float32_residual=True)
+
+    residual = torch.full((2, 64), 65_000.0, dtype=torch.float32)
+    attn_out = torch.zeros((2, 64), dtype=torch.float16)
+    with torch.no_grad():
+        q, k, v = pre(residual)
+        h, xn = post(attn_out, residual)
+        routed = torch.full_like(xn, 1_000.0)
+        got = _combine_moe_output(h, routed)
+
+    assert {q.dtype, k.dtype, v.dtype, xn.dtype} == {torch.float16}
+    assert h.dtype == got.dtype == torch.float32
+    assert torch.isfinite(got).all()
+    assert not torch.isfinite(h.half() + routed).all()
 
 
 def test_combine_casts_fp32_router_scores():
@@ -615,6 +661,34 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     result = _combine_moe_output(h, routed, shared)
     assert result.dtype == torch.float32
     torch.testing.assert_close(result, torch.tensor([[73000.0]], dtype=torch.float32), rtol=0, atol=0)
+
+
+def test_routing_histogram_counts_persistent_input_slice_selections():
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._routing_histogram_counts = torch.zeros(2, 4, dtype=torch.int64)
+    runner._routing_histogram_interval = 0
+    runner._routing_histogram_calls = 0
+    runner._moe = [
+        {"local_layer": 0, "layer": 10, "num_experts": 4, "top_k": 2},
+        {"local_layer": 1, "layer": 11, "num_experts": 3, "top_k": 2},
+    ]
+
+    runner._record_routing(runner._moe[0], torch.tensor([[1, 3], [1, 2]]))
+    runner._record_routing(runner._moe[1], torch.tensor([[0, 2]]))
+
+    assert runner.routing_histogram() == {
+        "event": "emmy_routing_histogram",
+        "layers": [
+            {"layer": 10, "num_experts": 4, "top_k": 2, "total_selections": 4, "selections": [0, 2, 1, 1]},
+            {"layer": 11, "num_experts": 3, "top_k": 2, "total_selections": 2, "selections": [1, 0, 1]},
+        ],
+    }
+    runner.routing_histogram(reset=True)
+    assert runner._routing_histogram_counts.count_nonzero() == 0
 
 
 def test_moe_block_parts_rejects_dense_mlp():
@@ -679,6 +753,8 @@ def test_expert_slot_maps_both_expert_layouts():
     from emmy.compiler.trace.huggingface import _expert_slot
 
     assert _expert_slot("model.layers.3.mlp.experts.gate_up_proj") == (3, "w_gate_up", None)
+    assert _expert_slot("model.layers.3.mlp.experts.gate_up_proj_blocks") == (3, "w_gate_up", None)
+    assert _expert_slot("model.layers.3.mlp.experts.down_proj_scales") == (3, "w_down_scale", None)
     assert _expert_slot("model.layers.3.mlp.experts.7.gate_proj.trellis") == (3, "w_gate", 7)
     assert _expert_slot("model.layers.3.mlp.experts.7.up_proj.suh") == (3, "w_up_suh", 7)
     assert _expert_slot("model.layers.3.mlp.experts.7.down_proj.svh") == (3, "w_down_svh", 7)
@@ -780,6 +856,88 @@ def _exl3_moe_checkpoint(dirpath, cfg, *, routing_bias=None, omit_routing_bias=F
     cfg_dict["quantization_config"] = {"quant_method": "exl3", "version": "0.0.5", "bits": 2.0}
     (dirpath / "config.json").write_text(json.dumps(cfg_dict))
     return ref
+
+
+def _mxfp4_gpt_oss_checkpoint(dirpath, cfg):
+    """A tiny native-MXFP4 checkpoint plus its decoded architecture-twin expert values."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+    from transformers import AutoModelForCausalLM
+
+    from emmy.compiler.loader.quant import decode_mxfp4
+
+    model = AutoModelForCausalLM.from_config(cfg).to(torch.float16).eval()
+    tensors = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+    decoded = {}
+    for layer in range(cfg.num_hidden_layers):
+        base = f"model.layers.{layer}.mlp.experts."
+        for leaf in ("gate_up_proj", "down_proj"):
+            logical = tensors.pop(base + leaf)
+            experts, in_features, out_features = logical.shape
+            codes = (
+                (
+                    torch.arange(experts * out_features * in_features, dtype=torch.int64).reshape(experts, out_features, in_features)
+                    + layer * 3
+                )
+                .remainder(16)
+                .to(torch.uint8)
+            )
+            pairs = codes.reshape(experts, out_features, in_features // 32, 16, 2)
+            blocks = pairs[..., 0] | (pairs[..., 1] << 4)
+            scales = torch.full((experts, out_features, in_features // 32), 127, dtype=torch.uint8)
+            tensors[base + leaf + "_blocks"] = blocks
+            tensors[base + leaf + "_scales"] = scales
+            decoded[base + leaf] = torch.from_numpy(decode_mxfp4(blocks.numpy(), scales.numpy())).to(torch.float16)
+        for leaf in ("gate_up_proj_bias", "down_proj_bias"):
+            bias = tensors[base + leaf]
+            bias.copy_(torch.arange(bias.numel(), dtype=torch.float32).reshape(bias.shape).mul_(0.125).to(bias.dtype))
+            decoded[base + leaf] = bias.clone()
+
+    save_file(tensors, str(dirpath / "model.safetensors"))
+    config = cfg.to_dict()
+    config["quantization_config"] = {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}
+    (dirpath / "config.json").write_text(json.dumps(config))
+    return decoded
+
+
+def test_load_quantized_twin_decodes_native_mxfp4_experts(tmp_path):
+    """Whole-model eager/reference loading must not leave random logical expert weights."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_twin
+
+    cfg = _tiny_gpt_oss_config(transformers)
+    expected = _mxfp4_gpt_oss_checkpoint(tmp_path, cfg)
+    model = load_quantized_twin(tmp_path, torch.float16)
+    state = model.state_dict()
+
+    for name, value in expected.items():
+        assert not state[name].is_meta
+        torch.testing.assert_close(state[name], value, rtol=0, atol=0)
+
+
+def test_load_quantized_layer_twin_materializes_native_mxfp4_experts(tmp_path):
+    """A shard-streamed selected-layer eager reference must attach decoded expert values."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_layer_twin
+
+    cfg = _tiny_gpt_oss_config(transformers)
+    expected = _mxfp4_gpt_oss_checkpoint(tmp_path, cfg)
+    layer = 1
+    model = load_quantized_layer_twin(tmp_path, torch.float16, layer)
+    state = model.state_dict()
+
+    prefix = f"model.layers.{layer}.mlp.experts."
+    for leaf in ("gate_up_proj", "down_proj", "gate_up_proj_bias", "down_proj_bias"):
+        name = prefix + leaf
+        assert not state[name].is_meta
+        assert state[name].is_contiguous()
+        torch.testing.assert_close(state[name], expected[name], rtol=0, atol=0)
 
 
 def test_load_quantized_split_preserves_nonzero_laguna_router_bias(tmp_path):

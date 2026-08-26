@@ -94,6 +94,37 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
         )
 
 
+def test_float32_residual_moe_rider_keeps_normalized_activation_in_float16():
+    """The two-output fp32-residual post rider must not allocate ``xn`` in residual dtype."""
+    torch = pytest.importorskip("torch")
+
+    class PostProgram:
+        output_names = ("hidden", "moe_xn")
+
+        def run_device(self, inputs, *, out):
+            _attn_out, residual = inputs
+            out[0].copy_(residual)
+            out[1].copy_(residual.to(out[1].dtype))
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._post_m1 = None
+    runner._post_decode = [PostProgram()]
+    runner._post_prefill = [PostProgram()]
+    runner._post = []
+    runner._pre_decode = [object()]
+    runner._pre_prefill = [object()]
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._activation_dtype = torch.float16
+
+    residual = torch.randn(6, 8, dtype=torch.float32)
+    hidden, normalized = runner._route_post_device(0, torch.randn(6, 8, dtype=torch.float16), residual)
+
+    assert hidden.dtype == torch.float32
+    assert normalized.dtype == torch.float16
+    assert torch.nn.Linear(8, 2, dtype=torch.float16)(normalized).dtype == torch.float16
+
+
 def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
     runner = EmmyGenRunner(
         embed_weight=None,
@@ -147,7 +178,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True):
+    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_range=None):
         seen.update(
             path=path,
             dtype=dtype,
@@ -155,6 +186,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
             layer_range=layer_range,
             include_embed=include_embed,
             include_norm=include_norm,
+            expert_range=expert_range,
         )
         return fake_model, fake_store
 
@@ -171,6 +203,33 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     assert seen["compress_trunk"] is coded_trunk
     assert seen["model"] is fake_model
     assert seen["kwargs"]["expert_store"] is fake_store
+
+
+def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypatch):
+    """A tensor-parallel rank's expert shard must reach the checkpoint read, not just the routing:
+    holding every expert is what does not fit the card in the first place."""
+    import json
+
+    from emmy.compiler.loader import safetensors
+    from emmy.compiler.trace import huggingface
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
+    seen = {}
+    monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
+    monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
+
+    def fake_load(path, dtype, **kwargs):
+        seen.update(kwargs)
+        return object(), {"fmt": "mxfp4"}
+
+    monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)
+    monkeypatch.setattr(EmmyGenRunner, "from_model", classmethod(lambda cls, model, **kwargs: kwargs))
+
+    built = EmmyGenRunner.create(model_id=str(tmp_path), expert_range=(64, 96))
+
+    assert seen["expert_range"] == (64, 96), "the shard never reached the checkpoint read"
+    assert built["expert_range"] == (64, 96), "the shard never reached the runner"
 
 
 # ===================================================================

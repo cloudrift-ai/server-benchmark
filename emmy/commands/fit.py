@@ -3,7 +3,7 @@ metrics file.
 
 The fitter entry point: one pipeline, two orthogonal switches — ``--trainer``
 (model class: the incumbent ``linear`` weights or a ``catboost`` ranker) × ``--data`` (training data).
-Only ``--data golden`` exists today; the freeze cells arrive with the measurement-freeze training work
+Only ``--data golden`` exists today; the freeze summaries arrive with the measurement-freeze training work
 and until then are rejected loudly. Both trainers write the same artifact shape, distinguished by its
 ``kind`` field, so either can be pointed at with ``EMMY_OFFLINE_FILE`` and A/B'd against the other.
 
@@ -11,10 +11,10 @@ A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two 
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and ``<out>/weights.json``, the full-train artifact in the
 shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
-a ``cv.shape`` holdout/train/gap block) is documented on
+a ``cv`` holdout/train/gap block, both carrying ``prior/report.py`` summaries) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
-module owns what ``pipeline/`` must not import: the snippet-tracing golden case builder
+module owns what ``pipeline/`` must not import: the snippet-tracing golden group builder
 (:func:`build_golden_groups`) plus the CLI, the trainer wiring, and the file writing.
 """
 
@@ -132,7 +132,7 @@ class _Pool:
 
     ``namer`` is the first golden the builder found in this pool — it supplies the group's key, name,
     card and fold group. Deliberately not "the first record considered": a record can be grouped onto this
-    pool and then fail to match a row in it, and naming a case after a golden the same run reports as
+    pool and then fail to match a row in it, and naming a group after a golden the same run reports as
     skipped would put a rank in ``metrics.json`` under a name nothing pinned."""
 
     namer: GoldenRecord
@@ -165,7 +165,7 @@ def _pool_bucket(g) -> tuple:
     key - so two goldens that could share a pool always land in one bucket. That direction is the
     one that matters: an over-broad bucket costs a few extra retained rows, while a too-narrow one
     would hand two goldens over one pool different keep-sets, retain different rows, and stop them
-    merging into a single training case."""
+    merging into a single training group."""
     return (g.gpu_name, tuple(g.compute_cap), g.pin_key)
 
 
@@ -184,14 +184,14 @@ def _keep_sets(records) -> dict[tuple, frozenset]:
 
 
 def build_golden_groups(
-    features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
+    features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0, kernel: str | None = None
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each embedded golden program, pin its recorded row, and
     featurize every row, as :class:`Group` records (name, tier, card, pinned rows,
     per-row features filtered through the ``features_spec`` view; ``key`` is ``"<gpu>/<name>"``,
     suffixed ``#2``, ``#3``, … when one name opens several distinct pools). The second return is
-    the goldens that did NOT become cases, as ``(gpu, name, reason)`` — enumeration
-    failures plus the kinds this fitter has no case builder for
+    the goldens that did NOT become groups, as ``(gpu, name, reason)`` — enumeration
+    failures plus the kinds this fitter has no group builder for
     (:data:`fit_cv.OUT_OF_SCOPE`) — so metrics can count every recorded golden.
 
     **A group is a candidate pool, not a golden.** Several goldens can land on one pool — the same shape
@@ -202,7 +202,7 @@ def build_golden_groups(
     groups against positives in the metrics header.
 
     Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
-    pool ``eval offline`` and the greedy deploy rank over (fp32 → thread tier,
+    pool ``eval prior --dataset golden`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no
     scalar rows in the pool). A dynamic (``.dynM``) golden enumerates the pool of its
@@ -211,9 +211,15 @@ def build_golden_groups(
     schedule fork's rows (``_snippet_rows``); a regime the live tree doesn't fork
     (pointwise) reports un-enumerable rather than reconstructing a search space that no longer exists.
 
+    ``kernel`` keeps only goldens whose name contains it — a narrowing VIEW of the corpus, for iterating on
+    one kernel without paying for the rest. Each retained golden's rank is unchanged by it: the keep-sets are
+    still computed over the whole corpus, so a pool retains the same rows under the same draw. What does change
+    is which goldens MERGE — a dropped sibling is one fewer verified row in the pool it shared — so a filtered
+    run's group and positive counts are its own, and only an unfiltered run compares against a fit.
+
     ``sample`` draws that many candidates per pool DURING enumeration (0 enumerates every row).
     The draw is a pure function of ``(pool size, sample, seed)`` and never looks at a row, so two
-    goldens over one pool retain identical rows and still merge into one case; every recorded
+    goldens over one pool retain identical rows and still merge into one group; every recorded
     config survives it whatever the draw picks (:func:`_keep_sets`), so a golden that misses its
     pool still means what it always meant - a pin or dtype mismatch.
 
@@ -226,7 +232,7 @@ def build_golden_groups(
     recording card's regime — not one global cap — for the rank objective to match
     the deployed per-card featurization."""
     keep = feature_view(features_spec)
-    cases: list[GoldenGroup] = []
+    groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
     matched = 0
@@ -241,11 +247,12 @@ def build_golden_groups(
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
     keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
     # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_key`) before touching
-    # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the cases
+    # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the groups
     # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
-        by_pool[g.pool_key].append(g)
+        if kernel is None or kernel in g.name:
+            by_pool[g.pool_key].append(g)
 
     for members in by_pool.values():
         g = members[0]  # the pool is a property of the KEY; every member spells it identically
@@ -295,7 +302,7 @@ def build_golden_groups(
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         packed = pack_features(feats)
         # Second stage: two enumerations can still land on one pool — the same program recorded in different
-        # sessions keys apart above but packs identically here. Fold those together, so a pool is one case
+        # sessions keys apart above but packs identically here. Fold those together, so a pool is one group
         # however many times it was recorded.
         pool = pools.get(identity := _pool_identity(namer, tier, packed))
         if pool is None:
@@ -310,7 +317,7 @@ def build_golden_groups(
         g = pool.namer
         key_str = f"{g.gpu_name}/{g.name}"
         key_counts[key_str] = n = key_counts.get(key_str, 0) + 1
-        cases.append(
+        groups.append(
             GoldenGroup.over(
                 key_str if n == 1 else f"{key_str}#{n}",
                 g.name,
@@ -325,10 +332,10 @@ def build_golden_groups(
     logger.info(
         "  %d matched goldens over %d candidate pools (%d beyond one golden per pool)",
         matched,
-        len(cases),
-        matched - len(cases),
+        len(groups),
+        matched - len(groups),
     )
-    return cases, skipped
+    return groups, skipped
 
 
 def _write_artifact(path: Path, model, provenance: dict) -> None:
@@ -357,7 +364,7 @@ def _repo_commit() -> str:
 
 
 def _linear_trainers(args, names: list[str]):
-    """The linear cell's trainer pair and the hyperparameters its metrics header records.
+    """The linear summary's trainer pair and the hyperparameters its metrics header records.
 
     Full-train seeds from the incumbent artifact's weights; fold models seed from ZEROS
     (``warm_start=False``) — the incumbent's weights were fit on every golden, so warm-starting a fold from
@@ -389,7 +396,7 @@ def _linear_trainers(args, names: list[str]):
 
 
 def _catboost_trainers(args, names: list[str]):
-    """The tree cell's trainer and its recorded hyperparameters. ONE trainer serves both the shippable model and
+    """The tree summary's trainer and its recorded hyperparameters. ONE trainer serves both the shippable model and
     every fold: a tree ensemble has no warm start, so there is no seeding policy to differ on and no way for a
     fold model to inherit anything from the held-out golden."""
     trainer = fit_catboost.CatBoostTrainer(
@@ -420,12 +427,37 @@ TRAINERS = {
 }
 
 
+def _log_cells(metrics: dict) -> None:
+    """The run's summaries as one line per card per split — the same rows ``metrics.json`` carries, so what
+    scrolls past and what is written down cannot disagree. Indexes rather than defends: every key read here
+    is one the same process wrote a few lines earlier, so a shape mismatch should raise rather than render
+    a line full of ``None``."""
+    full, cv = metrics["full_train"], metrics["cv"]
+    train = {c["axes"]["gpu"]: c["metrics"]["rank"]["median"] for c in cv.get("summaries", []) if c["axes"]["cv_split"] == "train"}
+    gap = cv.get("gap", {})
+    for summary in full["summaries"] + [c for c in cv.get("summaries", []) if c["axes"]["cv_split"] == "holdout"]:
+        cv_split, gpu, rank = summary["axes"]["cv_split"], summary["axes"]["gpu"], summary["metrics"]["rank"]
+        line = f"{cv_split:<11} {gpu:<34} n={summary['groups']:<3} median={rank['median']} (optimistic {rank['median_optimistic']})"
+        if cv_split == "full_train":
+            skipped = full["skipped"][gpu]
+            line += f" unranked={skipped['unranked']} out_of_scope={skipped['out_of_scope']}"
+        else:
+            line += f" train={train.get(gpu)} gap={gap.get(gpu)}"
+        logger.info("%s", line)
+    # A card every one of whose goldens was skipped has no summary at all — say so rather than let it vanish.
+    for gpu, skipped in full["skipped"].items():
+        if gpu not in {c["axes"]["gpu"] for c in full["summaries"]}:
+            logger.info("%-11s %-34s no ranked groups  unranked=%d out_of_scope=%d", "full_train", gpu, *skipped.values())
+    for f, why in cv.get("fold_detail", {}).get("excluded", {}).items():
+        logger.info("cv fold %s EXCLUDED: %s", f, why)
+
+
 def handle_fit(args) -> None:
     from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
 
     if args.data != "golden":
         raise SystemExit(
-            f"--data {args.data} is not yet supported — only 'golden' exists (the freeze cells land with the training-data work)"
+            f"--data {args.data} is not yet supported — only 'golden' exists (the freeze summaries land with the training-data work)"
         )
 
     out_dir = Path(args.out) if args.out else Path("_tune/fits") / f"{time.strftime('%Y%m%d-%H%M%S')}-{args.trainer}-{args.data}"
@@ -435,20 +467,20 @@ def handle_fit(args) -> None:
     view = args.features or default_view
 
     logger.info("Building golden dataset (each golden under its own card's context) ...")
-    cases, skipped = build_golden_groups(view, sample=args.pool_sample, seed=args.seed)
-    names = sorted({n for c in cases for n in c.feat_names})
-    n_dyn = sum(1 for c in cases if c.dynamic)
-    # A case is a candidate pool and may carry several verified rows, so the case count alone no longer says
+    groups, skipped = build_golden_groups(view, sample=args.pool_sample, seed=args.seed)
+    names = sorted({n for c in groups for n in c.feat_names})
+    n_dyn = sum(1 for c in groups if c.dynamic)
+    # A group is a candidate pool and may carry several verified rows, so the group count alone no longer says
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
     # ``merged`` is the positives beyond one per pool; the builder logs the record-level count, which also
     # counts a golden recorded twice at one config (it pins a row already pinned, so it adds no positive).
-    positives = sum(len(c.golden_ids) for c in cases)
+    positives = sum(len(c.golden_ids) for c in groups)
     logger.info(
-        "  %d static + %d dynamic golden cases (%d positives, %d merged), %d D_* features, %d skipped",
-        len(cases) - n_dyn,
+        "  %d static + %d dynamic golden groups (%d positives, %d merged), %d D_* features, %d skipped",
+        len(groups) - n_dyn,
         n_dyn,
         positives,
-        positives - len(cases),
+        positives - len(groups),
         len(names),
         len(skipped),
     )
@@ -464,19 +496,20 @@ def handle_fit(args) -> None:
         # Two fits are comparable only when they drew the same way: a sampled fit's ranks are RAW
         # ranks within the draw, and ``per_golden`` prints the true pool size beside them.
         "pool_sample": args.pool_sample,
-        # Cases are candidate pools, positives the verified rows pinned in them. Recorded so a metrics file
-        # whose case count dropped against an earlier fit says why, instead of looking like lost data.
-        "cases": {"groups": len(cases), "positives": positives, "merged": positives - len(cases)},
+        # A group IS a candidate pool; positives are the verified rows marked in it, and a pool can hold more
+        # than one. Recorded so a metrics file whose group count dropped against an earlier fit says why,
+        # instead of looking like lost data.
+        "groups": {"total": len(groups), "positives": positives, "merged": positives - len(groups)},
         "repo_commit": _repo_commit(),
         "trainer_params": trainer_params,
     }
     import datetime  # noqa: PLC0415
 
-    metrics, fit = run_fit(cases, skipped, trainer=trainer, fold_trainer=fold_trainer, folds=args.folds, header=header)
+    metrics, fit = run_fit(groups, skipped, trainer=trainer, fold_trainer=fold_trainer, folds=args.folds, header=header)
 
     model, notes = fit.model, fit.notes
     # Shipping policy, and the reason ``run_fit`` hands back a fit rather than an artifact: a LINEAR fit with no
-    # dynamic cases would otherwise ship with no dynamic weight set at all, so carry the incumbent's forward —
+    # dynamic groups would otherwise ship with no dynamic weight set at all, so carry the incumbent's forward —
     # loudly, in the provenance notes, never silently. The tree model has no second weight set to be missing.
     if isinstance(model, LinearModel) and model.weights_dynamic is None:
         # ``is not None``, not truthiness: an incumbent that legitimately pruned every dynamic
@@ -491,7 +524,7 @@ def handle_fit(args) -> None:
         "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
         "features": view,
         "pool_sample": args.pool_sample,
-        "cases": {"static": len(cases) - n_dyn, "dynamic": n_dyn},
+        "groups": {"static": len(groups) - n_dyn, "dynamic": n_dyn},
         "positives": positives,
         "notes": notes,
     }
@@ -502,27 +535,5 @@ def handle_fit(args) -> None:
         _write_artifact(artifact_path, model, provenance)
         logger.info("wrote %s", artifact_path)
 
-    for gpu, card in metrics["full_train"]["per_card"].items():
-        logger.info(
-            "full_train  %-34s n=%-3d median=%s (optimistic %s) unranked=%d out_of_scope=%d",
-            gpu,
-            card["n"],
-            card["median"],
-            card["median_optimistic"],
-            card["unranked"],
-            card["out_of_scope"],
-        )
-    for axis, block in metrics["cv"].items():
-        for gpu, card in block["holdout"]["per_card"].items():
-            logger.info(
-                "cv.%-9s %-34s holdout median=%s (optimistic %s) train=%s gap=%s",
-                axis,
-                gpu,
-                card["median"],
-                card["median_optimistic"],
-                block["train"]["per_card"][gpu]["median"],
-                block["gap"].get(gpu),
-            )
-        for f, why in block["fold_detail"]["excluded"].items():
-            logger.info("cv.%-9s fold %s EXCLUDED: %s", axis, f, why)
+    _log_cells(metrics)
     logger.info("wrote %s", out_dir / "metrics.json")

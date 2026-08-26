@@ -10,9 +10,10 @@ description: >-
 
 The autotune `node` table (`SearchDB`, default `~/.cache/emmy/autotune.db`) is a **cross-hardware** dataset of
 search-tree value-of-position rows — the leaf measurements the future offline prior trains on, with the full feature
-dict the prior sees. It is read by `emmy eval prior --dataset nodes` (per-card fork sibling-ranking + leaf
-reachability) and feeds prior diagnostics. Because your dev box (and most of the fleet) has no local CUDA GPU, the
-data for any given card must be **measured on that card** and brought back.
+dict the prior sees. It is read by `emmy eval prior --dataset nodes` (Spearman + regret per card and compile
+regime) and feeds prior diagnostics. Because your dev
+box (and most of the fleet) has no local CUDA GPU, the data for any given card must be **measured on that card** and
+brought back.
 
 This skill does exactly that for one GPU, in a single budgeted run on the box: get a server (an existing one the
 user provides, or rent one) → set up emmy → the golden sweep (`scripts/remote_node_collect.py`, driving
@@ -201,8 +202,8 @@ process on the box by hand, start it inside a tmux session, never bare over ssh.
 ./venv/bin/emmy eval prior --dataset nodes
 ```
 
-`node_report` groups by card — confirm a block headed with the swept GPU's name appears (`[<gpu>] <n> nodes`, with fork
-sibling-ranking + leaf reachability for that card). `--kernel matmul` / `reduce` / `pointwise` narrows to one op family.
+The report keys its cells on card and compile regime — confirm a row headed with the swept GPU's name appears, with a
+pool count and a rho / regret figure for it. `--kernel matmul` / `reduce` / `pointwise` narrows to one op family.
 
 ## Step 4 — Tear down the server (only if this run rented it)
 

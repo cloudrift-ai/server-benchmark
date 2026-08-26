@@ -53,11 +53,9 @@ so allocation failure is reported synchronously instead of surfacing later as an
 
 ## Compiler qualification
 
-The [canonical V100 golden](golden/v100_sm70.yaml) contains 22
-current compiler targets and 25 verified realizations with paired deployable O3 and reference timings. All 15
-full-program deploy offers matched stored realizations with zero gaps, drift, fall-through, or compile failures.
-Representative exact-layer traces and all checkpoint tensor OIDs established that the documentation-only model
-revision does not change the traced inventory.
+The current serving-twin trace covers 40 graphs and 96 distinct Loop targets. The bounded V100 search ended before the
+proposal-seeded and MCTS-only comparison and repeated deployable O3 verification were complete, so no canonical V100
+golden is currently claimed.
 
 ## Reproduce
 

@@ -45,12 +45,12 @@ def _tiny_deepseek(path, transformers, torch):
         # indexer head 128). Everything else shrinks.
         head_dim=512,
         qk_rope_head_dim=64,
-        q_lora_rank=32,
+        q_lora_rank=128,  # every fp8 projection's group outputs must 128-align (SM70 grouped FP8)
         n_routed_experts=4,
         num_experts_per_tok=2,
         n_shared_experts=1,
         o_groups=2,
-        o_lora_rank=32,
+        o_lora_rank=128,
         index_n_heads=2,
         index_head_dim=128,
         index_topk=8,
@@ -62,7 +62,8 @@ def _tiny_deepseek(path, transformers, torch):
         # then cannot read ``num_local_experts`` off the config at all.
         compress_ratios=list(RATIOS),
         num_hash_layers=0,
-        compress_rates={"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+        # NO ``compress_rates``: the published config does not carry it, and the twin and the fork
+        # derive their compressor geometry consistently only under the published spelling.
         sliding_window=32,
         swiglu_limit=10.0,
         max_position_embeddings=256,
@@ -91,6 +92,24 @@ def _tiny_deepseek(path, transformers, torch):
     return config
 
 
+# ``quantization_config`` rides in as an override rather than in the file: the fork's attention
+# requires the published fp8 declaration (``scale_fmt``), but writing it into config.json would
+# flip the RUNNER's load onto the quantized lane — and this fixture's weights are plain fp16. The
+# real checkpoint declares it in the file and both sides read it, EXACTLY as published: a smaller
+# block size sends vLLM's fp8 off the fork's block-quant path onto per-tensor kernels the card
+# does not have.
+HF_OVERRIDES = {
+    "architectures": ["EmmyGenModel"],
+    "quantization_config": {
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "quant_method": "fp8",
+        "scale_fmt": "ue8m0",
+        "weight_block_size": [128, 128],
+    },
+}
+
+
 def _vllm_config(vllm, model_dir):
     from vllm.config import VllmConfig
     from vllm.engine.arg_utils import EngineArgs
@@ -103,22 +122,7 @@ def _vllm_config(vllm, model_dir):
         max_num_batched_tokens=256,
         enforce_eager=True,
         kv_cache_dtype="fp8",  # the fork's paged attention supports no other cache format
-        # ``quantization_config`` rides in as an override rather than in the file: the fork's
-        # attention requires the published fp8 declaration (``scale_fmt``), but writing it into
-        # config.json would flip the RUNNER's load onto the quantized lane — and this fixture's
-        # weights are plain fp16. The real checkpoint declares it in the file and both sides read
-        # it. The block size is scaled with the fixture (the published 128x128 block spans every
-        # whole projection here, which would make the fused block-scale shards degenerate).
-        hf_overrides={
-            "architectures": ["EmmyGenModel"],
-            "quantization_config": {
-                "activation_scheme": "dynamic",
-                "fmt": "e4m3",
-                "quant_method": "fp8",
-                "scale_fmt": "ue8m0",
-                "weight_block_size": [16, 16],
-            },
-        },
+        hf_overrides=HF_OVERRIDES,
     )
     config = args.create_engine_config()
     assert isinstance(config, VllmConfig)
@@ -189,7 +193,7 @@ def test_fork_attention_registers_one_cache_set_per_absolute_layer(tmp_path):
 def _native_stream(torch, config, model, fills):
     """The checkpoint's attention keys for every layer, shaped off the REAL fork modules' own
     geometry (fused shards split by the merged projection's ``output_sizes``), plus the head."""
-    block = 16
+    block = HF_OVERRIDES["quantization_config"]["weight_block_size"][0]
     items = [("head.weight", torch.zeros(config.vocab_size, config.hidden_size, dtype=torch.float16))]
     for layer, layer_type in enumerate(config.layer_types):
         params = dict(model.fork_attn[layer].named_parameters())

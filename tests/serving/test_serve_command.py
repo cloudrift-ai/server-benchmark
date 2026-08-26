@@ -462,3 +462,45 @@ def test_health_timeout_after_model_is_extracted_not_forwarded(capsys):
     assert len(out) == 2
     assert "--health-timeout" not in out[0] and "--health-timeout" not in out[1]
     assert args.health_timeout == 5400
+
+
+def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
+    """DeepSeek V4 publishes its expert count as ``n_routed_experts`` with per-layer structure
+    derived from ``compress_ratios``; the native config derives ``num_local_experts`` from it, which
+    is what the probe keys on — so an MoE serve of this checkpoint gets the capture-size-1 default."""
+    pytest.importorskip("transformers")
+    from emmy.commands.serve import _is_moe_model
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV4ForCausalLM"],
+                "model_type": "deepseek_v4",
+                "vocab_size": 64,
+                "hidden_size": 64,
+                "moe_intermediate_size": 32,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "head_dim": 512,
+                "qk_rope_head_dim": 64,
+                "q_lora_rank": 16,
+                "n_routed_experts": 4,
+                "num_experts_per_tok": 2,
+                "n_shared_experts": 1,
+                "o_groups": 1,
+                "o_lora_rank": 16,
+                "index_n_heads": 2,
+                "index_head_dim": 128,
+                "index_topk": 2,
+                "hc_mult": 2,
+                "hc_sinkhorn_iters": 2,
+                "compress_ratios": [0, 0],
+                "num_hash_layers": 0,
+                "compress_rates": {"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+                "sliding_window": 4,
+                "swiglu_limit": 10.0,
+                "max_position_embeddings": 64,
+            }
+        )
+    )
+    assert _is_moe_model(str(tmp_path), []) is True

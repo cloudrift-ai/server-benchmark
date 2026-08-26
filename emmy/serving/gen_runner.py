@@ -1334,6 +1334,12 @@ class EmmyGenRunner:
                     if has_bias:
                         einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
                         einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
+                    if expert_range is not None:
+                        # The quantized store arrives pre-narrowed by the loader; the twin's own
+                        # tables carry every expert, so a shard keeps only its slice (every expert
+                        # tensor is E-leading) — the combine indexes them rank-locally.
+                        lo, hi = expert_range
+                        einputs = {nm: tensor[lo:hi].contiguous() for nm, tensor in einputs.items()}
                     if interleaved:
                         for nm in ("w_gate_up", "b_gate_up"):
                             if nm in einputs:
@@ -2030,6 +2036,13 @@ class EmmyGenRunner:
             from emmy.compiler.trace.huggingface import place_routed_streams
 
             mixed, xn, mix = outs
+            # A compiled variant may hand its outputs back in its ACCUMULATION dtype (some
+            # geometries' post twins emit float32); the seam contract is the residual dtype for
+            # the carrier and the activation dtype for the routed input, so normalize before the
+            # consumers — the router and expert programs take activation-dtype rows, and the next
+            # layer's pre uploads the carrier at the residual dtype.
+            mixed = mixed.to(self.residual_dtype)
+            xn = xn.to(self._activation_dtype)
             routed = self._moe_combine(moe, xn, token_ids)
             if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
                 routed = reduce_routed(routed)
@@ -2377,4 +2390,6 @@ class EmmyGenRunner:
         self._ensure_device()
         with torch.no_grad():
             out = self._norm_dev(self._collapse_streams(hidden))
-            return out.to(self._activation_dtype) if self._residual_float32 else out
+            # ALWAYS the activation dtype: the head consumes it, and the norm (or the stream
+            # collapse before it) may compute — and hand back — float32.
+            return out.to(self._activation_dtype)

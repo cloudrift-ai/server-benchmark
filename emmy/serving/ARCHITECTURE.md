@@ -342,6 +342,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
   gate only weights the selection), and the runner refuses to route such a layer without them.
 
+  Under tensor parallelism the plugin derives each rank's CONTIGUOUS expert slice from the config's
+  routed-expert count and hands it to the runner (`expert_range`): the quantized loader narrows its
+  checkpoint read to the shard, the unquantized lane slices the twin's own expert tables, and the
+  rank's partial combine is completed by the group all-reduce. The distributed gate is a REAL-engine
+  parity test: the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy
+  token ids (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the
+  engine enforces that in-process gates cannot: compiled twins may hand outputs back in their
+  ACCUMULATION dtype, so the runner normalizes the carrier to the residual dtype and the routed
+  input / final-norm output to the activation dtype at the seam; and the cross-process GPU lock is
+  scoped per physical device — serving ranks each own a card, and one machine-wide lock deadlocks
+  a rank inside its combine against the peer its pending collective is waiting for.
+
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
   `from_model` interns it into a group index, compiles that group's whole tier set on first sight

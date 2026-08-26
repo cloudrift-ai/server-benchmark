@@ -433,6 +433,19 @@ class EmmyGenModel(nn.Module, SupportsPP):
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
+        # Routed experts are sharded across the tensor-parallel group: the runner loads only this
+        # rank's contiguous expert slice, its combine yields a PARTIAL sum over the rank's own
+        # hits, and the group all-reduce (installed below) completes it. A rank cannot hold every
+        # expert of the models this exists for — one DeepSeek V4 stage's experts alone outweigh a
+        # 32 GB card.
+        tp = get_tp_group()
+        expert_range = None
+        n_routed = getattr(config, "n_routed_experts", None) or getattr(config, "num_local_experts", None)
+        if tp.world_size > 1 and n_routed:
+            if n_routed % tp.world_size:
+                raise ValueError(f"{n_routed} routed experts do not divide across tensor_parallel_size={tp.world_size}")
+            per_rank = n_routed // tp.world_size
+            expert_range = (tp.rank_in_group * per_rank, (tp.rank_in_group + 1) * per_rank)
         self.runner = EmmyGenRunner.create(
             model_id=self._model_id,
             dtype_str=_trunk_dtype_str(mc.dtype),
@@ -442,6 +455,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
             layer_range=(self.start_layer, self.end_layer),
             include_embed=self._is_first_rank,
             include_norm=self._is_last_rank,
+            expert_range=expert_range,
         )
         if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
             # The over-cap headroom was granted on the promise of the split; if the twin
@@ -547,9 +561,9 @@ class EmmyGenModel(nn.Module, SupportsPP):
             max_pos = _rope_cache_limit(mc, config)
             self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
 
-        # Routed experts are sharded across the tensor-parallel group, so each rank's combine is a
-        # PARTIAL sum; the group reduction completes it before the placement closes the layer.
-        if get_tp_group().world_size > 1:
+        # The shard's combine is a PARTIAL sum; the group reduction completes it before the
+        # placement closes the layer.
+        if tp.world_size > 1:
             from vllm.distributed import tensor_model_parallel_all_reduce
 
             self.runner._reduce_routed = tensor_model_parallel_all_reduce

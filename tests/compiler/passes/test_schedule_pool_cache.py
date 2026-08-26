@@ -15,6 +15,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of
@@ -207,3 +208,46 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
     pins = schedule_pin_fingerprint()
     assert pool_key(wide, pins=pins) != pool_key(tall, pins=pins), "so they must not share a pool entry"
+
+
+def test_split_dim_store_does_not_share_an_identity() -> None:
+    """A buffer's SHAPE and the store's index are enumeration inputs, so both identities carry them.
+
+    The same iteration space can reach its output flat (``128x128``) or through a re-fused split
+    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). The fragment store can
+    address the pair only under a divisibility rule, so the split form loses the warp tier — 50538
+    candidates against 10284. The term carries neither fact: ``TileOp.structural_key`` excludes the
+    stores by design and the algebra digest canonicalizes sizes away, so both reached one
+    ``deploy_identity`` as well as one ``pool_key``. The deploy collision is the worse half: a
+    golden measured on the flat kernel would be handed to a kernel that cannot realize its row.
+    """
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
+
+    matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
+    ctx = Context.from_target((12, 0))
+
+    def lifted(code: str):
+        graph, _, _ = graph_from_code(code)
+        out = Pipeline.build(LOOP_PASSES).run(graph)
+        node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
+        tile = lift_loop_op(node.op, name=node.op.name)
+        tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+        return tile
+
+    flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
+
+    # The premise: the ALGEBRA and its extents agree — only the boundary differs.
+    assert flat.structural_key() == split.structural_key()
+    assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
+
+    def total(tile) -> int:
+        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+
+    assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
+    assert deploy_identity(flat) != deploy_identity(split), "so a golden must not join across them"
+    pins = schedule_pin_fingerprint()
+    assert pool_key(flat, pins=pins) != pool_key(split, pins=pins), "and they must not share a pool"

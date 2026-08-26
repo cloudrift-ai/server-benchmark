@@ -47,7 +47,14 @@ __all__ = [
     "hint_extent",
     "hint_fingerprint",
     "pool_key",
+    "shape_fingerprint",
+    "store_fingerprint",
 ]
+
+
+def _dims(shape) -> tuple[str, ...]:
+    """A buffer shape rendered hint-free — a static dim as its integer, a symbolic one as ``sym``."""
+    return tuple(str(d.as_static()) if d.is_static else "sym" for d in shape)
 
 
 def hint_extent(ax) -> int:
@@ -146,6 +153,74 @@ def dtype_fingerprint(tile: TileOp) -> tuple[str, ...]:
     return (*out, "->", *(str(t.dtype) for t in tile.outputs.values()))
 
 
+def _buffers(tile: TileOp) -> list:
+    """Every buffer a schedule reads, in the ONE walk order: each term ``Load``'s buffer in
+    first-use order, then the outputs. Shared by :func:`dtype_fingerprint` and
+    :func:`shape_fingerprint` so the two can never disagree about which buffer a position names."""
+    seen: set[str] = set()
+    out: list = []
+
+    def note_stmt(s) -> None:
+        if isinstance(s, Fold):
+            walk(s)
+            return
+        if isinstance(s, Load) and s.input not in seen:
+            seen.add(s.input)
+            out.append(tile.inputs.get(s.input))
+        for b in s.nested():
+            for c in b:
+                note_stmt(c)
+
+    def walk(node) -> None:
+        if not isinstance(node, Fold):
+            return
+        for e in node.operands:
+            note_stmt(e)
+        for s in node.lift.body:
+            note_stmt(s)
+
+    walk(tile.op)
+    return [*out, None, *tile.outputs.values()]  # ``None`` separates the operands from the results
+
+
+def shape_fingerprint(tile: TileOp) -> tuple[tuple[str, ...] | str, ...]:
+    """Every buffer's SHAPE, in :func:`_buffers` order. NAME-FREE, like the dtypes beside it.
+
+    Not implied by :func:`extent_fingerprint`: the axes say how far a loop runs, the shape says how
+    the buffer SPELLS that coordinate. A re-fused split axis reaches its buffer as a dim pair
+    (``[…, f/Q, …, f%Q]``), which the fragment store can address only under a divisibility rule
+    (``_legality.warp_split_store``) — so a ``(128, 128)`` output and a ``(4, 32, 128)`` one over
+    the same iteration space do not offer the same tiers. They were reaching identical
+    ``deploy_identity`` AND ``pool_key`` over spaces of 50538 and 10284 candidates, which put a
+    golden measured on the flat kernel onto a kernel that cannot realize the row it names.
+    """
+    return tuple("->" if t is None else _dims(t.shape) for t in _buffers(tile))
+
+
+def store_fingerprint(tile: TileOp) -> tuple:
+    """The kernel-boundary stores' ADDRESSING — what ``TileOp.stores`` contributes that the term
+    does not carry.
+
+    Per store in order: the index expression, whether it is an ``atomicAdd``, its stored width, and
+    the sweep axis's extent when it rides an output ``Loop``. Buffer and SSA names are excluded —
+    those are spelling, and identity is name-free — while the index EXPR is kept whole, since it is
+    exactly what :func:`~_legality.warp_split_store` reads to decide addressability.
+
+    ``TileOp.structural_key`` excludes the stores by design (they are a kernel-boundary fact beside
+    ``place``, not algebra), so any identity coarser than the term folds them back in here.
+    """
+    return tuple(
+        (
+            tuple(repr(e) for e in store.write.index),
+            store.write.atomic,
+            store.write.width,
+            None if store.sweep is None else (str(store.sweep.extent.as_static()) if store.sweep.extent.is_static else "sym"),
+            store.unroll,
+        )
+        for store in tile.stores
+    )
+
+
 def deploy_identity(tile: TileOp) -> str:
     """The verified-tier join key — what the kernel IS.
 
@@ -159,7 +234,13 @@ def deploy_identity(tile: TileOp) -> str:
     kernel is; the strict row decode (exact spelled-row equality) is what guarantees a record still
     realizes.
     """
-    return digest(tile.structural_key(), dtype_fingerprint(tile), extent_fingerprint(tile))
+    return digest(
+        tile.structural_key(),
+        dtype_fingerprint(tile),
+        extent_fingerprint(tile),
+        shape_fingerprint(tile),
+        store_fingerprint(tile),
+    )
 
 
 def pool_key(tile: TileOp, *, pins: str) -> str:
@@ -174,4 +255,12 @@ def pool_key(tile: TileOp, *, pins: str) -> str:
     Target facts (smem cap, TMA, the f16acc gate) need no part: the pool cache lives ON the
     ``Context``, so one instance never spans two fact sets.
     """
-    return digest(tile.cache_key(), dtype_fingerprint(tile), extent_fingerprint(tile), hint_fingerprint(tile), pins)
+    return digest(
+        tile.cache_key(),
+        dtype_fingerprint(tile),
+        extent_fingerprint(tile),
+        shape_fingerprint(tile),
+        store_fingerprint(tile),
+        hint_fingerprint(tile),
+        pins,
+    )

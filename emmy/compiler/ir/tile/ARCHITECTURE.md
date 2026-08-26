@@ -116,9 +116,13 @@ key and takes the live pin fingerprint as a required argument, which is what kee
 pure function of a `TileOp` and below the pipeline layer.
 
 A fact that changes what a reader produces, and that the term does not carry, belongs in a
-fingerprint here. Omitting one is silent: `pool_key` shipped without per-axis extents, and two
-matmuls with transposed M/N — equal terms, equal `S_ext_*` summaries — shared one pool entry over
-spaces of 57442 and 8280 candidates.
+fingerprint here. Omitting one is silent, and both known omissions cost the same way. `pool_key`
+shipped without per-axis extents, so two matmuls with transposed M/N — equal terms, equal
+`S_ext_*` summaries — shared one pool entry over spaces of 57442 and 8280 candidates. Buffer
+shapes and the boundary stores were missing from both identities, so a `(128, 128)` output and a
+`(4, 32, 128)` one over the same iteration space collided: the split form spells its coordinate as
+a dim pair the fragment store can address only under a divisibility rule, and a golden measured on
+the flat kernel joined a kernel that could not realize its row.
 
 ## TileOp and scheduling
 

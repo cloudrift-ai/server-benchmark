@@ -12,7 +12,9 @@ own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
 
 - every cleanly-benched pinned golden / ``--ab`` row as an ``ok`` leaf;
 - a realized config whose bench failed as a ``bench_fail`` negative (its ``value_us`` is
-  :data:`FAIL_SENTINEL_US`, not a measurement — consumers read ``status``);
+  :data:`FAIL_SENTINEL_US`, not a measurement — consumers read ``status``), and only when
+  the config lowered to ONE kernel: a failure belongs to the variant, and spreading one
+  sentinel across several kernels would file a number none of them measured;
 - the greedy pick, from its ``greedy (isolated)`` re-bench — pinned-comparable by
   construction, so every benched pool self-anchors the prior's argmax.
 
@@ -22,15 +24,19 @@ floor: the measurement is untrue), and anything from the ``--ir`` path (serializ
 drops ``op.knobs``, so there is no honest feature dict). The caller
 (``emmy/commands/run.py``) owns those exclusions; this module records what it is given.
 
-Pool fidelity: the tune keys a pool by ``op_sig`` — a digest over the **pre-descent**
-offer op's ``S_*`` stamps, NOT the terminal kernel's (descent stamps further ``S_*``
-deltas, so the two differ for most ops). :func:`bench_leaves` recovers the offer site
-from each compiled kernel via ``source_chain`` (the ``two_level`` decomposition idiom:
-deepest loop-dialect ancestor carrying ``S_*`` knobs, tile-dialect fallback for the mma
-path) and groups a variant's kernels under one
-site — an auxiliary kernel with no provenance at all attributes to its nearest sited
-producer through the graph edges — one leaf per (variant, op), valued at the group's
-summed per-launch time, exactly the tune's whole-variant leaf semantics.
+Pool fidelity: **one row describes one kernel**, the same rule the tune walk records by
+(``policy/mcts._measured_kernel_rows``) — its own knobs, its own launch time, and its own
+identity, so a kernel benched here and the same kernel tuned by the search meet on one
+``node_key`` and rank against each other in one candidate pool. A benched graph is
+therefore a per-kernel map, with nothing grouped and no latency summed: a variant that
+lowered to several kernels contributes several rows, because no kernel ran at their total.
+
+Identity comes from :func:`~...passes.identity.chain_op_sig`, never from the realized op's
+own stamps — tile materialization merges ``S_warp_eligible`` onto the op it builds, so the
+op carries a stamp its kernel was not born with. A kernel whose chain carries no stamp at
+all is not recordable: there is no identity to file it under, and it is dropped with a
+debug note rather than attributed to a neighbour.
+
 Rows are keyed with the tune's own recipes (same ``node_key`` / ``op_sig`` /
 ``context_key``), parentless with ``depth=0`` — the no-tree-schema marker the fork
 diagnostics skip — and stamped with a ``bench-…`` ``run_id`` so freeze headers show the
@@ -65,11 +71,11 @@ FAIL_SENTINEL_US = 1e9
 
 @dataclass(frozen=True)
 class BenchLeaf:
-    """One (variant, op) measurement extracted from a benched compiled graph."""
+    """One benched KERNEL's measurement, extracted from a benched compiled graph."""
 
-    op_sig: str  # the tune's pool key — pre-descent offer-site S_* digest
-    knobs: dict  # realized knob dict (S_* stamps + tunables) of the group's main kernel
-    value_us: float  # whole-variant latency for this op (summed launches); sentinel on fail
+    op_sig: str  # the kernel's identity — the stamp it was born with (``chain_op_sig``)
+    knobs: dict  # the kernel's own realized knob dict (S_* stamps + tunables)
+    value_us: float  # the kernel's own launch time; sentinel on fail
     variance: float | None
     n_samples: int | None
     status: str  # 'ok' | 'bench_fail'
@@ -86,114 +92,62 @@ def mint_bench_run_id() -> str:
     return f"bench-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
 
 
-def _offer_site(op) -> object | None:
-    """The pre-descent offer op a compiled kernel lowered from. Preferred: the deepest
-    loop-dialect ancestor carrying ``S_*`` stamps (the ``two_level`` decomposition-row
-    idiom). The tensor-core (mma) tile-lowering does NOT preserve a ``LoopOp`` in the
-    ``.source`` chain — it bottoms at a ``TileOp`` — so with no loop ancestor the
-    deepest tile-dialect ``S_*``-carrying ancestor stands in: it holds the
-    recognize-time ``S_*`` set unchanged (descent's extra ``S_*`` stamps land on
-    kernel/cuda-dialect ops), so its digest equals the tune-written ``op_sig``
-    (verified against real tune rows on an RTX 4090 — without the fallback, every
-    mma-path kernel was silently unrecordable, i.e. exactly the fast tensor-core
-    variants this module exists to capture). ``None`` when neither exists."""
-    site = fallback = None
-    for anc in op.source_chain():
-        if not any(k.startswith("S_") for k in getattr(anc, "knobs", {}) or {}):
-            continue
-        dialect = anc.dialect
-        if dialect == "loop":
-            site = anc
-        elif dialect == "tile":
-            fallback = anc
-    return site or fallback
-
-
 def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
-    """Extract one :class:`BenchLeaf` per (variant, op) from a benched compiled graph.
+    """One :class:`BenchLeaf` per benched CUDA kernel of ``compiled``.
 
-    Kernels are paired with ``bench.per_launch`` by topological order (the launch
-    order) and grouped by their offer site: kernels sharing one site contribute ONE
-    leaf valued at the group's summed launch time, so a fragment kernel's own tiny
-    latency never becomes that site's row (the pre-#330 poison class). Kernels a
-    structural fork minted are NOT such a group — each is a brand-new kernel carrying its own
-    structural stamp, re-derived from its own body, so each records its own row against its own site. Bench stats (variance / n_samples)
-    carry only for single-kernel groups — per-launch windows replay each kernel
-    back-to-back, so cross-kernel samples don't align iter-wise and a summed variance
-    would be fiction. ``status="bench_fail"`` (with ``bench=None``) emits sentinel
-    leaves for a realized config that failed to bench. A kernel with no recoverable
-    offer site is skipped with a debug note."""
+    Kernels pair with ``bench.per_launch`` by topological order (the launch order) and each
+    keeps its own launch time: nothing is grouped and nothing is summed, because a row that
+    carried several kernels' total would describe a cost no kernel ran at — and the deploy
+    prices a multi-kernel realization by summing a per-kernel price, so one kernel's cost is
+    the quantity a row must hold.
+
+    ``status="bench_fail"`` (with ``bench=None``) emits ONE sentinel leaf, and only for a
+    single-kernel graph: the failure is the variant's, and there is no honest way to divide
+    it among several kernels. A kernel whose chain carries no stamp has no identity to file
+    under and is skipped with a debug note; if that is true of every kernel in the graph, the
+    silence is loud, since it means a lowering path stopped preserving provenance."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.identity import kernel_sig  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.identity import chain_op_sig  # noqa: PLC0415
 
     nids = [nid for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
-    entries = []  # (nid, op, launch, sig-or-None) in launch order
-    sig_by_nid: dict[str, str] = {}
+    if status != "ok" and len(nids) != 1:
+        logger.debug("[record-nodes] %d-kernel variant failed to bench — the failure is the variant's, no row recorded", len(nids))
+        return []
+
+    leaves: list[BenchLeaf] = []
+    skipped = 0
     for idx, nid in enumerate(nids):
         op = compiled.nodes[nid].op
-        site = _offer_site(op)
-        sig = kernel_sig(site.knobs) if site is not None else None
-        if sig is not None:
-            sig_by_nid[nid] = sig
-        entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))
-
-    def attributed(nid: str, hops: int = 4) -> str | None:
-        """The site group of an orphan kernel's nearest sited PRODUCER — the graph edge
-        standing in for an attribution the source chain lost. A kernel with no ``S_*``
-        anywhere in its chain would otherwise be dropped silently, and its group's value
-        would then be a partial one: systematically fast-biased against the tune's
-        whole-slice leaves in the same pool (found by the 2026-07-16 4090 verification)."""
-        frontier = [nid]
-        for _ in range(hops):
-            nxt: list[str] = []
-            for cur in frontier:
-                node = compiled.producer(cur)
-                for pid in getattr(node, "inputs", None) or []:
-                    if pid in sig_by_nid:
-                        return sig_by_nid[pid]
-                    nxt.append(pid)
-            frontier = nxt
-        return None
-
-    groups: dict[str, dict] = {}
-    skipped = 0
-    for nid, op, launch, sig in entries:
-        sig = sig or attributed(nid)
+        sig = chain_op_sig(op)
         if sig is None:
             skipped += 1
-            logger.debug("[record-nodes] kernel %s has no recoverable offer site and no sited producer — skipped", nid)
+            logger.debug("[record-nodes] kernel %s carries no structural stamp in its chain — skipped", nid)
             continue
-        g = groups.setdefault(sig, {"ops": [], "launches": []})
-        g["ops"].append(op)
-        g["launches"].append(launch)
-    if skipped and not groups:
-        # Silence must never read as success: a graph whose EVERY kernel lost its offer
-        # site means a provenance gap in some lowering path, not "nothing to record".
-        logger.warning(
-            "[record-nodes] none of the %d kernel(s) has a recoverable offer site — nothing recorded "
-            "(a lowering path is not preserving op provenance; please report)",
-            skipped,
-        )
-    leaves = []
-    for sig, g in groups.items():
-        # The main kernel carries the group's descent stamps; an auxiliary carries a subset — the
-        # most-tunables op is the group's knob identity.
-        main = max(g["ops"], key=lambda o: sum(1 for k in (o.knobs or {}) if not k.startswith(("S_", "H_"))))
-        knobs = dict(main.knobs or {})
+        knobs = dict(op.knobs or {})
         if status != "ok":
             leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=FAIL_SENTINEL_US, variance=None, n_samples=None, status=status))
             continue
-        if any(launch is None for launch in g["launches"]):
-            logger.debug("[record-nodes] op %s missing per-launch timings — skipped", sig[:12])
+        launch = per_launch[idx] if idx < len(per_launch) else None
+        if launch is None:
+            logger.debug("[record-nodes] kernel %s has no per-launch timing — skipped", nid)
             continue
-        value_us = sum(launch.time_ms for launch in g["launches"]) * 1000.0
         variance = n_samples = None
-        if len(g["launches"]) == 1 and g["launches"][0].samples:
-            samples_us = [s * 1000.0 for s in g["launches"][0].samples]
+        if launch.samples:
+            samples_us = [sample * 1000.0 for sample in launch.samples]
             n_samples = len(samples_us)
             variance = statistics.pvariance(samples_us) if n_samples >= 2 else None
-        leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=value_us, variance=variance, n_samples=n_samples, status="ok"))
+        leaves.append(
+            BenchLeaf(op_sig=sig, knobs=knobs, value_us=launch.time_ms * 1000.0, variance=variance, n_samples=n_samples, status="ok")
+        )
+    if skipped and not leaves:
+        # Silence must never read as success: a graph whose EVERY kernel lost its stamp means a
+        # provenance gap in some lowering path, not "nothing to record".
+        logger.warning(
+            "[record-nodes] none of the %d kernel(s) carries a structural stamp — nothing recorded "
+            "(a lowering path is not preserving op provenance; please report)",
+            skipped,
+        )
     return leaves
 
 

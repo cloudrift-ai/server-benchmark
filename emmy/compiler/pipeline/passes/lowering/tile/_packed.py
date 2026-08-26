@@ -40,10 +40,15 @@ class PackedKBlockB:
     fragment load (one factor read per k block).
     """
 
-    bits: Load
+    bits: Load | None
     table: Load
     factor: str
     block: int
+    #: The SSA name when the codes are COMPUTED rather than stored — an operand whose quantize
+    #: loop fusion inlined into the matmul, so its byte exists only as a value. ``None`` (and
+    #: ``bits`` a real ``Load``) unless the caller passed ``codes_may_compute``; the packed
+    #: byte-slab stage, whose bits COPY from gmem, never asks for it.
+    codes: str | None = None
 
 
 def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
@@ -101,21 +106,32 @@ def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
     return walk(expr)
 
 
-def match_packed_kblock_b(cone: list, k_name: str, inputs) -> PackedKBlockB | None:
+def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute: bool = False) -> PackedKBlockB | None:
     """Recognize the packed-pair k-block shape in a computed-B cone.
 
-    The shape (the NVFP4 speller's lowered form): a packed-pair bits Load feeds an
-    index copy, a pair-table gather reads it by data-dependent index, and the final
-    multiply combines the gathered value with a factor whose every ``k`` reference is
-    block-guarded (:func:`_k_block_guard`). Everything else returns ``None``.
+    The shape (the NVFP4 speller's lowered form): the packed byte feeds an index copy, a
+    pair-table gather reads it by data-dependent index, and the final multiply combines the
+    gathered value with a factor whose every ``k`` reference is block-guarded
+    (:func:`_k_block_guard`). Everything else returns ``None``.
+
+    The byte is normally a ``Load`` — a stored weight, or an activation whose codes a fan-out
+    forced into memory. ``codes_may_compute`` also admits one whose quantize loop fusion inlined
+    into this matmul, so the byte is an ``Assign`` at the packed dtype and there is no buffer to
+    copy: the operand's slab is then compute-filled from this very cone instead. Only the
+    block-scaled reading asks for that; the packed byte-slab stage copies its bits and would have
+    nothing to address.
     """
     if not cone or inputs is None:
         return None
     loads = [st for st in cone if isinstance(st, Load)]
     packed = [ld for ld in loads if getattr(inputs.get(ld.input), "dtype", None) is not None and inputs[ld.input].dtype.logical_elems == 2]
-    if len(packed) != 1:
+    computed = (
+        [st for st in cone if isinstance(st, Assign) and st.dtype is not None and st.dtype.logical_elems == 2] if codes_may_compute else []
+    )
+    if len(packed) + len(computed) != 1:
         return None
-    bits = packed[0]
+    bits = packed[0] if packed else None
+    codes = None if bits is not None else computed[0].name
     defined = {d for st in cone if isinstance(st, Assign) for d in st.defines()}
     gathers = [ld for ld in loads if _idx_vars(ld.index) & defined]
     if len(gathers) != 1:
@@ -145,7 +161,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs) -> PackedKBlockB | No
             blocks |= guards
     if len(blocks) != 1:
         return None
-    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)))
+    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)), codes=codes)
 
 
 def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
@@ -176,10 +192,16 @@ def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
 class BlockScaledOperand:
     """One side of the block-scaled reading, split into the three things the instruction wants.
 
-    ``bits`` is the packed-pair storage Load, ``scale`` the RAW block-scale Load its factor
-    decodes (a 1-byte, one-value-per-element storage dtype — what the instruction takes as its
-    scale operand), and ``alpha`` the factor's k-invariant Loads, whose product the epilogue
-    applies once per output element instead of once per k.
+    ``scale`` is the RAW block-scale Load the factor decodes (a 1-byte, one-value-per-element
+    storage dtype — what the instruction takes as its scale operand), and ``alpha`` the factor's
+    k-invariant Loads, whose product the epilogue applies once per output element instead of
+    once per k.
+
+    The codes arrive one of two ways, and the operand's slab follows. ``bits`` set: they are
+    stored, so the slab COPIES them. ``codes`` set instead: this matmul's own kernel computes
+    them (loop fusion inlined the quantize), so there is no buffer to copy and the slab is
+    compute-FILLED from ``cone`` — the stmts producing that byte, which derive both its nibbles
+    from one k coordinate exactly as the copied form's index does.
 
     The instruction consumes ``bits`` and ``scale`` and nothing else, so whatever the factor does
     BETWEEN the raw scale and the multiply — today a decode, a multiply by ``alpha`` and a round
@@ -187,9 +209,11 @@ class BlockScaledOperand:
     branch accepts here rather than restating the declared program (PR decision 18).
     """
 
-    bits: Load
+    bits: Load | None
     scale: Load
     alpha: tuple[Load, ...]
+    codes: str | None = None
+    cone: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -209,6 +233,7 @@ def _split_block_scale(read: PackedKBlockB, cone: list, k_name: str, inputs) -> 
     scale operand can take; every other Load in it must be k-free, and those are the residue.
     Anything else declines, and the operand keeps the decode-based readings.
     """
+    codes_cone = () if read.codes is None else tuple(Body(tuple(cone)).backward_cone([read.codes]).members)
     factor_cone = list(Body(tuple(cone)).backward_cone([read.factor]).members)
     loads = [st for st in factor_cone if isinstance(st, Load)]
     scales = [ld for ld in loads if k_name in _idx_vars(ld.index)]
@@ -221,7 +246,7 @@ def _split_block_scale(read: PackedKBlockB, cone: list, k_name: str, inputs) -> 
     alpha = tuple(ld for ld in loads if ld is not scale)
     if any(_idx_vars(ld.index) for ld in alpha):
         return None  # the residue must be CELL-UNIFORM: the epilogue applies it once per output element
-    return BlockScaledOperand(bits=read.bits, scale=scale, alpha=alpha)
+    return BlockScaledOperand(bits=read.bits, scale=scale, alpha=alpha, codes=read.codes, cone=codes_cone)
 
 
 def block_scaled_atom(atom) -> bool:
@@ -259,7 +284,7 @@ def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
     sides = []
     for edge in edges:
         cone = list(operand_body(edge))
-        read = match_packed_kblock_b(cone, k_name, inputs)
+        read = match_packed_kblock_b(cone, k_name, inputs, codes_may_compute=True)
         split = _split_block_scale(read, cone, k_name, inputs) if read is not None else None
         if split is None:
             return None

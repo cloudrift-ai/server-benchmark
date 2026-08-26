@@ -670,7 +670,9 @@ def _warp_atoms(term: _Term, node) -> tuple[str, ...]:
     # loads — the codes or their e4m3 block scales — the body happens to name first.
     pair = match_packed_pair_node(node, inputs)
     if pair is not None:
-        return atoms_for(inputs[pair.a.bits.input].dtype, ctx=term.ctx)
+        # The weight side's codes are always STORED, so its dtype is the pair's — the activation's
+        # may be computed in this very kernel, in which case it has no gmem tensor to ask.
+        return atoms_for(inputs[pair.b.bits.input].dtype, ctx=term.ctx)
     ab = _a_dtype(node, inputs)
     if ab is not None and ab.logical_elems != 1:
         # A packed-pair storage dtype has no scalar byte semantics, so every atom that multiplies

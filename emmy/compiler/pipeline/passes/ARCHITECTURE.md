@@ -478,7 +478,10 @@ failing several passes later:
   factor inside the fold. Neither product argument is a direct load there, so the row side follows from the cones'
   indices rather than from the argument order. That pair is what the BLOCK-SCALED cell reads
   (`_packed.match_packed_pair_node`): both edges split into packed codes, a raw 1-byte block-scale load and a
-  k-invariant residue, over one block extent. `_warp_atoms` asks that question before it asks any operand's leaf
+  k-invariant residue, over one block extent. The codes are a `Load` when stored and an `Assign` at the packed dtype
+  when this matmul computes them itself (`codes_may_compute` — the single-consumer activation whose quantize fusion
+  inlined); the operand's slab copies in the first case and is compute-filled from that cone in the
+  second. `_warp_atoms` asks that question before it asks any operand's leaf
   dtype — the cell is the one atom whose operands are read off the pair rather than off an `a` edge — and offers the
   atom when it matches. A packed operand with no packed peer still declines to the decode-based readings.
   The binding now happens ONCE at **recognize time** (`_classify.bind_bilinear` — every

@@ -229,10 +229,14 @@ Both readings still hand the tensor cores 16-bit fragments, because every mma be
 8-bit operands. Consumer Blackwell adds one that multiplies the 4-bit codes THEMSELVES and applies each 16-value
 block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul carries no decode at all.
 A marked matmul reaches it when BOTH operands read as packed decode chains: the schedule offers the atom, the stage
-resolves FOUR verbatim byte slabs (both operands' codes, both operands' raw e4m3 block scales — nothing is
-compute-filled, because the cell takes the stored scale byte itself), and the drain loads two data fragments through
-the same byte gathers the fp8 k32 atoms use plus one scale register per side. The per-tensor scale levels ride the
-epilogue.
+resolves FOUR byte slabs (both operands' codes, both operands' raw e4m3 block scales), and the drain loads two data
+fragments through the same byte gathers the fp8 k32 atoms use plus one scale register per side. The per-tensor scale
+levels ride the epilogue. Both block-scale slabs always COPY — the cell takes the stored e4m3 byte itself, so the fill
+the 16-bit drain needs for its fused scale has nothing left to evaluate. The codes copy too when they are stored, and
+are compute-FILLED when this matmul's own kernel produces them: loop fusion materializes an activation's fan-out
+point, so an activation read by one kernel keeps its quantize inline, and the fill then evaluates that same cone once
+per slab cell instead of once per output element. Filled codes reach the cell but keep 16-bit traffic on that operand,
+since the fill still reads the unquantized activation to encode from.
 
 That last move is why the native lowering carries a bounded gap rather than the exact oracle every other lowering
 answers to. The declared program applies `f16(block_scale x tensor_scale)` per element — the single fused rounding

@@ -512,16 +512,26 @@ def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int,
         return None
     if not c.axis.extent.is_static or tile.n.mask:
         return None  # an N tile the copy would clamp element-by-element along the contiguous span
+    if pair.b.bits is None:
+        return None  # only the ACTIVATION side's codes are ever computed here; a weight is stored
     k, bk_elems, block = c.axis.extent.as_static(), tile.bk * atom.atom_k, pair.block
     for side, tile_side, atom_dim in ((pair.a, tile.m, 0), (pair.b, tile.n, 1)):
-        bits, scale = inputs.get(side.bits.input), inputs.get(side.scale.input)
-        if bits is None or scale is None or bits.dtype != atom.operand_dtype("a"):
+        scale = inputs.get(side.scale.input)
+        if scale is None or not _row_major_k_inner(scale, side.scale, c.axis.name):
             return None
-        if not _row_major_k_inner(bits, side.bits, c.axis.name) or not _row_major_k_inner(scale, side.scale, c.axis.name):
-            return None  # a k-strided operand is not the layout the byte gathers walk
+        if side.bits is not None:
+            # STORED codes copy verbatim, so their gmem layout has to be the one the byte gathers
+            # walk. COMPUTED codes have no gmem tensor at all — the fill writes the slab — so
+            # there is nothing to lay out and the 16 B chunk rule below applies to the copied
+            # slabs only.
+            bits = inputs.get(side.bits.input)
+            if bits is None or bits.dtype != atom.operand_dtype("a") or not _row_major_k_inner(bits, side.bits, c.axis.name):
+                return None
+            if (k // 2) % 16:
+                return None
         if tile_side.tile % atom.shape[atom_dim]:
             return None
-    if k % bk_elems or (bk_elems // 2) % 16 or (k // 2) % 16 or (bk_elems // block) % 16 or (k // block) % 16:
+    if k % bk_elems or (bk_elems // 2) % 16 or (bk_elems // block) % 16 or (k // block) % 16:
         return None
     rows = (tile.m.tile, tile.n.tile)
     slot_bytes = sum(r * (bk_elems // 2 + BYTE_SLAB_PAD) + r * (bk_elems // block + BYTE_SLAB_PAD) for r in rows)

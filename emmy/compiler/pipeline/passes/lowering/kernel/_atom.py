@@ -1568,7 +1568,7 @@ def _packed_operands(
 
 def _block_scaled_operands(
     c: Fold, pair, bk_elems: int, mn: tuple[Side, Side], bits_dtype, scale_dtype, *, pad: int
-) -> tuple[tuple, tuple[Operand, ...]]:
+) -> tuple[tuple, tuple[Operand, ...], tuple[SyncOperand, ...]]:
     """The staged operands of a BLOCK-SCALED packed pair — the native fp4 cell's four slabs.
 
     Four where the packed byte-slab stage next door has two-and-a-fill, and all four are verbatim
@@ -1592,6 +1592,20 @@ def _block_scaled_operands(
     row_base, col_base = _tile_base(mn)
     k_axis, block = c.axis, pair.block
     k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+
+    def filled(side: Side, sibling: Side, base, codes, cone, tag: str, *, scale):
+        """A compute-FILLED codes slab: this matmul's own kernel produces the byte, so there is no
+        buffer to copy and the fill evaluates the cone at each slab cell instead. One cell is one
+        byte — two logical k — and the cone derives both nibbles from a single k coordinate, so
+        the σ substitutes the same ``k0 + 2·col`` the copied form's index arithmetic consumes."""
+
+        def value(k0, row, col):
+            k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
+            t = BinaryExpr("+", base, row)
+            sigma = Sigma({side.axis.name: clamp_last(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
+            return [st.rewrite(lambda nm: nm, sigma) for st in cone], codes
+
+        return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
 
     def build(side: Side, sibling: Side, base, load, tag: str, *, cols: int, step: int, dtype, trans: bool, scale=None, pad=pad):
         def at(k_expr, row_expr):
@@ -1626,9 +1640,15 @@ def _block_scaled_operands(
     # source, exactly as the packed byte-slab drain names its compute-filled one.
     a_scale = build(m, n, row_base, pair.a.scale, "as", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=False, pad=0)
     b_scale = build(n, m, col_base, pair.b.scale, "bs", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=True, pad=0)
-    a_bits = build(m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block))
+    a_bits = (
+        filled(m, n, row_base, pair.a.codes, pair.a.cone, "a", scale=(a_scale.slab, block))
+        if pair.a.bits is None
+        else build(m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block))
+    )
     b_bits = build(n, m, col_base, pair.b.bits, "b", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=True, scale=(b_scale.slab, block))
-    return (a_bits, b_bits), (a_bits, b_bits, a_scale, b_scale)
+    copies = tuple(op for op in (a_bits, b_bits, a_scale, b_scale) if isinstance(op, Operand))
+    fills = tuple(op for op in (a_bits,) if isinstance(op, SyncOperand))
+    return (a_bits, b_bits), copies, fills
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -1664,16 +1684,22 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     packed = None if bs_pair is not None else (match_packed_b_node(c, ops.inputs) if copy_transport else None)
     if bs_pair is not None:
         assert len(ops.channels) == 1, "the block-scaled cell reads one channel (match_packed_pair_node enforces it)"
-        operands, copies = _block_scaled_operands(
+        operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
             stage.bk_elems,
             mn,
-            ops.inputs[bs_pair.a.bits.input].dtype,
+            ops.inputs[bs_pair.b.bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
             pad=BYTE_SLAB_PAD,
         )
-        transport = CpAsyncTransport(operands=copies, slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        # Pure copies when both operands' codes are stored; a fill underneath them when this
+        # matmul computes its own A codes, which is the same two-group shape the packed
+        # byte-slab stage takes for its scale fill.
+        transport = (
+            CpAsyncTransport(operands=copies, **common) if not fills else SyncTransport(operands=fills, copy_operands=copies, **common)
+        )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
         # second level, so a factor that the operand's own chain applies per element has to land

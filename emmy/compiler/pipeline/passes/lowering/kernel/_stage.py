@@ -482,6 +482,11 @@ class SyncOperand:
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
     # (a plain-``Load`` drain cannot read a swizzled slab).
     swizzle: str = "NONE"
+    # The companion block-scale slab, ``(slab, block)`` — the same fact the copied :class:`Operand`
+    # carries, on the filled side. A block-scaled operand whose codes this matmul COMPUTES fills
+    # its own slab and still hands the drain the stored scales beside it, so the drain must read
+    # the pairing off either kind.
+    scale: tuple | None = None
 
     @property
     def slab(self) -> str:

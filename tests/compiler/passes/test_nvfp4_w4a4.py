@@ -264,3 +264,40 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
         # max 5.6e-4; the bounds are roughly 5x those.
         assert float(np.median(rel)) < 1e-4, f"{out}: a systematic shift, not the fused-scale rounding"
         assert float(rel.max()) < 2e-3, f"{out}: past one fused-scale rounding per side"
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_the_block_scaled_cell_takes_an_inlined_quantize_through_the_fill(tmp_path):
+    """Coverage's other half. A linear with ONE consumer keeps its quantize inside the matmul —
+    loop fusion materializes an activation's fan-out point, and there is no fan-out here — so its
+    codes are a register value and no buffer exists to copy into the slab. The codes slab is
+    compute-filled from that same cone instead, and the cell still fires.
+
+    What that buys over the inlined generic reading is where the encode runs: once per slab cell,
+    ``(m, k/2)``, rather than once per ``(m, n, k)`` inside the fold. What it does NOT buy is
+    4-bit traffic on that operand — the fill still reads the 16-bit activation to encode from.
+    """
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+
+    m, n, k = 16, 128, 256
+    g = _w4a4_linear(tmp_path, m=m, n=n, k=k)
+    x = (np.random.default_rng(23).standard_normal((m, k)) * 0.5).astype(np.float16)
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    ref, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    backend = CudaBackend()
+    compiled = backend.compile(g)
+    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
+    assert native, "the block-scaled cell was never selected on an inlined quantize"
+    assert "emmy_to_f4e2m1" in native[0], "the encode should ride the slab fill, in this same kernel"
+    assert "EMMY_F4_LUT" not in native[0], "a native cell must not decode either operand through the value table"
+
+    got, _ = backend.run(compiled, input_data={**data, "x": x})
+    r = ref.outputs["y"].astype(np.float32).reshape(-1)
+    c = np.asarray(got.outputs["y"]).astype(np.float32).reshape(-1)
+    rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
+    assert float(np.median(rel)) < 1e-4, "a systematic shift, not the fused-scale rounding"
+    assert float(rel.max()) < 2e-3, "past one fused-scale rounding per side"

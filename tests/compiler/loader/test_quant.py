@@ -1600,6 +1600,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
+    "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
 }
 

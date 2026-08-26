@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from emmy import config
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
+from emmy.compiler.loader.synthesize import SCHEMES
 from emmy.compiler.pipeline import (
     CUDA_PASSES,
     KERNEL_PASSES,
@@ -117,6 +118,18 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
             "so torch's SymInt propagation determines which downstream tensors carry the "
             "symbolic dim — no value collisions. The compiled CUDA kernel signature gains "
             "an ``int <NAME>`` runtime arg per dim. Example: ``--dynamic seq_len@x:1``."
+        ),
+    )
+    parser.add_argument(
+        "--quantize",
+        choices=SCHEMES,
+        default=None,
+        help=(
+            "Quantize the traced module's linear weights to this scheme and compile the result. "
+            "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
+            "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
+            "The weight side is derived from each tensor; the activation scale is calibrated over the "
+            "trace's ONE example input — a real calibration, and a poor one."
         ),
     )
     if include_dump_dir:
@@ -424,7 +437,9 @@ def handle_compile(args):
     config.set_readable(False, overwrite=True) if args.no_readable else config.set_readable(True)
     apply_nvcc_flags(args, default="")  # compile uses nvcc default -O3 (representative codegen)
     passes = resolve_passes(args)
-    graph, _, _ = load_or_trace(args)
+    graph, _, bundle = load_or_trace(args)
+    if getattr(args, "quantize", None):
+        _quantize_traced(graph, bundle, args)
     initial_count = len(graph.nodes)
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -475,6 +490,33 @@ def format_stage(graph, stage: str) -> str:
     if formatter == "graph":
         return graph.pretty_print()
     return format_kernels(graph)
+
+
+def _quantize_traced(graph: Graph, bundle, args) -> None:
+    """``--quantize``: quantize a TRACED graph's linear weights, then spell the result.
+
+    Deliberately not a second way to build a quantized graph. It writes a real checkpoint and
+    runs the ordinary spellers over it, so what compiles is exactly what compiling that directory
+    would give — and the directory is on disk to be read. ``--dump-dir`` keeps it; otherwise it
+    lands in a temp dir whose path is logged."""
+    import tempfile  # noqa: PLC0415
+
+    from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
+    from emmy.compiler.loader.synthesize import summarize, write_quantized_checkpoint  # noqa: PLC0415
+
+    if bundle is None:
+        logger.error("--quantize needs a traced module: use --code, or a model that traces")
+        sys.exit(2)
+    out = Path(args.dump_dir) / "quantized-checkpoint" if getattr(args, "dump_dir", None) else Path(tempfile.mkdtemp(prefix="emmy-quant-"))
+    try:
+        ckpt = write_quantized_checkpoint(graph, bundle, out, scheme=args.quantize)
+    except ValueError as e:
+        logger.error("--quantize: %s", e)
+        sys.exit(2)
+    logger.info("%s checkpoint at %s\n%s", args.quantize, ckpt, summarize(ckpt))
+    spelled = spell_quantized_constants(graph, str(ckpt))
+    marked = spell_static_fp4_activations(graph, str(ckpt))
+    logger.info("spelled %d quantized weight(s); %d linear(s) marked for 4-bit activations", spelled, marked)
 
 
 def _is_boundary(op) -> bool:

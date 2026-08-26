@@ -45,8 +45,7 @@ _BASE_FLAGS = ["--use_fast_math"]
 def effective_flags() -> list[str]:
     """The full nvcc flag list: the base flags plus any extra flags from the
     ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
-    set — ``tune`` defaults to ``-Xcicc -O1`` (fast compile; see the O1 note in
-    ``compile_to_cubin``), ``compile`` / ``run`` to nvcc's default cicc -O3.
+    set — ``tune``, ``compile`` and ``run`` all default to nvcc's own cicc -O3.
     Read fresh each call so a per-invocation override / the bench-worker
     subprocess (which inherits the env) both see the same value, and so the
     flags fold into the cache key."""
@@ -124,9 +123,8 @@ def _toolkit_tag() -> str:
 def _cache_key(source: str, name: str, arch: str) -> str:
     # Content-addressed: identical (source, name, arch, toolkit, flags) → same
     # cubin, so the persistent cache is safe to share across (even concurrent)
-    # runs. Toolkit + flags are in the key so an nvcc / opt-level (e.g. tune's
-    # -Xcicc -O1 vs compile's -O3) / flags change recompiles rather than
-    # serving a stale or wrong-opt cubin.
+    # runs. Toolkit + flags are in the key so an nvcc / opt-level / flags change
+    # recompiles rather than serving a stale or wrong-opt cubin.
     h = hashlib.sha1()
     for part in (source, name, arch, _toolkit_tag(), "\x1f".join(effective_flags())):
         h.update(part.encode())
@@ -142,13 +140,10 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     ``RuntimeError`` if ``nvcc`` is unavailable; ``CalledProcessError`` on a
     compile error (caller decides whether to fall back).
 
-    ⚠️  The opt level comes from :func:`effective_flags` (``EMMY_NVCC_FLAGS``).
-    ``emmy tune`` defaults to ``-Xcicc -O1`` to dodge a cicc/LLVM blowup on
-    big unrolled register-tile kernels (up to ~200× faster compile), but **-O1
-    is NOT runtime-optimal** — reduction/attention kernels can run ~1.5–3×
-    slower than -O3, so tune-measured latencies are a *ranking* signal, not the
-    deployed speed. ``compile`` / ``run`` use -O3; re-bench there for real
-    numbers."""
+    The opt level comes from :func:`effective_flags` (``EMMY_NVCC_FLAGS``). Every command —
+    ``tune`` included — defaults to nvcc's own -O3, the deployable regime, so a tuned latency is
+    the deployed one. A lower level pinned by hand compiles no faster on current codegen and
+    mis-ranks by tile area; see ``backend/cuda/ARCHITECTURE.md``."""
     nvcc = nvcc_path()
     if nvcc is None:
         raise RuntimeError("nvcc unavailable")

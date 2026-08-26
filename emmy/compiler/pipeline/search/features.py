@@ -56,6 +56,13 @@ FEATURIZER_VERSION = 3
 # spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
 # (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
 # descent because a pool-constant term cancels out of a within-pool ranking).
+#: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
+#: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
+#: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
+#: ``-Xcicc -O1``; nothing trains on them and no deploy reads them. Spelled here because both the
+#: data layer and the model layer test against it and neither may import the other.
+DEPLOYABLE_OPT = 3.0
+
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 
 

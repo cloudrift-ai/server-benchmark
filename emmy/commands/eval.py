@@ -14,8 +14,7 @@ Five subcommands:
 - ``eval golden``    — validate one canonical golden YAML against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
-  (fastest first), the config the prior deploys marked + ranked, and the -O3
-  re-bench latency from the prior reservoir where one was recorded.
+  (fastest first) and the config the prior deploys marked + ranked.
 - ``eval failures``  — the tune DB's ``bench_fail`` rows clustered by
   ``(kernel, error)`` with the knob values shared by every failing row.
 
@@ -622,9 +621,8 @@ def _record_consult_baseline(serving, consultations: dict[str, dict[str, int]]) 
 
 def handle_eval_variants(args) -> None:
     """``eval variants`` — per-kernel leaderboard of the tune DB's measured
-    variants (fastest first, knob columns aligned), the config the prior would
-    deploy marked + ranked, and the deployable -O3 re-bench latency (from the
-    prior's reservoir) where one was recorded. The per-kernel "did the
+    variants (fastest first, knob columns aligned), with the config the prior would
+    deploy marked + ranked. The per-kernel "did the
     search/prior reach the best measured config, and which knobs distinguish
     it?" drill-down view."""
     require_source(args, {"db"}, "eval variants lists measured tune-DB rows — --dataset golden has no per-variant measurements.")
@@ -645,9 +643,8 @@ def handle_eval_variants(args) -> None:
     prior = load_prior()
     if not prior.fitted:
         logger.info("No fitted prior at %s — the pick is the cold OfflinePrior's (the ranking compile/run use).", config.online_path())
-    o3 = _o3_reservoir_index(prior)
     for name in sorted(groups):
-        _emit_variant_table(name, groups[name], prior, n_fail=fails.get(name, 0), o3=o3, top=args.top)
+        _emit_variant_table(name, groups[name], prior, n_fail=fails.get(name, 0), top=args.top)
 
 
 def handle_eval_failures(args) -> None:
@@ -681,52 +678,24 @@ def handle_eval_failures(args) -> None:
         logger.info("    shared knobs: %s", knob_txt)
 
 
-def _variant_key(s) -> tuple:
-    """Hashable identity of one measured config: the full ``S_*`` signature plus
-    the tunable-knob dict (sorted items) — the join key between a DB row and its
-    -O3 reservoir sibling."""
-    return (
-        tuple(sorted((k, v) for k, v in s.s_features().items())),
-        tuple(sorted((k, v) for k, v in s.knobs.items())),
-    )
+def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, top: int) -> None:
+    """One kernel's leaderboard: measured leaf configs sorted by latency, the prior's pick marked,
+    knobs in the canonical aligned columns (``tuning_knob_items`` — the same filtered view the
+    ``run --bench`` kernel table renders). Non-leaf rows (partial-knob fork nodes) are dropped —
+    a partial config is not a variant.
 
-
-def _o3_reservoir_index(prior) -> dict[tuple, float]:
-    """Deployable (-O3) latencies from the prior's reservoir, keyed by
-    :func:`_variant_key`. Tuning re-benches every config within ``EMMY_O3_TOL``
-    of the running -O1 best at ``-Xcicc -O3`` and feeds it to the prior as an
-    ``H_opt=3`` row WITHOUT writing a ``perf`` row — so the reservoir, not the DB,
-    is the only -O3 source (the same reasoning as
-    :func:`diagnostics.golden_deploy_perf`)."""
-    from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
-
-    out: dict[tuple, float] = {}
-    for knobs, us in getattr(prior, "_dataset", None) or []:
-        s = Sample.from_prior_row(knobs, us)
-        if int(s.all_knobs().get("H_opt", 0)) != 3:
-            continue
-        key = _variant_key(s)
-        if key not in out or us < out[key]:
-            out[key] = us
-    return out
-
-
-def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, o3: dict, top: int) -> None:
-    """One kernel's leaderboard: measured leaf configs sorted by tune-ranking
-    latency, the prior's pick marked, knobs in the canonical aligned columns
-    (``tuning_knob_items`` — the same filtered view the ``run --bench`` kernel
-    table renders). Non-leaf rows (partial-knob fork nodes) are dropped —
-    a partial config is not a variant; the ``-O3 us`` column appears only
-    when the reservoir holds any -O3 row at all."""
+    The ``us`` column is the measured latency as stored. A sweep measures in the deployable
+    regime, so on a store written since that became true every row is a deploy latency — but
+    ``Dataset.from_db`` reads every ``context_key`` and ``PerfSample`` carries none, so a store
+    holding rows from the era of a separate ranking lane still pools both here."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
     kmax = max(len(s.knobs) for s in samples)
     leaves = sorted((s for s in samples if len(s.knobs) == kmax), key=lambda s: s.latency_us)
-    # Score in the deploy regime (``H_opt=3``) through ``Prior.pick`` — measured
-    # -O3 evidence first, model argmin otherwise — so the marker shows the config
-    # greedy ``compile`` / ``run`` would actually deploy, not just the model's
-    # favourite (the DB rows themselves carry the tune's ``H_opt=1`` stamp).
-    best_i, _ = prior.pick([{**s.all_knobs(), "H_opt": 3.0} for s in leaves])
+    # Score through ``Prior.pick`` — measured evidence first, model argmin otherwise — so the
+    # marker shows the config greedy ``compile`` / ``run`` would actually deploy, not just the
+    # model's favourite.
+    best_i, _ = prior.pick([s.all_knobs() for s in leaves])
     pick = leaves[best_i]
     rank = best_i + 1
 
@@ -739,32 +708,18 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, o3: dic
     logger.info("")
     logger.info("%s — %d measured configs%s", name, len(leaves), f", {n_fail} bench_fail" if n_fail else "")
     kcols, kcells = knob_columns([{k: (v, False) for k, v in tuning_knob_items(s.knobs)} for _, s in shown])
-    columns = [Col("rank", "r"), Col("us", "r")] + ([Col("-O3 us", "r")] if o3 else []) + [Col("pick"), *kcols]
+    columns = [Col("rank", "r"), Col("us", "r"), Col("pick"), *kcols]
     data = []
     for (r, s), kc in zip(shown, kcells, strict=True):
-        row = [str(r), f"{s.latency_us:.1f}"]
-        if o3:
-            o3_us = o3.get(_variant_key(s))
-            row.append(f"{o3_us:.1f}" if o3_us is not None else "—")
-        data.append([*row, ("◄", _GREEN) if s is pick else "", *kc])
+        data.append([str(r), f"{s.latency_us:.1f}", ("◄", _GREEN) if s is pick else "", *kc])
     for line in render_table(columns, data, indent="  "):
         logger.info(line)
     if hidden > 0:
         logger.info("  … %d more (--top 0 shows all)", hidden)
     if len(leaves) >= 2:
-        # Judge the pick in the DEPLOY regime when -O3 re-benches cover it: the
-        # -O1 ranking lane inverts against -O3 by up to 8× on the fm big-tile
-        # family, so an -O1 ratio flags a near-best deployable pick as "misses
-        # best". Falls back to the -O1 lane when the reservoir has no -O3 row
-        # for the pick or no second row to compare against.
-        pick_o3 = o3.get(_variant_key(pick)) if o3 else None
-        o3_measured = [us for s in leaves if (us := o3.get(_variant_key(s))) is not None] if o3 else []
-        if pick_o3 is not None and len(o3_measured) >= 2:
-            ratio, lane = pick_o3 / min(o3_measured), "-O3 deploy latency"
-        else:
-            ratio, lane = pick.latency_us / leaves[0].latency_us, "tune-ranking latency"
+        ratio = pick.latency_us / leaves[0].latency_us
         flag = "  <-- misses best" if ratio > 1.2 else ""
-        logger.info("  pick: rank %d/%d, %.2fx of best (%s)%s", rank, len(leaves), ratio, lane, flag)
+        logger.info("  pick: rank %d/%d, %.2fx of best (measured latency)%s", rank, len(leaves), ratio, flag)
 
 
 def _emit_registry() -> None:

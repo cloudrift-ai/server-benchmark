@@ -7,9 +7,9 @@ it has any data for. Counting, not judging.
 
 **Ranking quality is deliberately not computed here.** It was, until 2026-08: a per-op pick ratio
 and a median Spearman over the reservoir, grouped by :meth:`Dataset.group_by_op`. That key is the
-``S_*`` signature alone, so one group pooled a tune's ``-O1`` ranking rows with the ``-O3``
-re-benches of the same configs — a tune writes both into one reservoir — and pooled cards. ``-O1``
-and ``-O3`` invert, so the ratio compared measurements taken under different compilers. Both
+``S_*`` signature alone, so one group pooled measurements taken under different opt levels — a
+sweep of that era wrote both into one reservoir — and pooled cards. The regimes invert, so the
+ratio compared measurements taken under different compilers. Both
 statistics live in ``prior/report.py`` now, over a grouping keyed on card and regime as well as
 kernel, and are reached through ``emmy eval prior``.
 
@@ -120,10 +120,11 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     prior's predicted-best **measured** config over the golden's recorded latency, read
     from the prior's reservoir with **no re-bench**.
 
-    Tuning re-benches every winner at -O3 (``H_opt=3``) and feeds it to the prior, so
-    each tuned shape's best config has a deployable row in the reservoir. For each
-    golden shape we take the op group's ``H_opt=3`` rows, pick the one ``Prior.pick``
-    deploys (measured -O3 evidence first, model argmin otherwise — the same selection
+    Tuning measures in the deployable regime and feeds every row to the prior, so each tuned
+    shape's best config has a deployable row in the reservoir. For each
+    golden shape we take the op group's ``H_opt=3`` rows (the filter still earns its place: a
+    legacy checkpoint can hold rows from the era of a separate ranking lane), pick the one
+    ``Prior.pick`` deploys (measured evidence first, model argmin otherwise — the same selection
     greedy ``compile`` / ``run`` make), and divide its measured latency by the golden's
     recorded ``emmy_us`` (also -O3 → same regime, so the ratio is a real
     deployable speed comparison; <1.0 = the prior's pick is faster than golden). Shapes
@@ -191,7 +192,7 @@ def report(prior) -> str:
 
     # Ranking quality is NOT reported here. It was, as a per-op pick ratio and a median Spearman over
     # these same groups, and both were wrong: ``group_by_op`` keys on the ``S_*`` signature alone, so one
-    # group pooled the ``-O1`` ranking rows with their ``-O3`` re-benches (a tune writes both into one
+    # group pooled rows measured under different opt levels (a sweep of that era wrote both into one
     # reservoir) and pooled cards. The two regimes invert, so the ratio was a comparison between
     # measurements taken under different compilers. ``emmy eval prior`` computes the same two statistics
     # over a correctly-keyed grouping; this block reports only what the reservoir can say by counting.

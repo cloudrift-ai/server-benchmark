@@ -50,11 +50,17 @@ get the same precedence. `config.py` is the source of truth for the full var lis
 make test
 ```
 
-`make test` compiles CUDA kernels at **`-Xcicc -O1`** (the suite is `nvcc`/`cicc`-compile-bound, not GPU-bound — `-O1`
-dodges the cicc/LLVM unroll blowup on big register-tile kernels, ~3× faster wall time). This is the **correctness lane**:
-`-O1` changes runtime perf, not numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped here — they
-run at `-O3` via `make bench-kernels`. To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or
-run `pytest` directly.
+`make test` compiles CUDA kernels at **`-Xcicc -O1`** — the **correctness lane**: `-O1` changes runtime perf, not
+numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped here, running at `-O3` via
+`make bench-kernels`. To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`
+directly.
+
+The lane saves far less than this file used to claim. Measured on an RTX 5090 (CUDA 13.0, 16 cores, one repo, only the
+opt level varying): cold cubin cache **923 s at `-O1` vs 1031 s at `-O3`** (1.12×); warm **718 s vs 760 s** (1.06×);
+identical results every run. The retired "~3× faster" was never re-measured after the WMMA→`mma.sync` migration
+removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel compilation at roughly a fifth of the
+suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
+one compile regime everywhere in the repo.
 
 Checked-in model goldens are not exercised by the per-commit test suite. The nightly `onboard-model` workflow owns
 their repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence.
@@ -74,6 +80,25 @@ parallelize (add `-p no:randomly` for a stable order):
 
 `-n auto` spawns one worker per core; `--dist=loadgroup` keeps tests sharing an `xdist_group` (e.g. CUDA context) on the
 same worker.
+
+### macOS: the suite exits 139 (SIGSEGV)
+
+The loop backend JIT-compiles kernels in-process through cppyy / Cling (`emmy/compiler/ir/loop/runner.py`), and
+cppyy-cling 6.32.8 bundles LLVM 16. That compiler cannot parse the libc++ headers in the Xcode 26 SDK, whose
+`is_convertible.h` uses the `__is_nothrow_convertible` builtin unconditionally. Cling faults while building its
+precompiled header, so every test that imports cppyy dies on a native crash: `pytest tests/compiler/ir/ --collect-only`
+exits 139 during *collection*, and `make test` loses its xdist workers to "node down: Not properly terminated".
+
+Rebuild the precompiled header once against an SDK whose libc++ Cling can still parse — any installed 15.x will do:
+
+```bash
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk CLING_REBUILD_PCH=1 \
+  ./venv/bin/python -c 'import cppyy; cppyy.cppdef("int probe() { return 42; }"); assert cppyy.gbl.probe() == 42'
+```
+
+This writes `venv/lib/python3.12/site-packages/cppyy_backend/etc/allDict.cxx.pch.20.6.32.8`, after which cppyy imports
+cleanly with no `SDKROOT` set. Repeat it whenever `venv/` is recreated or cppyy is reinstalled. Once cppyy releases a
+Cling built on a newer LLVM, upgrading it replaces this workaround.
 
 ## CLI Commands
 
@@ -108,7 +133,8 @@ Quick test models / scripts (for local iteration):
 
 - `make setup` — create venv and install dependencies (includes ruff)
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
-  kernels at `-Xcicc -O1` for ~3× faster nvcc (correctness lane; perf tests use `-O3` via `make bench-kernels`)
+  kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
+  `make bench-kernels`)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`

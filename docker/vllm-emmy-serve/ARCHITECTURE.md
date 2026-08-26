@@ -72,7 +72,8 @@ Hence the warm: one real serving run on the target card, inside the image. The f
 
 - `source` — live-probed target-card featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
-- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
+- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set to a non-deployable opt level (it would
+  poison the key).
 - The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
   capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
   programs exist and their shapes** — warm and release must use identical values. The revision is the one whose

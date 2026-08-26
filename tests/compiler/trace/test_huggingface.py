@@ -1056,16 +1056,42 @@ def test_checkpoint_key_renamer_leaves_a_plain_text_model_alone():
     assert rename is None or rename(key) == key
 
 
-def test_checkpoint_to_model_key_composes_the_two_translations():
-    """The Laguna literal substitutions and the registered family mapping both apply, in that
-    order. Transformers registers the Laguna pair too, so on a Laguna twin the literals are
-    redundant; they still run for a call with no model-derived renamer."""
+def test_checkpoint_to_model_key_applies_the_laguna_literals():
     from emmy.compiler.trace.huggingface import _checkpoint_to_model_key
 
     laguna = "model.layers.0.mlp.shared_expert.gate_proj.weight"
     assert _checkpoint_to_model_key(laguna) == "model.layers.0.mlp.shared_experts.gate_proj.weight"
-    assert _checkpoint_to_model_key(laguna, lambda k: k.replace("model.", "model.x.", 1)).startswith("model.x.")
     assert _checkpoint_to_model_key("a.weight") == "a.weight"
+
+
+def test_the_split_load_runs_both_key_translations(tmp_path):
+    """Two independent renamers stand between a checkpoint key and the twin's parameter name, and a
+    checkpoint can need both: the native one undoes an architecture published in its own flat
+    namespace, the family one places the result where THIS twin holds its parameters.
+
+    Running only one is silent. An unmatched name raises nothing — the parameter simply stays on the
+    meta device and the twin comes back looking complete. This fixture is a wrapper-prefixed family,
+    so the family renamer is the one that must fire; the native renamer is the identity here and
+    must not displace it."""
+    import json
+
+    import torch
+
+    from emmy.compiler.trace.huggingface import _auto_model_from_config, load_quantized_split
+
+    torch.manual_seed(0)
+    twin = _auto_model_from_config(_qwen3_5_multimodal_config()).eval()
+    leaf = "model.layers.0.mlp.gate_proj.weight"
+    _wrapper_prefixed_nvfp4_checkpoint(tmp_path / "ck", twin, leaf)
+    # The helper's stub config only has to name a quantization scheme; a split load also BUILDS the
+    # twin from it, so give it the real family config the mismatch belongs to.
+    config = _qwen3_5_multimodal_config().to_dict()
+    config["quantization_config"] = {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": []}
+    (tmp_path / "ck" / "config.json").write_text(json.dumps(config))
+
+    loaded, _experts = load_quantized_split(str(tmp_path / "ck"), torch.float16)
+    weight = dict(loaded.named_parameters())[leaf]
+    assert not weight.is_meta, "the wrapper-prefixed key never reached the twin's parameter name"
 
 
 # --- the serving lane's reverse direction ------------------------------------------------------

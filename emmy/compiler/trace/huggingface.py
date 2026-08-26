@@ -2064,16 +2064,16 @@ def load_quantized_split(
                             # The serving lane: leave the trio coded and let the caller re-source
                             # it from the checkpoint, so the packed bits reach the speller instead
                             # of a decoded tile. Same contract the AWQ and EXL3 arms above follow.
-                            coded_trunk.add(_checkpoint_to_model_key(k, rename))
+                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
                             continue
                         vals = dequantize_nvfp4(
                             t.numpy(),
                             _sibling(k + "_scale").view(torch.uint8).numpy(),
                             _sibling(k + "_scale_2").float().numpy(),
                         )
-                        state[_checkpoint_to_model_key(k, rename)] = torch.from_numpy(vals).to(dtype)
+                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
                         continue
-                    state[_checkpoint_to_model_key(k, rename)] = t.to(dtype) if t.is_floating_point() else t
+                    state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
                     continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:

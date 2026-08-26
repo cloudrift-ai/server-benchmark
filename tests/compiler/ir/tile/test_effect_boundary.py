@@ -87,6 +87,27 @@ def test_sweep_loop_splits_to_a_sweep_store_and_round_trips() -> None:
     assert effect_tail(pure, stores) == stmts
 
 
+def test_sweep_loop_with_multiple_writes_round_trips() -> None:
+    n = _ax("n")
+    stmts = [
+        Loop(
+            axis=n,
+            body=Body(
+                (
+                    Load(name="x", input="i", index=(Var("n"),)),
+                    Write(output="o", index=(Var("n"),), value="x"),
+                    Write(output="o", index=(Var("n"),), value="x"),
+                )
+            ),
+        )
+    ]
+
+    pure, stores = split_effects(stmts)
+
+    assert len(stores) == 2 and all(store.sweep == n for store in stores)
+    assert effect_tail(pure, stores) == stmts
+
+
 def test_sweep_membership_is_the_trailing_axis_reading_run() -> None:
     """The scalar epilogue (no ``n`` read) stays outside the reconstituted loop; everything from
     the first ``n``-reading stmt on goes inside — the trailing-run rule."""

@@ -50,9 +50,9 @@ class Store:
     longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
     names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
     NOT part of the term: ``TileOp.stores`` owns the tuple, and consumers reconstitute the
-    effectful stmt stream via :func:`effect_tail`. A ``sweep`` store's ``Write`` rides a per-cell output ``Loop`` over
-    that axis (rms/softmax's normalize sweep, ``unroll`` preserved); the swept members are the
-    trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
+    effectful stmt stream via :func:`effect_tail`. Consecutive ``sweep`` stores on one axis ride
+    one per-cell output ``Loop`` (rms/softmax's normalize sweep, ``unroll`` preserved); the swept
+    members are the trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
     through :func:`split_effects`, whose reconstitution round-trip gate is what keeps kernel
     sources byte-identical to the stored-``Write`` era."""
 
@@ -76,16 +76,24 @@ def effect_tail(stmts, stores) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary ``stores`` — the ONE reconstitution rule the scheduler's tail gates, the
     materializer's zero-axis ``Fold`` peel and ``030_split_reduce`` share, so the lowered kernels stay
-    byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; a
-    ``sweep`` store wraps the trailing run of stmts reading its axis (:func:`_sweep_start`)
-    into the per-cell output ``Loop``, the ``Write`` last."""
+    byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
+    ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
+    (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
     out = list(stmts)
-    for st in stores:
+    index = 0
+    while index < len(stores):
+        st = stores[index]
         if st.sweep is None:
             out.append(st.write)
-        else:
-            i = _sweep_start(out, st.sweep.name)
-            out = [*out[:i], Loop(axis=st.sweep, body=Body((*out[i:], st.write)), unroll=st.unroll)]
+            index += 1
+            continue
+        end = index + 1
+        while end < len(stores) and stores[end].sweep == st.sweep and stores[end].unroll == st.unroll:
+            end += 1
+        start = _sweep_start(out, st.sweep.name)
+        writes = tuple(store.write for store in stores[index:end])
+        out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *writes)), unroll=st.unroll)]
+        index = end
     return out
 
 
@@ -94,7 +102,7 @@ def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
     conversion-side inverse of :func:`effect_tail`, valid ONLY when the reconstitution
     round-trips byte-identically (checked here; ``None`` otherwise). Recognized shapes: a trailing run
     of top-level root ``Write``\\ s, or ONE trailing non-reduce output sweep ``Loop`` of pure
-    stmts whose last stmt is the ``Write``. An already-pure stream returns ``(stmts, ())``."""
+    stmts followed by one or more trailing writes. An already-pure stream returns ``(stmts, ())``."""
     original = list(stmts)
     rest = list(stmts)
     stores: list[Store] = []
@@ -103,9 +111,12 @@ def split_effects(stmts) -> tuple[tuple[Stmt, ...], tuple[Store, ...]] | None:
     if not stores and rest and isinstance(rest[-1], Loop) and not rest[-1].is_reduce:
         loop = rest[-1]
         inner = list(loop.body)
-        if inner and isinstance(inner[-1], Write) and all(s.pure for s in inner[:-1]):
-            stores.insert(0, Store(write=inner[-1], sweep=loop.axis, unroll=loop.unroll))
-            rest = [*rest[:-1], *inner[:-1]]
+        writes = []
+        while inner and isinstance(inner[-1], Write):
+            writes.insert(0, inner.pop())
+        if writes and all(s.pure for s in inner):
+            stores.extend(Store(write=write, sweep=loop.axis, unroll=loop.unroll) for write in writes)
+            rest = [*rest[:-1], *inner]
     if not all(s.pure for s in rest):
         return None
     if effect_tail(rest, stores) != original:
@@ -162,8 +173,8 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp
 
-        axes = [axis.name for axis in self.place.free]
-        axes.extend(store.sweep.name for store in self.stores if store.sweep is not None)
+        scope_axes = (*self.place.free, *(store.sweep for store in self.stores if store.sweep is not None))
+        axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         normalized = normalize_fold_tree(self.op, axes)
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
@@ -180,7 +191,13 @@ class TileOp(Op):
         if not promoted:
             return
         free_names = {axis.name for axis in self.place.free}
-        extra = tuple(store.sweep for store in self.stores if store.sweep is not None and store.sweep.name in promoted - free_names)
+        extra = tuple(
+            {
+                store.sweep.name: store.sweep
+                for store in self.stores
+                if store.sweep is not None and store.sweep.name in promoted - free_names
+            }.values()
+        )
         if extra:
             self.place = Placement(free=(*self.place.free, *extra))
         self.stores = tuple(

@@ -224,7 +224,7 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
 
 
 def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
-    """Factor every operand cone and orient a shared commutative argument as contraction A."""
+    """Factor operand cones, coalesce an equivalent shared argument, and orient it as contraction A."""
     form = _semiring_form(fold)
     if form is None:
         return fold
@@ -266,8 +266,13 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...]) -> Fold:
     a_clusters = lambda_equivalent_clusters(_operand_lambda(candidate, all_axes) for candidate, _ in pairs)
     member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
     names = tuple(member_sets)
-    overlap = any(member_sets[names[i]] & member_sets[names[j]] for i in range(len(names)) for j in range(i + 1, len(names)))
-    if a_clusters == (tuple(range(len(pairs))),) and not overlap:
+    shared_names = {operand_name(candidate) for candidate, _ in pairs}
+    foreign_overlap = any(
+        member_sets[names[i]] & member_sets[names[j]] and not {names[i], names[j]} <= shared_names
+        for i in range(len(names))
+        for j in range(i + 1, len(names))
+    )
+    if a_clusters == (tuple(range(len(pairs))),) and not foreign_overlap:
         if not form.product.commutative:
             for index, (product, (candidate_a, b)) in enumerate(zip(form.products, pairs, strict=True)):
                 canonical_args = (

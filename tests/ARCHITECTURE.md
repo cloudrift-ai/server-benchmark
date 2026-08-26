@@ -52,7 +52,8 @@ to them.
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
 
-- **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
+- **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. Compiler IR units also pin construction
+  idempotence and effect-boundary round trips, including output sweeps with several stores. The bulk of the suite.
 - **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
   `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
   `bench`, `teardown`, and `vm create/delete/audit`. These use real recipes from `recipes/` so config drift fails a

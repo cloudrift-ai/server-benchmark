@@ -47,10 +47,11 @@ Physical M/N orientation remains a placement fact rather than part of the Fold a
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
 contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
-cone into a zero-axis Fold edge. Overlapping cones become one multi-result operand edge so shared computation remains
-single; a semiring without one shared product argument remains a general planar Fold. Canonicalization runs entirely
+cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to one shared result even when their
+source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
+single. A semiring without one shared product argument remains a general planar Fold. Canonicalization runs entirely
 in `TileOp.__post_init__`, including the output-sweep-to-free-axis adjustment exposed when factoring makes a
-contraction the root compute node.
+contraction the root compute node. Multiple stores in one output sweep retain one sweep axis and reconstitute one Loop.
 
 Scoped lambda equivalence uses that normalized order. It therefore ignores SSA spelling and harmless interleaving
 without weakening buffer or axis identity. The emit-side same-score legality query uses this same mechanism rather

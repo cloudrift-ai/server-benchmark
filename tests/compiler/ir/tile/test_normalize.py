@@ -8,7 +8,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Placement, TileOp, lambda_equivalent_clusters
+from emmy.compiler.ir.tile import Placement, Store, TileOp, lambda_equivalent_clusters
 from emmy.compiler.pipeline import Pipeline
 
 
@@ -44,6 +44,16 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
     assert TileOp(op=tile.op, place=tile.place).op == tile.op
 
 
+def test_contraction_promotes_a_shared_store_sweep_once() -> None:
+    n = Axis("n", 16)
+    stores = tuple(Store(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=n) for _ in range(2))
+
+    tile = TileOp(op=_planar_matmul(), place=Placement(free=(Axis("m", 8),)), stores=stores)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert all(store.sweep is None for store in tile.stores)
+
+
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     axis = Axis("k", Dim(32))
     body = Body(
@@ -73,6 +83,36 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     assert contraction.role is AxisRole.CONTRACTION
     assert len(contraction.channels) == 2
     assert contraction.a.input == "x"
+
+
+def test_contraction_coalesces_overlapping_equivalent_shared_operands() -> None:
+    axis = Axis("k", Dim(32))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Var("m"), Var("k"))),
+            Load(name="scale", input="s", index=(Var("k"),)),
+            Assign(name="scaled0", op="multiply", args=("left", "scale")),
+            Assign(name="scaled1", op="multiply", args=("left", "scale")),
+            Load(name="right0", input="w0", index=(Var("n"), Var("k"))),
+            Load(name="right1", input="w1", index=(Var("n"), Var("k"))),
+            Assign(name="product0", op="multiply", args=("scaled0", "right0")),
+            Assign(name="product1", op="multiply", args=("scaled1", "right1")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
+    planar = Fold(
+        axis=axis,
+        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        init=init,
+        combine=combine,
+    )
+
+    tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert len(tile.op.channels) == 2
+    assert tile.op.a.out == "scaled0"
+    assert sum(isinstance(stmt, Assign) and stmt.name.startswith("scaled") for stmt in tile.op.a.body) == 1
 
 
 def test_contraction_orients_a_shared_commutative_argument_first() -> None:

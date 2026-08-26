@@ -109,7 +109,7 @@ does not inherit the workaround and dies with "invalid value for --gpu-architect
 must run inside the 1Cat image (NVRTC 12.9 native, verified) or in a venv without the NVRTC-13 pin. The inventory is
 untuned (no knobs or timings) and is therefore NOT promoted to the canonical path; it regenerates in ~60 s.
 
-## Stage 1 — loader lane: read the published checkpoint (CPU-testable)
+## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
 Extend the quantized split loader (`load_quantized_split` + `loader/quant.py`) with one DeepSeek-native lane:
 
@@ -131,7 +131,7 @@ raw fp8 payload bytes AND raw e8m0 scale bytes across every fp4 nibble code, blo
 tensors; `expert_range` applies before stacking/conversion and peak host memory proves no rank materializes non-local
 experts; on the host, one real layer's loaded expert slice matches the reference converter's output.
 
-## Stage 2 — runner: DeepSeek widths + TP expert sharding
+## Stage 2 — runner: DeepSeek widths + TP expert sharding — **DONE (#656)**
 
 1. Seam plumbing in `EmmyGenRunner.from_model`: DeepSeek `_meta` (no `q_proj`; carrier `hc·H`, attention width `H`),
    the 3-output post program (`mixed`, `xn`, `mix`) routed through `_route_post_device` (per-output dest shapes —
@@ -152,7 +152,7 @@ residual arenas all use `hc_mult·H` while attention and expert inputs stay `H`;
 tests stay green; a single-GPU tiny-config DeepSeek stitch test (seam programs + torch attention stand-in) matches
 eager.
 
-## Stage 3 — plugin: host the fork's attention inside `EmmyGenModel`
+## Stage 3 — plugin: host the fork's attention inside `EmmyGenModel` — **in-repo work DONE (#662)**
 
 1. A DeepSeek branch that constructs the fork's `DeepseekV4Attention` per layer (needs `vllm_config`, the shared
    `topk_indices_buffer`, aux streams, unique prefixes so its SWA/compressor/indexer cache layers register in the
@@ -177,6 +177,23 @@ prefill/decode requests (not just `/health`); (d) layer-level numerical agreemen
 atol/rtol, then deterministic greedy token-ID agreement on a fixed corpus spanning HCA/CSA/hash layers, multiple
 expert destinations, PP transport, and mixed scheduling — token IDs either agree or they do not. Also verify
 `emmy serve`'s MoE probe recognizes `n_routed_experts` (or pin capture sizes + eager in the release config).
+
+### Stage 3 findings (2026-08-26, PR #662)
+
+- Items 1–3 landed; gates (a), the weight-loading gate, and (b) are green in the pinned image: construction and
+  per-absolute-layer cache registration across all three attention layer types, the attention ownership table
+  against the real fork modules, and a REAL-engine parity gate — the same checkpoint served single-rank and
+  TP2×PP2 produces identical greedy token ids modulo numerical ties (exact ids stay the real checkpoint's gate,
+  where logits are decisive).
+- Load-bearing surprises, each encoded in code/tests/docs: a vLLM process re-registers `deepseek_v4` onto its own
+  rope-only config class process-wide, so the loader reloads with Transformers' same-named native class; the
+  fork's kernels accept only the published geometry (compressor head 512 / indexer head 128 / 128-aligned fp8
+  group outputs / 128×128 blocks, and no invented `compress_rates`); compiled twins may hand outputs back in
+  their accumulation dtype, normalized at the seam by the runner; and the machine-wide GPU file lock deadlocks
+  multi-rank serving (a rank holds it inside its combine while its pending collective waits on the peer queued
+  behind the same lock) — it is now scoped per physical device UUID.
+- The remaining gates move to the on-host block beside Stage 4's image work: (c) the TP8×PP2 target-host boot
+  serving mixed prefill/decode, and (d) real-checkpoint layer-level numerics plus greedy token-ID agreement.
 
 ## Stage 4 — image + release plumbing
 
@@ -230,7 +247,7 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 
 ## Effort
 
-Stage −1: DONE (~2 h). Stage 0: DONE (fixed upstream by #602; verification ~2 h).
-Stage 1: 2–4 days. Stage 2: 3–5 days. Stage 3: 5–10 days (the risk pool). Stage 4: 2–4 days on-host. Stage 5:
+Stage −1: DONE (~2 h). Stage 0: DONE (fixed upstream by #602; verification ~2 h). Stage 1: DONE (#651).
+Stage 2: DONE (#656). Stage 3 in-repo: DONE (#662; gates (c)/(d) move on-host). Stage 4: 2–4 days on-host. Stage 5:
 1–2 days. A measured eager fp8 A/B is realistically 3–5 engineering weeks; adding stage 6 (MXFP4 + tuning,
 1–3 weeks) makes ~5–8 weeks, with stage 0 and the fork ABI as the dominant uncertainty.

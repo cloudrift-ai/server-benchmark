@@ -1127,6 +1127,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
+    "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }
 
 

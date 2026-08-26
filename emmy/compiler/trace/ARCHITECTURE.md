@@ -190,6 +190,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
   blocks with uint8 E8M0 scales; biases stay in the requested value dtype. `expert_range=(lo, hi)` narrows the read to
   one tensor-parallel rank's expert shard, re-indexed rank-locally, so a rank never reads bytes it does not own.
+  The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
+  the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
+  the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
+  loader reloads the config with it.
 
   A checkpoint published in its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming
   Transformers itself publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second

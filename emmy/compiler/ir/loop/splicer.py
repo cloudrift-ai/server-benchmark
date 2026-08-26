@@ -22,9 +22,10 @@ Resolution dispatches on stmt kind:
 - **Load on a splice edge** — emit a copy alias at the demand scope;
   σ is solved by pairing target's ``Write.index`` against the reader's
   σ-substituted index, and the target's ``Write.value`` is queued under
-  the solved σ. A narrowing reduction at a declared frontend output keeps its
-  tensor dtype when the consumer has a distinct origin; a decomposition-private
-  output may reconstruct within the frontend operation. The target's expression
+  the solved σ. The alias is dtype-free: a narrowing store spells its rounding
+  as an ordinary ``Assign`` conversion ahead of the Write
+  (``loop/lifting/090_spell_store_rounding``), so inlining the value chain
+  carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
 - **Accum** — freshen its reduce axis, place
   ``Loop(fresh_reduce_axis, Accum(...))`` at
@@ -65,7 +66,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
@@ -141,7 +141,6 @@ def splice_loops(
     loops: dict[str, LoopOp],
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
-    splice_dtypes: dict[tuple[str, str], DataType] | None = None,
     roots: tuple[tuple[str, str], ...] | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
@@ -152,10 +151,6 @@ def splice_loops(
     ``(target_tag, target_output_buf)`` meaning "this loop's Load whose
     ``source`` is ``source_buf`` reads ``target_tag``'s Write whose
     ``output`` is ``target_output_buf`` and should be inlined."
-    ``splice_dtypes`` optionally gives an edge's required dtype conversion.
-    The emitted copy alias retains that dtype so reconstructing a reduction
-    cannot bypass its tensor boundary.
-
     Non-splice Loads keep their original ``source`` buf names — buf
     identity is global, no remap needed. ``roots`` selects the observable
     Writes as ``(loop_tag, output_buffer)`` pairs. When omitted, every Write
@@ -176,7 +171,6 @@ def splice_loops(
         return _Splicer(
             loops={tag: op.analyze() for tag, op in loops.items()},
             splice_edges=splice_edges,
-            splice_dtypes=splice_dtypes or {},
             roots=roots,
         ).run()
     except (_NotSupported, ValueError) as exc:
@@ -237,7 +231,6 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
             return None
         roots.append((root_node.id, output))
     splice_edges: dict[tuple[str, str], tuple[str, str]] = {}
-    splice_dtypes: dict[tuple[str, str], DataType] = {}
     external_order: list[str] = []
     seen_external: set[str] = set()
 
@@ -253,32 +246,11 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
             if input_producer is not None and input_producer.id in loops:
                 producer_id = input_producer.id
                 splice_edges[(node_id, inp)] = (producer_id, inp)
-                producer = graph.buffer(inp)
-                producer_meta = loops[producer_id].analyze()
-                producer_write = next((write for write, _ in producer_meta.writes if write.output == inp), None)
-                producer_value = producer_meta.defs.get(producer_write.value) if producer_write is not None else None
-                producer_origin = _ultimate_source(loops[producer_id])
-                same_origin = producer_origin is _ultimate_source(op)
-                origin_outputs = getattr(producer_origin, "outputs", {})
-                private_output = producer_origin is not loops[producer_id] and bool(origin_outputs) and inp not in origin_outputs
-                if (
-                    not same_origin
-                    and not private_output
-                    and isinstance(producer_value, Accum)
-                    and producer is not None
-                    and producer.dtype != (producer_value.dtype or F32)
-                ):
-                    splice_dtypes[(node_id, inp)] = producer.dtype
             elif inp not in seen_external:
                 seen_external.add(inp)
                 external_order.append(inp)
 
-    merged = splice_loops(
-        loops=loops,
-        splice_edges=splice_edges,
-        splice_dtypes=splice_dtypes,
-        roots=tuple(roots),
-    )
+    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots))
     if merged is None:
         return None
     return merged, external_order
@@ -509,14 +481,6 @@ def _loop_extents(op: LoopOp) -> dict[str, int] | None:
     return extents
 
 
-def _ultimate_source(op):
-    """The frontend-origin object at the end of an op rewrite chain."""
-    root = op
-    for source in op.source_chain():
-        root = source
-    return root
-
-
 # ---------------------------------------------------------------------------
 # _Splicer — all per-splice state + the worklist loop
 # ---------------------------------------------------------------------------
@@ -543,7 +507,6 @@ class _Splicer(LoopBuilder):
         *,
         loops: dict[str, LoopMeta],
         splice_edges: dict[tuple[str, str], tuple[str, str]],
-        splice_dtypes: dict[tuple[str, str], DataType],
         roots: tuple[tuple[str, str], ...],
     ) -> None:
         used: set[str] = set()
@@ -552,7 +515,6 @@ class _Splicer(LoopBuilder):
         super().__init__(used_names=used)
         self.loops = loops
         self.splice_edges = splice_edges
-        self.splice_dtypes = splice_dtypes
         self.roots = roots
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
@@ -717,8 +679,7 @@ class _Splicer(LoopBuilder):
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
         v_bound = self._ensure_dep(target_write.value, target_tag, sigma, d.demand_scope)
-        dtype = self.splice_dtypes.get((d.origin, stmt.input))
-        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,), dtype=dtype), d.demand_scope)
+        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Emit ``Loop(fresh_reduce_axis, [Accum(bound, value_bound, op)])`` at

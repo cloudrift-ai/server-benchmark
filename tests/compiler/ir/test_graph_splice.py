@@ -88,3 +88,36 @@ def test_splice_restores_secondary_output_buffer_identity():
     assert g.nodes["ua"].inputs == ["a"]
     assert g.nodes["ub"].inputs == ["b"]
     g.validate()
+
+
+def test_splice_marks_fragment_private_buffers_transient():
+    """A buffer no redirect and no ``fragment.outputs`` entry names has no storage."""
+    g = _make_fanout_graph()
+    frag = Graph()
+    frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    frag.add_node(ElementwiseOp("exp"), ["x"], Tensor("mid", (8,)), node_id="mid")
+    frag.add_node(ElementwiseOp("negative"), ["mid"], Tensor("a", (8,)), node_id="fa")
+    frag.outputs = ["fa"]
+
+    g.splice(frag, consumed={"a"}, output="a")
+    assert g.buffer("mid").transient
+    assert not g.buffer("a").transient  # a tensor the source program materialized
+
+
+def test_splice_replacement_inherits_transience():
+    """Decomposing a decomposition's private intermediate keeps it private."""
+    g = _make_fanout_graph()
+    outer = Graph()
+    outer.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    outer.add_node(ElementwiseOp("exp"), ["x"], Tensor("mid", (8,)), node_id="mid")
+    outer.add_node(ElementwiseOp("negative"), ["mid"], Tensor("a", (8,)), node_id="fa")
+    outer.outputs = ["fa"]
+    g.splice(outer, consumed={"a"}, output="a")
+    assert g.buffer("mid").transient
+
+    inner = Graph()
+    inner.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    inner.add_node(ElementwiseOp("sin"), ["x"], Tensor("mid", (8,)), node_id="remid")
+    inner.outputs = ["remid"]
+    g.splice(inner, consumed={"mid"}, output="mid")
+    assert g.buffer("mid").transient  # inherited, not restated by the rule

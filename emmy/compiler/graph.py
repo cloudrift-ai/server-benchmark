@@ -604,7 +604,7 @@ class Graph:
         node = self.nodes[nid]
         outs = list(node.outputs)
         tensor = outs[slot]
-        outs[slot] = Tensor(new_buf, tensor.shape, tensor.dtype, constant=tensor.constant, value=tensor.value)
+        outs[slot] = replace(tensor, name=new_buf)
         node.outputs = tuple(outs)
         users = self._users.pop(old_buf, set())
         self._users[new_buf] = users
@@ -688,17 +688,32 @@ class Graph:
           fragment_output_buffer}`` map redirecting several values at once.
           Keys may name primary or secondary outputs. Each old output's hints
           merge onto its replacement; if all replacements belong to one MIMO
-          node, dissolved nodes' hints merge there as well."""
+          node, dissolved nodes' hints merge there as well.
+
+        Buffer TRANSIENCE is decided here and nowhere else: a fragment buffer no redirect
+        and no ``fragment.outputs`` entry names is private to the fragment, so it is marked
+        ``Tensor.transient``; a public one inherits the answer from the buffer it replaces.
+        That is the fact fusion reads to know whether deleting a buffer also deletes a
+        rounding the source program performed."""
         consumed = list(consumed)
         consumed_hints = {nid: self.nodes[nid].hints for nid in consumed if nid in self.nodes}
         single = isinstance(output, str)
         output_map = {output: fragment.outputs[0]} if single else dict(output)
         output_owners: dict[str, str] = {}
+        old_transient: dict[str, bool] = {}
         for old_buf in output_map:
             owner = self.producer(old_buf)
             if owner is None:
                 raise KeyError(f"Redirected buffer {old_buf!r} has no producer")
             output_owners[old_buf] = owner.id
+            replaced = self.buffer(old_buf)
+            old_transient[old_buf] = replaced is not None and replaced.transient
+        # A fragment buffer nothing outside the fragment names is TRANSIENT: it exists only
+        # between these nodes, so its dtype carries shape rather than a rounding boundary
+        # (:class:`~emmy.compiler.tensor.Tensor`). Public fragment buffers inherit the answer
+        # from the buffer they replace below, which is what keeps a decomposition of a
+        # decomposition transient without any rule restating it.
+        public_bufs = set(fragment.outputs) | set(output_map.values())
         new_compute: list[str] = []
         id_map: dict[str, str] = {}
         buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
@@ -718,7 +733,10 @@ class Graph:
             new_id = self.add_node(
                 op=frag_node.op,
                 inputs=mapped_inputs,
-                outputs=tuple(Tensor(t.name, t.shape, t.dtype) for t in frag_node.outputs),
+                outputs=tuple(
+                    Tensor(t.name, t.shape, t.dtype, transient=(frag_id if slot == 0 else t.name) not in public_bufs)
+                    for slot, t in enumerate(frag_node.outputs)
+                ),
                 node_id=preferred_id,
             )
             if frag_node.hints:
@@ -771,6 +789,10 @@ class Graph:
                     else:
                         self.rename_buffer(new_out, old_buf)
                     new_out = old_buf
+            if old_transient[old_buf]:
+                replacement = self.buffer(new_out)
+                if replacement is not None:
+                    replacement.transient = True
             result[old_buf] = new_out
 
         self.remove_orphans()
@@ -1171,7 +1193,7 @@ class Graph:
                 id=node.id,
                 op=node.op,
                 inputs=list(node.inputs),
-                outputs=tuple(Tensor(name=t.name, shape=t.shape, dtype=t.dtype) for t in node.outputs),
+                outputs=tuple(replace(t) for t in node.outputs),
                 hints=Hints.from_dict(node.hints.to_dict()),
             )
         g._users = {buf: set(users) for buf, users in self._users.items()}
@@ -1319,13 +1341,7 @@ def _rename_buf_in_op(op, old: str, new: str):
 
     def renamed_io(io: dict[str, Tensor]) -> dict[str, Tensor]:
         return {
-            (new if buf == old else buf): Tensor(
-                new if tensor.name == old else tensor.name,
-                tensor.shape,
-                tensor.dtype,
-                constant=tensor.constant,
-                value=tensor.value,
-            )
+            (new if buf == old else buf): (replace(tensor, name=new) if tensor.name == old else replace(tensor))
             for buf, tensor in io.items()
         }
 

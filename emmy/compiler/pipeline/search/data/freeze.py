@@ -11,8 +11,9 @@ carrying provenance and content digests. Each row stores its DB ``op_sig``, curr
 structural measurement features, verbatim tunable knobs, and measurement metadata.
 Device ``H_*`` features are re-derived card-faithfully at load time.
 
-What freezes (see :func:`freeze_reason`): every **leaf** in the current featurizer
-vocabulary that passes the physical-plausibility predicates. ``bench_fail`` leaves are kept as durable negatives. Branch rows
+What freezes (see :func:`freeze_reason`): every **deployable-regime leaf** in the current
+featurizer vocabulary that passes the physical-plausibility predicates. ``bench_fail`` leaves are
+kept as durable negatives. Branch rows
 never freeze and no tree schema is stored (no ``parent_key`` / ``depth`` / ``visits``):
 prefix rows are re-synthesized at fit time under the current fork structure.
 
@@ -74,13 +75,20 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 def freeze_reason(row: NodeRow) -> str | None:
     """Why ``row`` is excluded from a measurement freeze, or ``None`` to keep it.
 
-    THE freeze sanity filter, and nothing else — keep every leaf
+    THE freeze sanity filter, and nothing else — keep every DEPLOYABLE-regime leaf
     spelled in the current featurizer vocabulary that passes the shared plausibility
     predicates. ``bench_fail`` leaves reach the keep path by construction: both
     predicates return ``None`` for non-``ok`` rows, so failures are kept as negative
-    examples without a special case."""
+    examples without a special case.
+
+    The regime gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
+    prior number is computed over, and a measurement taken under a non-deployable opt level
+    answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
+    reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
+    number would describe a regime that does not exist. Older stores hold such rows from the era
+    when sweeps ranked at ``-Xcicc -O1``; they are dropped here rather than at each reader."""
     from emmy.compiler.pipeline.search.db import implausible_value_reason, impossible_kernel_reason  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION  # noqa: PLC0415
 
     if row.is_leaf is not True:
         return "non-leaf (branch or pre-enrichment row)"
@@ -88,6 +96,8 @@ def freeze_reason(row: NodeRow) -> str | None:
         return f"stale feat_ver {row.feat_ver} != current {FEATURIZER_VERSION}"
     if "H_cc" not in row.features or "H_opt" not in row.features:
         return "missing H_* regime stamps"
+    if float(row.features["H_opt"]) != DEPLOYABLE_OPT:
+        return f"non-deployable regime (H_opt={row.features['H_opt']:g})"
     reason = implausible_value_reason(row)
     if reason is not None:
         return f"implausible value: {reason}"

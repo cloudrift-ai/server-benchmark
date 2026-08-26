@@ -1005,8 +1005,30 @@ def _file_gpu_name(path: Path) -> str | None:
 #: Optional scope override for :func:`records_for_card` — the corpus the deploy tier reads.
 #: ``None`` (the default, and the only value a real deploy ever sees) reads the repository files.
 #: The drift audit (``search/audit.py``) installs one file's / one precision lane's records here so
-#: its verdicts judge exactly that set, the way the release gate needs them scoped.
+#: its verdicts judge exactly that set, the way the release gate needs them scoped. Set it through
+#: :func:`records_override`, never by hand.
 RECORDS_OVERRIDE: list[GoldenRecord] | None = None
+
+
+@contextmanager
+def records_override(records: list[GoldenRecord] | None):
+    """Scope the corpus :func:`records_for_card` reads, restoring the previous scope after.
+    ``[]`` hides every record — how a caller that must not consult the verified tier says so;
+    ``None`` is a no-op, leaving whatever scope is already installed.
+
+    **The body must not ``await``.** This swaps a module global, so it is only atomic with respect
+    to other coroutines while the block stays synchronous — and it is used inside concurrently
+    gathered tune targets, which share one event loop."""
+    global RECORDS_OVERRIDE  # noqa: PLW0603 — the documented scope seam, one owner
+    if records is None:
+        yield
+        return
+    prev = RECORDS_OVERRIDE
+    RECORDS_OVERRIDE = records
+    try:
+        yield
+    finally:
+        RECORDS_OVERRIDE = prev
 
 
 def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:

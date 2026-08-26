@@ -78,7 +78,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
-| **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
+| **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (tier 2); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
@@ -91,7 +91,6 @@ WRITERS                                STORES                                REA
 
 emmy tune ─┬─ sweep benches ─────────▶ perf table   (autotune.db) ─────────▶ greedy compile, tier 3
            ├─ every training row ────▶ reservoir    (online.json) ─────────▶ greedy compile, tier 2 (H_opt=3 rows)
-           ├─ -O3 re-benches ────────▶ reservoir + node table                online prior refits
            └─ every tree node ───────▶ node table   (autotune.db) ─────────▶ emmy eval only (never a deploy)
 run --bench pinned/golden/--ab rows ─▶ node table   (autotune.db)
 recorded from those rows ────────────▶ recipe-local / hardware golden YAML ─▶ greedy compile, tier 1 + pinned replay
@@ -100,8 +99,8 @@ recorded from those rows ────────────▶ recipe-local / 
                                        online prior model (online.json) ──▶ greedy compile, tier 4 (trusted)
 ```
 
-One asymmetry trips people up: the `-O3` re-benches a tune runs never reach the `perf` table. On a machine tuned at
-the default `-Xcicc -O1` flags, the only measurements taken at deployable `-O3` flags live in the reservoir (Part 3).
+Everything above is measured in ONE regime: the deployable one a compile runs in. A sweep benches at the flags a
+deploy compiles with, so a tuned latency is the deployed latency and no store needs a per-regime lane (Part 3).
 
 ### How one fork gets decided, end to end
 
@@ -113,12 +112,11 @@ rule matches a `LoopOp` and returns several tile options.
 3. Each leaf becomes one row: the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
    an earlier pass wrote onto the op (a summary of its body and loop extents), and the leaf's complete knob values
    (Part 6).
-4. **Tier 1, reservoir.** The leaf that agrees with the fastest reservoir row of the same op that was itself
-   measured at `-O3` (`H_opt=3`) — agreement means every knob the leaf has decided has the same value in the row.
-   Deployable flags only.
-5. **Tier 2, `perf` rows.** Otherwise: measured rows for this exact op — a row measured at deployable flags decides
-   ahead of a row measured at the `-Xcicc -O1` flags a tune sweep uses.
-6. **Tier 3, the prior.** Otherwise: the `mean_scores` argmin over all leaves, in one batched predict.
+4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
+   every knob the leaf has decided has the same value in the row. (The example starts here because this card records
+   no golden for the op; the **verified** tier would otherwise decide first. Part 3 numbers the full list.)
+5. **The `perf` tier.** Otherwise: measured rows for this exact op, under this compile's own context key.
+6. **The prior.** Otherwise: the `mean_scores` argmin over all leaves, in one batched predict.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -140,7 +138,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes and the prior can read it: the `S_*` shape/body features, knob values, scheduler facts. "The op's stamped `S_*` features" means the ones an earlier pass wrote onto it. |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
-| **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** regime, `-Xcicc -O1` the fast-compiling one a tune sweep uses — plus whether fast math is on. |
+| **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** one, and the only one anything is measured in — plus whether fast math is on. |
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
@@ -510,11 +508,9 @@ prior, never a preference written into a pass or into this policy.
    `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row
    of the same op that was measured at `-O3` (`H_opt=3`);
-3. the tune DB's measured `perf` rows, with a preference order inside the tier: a row measured at **deployable flags**
-   decides outright, and a row measured at the `-Xcicc -O1` flags a tune sweep uses decides only when no candidate has
-   a deployable-flag measurement. An `-O1` median is a ranking signal that is known to invert against `-O3`, so it
-   must never override a deployable-flag row — but it is still a real measurement of this exact op, so it beats the
-   model's extrapolation;
+3. the tune DB's measured `perf` rows for this compile's own context key — one lane, because a sweep measures in the
+   regime a deploy compiles in. A real measurement of this exact op beats the model's extrapolation. Rows from a
+   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted;
 4. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
@@ -527,7 +523,7 @@ consultation appends to — `MATCH` (a record carrying the fork's identity had a
 leaf), `DRIFT` (records carry the identity, no offered leaf equals any of their rows — the fail-closed branch), `GAP`
 (no record carries it). Unset, the sink is one identity test per consulted fork and nothing else. `search/audit.py`
 drives it over a whole card's graphs with the machine-local evidence removed (`config.online_file_override` at a
-nonexistent path, `nvcc_flags_override("")` for the deployable regime, `golden.RECORDS_OVERRIDE` scoping the corpus to
+nonexistent path, `nvcc_flags_override("")` for the deployable regime, `golden.records_override` scoping the corpus to
 one file or precision lane), so the verdicts are the same on a GPU-less box and the recording host. `eval golden
 --serving-config` is the consumer, and it also ratchets `consultation_counts` — the count is the one thing the
 verdicts cannot report, because a kernel whose lowering stops enumerating candidates deploys single-option, consults
@@ -544,28 +540,23 @@ Three definitions the list leans on:
   while the same prefix rule continues to apply to every non-`PLACE` knob.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
-  (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so
-  tier 2 is not a separate store. A tune writes its `-O3` re-benches to the reservoir and the `node` table ONLY, never
-  to `perf`. So on a machine tuned at the default `-Xcicc -O1` flags, the measurements taken at deployable flags live
-  in the reservoir, and the `perf` table gets deployable-flag rows only when a sweep itself ran at those flags. That
-  asymmetry in who writes where is why the reservoir sits above the DB tier. One consequence: anything that discards
-  the checkpoint — a `FEATURIZER_VERSION` bump discards it WHOLE, see "Featurizer versioning" — deletes this evidence
-  tier along with the model, and the machine's deploys silently drop to DB rows (usually `-O1` ones) → the
-  offline prior. The SQLite `perf` rows (tier 3) survive such a bump: the DB is keyed by content, and the join that
-  matches rows to candidates tolerates feature-set changes, so old rows stay usable.
-- **Which compile flags each tier applies under**: the reservoir tier applies only to a compile at deployable `-O3`
-  flags (`H_opt=3`) — `-O3` evidence is true of the deployable settings only and must never settle an `-Xcicc -O1`
-  compile. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the `compile` /
-  `run` default — count as 3, so a default deploy is always deployable. The identity a measurement is *stored* under
-  agrees with that reading: `Context.structural_key` folds the flags **split** into an opt level plus the other flags
-  (`context.split_opt_level`), never the raw string, so `""` and an explicit `-Xcicc -O3` are one key for the one
-  regime they physically are. Keyed on the raw string they were two, and a row a tune wrote under an explicit `-O3`
-  pin was declared deployable by `H_opt` and then unreadable at a default deploy. The DB tier applies under any
-  flags: its
-  "deployable" half means any context key that is not the `-O1` one, so an `-O3` row decides outright even under an
-  `-O1` compile. The two tests are deliberately not mirror images: only `-Xcicc -O1` counts as the ranking flags,
-  while anything else counts as deployable for the DB tier. An explicit `-O2` pin therefore gets DB evidence but not
-  the reservoir — an accepted edge case.
+  (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
+  deploy evidence, so tier 2 is not a separate store. The reservoir sits above the DB tier because it is the online
+  prior's own view of what it has seen, and because it carries the value-of-position labels the DB's per-kernel rows
+  do not. One consequence: anything that discards the checkpoint — a `FEATURIZER_VERSION` bump discards it WHOLE, see
+  "Featurizer versioning" — deletes this evidence tier along with the model, and the machine's deploys drop to DB
+  rows → the offline prior. The SQLite `perf` rows (tier 3) survive such a bump: the DB is keyed by content, and
+  the join that matches rows to candidates tolerates feature-set changes, so old rows stay usable.
+- **Which compile flags each tier applies under**: all of them apply to the deployable regime, and that is the only
+  regime anything is measured in. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all
+  — the default everywhere — count as 3, so an ordinary compile is always deployable. The identity a measurement is
+  *stored* under agrees with that reading: `Context.structural_key` folds the flags **split** into an opt level plus
+  the other flags (`context.split_opt_level`), never the raw string, so `""` and an explicit `-Xcicc -O3` are one key
+  for the one regime they physically are. Keyed on the raw string they were two, and a row written under an explicit
+  `-O3` pin was declared deployable by `H_opt` and then unreadable at a default deploy. A compile deliberately pinned
+  to another opt level reads no measured tier at all: the reservoir gate rejects it on `H_opt`, and its own context
+  key holds only whatever was measured under that same pin. That is the intended outcome — a non-deployable
+  measurement is not evidence about a deploy.
 
 **With no prior object at all, every tier is gone.** That happens when `load_prior` failed (a corrupt online
 checkpoint, or the strict offline-artifact load raising; the loader is best-effort and swallows any failure), and on
@@ -775,7 +766,7 @@ structural fork — the cut fragments and the keep-fused side alike — by a nes
 `lowering/tile`-only pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized
 per `Op.cache_key`, and takes the argmin. So an unpinned compile deploys the splits `tune` measured best. The nested
 resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick
-(reservoir -O3, then the tune DB's -O1 ranking rows, model prediction only where unmeasured) — a pure
+(the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
 sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
 different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
@@ -789,10 +780,8 @@ tier: a candidate's fork-time `S_*` base may carry scheduler stamps the persiste
 `S_warp_eligible` is on no row recorded before it), and a strict-equality signature join would let one added feature
 silently disable the whole evidence tier against every existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the
 model's `g2k` pick beating the measured-faster fused config it was never allowed to see). The index spans three
-context keys (the deploy's own flags, and the same key with `-Xcicc -O1` and with `-Xcicc -O3` — where the tune's
-deployable re-benches land), and the pick is two-tier: a row measured at deployable flags decides outright; `-O1`
-rows decide only when no candidate has deployable evidence, because an -O1 median is a ranking signal with -O3
-inversions and must not override a well-trained model on its own.
+the deploy's own context key — one regime, one key, one lane — and the pick is the plain argmin over the
+matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
 non-chronological backtracking, no snapshots). A structural pick that leaves a fragment kernel un-lowered retires
@@ -818,7 +807,7 @@ fires the loud `LoweringError`.
 sweep. Pass a `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per
 fully-explored rollout and awaits `search.evaluate(token, cand, backend=, db=)` — terminal VALUATION is search
 policy, not engine mechanics: the bench (or cache/stub short-circuit), the per-kernel `perf` / `lowering` /
-inventory rows, the observe protocol, and the deployable `-O3` re-bench all live on the policy
+inventory rows and the observe protocol live on the policy
 (`search/policy/terminal_bench.py` + `TuningSearch.evaluate`). Per-run engine-event strategies are composed into
 the pipeline itself (`Pipeline.with_strategies` — see the strategies section of the rule contract above).
 
@@ -976,8 +965,8 @@ schedules into one row or falls back to a slower monolithic sibling. A cross-CTA
 when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a parent whose pins
 name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
 claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
-with that search reward. These `-O1` ranking numbers never populate
-`emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
+with that search reward. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
+separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
 proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.
@@ -999,22 +988,18 @@ with max-Q normalized UCB1:
 - **Patience** counts terminals since the last new global best; when it exceeds `--patience N` (default 50), the level
   exits.
 
-### Re-benching the near-best configs at deployable `-O3` flags
+### One measurement regime
 
-The sweep compiles at `-Xcicc -O1`. That is fast, but it is only good enough to *rank*: it gives equal times to
-configs that would differ at `-O3` — an ILP fold in `REDUCE`, say, or a warp tile's dedicated group of producer warps.
-So whenever a bench lands **within `EMMY_O3_TOL` (default 15%, `config.o3_tol`) of the best `-O1` result so far** — a
-wider band than "strictly better", so near-tied contenders qualify too — the engine re-benches that config at
-`-Xcicc -O3` (`_rebench_o3`). `observe_o3` then records an extra row, carrying the same knob values the config
-actually ended up with and tagged `H_opt=3` (the deployable regime), into the reservoir AND the `node` table — never
-the `perf` table (Part 3's reservoir definition explains what that means at deploy time). In the `node` table it lands
-as a leaf row with no parent, under its own `-O3` `context_key`. Each config is re-benched at most once.
+The sweep benches in the **deployable regime** — the same nvcc flags `compile` / `run` use — so a terminal earns
+exactly one measurement and a tuned latency is the deployed latency. Nothing is re-benched, nothing is translated
+between lanes, and no store carries a per-regime column.
 
-The `H_*` features are what let the broad `-O1` rows and the near-best `-O3` rows live in one dataset. `compile` /
-`run` run at `-O3` (`H_opt=3`), so a greedy compile ranks by the deployable rows and reaches the true optimum — for as
-long as the checkpoint holding them survives (see the consequence spelled out under "Featurizer versioning" in
-Part 3). The `nvcc_flags` override travels with the bench request to the worker, so only the winners pay for the `-O3`
-recompile, and the compiled cubin is cached under those flags.
+It was not always so: the sweep used to rank at `-Xcicc -O1` and re-bench near-best configs at `-O3`, which put a
+proxy in charge of the search and the confirmation in charge of nothing but training rows. Two measurements retired
+it. The proxy's error is *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as
+slow (paired over 1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools).
+And the compile time it was buying no longer exists: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of
+`-O1`. The rationale had been measured against WMMA codegen deleted days later.
 
 All tune/bench timings are **CUDA-graph-captured** by default (pure GPU time); each `perf` row records its mode in the
 `captured` column, and on write a captured measurement supersedes a wall-semantics one for the same key (never the
@@ -1064,8 +1049,16 @@ checkpoint carries deploy evidence, not just model state.
 resumes from the cached state. On default verbosity (and a tty) a `TuneProgress` draws a live single-line bar
 (completed/total tuned op leaves plus a `<kernel> <current us> (best <best us>) <knobs>` tail), threaded as an optional
 `progress=` through `TwoLevelStrategy` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
-shows the per-`[tune]` INFO lines instead, `-q` is quiet. `--bench` re-benches the tuned winner at -O3 (deployable,
-not the -O1 ranking pass): the full model against the real torch module and each kernel via its in-memory frontend
+shows the per-`[tune]` INFO lines instead, `-q` is quiet.
+
+The final greedy assembly (`result.assembled`, what `--output` writes and `--bench` measures) is the one greedy
+compile that **holds the verified-golden tier out** (`golden.records_override([])`). That tier is a deploy
+statement — "this config is known good on this card" — and a tune must assemble what it measured: the recorded
+winner (`persist_tune_winner`) names the searched config, so letting a golden win the replay would report a benched
+number for a config the tune did not choose. Every other tier still applies.
+
+`--bench` benches the tuned winner end to end:
+the full model against the real torch module and each kernel via its in-memory frontend
 provenance slice, vs eager / `torch.compile` / Emmy.
 
 ## Part 6: Persistence and keys
@@ -1148,15 +1141,19 @@ a `configs` list), beside a `manifest.json` holding the provenance header and th
 - **Each row records DB `op_sig`, its measured `S_*` structural row, tunable knobs, and measurement metadata.** This
   is a regenerable measurement snapshot, not the stable golden format. Device `H_*` facts are derived faithfully from
   the GPU header and `opt` at load time.
-- **Only current-vocabulary leaves freeze**, as filtered by `freeze_reason`: `feat_ver` must have been current when
-  the row was written, and the row must pass the two physical-plausibility checks the DB shares
-  (`implausible_value_reason` / `impossible_kernel_reason`). `bench_fail` leaves are kept, as negative examples.
+- **Only current-vocabulary, deployable-regime leaves freeze**, as filtered by `freeze_reason`: `feat_ver` must have
+  been current when the row was written, `H_opt` must be the deployable level, and the row must pass the two
+  physical-plausibility checks the DB shares (`implausible_value_reason` / `impossible_kernel_reason`). `bench_fail`
+  leaves are kept, as negative examples. The regime gate is what keeps a freeze a fair yardstick: a freeze is the
+  corpus a reported prior number is computed over, so rows from a regime nothing deploys in would put half a card's
+  pools in a lane no one runs. `group_measured` inherits the same filter, so an analysis over a live DB agrees with
+  one over a freeze.
   Branch rows are never frozen and no tree structure is stored — the partly-decided rows are rebuilt at fit time under
   whatever fork structure is current then.
 - **Freezing the same DB twice yields the same digests.** Every row serializes to one canonical JSON line, rows sort
   by that line, the per-file sha256 covers exactly those lines (content-level — immune to YAML style), the manifest's
   top sha256 folds the sorted per-file digests, and `created_at` enters none of them.
-- A loaded row retains the DB's canonical `op_sig`, so the `-O1` and `-O3` measurements of one operation group
+- A loaded row retains the DB's canonical `op_sig`, so a store's older cross-regime measurements of one operation group
   together without a second shape schema.
 - **Loading is strict.** `load_freeze` hard-errors on a missing/foreign/corrupt manifest, a `freeze_ver` mismatch, a
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
@@ -1176,11 +1173,6 @@ label is (`SearchNode.visits`, the leaf's `bench_stats` / `bench_status` that `o
 
 - **`bench_fail` leaves** — leaves only. Their value never contributes to any branch's minimum, so a branch's value
   comes from its working descendants instead, and a branch all of whose leaves failed is not recorded at all.
-- **`-O3` rows** for any leaf the tune re-benched at the deployable `-Xcicc -O3` (`observe_o3` stashes
-  `SearchNode.o3_us`). They are keyed under the tune's context with `O3_NVCC_FLAGS` substituted, so they can never
-  collide with the `-O1` row of the same config, their features carry `H_opt=3.0` (the same convention the reservoir
-  uses), and they have no parent: this is a re-measurement under different flags, not part of the tree, and never one
-  of a fork's siblings.
 
 **Recording benches as node rows** (`search/bench_record.py`) is the node table's second writer. A `run --bench` that
 benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement — plus the greedy
@@ -1206,8 +1198,8 @@ is what stops measurements from a manual sweep evaporating.
 Within one batch, a deterministic step that changes no knob can give a child exactly its parent's knob set, and hence
 the same `node_key`. Such duplicates collapse into one row (keeping the leaf's stats, and the max — not the sum — of
 their visits), so the SUM accumulation in `record_nodes` never double-counts a single run. The store is ready to be
-split into held-out groups for cross-validation (`Dataset.fold_node_rows`, by `op_sig` / `gpu`): an op's `-O1` tree,
-its `-O3` rows and its failed leaves all move to the same side together, and no parent edge ever crosses a fold
+split into held-out groups for cross-validation (`Dataset.fold_node_rows`, by `op_sig` / `gpu`): an op's tree and
+its failed leaves all move to the same side together, and no parent edge ever crosses a fold
 boundary. (`run_id` records where the surviving deduplicated value came from and is deliberately NOT used to split
 folds.)
 

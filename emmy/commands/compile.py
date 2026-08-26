@@ -322,9 +322,10 @@ def add_nvcc_args(parser) -> None:
         default=None,
         help=(
             "Override the extra nvcc compile flags (space-separated), e.g. "
-            '"-Xcicc -O3" or "-Xcicc -O1". Defaults: tune uses "-Xcicc -O1" (fast compile — but latencies are a '
-            "RANKING signal, NOT -O3-optimal: reductions/attention can run 1.5-3x slower); compile/run use nvcc's "
-            "default -O3. Folded into the cubin + perf cache keys. Equivalent to setting EMMY_NVCC_FLAGS."
+            '"-Xcicc -O1". Default everywhere is nvcc\'s own -O3, the deployable regime: tune measures in the '
+            "same regime it deploys into, so a tuned latency is the deployed one. Pinning a non-deployable opt "
+            "level makes a sweep rank only against itself — its rows key to that regime and no deploy reads them. "
+            "Folded into the cubin + perf cache keys. Equivalent to setting EMMY_NVCC_FLAGS."
         ),
     )
 

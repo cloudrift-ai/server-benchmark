@@ -195,11 +195,10 @@ class Context:
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
     # Extra nvcc flags this compile uses (from ``EMMY_NVCC_FLAGS`` — e.g.
-    # tune's ``-Xcicc -O1`` vs compile/run's -O3). Folded into
-    # ``structural_key`` so the autotune ``perf`` cache is partitioned by opt
-    # level: -O1-measured latencies (a fast-compile *ranking* signal) never
-    # clobber -O3 ones, and a later -O3 ``run`` re-benches rather than reading a
-    # stale -O1 number. Populated from the env by :meth:`probe` /
+    # normally empty — tune, compile and run all measure in the deployable regime).
+    # Folded into ``structural_key`` (split, see :func:`split_opt_level`) so the autotune
+    # ``perf`` cache is partitioned by opt level: a measurement taken under a deliberately
+    # non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the env by :meth:`probe` /
     # :meth:`from_target`.
     compile_flags: str = ""
     # Whether the strict knob-pin validator (``lowering/tile/_validate``)
@@ -337,7 +336,7 @@ class Context:
         - ``H_tc_gen`` — tensor-core generation (``_TENSOR_CORE_GEN``)
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
         - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
-          ``-Xcicc -O1`` → 1; compile/run's default → 3)
+          an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
           ``H_regs_per_block`` / ``H_warp_size`` / ``H_total_mem`` — live device props
           (:func:`target.live_device_features`; absent on GPU-less hosts). ``H_total_mem``

@@ -50,11 +50,12 @@ Without this, matmul — ~87% of the selectable points on a 4090 — soaked up n
 their share flows back to the big ones, so a run guarantees every kind data first and spends the rest where the pool
 actually is.
 
-**Why paired -O1/-O3.** The offline prior trains on deployable (-O3) records, and the historical tune data is mostly
--O1 — the dataset holds few points measured at BOTH opt levels. The sweep benches every point at both `-Xcicc -O1`
-and `-Xcicc -O3` (`emmy run --bench --ab`, node recording on): the twins share the knob set, so they join later on
-`op_sig` + tunables — the dataset a future "how well does -O1 approximate -O3 on this shape" model fits on. Both
-legs of a pair are measured on the same box in the same session.
+**Bench in the deployable regime.** The offline prior trains on deployable records, and a sweep now measures there
+by default (`emmy run --bench --ab`, node recording on), so no pairing step is needed: every point collected is
+already a deployable measurement. Historical stores also hold `-O1` rows from the era when sweeps ranked at that
+level; those are inert — the prior does not train on them and no deploy reads them. Do NOT pin `--nvcc-flags` to a
+non-deployable level to collect "cheaper" data: its error is biased along tile size, so it mis-ranks the wide
+register-tile family it would most matter for.
 
 **Declarative identity (what makes the rows freezable).** Each batch passes `--record-shape` — the group's
 golden-spelled shape spec — and the recorder stamps it as `shape_spec` on exactly the leaves whose extents key to

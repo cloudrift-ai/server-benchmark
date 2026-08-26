@@ -179,13 +179,26 @@ def _tune_backend(device_id: int | None = None):
     with the worker and the **parent** CUDA stream stays clean. Tight per-variant
     budgets: tune benches isolated single kernels at -Xcicc -O1 (fast), but the
     big-N warp-MMA variants (fp16 N=28672, ``matmul.mlp_gate_up.h4096``) need ~5 s
-    of cicc even then — a 4 s compile budget would record that whole family as
-    bench failures and lock it out of the sweep, hence 12 s; 2 s run is ample and the wall SIGKILLs any runaway
-    (keeping a ~2 s margin over compile+run). ``device_id`` pins the async bench
-    worker to a physical GPU (multi-GPU tune)."""
+    of cicc even then — a 4 s compile budget would refuse that whole family, hence 12 s; 2 s run
+    is ample. A config that overruns the compile budget is REPORTED, not recorded (see
+    ``CompileBudgetExceeded``), which is why the wall must not pre-empt it. ``device_id`` pins the
+    async bench worker to a physical GPU (multi-GPU tune)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    return CudaBackend(bench_compile_timeout_s=12.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=16.0, device_id=device_id)
+    compile_s, run_s = 12.0, 2.0
+    # The wall cap must sit ABOVE the in-child budgets, not beside them (the same formula the
+    # pinned path uses). A wall that can fire first silently converts the two honest in-child
+    # verdicts into one SIGKILL: a compile that overran is checked only when it RETURNS, so under
+    # the old ~2 s margin any compile slower than the wall was killed instead, and recorded as a
+    # sticky ``bench_fail`` — precisely the wide-tile family the compile budget exists to report.
+    # Hangs are still caught promptly in-child by the per-launch watchdog; the wall is a backstop
+    # for a wedged worker, and 60 s of headroom is what lets that watchdog's first-iter grace fire.
+    return CudaBackend(
+        bench_compile_timeout_s=compile_s,
+        bench_run_timeout_s=run_s,
+        bench_wall_timeout_s=compile_s + run_s + 60.0,
+        device_id=device_id,
+    )
 
 
 async def _warm_tune_backends(backends) -> None:

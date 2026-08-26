@@ -20,14 +20,17 @@ Protocol (length-prefixed pickle on stdin/stdout):
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
   "greedy_error": str|None, "reference_run_us": float|None}``
-  or ``{"ok": False, "error": str, "traceback": str}`` on exception.
+  or ``{"ok": False, "error": str, "traceback": str, "cache_miss": bool, "compile_budget": bool}``
+  on exception — the two flags rebuild parent-side the exception kinds a pickled string loses.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
 - A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
 bench_run_timeout_s, per-launch ``_KERNEL_TIMEOUT_MS``) propagate back
-as ``ok: False`` and the parent surfaces them as ``RuntimeError``.
+as ``ok: False`` and the parent surfaces them as ``RuntimeError``. A
+``bench_compile_timeout_s`` overrun is the one kind the caller must tell apart — it measured
+no latency — so it rides back as ``compile_budget: True`` and the parent re-raises it as such.
 
 A failing bench may have left the CUDA context in a sticky-error state: an
 illegal / misaligned memory access corrupts the context so that *every*
@@ -294,6 +297,8 @@ def main() -> None:
             dirty = bool(result.get("_retire_worker", False))
             resp = {"ok": True, **result}
         except BaseException as exc:  # noqa: BLE001 — surface every failure mode to the parent
+            from emmy.compiler.backend.cuda.program import CompileBudgetExceeded
+
             # A bare ``SystemExit`` repr hides the cause (a CLI-style ``sys.exit`` after a
             # logged error) — point the parent at the traceback + stderr, where it lives.
             error = (
@@ -306,6 +311,7 @@ def main() -> None:
                 "error": error,
                 "traceback": traceback.format_exc(),
                 "cache_miss": isinstance(exc, InputsCacheMissError),
+                "compile_budget": isinstance(exc, CompileBudgetExceeded),
             }
             dirty = _hung(exc) or _context_dirty()
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)

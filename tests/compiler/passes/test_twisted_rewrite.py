@@ -205,3 +205,78 @@ def test_twisted_folds_derived_loop_is_well_formed() -> None:
         reads = set() if isinstance(stmt, Fold) else set(stmt.deps())
         assert reads <= defined, f"{stmt} reads {sorted(reads - defined)} before definition"
         defined |= set(stmt.defines())
+
+
+# ---------------------------------------------------------------------------
+# The family vocabulary: one table, read by both the generator and the recognizer
+# ---------------------------------------------------------------------------
+
+
+def test_generated_combine_only_spells_the_family_vocabulary() -> None:
+    """Every op the carrier GENERATOR emits is named in ``EXP_FAMILY``.
+
+    This is the anti-drift guard the vocabulary exists for. The recognizer
+    (``_twist``) matches against that table; if the generator ever emitted an op the table does
+    not name, recognition of its own output would fail SILENTLY — no error, just a kernel that
+    kept its planar fold. Asserting the containment keeps the two halves one decision.
+    """
+    from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states, exp_merge
+
+    vocabulary = {
+        EXP_FAMILY.psi,
+        EXP_FAMILY.pivot,
+        EXP_FAMILY.shift,
+        EXP_FAMILY.product,
+        EXP_FAMILY.plus,
+        EXP_FAMILY.alias,  # the pure form writes its pivot through a copy
+        "negative",  # ψ⁻¹'s leading sign, internal to the generated term
+    }
+    programs = (
+        exp_combine_states(("m", "l"), ("m__o", "l__o")),
+        exp_merge(("m", "l"), ("s", 1.0)),
+        exp_combine_states(("m", "l", "o"), ("m__o", "l__o", "o__o")),
+    )
+    emitted = {s.op.name for prog in programs for s in prog}
+    assert emitted <= vocabulary, f"the generator emits {sorted(emitted - vocabulary)}, which EXP_FAMILY does not name"
+
+
+@pytest.mark.parametrize("spelling", ["reciprocal", "divide"])
+def test_normalized_exponential_parses_either_inverse_spelling(spelling: str) -> None:
+    """``w * (1/d)`` and ``w / d`` are the same normalized exponential.
+
+    Which one a body carries is decided upstream by ``split_invariant_divides``, a Loop-IR
+    HOISTING heuristic gated on a strict axis-subset. Recognition must not depend on whether that
+    fired, so the product spine is read with ``divide=True`` — the same reading the storage-decode
+    hoist uses — and the divisor leaf serves as the inverse.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._twist import _inverse_leaf, _mul_leaves
+
+    if spelling == "reciprocal":
+        body = Body(
+            (
+                Assign(name="inv", op="reciprocal", args=("den",)),
+                Assign(name="p", op="multiply", args=("w", "inv")),
+            )
+        )
+    else:
+        body = Body((Assign(name="p", op="divide", args=("w", "den")),))
+
+    defs = body.definitions
+    leaves = _mul_leaves(defs, "p")
+    assert leaves is not None and len(leaves) == 2, leaves
+    assert "w" in leaves
+    assert _inverse_leaf(defs, leaves, "den") is not None, f"{spelling}: the 1/den factor was not found in {leaves}"
+
+
+def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
+    """A ``maximum`` fold whose same-axis sibling is not an exp-weighted denominator is the shape
+    this pass exists for, refusing — and the demotion is otherwise invisible."""
+    import logging
+
+    graph, _, _ = graph_from_code(
+        "torch.randn(64,128,dtype=torch.float16).amax(-1, keepdim=True) + torch.randn(64,128,dtype=torch.float16).sum(-1, keepdim=True)"
+    )
+    with caplog.at_level(logging.DEBUG, logger="emmy.compiler.pipeline.passes.lowering.tile._twist"):
+        Pipeline.build(LOOP_PASSES + ["lowering/tile"]).run(graph, ctx=Context.from_target((12, 0)))
+    declines = [r.message for r in caplog.records if "declined" in r.message]
+    assert declines, "a refusing max/sum sibling pair must name the predicate that refused"

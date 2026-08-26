@@ -35,7 +35,14 @@ jobs:
     # single-digit minutes, so 20 leaves ample headroom while still failing fast on a regression.
     timeout-minutes: 20
     steps:
+      # ``lfs: true`` because the suite READS an LFS-tracked file: the checked-in measurement
+      # freeze (``search/freezes/``) is what the prior is evaluated against, and a plain checkout
+      # leaves a 3-line pointer in its place — which parses as nonsense rather than failing
+      # cleanly. Only this job needs it; lint reads no data, and the freeze is not wheel
+      # package-data, so the release job does not ship it.
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:

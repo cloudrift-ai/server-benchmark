@@ -339,6 +339,22 @@ def test_load_node_rows_sniffs_db_and_freeze_dir(tmp_path) -> None:
         load_node_rows(garbage)
 
 
+def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
+    """A checkout without LFS leaves a three-line pointer where the payload should be, and a pointer is
+    valid YAML — it parses to a string, and the first key lookup fails as ``TypeError: string indices must
+    be integers``, which says nothing about the real problem. This is how the checked-in freeze reached
+    ``main`` with red CI: the failure named a type error, not a missing file."""
+    from emmy import config
+
+    src = config.freeze_path()
+    (tmp_path / "manifest.json").write_text((src / "manifest.json").read_text())
+    name = next(iter(json.loads((src / "manifest.json").read_text())["files"]))
+    (tmp_path / name).write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n")
+
+    with pytest.raises(RuntimeError, match="git-LFS pointer"):
+        load_node_rows(tmp_path)
+
+
 def test_the_checked_in_freeze_is_the_default_evaluation_corpus() -> None:
     """The repo ships one measurement freeze, and ``config.freeze_path()`` resolves to it.
 

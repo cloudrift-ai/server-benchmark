@@ -369,9 +369,14 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
                     break
     if not matches:
         raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
-    if len(matches) > 1:
+    if len({id(s.node) for s in matches}) > 1:
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
         raise ValueError(f"knob key {key!r} is ambiguous: use {cands}")
+    # Several matches that are ONE node are not ambiguous: a shared subtree is a site at each path
+    # it appears under (MoE experts under one ``Map``, a repeated fold step), and one node carries
+    # one schedule, so the key names one decision however many paths reach it. :func:`spell` keys
+    # by node identity and already gives them a single spelling; refusing it here would make that
+    # spelling unresolvable.
     return matches[0]
 
 

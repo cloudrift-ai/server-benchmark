@@ -305,6 +305,12 @@ class _Term:
         self.tree = _site_tree(tile.op, self.key)
         self.tile_nodes = {node.keys["TILE"]: node.site.node for root in self.tree for node in _walk_nodes(root) if "TILE" in node.keys}
         self.fragment_edges = self._fragment_edges()
+        #: The site keys MORE THAN ONE site spells. A row has one slot per key, so such a key is
+        #: one DECISION its sites share, not one each: MoE experts under a single ``Map`` and the
+        #: repeated steps of a nested fold chain reach the same path and must schedule alike.
+        #: ``_Row.union`` merges knob dicts, so without this the later site's spelling would
+        #: silently overwrite the earlier one and the row would stop naming its own kernel.
+        self.shared_keys = _shared_keys(self)
         #: The refusal a schedule PIN drew, kept until the walk is done. One inventory declining
         #: a pin is ordinary (the widths are read OFF the inventory, so the pin names a different
         #: plan under each); a pin NO inventory could spell is malformed, and that is loud.
@@ -1167,7 +1173,11 @@ class _Row:
         kernels the wire format cannot tell apart, so they are not one row. A part claiming
         ``None`` composes with any other. This is the SAME rule :func:`_merge_interfaces` applies
         to the interface, one level up — it is stated once, in :func:`derive_inventory`, and
-        applied here to the already-derived claims."""
+        applied here to the already-derived claims.
+
+        The knob merge lets the last writer win, which is safe: a key several sites spell is fixed
+        for all of them by the pass that built the combination (:attr:`_Term.shared_keys`), so the
+        spellings merged here are equal."""
         knobs: dict = {}
         plans: dict = {}
         stages: dict = {}
@@ -1227,6 +1237,12 @@ def _block_rows(node: _Node, block: Block) -> list[_Row]:
     return out
 
 
+#: Where a combination's pass records the shared-key assignment it was built under. A combination
+#: interface is ``(claim, axes, plans, stages, shared)``: the first and last are what the pass
+#: decided globally, the middle three what the sites agreed among themselves.
+_SHARED = 4
+
+
 @dataclass(frozen=True)
 class _ComboSpace(Sequence[tuple[int, ...]]):
     """Compatible signature-group products, concatenated as an addressable sequence."""
@@ -1237,63 +1253,68 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
 
     @classmethod
     def build(cls, term: _Term, parts: tuple[Sequence[_Row], ...]) -> _ComboSpace:
-        """The compatible products of the sites' interfaces, one pass per worker inventory.
+        """The compatible products of the sites' interfaces, ONE PASS PER GLOBAL ASSIGNMENT.
 
-        The inventory RESTRICTS THE ROWS, it does not key the interface. That distinction is the
-        whole tractability of this product: a term can carry hundreds of sites, and the product
-        runs over each site's interface GROUPS, so one extra group per site multiplies the whole
-        enumeration. Under a chosen inventory a site offers the rows claiming it plus the rows
-        claiming nothing, which collapse to the few interfaces they always did; keying the group by
-        the claim instead would split every site's catalog once per inventory it can spell and turn
-        a 491-site term into an unenumerable product.
+        A term's global decisions are its worker inventory and every key more than one site spells
+        (:attr:`_Term.shared_keys`). Those RESTRICT THE ROWS a pass offers; they never key the
+        interface. That distinction is the whole tractability of this product: the product runs
+        over each site's interface GROUPS, so one extra group per site multiplies the whole
+        enumeration — a shared key with V values across N sites would compose V^N ways to admit the
+        V that agree, and a term can carry hundreds of sites. Restricting instead leaves every site
+        at the groups it always had, and the passes cost one per joint assignment.
 
-        A pass keeps a combination when the merged interface CLAIMS workers exactly when the pass's
-        inventory does — which is what keeps the all-claims-nothing combination out of every
-        concrete inventory's pass and in its own. The combination is then recorded against that
-        inventory: the pass knows the claim, so nothing has to re-derive it."""
+        Within a pass a site offers the rows carrying that assignment, claiming rows first (the
+        order its own catalog puts them in, and the order the walk reads a branch's first row in).
+        A combination is kept when the merged interface CLAIMS workers exactly when the pass's
+        inventory does — which keeps the all-claims-nothing combination out of every concrete
+        inventory's pass and in its own — and is recorded against the pass's assignment, so
+        nothing downstream has to re-derive it."""
         if not parts:
-            return cls(((),), ((None, (), (), ()),), (0, 1))
-        buckets, claims = [], {}
+            return cls(((),), ((None, (), (), (), ()),), (0, 1))
+        shared = sorted(getattr(term, "shared_keys", frozenset()))
+        spelled, buckets, claims, values = [], [], {}, {}
         for rows in parts:
-            per_claim: dict = {}
+            keys = tuple(key for key in shared if any(key in row.knobs for row in rows))
+            bucket: dict = {}
             for index in range(len(rows)):
                 row = rows[index]
-                per_claim.setdefault(row.work, {}).setdefault(_row_interface(term, row), []).append(index)
-            buckets.append(per_claim)
-            claims.update(dict.fromkeys(claim for claim in per_claim if claim is not None))
+                decided = tuple(str(row.knobs.get(key, "")) for key in keys)
+                bucket.setdefault((row.work, decided), {}).setdefault(_row_interface(term, row), []).append(index)
+                for key, value in zip(keys, decided, strict=True):
+                    values.setdefault(key, {})[value] = None
+                if row.work is not None:
+                    claims[row.work] = None
+            spelled.append(keys)
+            buckets.append(bucket)
+        order = tuple(values)
+        assignments = [dict(zip(order, combo, strict=True)) for combo in product(*(tuple(values[key]) for key in order))]
+        _enforce_pass_budget(term, parts, len(claims) + 1, len(assignments))
         products = []
         product_interfaces = []
         # ``None`` leads: the per-cell / pure-reduce geometry is the inventory a term always has.
         for claim in (None, *claims):
-            grouped = []
-            for per_claim in buckets:
-                # Claiming rows lead, then the rows that claim nothing — the order the site's own
-                # catalog puts them in, and the order the walk below reads a branch's first row in.
-                # The two halves cannot collide: an interface records WHETHER its row claims
-                # workers, so a claiming group and a claims-nothing group are never the same key.
-                unclaimed = per_claim.get(None, {})
-                offered = {**per_claim.get(claim, {}), **unclaimed} if claim is not None else unclaimed
-                if not offered:
-                    break  # this site cannot inhabit the inventory at all, so no row of it can
-                grouped.append(tuple(offered.items()))
-            if len(grouped) != len(buckets):
-                continue
-            size = 1
-            for groups in grouped:
-                size *= len(groups)
-                if size > MAX_COMBINATIONS:
-                    raise ValueError(
-                        f"schedule enumeration is intractable: this term's {len(parts)} sites compose more than "
-                        f"{MAX_COMBINATIONS} compatible interface combinations at WORK={_spell(claim)!r} — the "
-                        f"composition is exponential in the number of independently scheduled sites"
-                    )
-            for choices in product(*grouped):
-                interfaces, indices = zip(*choices, strict=True)
-                interface = _merge_interfaces(term, interfaces)
-                if interface is None or interface[0] != (claim is not None):
+            for assignment in assignments:
+                grouped = []
+                for keys, bucket in zip(spelled, buckets, strict=True):
+                    decided = tuple(assignment[key] for key in keys)
+                    # The two halves cannot collide: an interface records WHETHER its row claims
+                    # workers, so a claiming group and a claims-nothing group share no key.
+                    unclaimed = bucket.get((None, decided), {})
+                    offered = {**bucket.get((claim, decided), {}), **unclaimed} if claim is not None else unclaimed
+                    if not offered:
+                        break  # this site cannot carry the assignment, so no row of the term can
+                    grouped.append(tuple(offered.items()))
+                if len(grouped) != len(buckets):
                     continue
-                products.append(indices)
-                product_interfaces.append((claim, *interface[1:]))
+                _enforce_combination_budget(term, parts, claim, grouped)
+                carried = tuple(sorted(assignment.items()))
+                for choices in product(*grouped):
+                    interfaces, indices = zip(*choices, strict=True)
+                    interface = _merge_interfaces(term, interfaces)
+                    if interface is None or interface[0] != (claim is not None):
+                        continue
+                    products.append(indices)
+                    product_interfaces.append((claim, *interface[1:], carried))
         sizes = [_product_size(group) for group in products]
         return cls(tuple(products), tuple(product_interfaces), (0, *accumulate(sizes)))
 
@@ -1316,6 +1337,32 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
             local, digit = divmod(local, len(group[i]))
             result[i] = group[i][digit]
         return tuple(result)
+
+
+def _enforce_pass_budget(term: _Term, parts, inventories: int, assignments: int) -> None:
+    """Refuse a term whose GLOBAL decisions alone do not fit — the joint space of its worker
+    inventories and its shared keys, one pass each."""
+    if inventories * assignments > MAX_COMBINATIONS:
+        raise ValueError(
+            f"schedule enumeration is intractable: this term's {len(parts)} sites share "
+            f"{len(term.shared_keys)} schedule key(s) whose joint assignments, crossed with "
+            f"{inventories} worker inventories, exceed {MAX_COMBINATIONS} passes"
+        )
+
+
+def _enforce_combination_budget(term: _Term, parts, claim, grouped) -> None:
+    """Refuse a pass whose sites compose past the limit. The composition is exponential in the
+    number of INDEPENDENTLY scheduled sites, and refusing is deliberate: a truncated product reads
+    as "these are the compatible schedules" while dropping whichever the walk reached last."""
+    size = 1
+    for groups in grouped:
+        size *= len(groups)
+        if size > MAX_COMBINATIONS:
+            raise ValueError(
+                f"schedule enumeration is intractable: this term's {len(parts)} sites compose more than "
+                f"{MAX_COMBINATIONS} compatible interface combinations at WORK={_spell(claim)!r} — the "
+                f"composition is exponential in the number of independently scheduled sites"
+            )
 
 
 def _product_size(parts) -> int:
@@ -1421,16 +1468,23 @@ class _RowProduct(Sequence[_Row]):
         return self._regrouped(groups)
 
     def partition(self, key: str):
-        """Partition this compatible product by one site-local schedule key.
+        """Partition this compatible product by one schedule key.
 
-        The key belongs to one leaf catalog. Restricting that catalog inside each compatibility
-        group preserves the product symbolically; no Cartesian row is visited.
+        A key ONE site spells is site-local: restricting that catalog inside each compatibility
+        group preserves the product symbolically, and no Cartesian row is visited.
+
+        A key SEVERAL sites spell is one decision they share (:attr:`_Term.shared_keys`). The pass
+        that built each combination already fixed it for every site at once, so the combination
+        carries the agreed value and the partition is a regroup — again without visiting a row.
         """
         owners = [index for index, part in enumerate(self.parts) if any(key in row.knobs for row in part)]
         if not owners:
             return (("", self),)
-        if len(owners) != 1:
-            raise ValueError(f"schedule key {key!r} belongs to several row catalogs")
+        if len(owners) > 1:
+            groups: dict[str, list[tuple]] = {}
+            for combo, interface in zip(self.combos.groups, self.combos.interfaces, strict=True):
+                groups.setdefault(dict(interface[_SHARED]).get(key, ""), []).append((combo, interface))
+            return tuple(self._regrouped(groups))
         owner = owners[0]
         part = self.parts[owner]
         groups: dict[str, list[tuple[tuple[Sequence[int], ...], tuple]]] = {}
@@ -1527,6 +1581,15 @@ def _level_keys(term: _Term) -> list[str]:
     for node in term.tree:
         walk(node)
     return [k for family in FAMILIES for k in decided[family]]
+
+
+def _shared_keys(term: _Term) -> frozenset[str]:
+    """The site keys more than one site of ``term`` spells (see :attr:`_Term.shared_keys`)."""
+    seen: set[str] = set()
+    shared: set[str] = set()
+    for key in _level_keys(term):
+        (shared if key in seen else seen).add(key)
+    return frozenset(shared)
 
 
 def _keys(term: _Term) -> list[str]:

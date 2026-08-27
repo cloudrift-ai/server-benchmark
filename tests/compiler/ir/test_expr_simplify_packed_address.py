@@ -8,11 +8,15 @@ every consumer that asks "does this index still mention the row axis outside a d
 without a contraction to bind.
 
 The value does separate: ``n·K`` is a multiple of the divisor, so the quotient is ``n·(K/2) + k/2``
-and the modulo keeps only ``k/2``. Proving it needs the loop extents — with ``k`` unbounded the fold
-is unsound, and these tests pin both directions.
+and the modulo keeps only ``k/2``. What the fold needs from the loop extents is NON-NEGATIVITY, not a
+tight bound — a negative row index would make the floor division round the wrong way. These tests pin
+the separation, its value-equivalence at ranges wider than the declared one, and the refusal when no
+range proves the sign.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 
@@ -74,16 +78,29 @@ def test_row_major_flatten_of_the_packed_load_loses_its_residue():
     _same_value(flat, s, "row-major flatten")
 
 
-def test_unbounded_reduce_axis_does_not_fold():
-    """Without a range on ``k`` the separation is not provable — and not true: at ``k = K`` the
-    quotient spills into the next row. The expression must survive untouched."""
+def test_no_range_does_not_fold():
+    """With no range at all the operands are not provably non-negative, so the fold must decline
+    rather than commit to a rounding direction it cannot justify."""
     e = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
     assert e.simplify(SimplifyCtx.empty()) == e
 
 
-def test_reduce_axis_wider_than_the_row_stride_does_not_fold():
-    """``k`` reaching ``K`` breaks the decomposition's remainder bound, so the fold must decline
-    rather than produce an expression that disagrees at the boundary."""
+def test_signed_row_axis_does_not_fold():
+    """A row index that may go negative rounds the floor division the other way; the fold declines
+    on the sign alone, which is the only thing it asks the ranges for."""
     e = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
-    s = e.simplify(_ctx(k_hi=K))
-    assert s == e, f"folded on an out-of-range k: {s.pretty()}"
+    signed = SimplifyCtx({"n": Interval(-1, N - 1), "k": Interval(0, K - 1)}, {})
+    assert e.simplify(signed) == e
+
+
+@pytest.mark.parametrize("k_hi", [K - 1, K, K + 7, 3 * K])
+def test_wider_reduce_range_stays_value_exact(k_hi: int):
+    """A ``k`` range wider than the row stride does not have to defeat the fold — the row term is a
+    multiple of the divisor either way — but whatever comes back must agree with the original over
+    the range it was folded under."""
+    e = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
+    s = e.simplify(_ctx(k_hi=k_hi))
+    for nv in (0, 1, 2, 37):
+        for kv in (0, 1, min(K - 1, k_hi), k_hi):
+            env = {"n": nv, "k": kv}
+            assert e.eval(env) == s.eval(env), f"k_hi={k_hi}: mismatch at n={nv} k={kv}: {s.pretty()}"

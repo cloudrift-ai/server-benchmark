@@ -876,7 +876,11 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     the original ``/`` or ``%``".
     Cleans up collapsed-reshape indices like ``((X*N + Y) / N) % M``
     that compose-indexmaps emits, where range bounds make the div/mod
-    pure strength-reduction.
+    pure strength-reduction, and sees through a division already standing
+    in the way — the shape a sub-byte-packed operand address arrives in.
+
+    Every arm proves its operands non-negative, so a successful return
+    carries that as an invariant; :func:`_split_addend` relies on it.
     """
     if isinstance(expr, Literal) and expr.dtype == "int" and isinstance(expr.value, int) and expr.value >= 0:
         return (_make_int_literal(expr.value // n), _make_int_literal(expr.value % n))
@@ -904,6 +908,10 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     if isinstance(expr, BinaryExpr) and expr.op == "+":
         L = _div_mod_decompose(expr.left, n, ctx)
         R = _div_mod_decompose(expr.right, n, ctx)
+        if L is None and R is None:
+            return None  # two opaque addends contribute two full remainders; their sum never proves below n
+        L = L if L is not None else _split_addend(expr.left, n, ctx)
+        R = R if R is not None else _split_addend(expr.right, n, ctx)
         if L is None or R is None:
             return None
         ql, rl = L
@@ -917,7 +925,37 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     rng = expr.range(ctx)
     if rng is not None and rng.lo >= 0 and rng.hi < n:
         return (_make_int_literal(0), expr)
+    if isinstance(expr, BinaryExpr) and expr.op in ("/", "//"):
+        # A division already standing between us and the sum: ``(A / d) = n·q + r`` follows from
+        # ``A = (n·d)·q + R``, since ``n·d·q`` is divisible by ``d`` and ``R < n·d`` leaves
+        # ``R / d < n``. This is how a pair-packed operand address separates — an NVFP4 weight
+        # spells ``((row·K + k) / 2) % (K/2)``, and asking the flat offset for its ``K``-decomposition
+        # answers with the row on the quotient side and ``k / 2`` as the remainder, freeing every
+        # consumer that needs the row axis outside a div/mod.
+        divisor = expr.right
+        if isinstance(divisor, Literal) and divisor.dtype == "int" and isinstance(divisor.value, int) and divisor.value > 0:
+            inner = _div_mod_decompose(expr.left, n * divisor.value, ctx)
+            if inner is not None:
+                q_inner, r_inner = inner
+                return (q_inner, BinaryExpr(expr.op, r_inner, divisor).simplify(ctx))
     return None
+
+
+def _split_addend(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr] | None:
+    """One addend as ``n·q + r`` through the DEFINITION ``expr = n·(expr/n) + expr%n``, for a sum
+    whose other addend decomposed in closed form.
+
+    Sound for a non-negative ``expr`` (every :func:`_div_mod_decompose` arm proves its operands
+    non-negative, so this restates the same invariant on the arm that gave up). Restating an addend
+    buys nothing on its own — the caller still has to prove the SUMMED remainder below ``n``, which
+    only holds when the partner contributed little or no remainder. That is exactly the packed-address
+    shape: the row term is a clean multiple of the divisor, so the whole remainder is the reduce
+    axis', and the row leaves the division behind."""
+    rng = expr.range(ctx)
+    if rng is None or rng.lo < 0:
+        return None
+    lit = _make_int_literal(n)
+    return (BinaryExpr("/", expr, lit).simplify(ctx), BinaryExpr("%", expr, lit).simplify(ctx))
 
 
 def _mod_below_divisor(left: Expr, right: Expr, ctx: SimplifyCtx) -> Expr | None:

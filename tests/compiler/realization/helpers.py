@@ -303,13 +303,11 @@ def correct(case: Case, compiled) -> None:
     else:
         greedy = CudaBackend()
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
+    narrow = _has_narrow_operand(program)
     for name in program.outputs:
         reference = np.asarray(want.outputs[name])
         np.testing.assert_allclose(
-            np.asarray(result.outputs[name]),
-            reference,
-            err_msg=f"{case.id}: output {name}",
-            **_tolerance(program.buffer(name).dtype, reference),
+            np.asarray(result.outputs[name]), reference, err_msg=f"{case.id}: output {name}", **_tolerance(narrow, reference)
         )
 
 
@@ -336,15 +334,33 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     return feed
 
 
-def _tolerance(dtype, reference: np.ndarray) -> dict[str, float]:
-    """Comparison bounds, scaled by the reference's own peak for f16.
+#: Dtypes narrow enough that rounding the OPERANDS dominates the comparison.
+_NARROW_DTYPES = ("f16", "bf16", "e4m3", "e5m2")
+
+
+def _has_narrow_operand(program) -> bool:
+    """Whether any buffer in the target is narrow enough to set the drift bound.
+
+    Read across the whole program, not off the output. An f16-by-f16 contraction that STORES f32
+    still carries a full f16 ulp of operand rounding, and a bound picked from the store alone sits
+    below it — no amount of correct codegen can pass that.
+    """
+    for node in program.nodes.values():
+        tensor = getattr(node, "output", None)
+        if tensor is not None and tensor.dtype.name in _NARROW_DTYPES:
+            return True
+    return False
+
+
+def _tolerance(narrow: bool, reference: np.ndarray) -> dict[str, float]:
+    """Comparison bounds, scaled by the reference's own peak when an operand is narrow.
 
     A fixed absolute bound cannot serve both a 128-long f16 reduction and a 4096-long one: the
-    drift bound is roughly K times the peak times the f16 epsilon, so a constant either fails the
-    long case or stops asserting anything about the short one. This is the same peak-relative form
-    the e2e coverage matrices this corpus replaces already use.
+    drift bound is roughly K times the peak times the operand epsilon, so a constant either fails
+    the long case or stops asserting anything about the short one. This is the same peak-relative
+    form the e2e coverage matrices this corpus replaces already use.
     """
-    if dtype.name != "f16":
+    if not narrow:
         return {"rtol": 1e-4, "atol": 1e-5}
     peak = float(np.max(np.abs(reference))) if reference.size else 0.0
     return {"rtol": 0.05, "atol": max(5e-3, 0.05 * peak)}

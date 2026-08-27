@@ -1,0 +1,38 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [x, x]
+    outputs: [[mul, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: sum_1
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: 1}
+    inputs: [mul]
+    outputs: [[sum_1, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - mul
+    - sum_1
+  realizations:
+  - name: k_sum_1_reduce.8ade25d9dc1b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: r4
+    identity: f6ab2257649615cd792e49a271c12aebbef8daa911b579444e10f0c75bf045cd
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 8.319466809431711
+        tcompile_us: 2.0493587870506724

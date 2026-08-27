@@ -20,12 +20,13 @@ because `emmy/compiler/pipeline/search/` has them, so a test for `policy/greedy.
 deploy-pick order invariance, or a process-wide cache over two subsystems — sit at the level that owns all of
 them, not inside one arbitrary child.
 
-Seven directories break the `emmy/` mirror deliberately, because their organizing axis is the *kind* of test or their
+Eight directories break the `emmy/` mirror deliberately, because their organizing axis is the *kind* of test or their
 source lives outside the package:
 
 | Directory | Axis |
 |---|---|
 | `compiler/e2e/` | end-to-end coverage matrices — the whole pipeline per regime (matmul / reduce / attention / fused), not per pass |
+| `compiler/realization/` | checked-in reproducers of pinned schedules, replayed as data (see its `ARCHITECTURE.md`) |
 | `compiler/cli/` | `emmy <command>` as a subprocess, via the `run_cli` fixture |
 | `compiler/fixtures/` | checked-in traces and model configs, not tests |
 | `perf/` | GPU perf comparison vs PyTorch, gated by the `perf` marker (see `tests/perf/ARCHITECTURE.md`) |
@@ -97,8 +98,15 @@ directly; they never import from another test module or from `conftest.py`.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
-- **Do not load checked-in golden YAML in the per-commit suite.** Unit tests use synthetic records and working files.
-  The nightly `onboard-model` workflow owns repository schema validation, strict decode, and exact-GPU replay.
+- **Do not load checked-in golden YAML in the per-commit suite — except the realization corpus.** Unit tests use
+  synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
+  strict decode, and exact-GPU replay for `recipes/*/golden/*.yaml`. `tests/compiler/realization/cases/` differs on
+  both counts that motivated the rule: its files are hand-minimized reproducers rather than model qualification
+  evidence, and they carry no measurement claim, so nothing about them is card-specific. They also target a
+  **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the enumeration and
+  lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
+  build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
+  beside `requires_sm90` in spirit but keyed on equality rather than a floor.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.

@@ -80,9 +80,18 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
         return _first(fp.options)
 
     def _first(options):
+        # A pin that admits nothing at this fork leaves no option to walk into. Say so: the bare
+        # `IndexError` this used to raise names neither the pin nor the fork, and it reaches
+        # callers that are asking a perfectly ordinary question — "is this schedule offered?" —
+        # for which "no" is a legitimate answer rather than a crash.
+        if not options:
+            raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
         option = options[0]
         while isinstance(option, Fork) and not option.is_leaf:
-            option = option.expand()[0]
+            expanded = option.expand()
+            if not expanded:
+                raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
+            option = expanded[0]
         return option
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)

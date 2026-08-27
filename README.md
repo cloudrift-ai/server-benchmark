@@ -49,8 +49,8 @@ emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048,
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
 # Measure proposed rows, then spend the remaining per-kernel budget on MCTS
 emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
-# Run every working-golden target (add --target NAME to select one)
-emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
+# Run every working-golden target (add --golden NAME to select one)
+emmy run --golden-file _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
@@ -451,6 +451,9 @@ require CloudRift organization access.
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))
+  - [compiler/realization/](tests/compiler/realization/) — the realization corpus: checked-in reproducers of pinned
+    schedules, replayed as data (see [ARCHITECTURE.md](tests/compiler/realization/ARCHITECTURE.md))
+  - [perf/](tests/perf/) — GPU perf comparison vs PyTorch (see [ARCHITECTURE.md](tests/perf/ARCHITECTURE.md))
 - [scripts/](scripts/) — Analysis and visualization scripts
 - [utils/](utils/) — Standalone utility scripts
 - [config.yaml](config.yaml) — Benchmark configuration

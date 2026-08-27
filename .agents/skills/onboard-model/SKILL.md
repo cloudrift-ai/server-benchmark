@@ -185,7 +185,9 @@ tractable compiler gaps with focused regressions, then retrace before accepting 
 
 Use `tune-kernels` to run its equal-budget model-proposal-versus-MCTS workflow over every traceable target, followed
 by repeated O3 correctness and finalist checks. For complete coverage, finish one deployable O3 measurement and one
-positive reference-backend measurement for every retained target. When search finds no acceptable winner, measure a
+positive reference-backend measurement for every retained target, and a `torch.compile` measurement beside it —
+without that column nothing tells you a target is losing, and section 3b has nothing to
+rank. When search finds no acceptable winner, measure a
 correct greedy fallback instead of dropping the target. Strip working `ranking` metadata and commit the resulting
 self-contained, fully verified document beside the model's recipe:
 
@@ -204,6 +206,41 @@ diagnostics only in the caller-supplied external output or an ignored task direc
 experiment `RESULTS.md` unless the caller explicitly requests that exact evidence. If no path emits a target, do not
 invent an empty file. Trace incompleteness is the only model-coverage reason to omit the usual golden YAML; tuning
 failures must fall back to a correct measured configuration, and serving failures do not block a complete golden.
+
+## 3b. Surface and record compiler realization gaps
+
+Mandatory, and runs even when serving is blocked — the same rule section 3 already carries. Compiler qualification is
+a durable deliverable; a golden that is complete and verified can still be an order of magnitude off `torch.compile`
+and say nothing, because the golden gate accepts `reference_backend: emmy-greedy`.
+
+1. After tuning, run one per-target torch comparison at deployable optimization:
+   `emmy run --golden-file <working.yaml> --bench --bench-backends eager,tcompile,emmy --strict --json <out>`.
+   Parse that record — it carries `record_knobs`, `status`, `flags` and `lane` per row. Never parse the terminal table.
+2. Rank targets by `tcompile_us / emmy_us`, losers first.
+3. Classify each material loss with the taxonomy `tune-kernels` defines. Only an **eligibility or optimization
+   lockout**, a pin that refuses or fails to lower, or a pin that runs wrong becomes a case. A **search shortfall** is
+   fixed by measuring, or reported as a prior finding. A **code generation quality** loss is reported, not recorded.
+   A schedule the compiler *correctly* refuses is not a gap at all.
+4. **Name the desired schedule with cited evidence.** Accept only a sibling card's golden carrying that family for the
+   same structural identity, the same family already winning at a neighbouring binding, or an explicit roofline
+   argument. It becomes the case file's `# evidence:` line. Without this the corpus fills with speculation.
+5. Minimize to the smallest snippet that reproduces the refusal, then write the case:
+
+   ```bash
+   case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.yaml
+   emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
+   cat >> "$case" <<'EOF'   # the knobs block, copied from run --json's record_knobs
+   EOF
+   make test-corpus-regen   # normalizes, stamps identity, re-prepends the comment block
+   ```
+
+   Read `tests/compiler/realization/ARCHITECTURE.md` first — it owns what earns a case, the knob spelling rules, and
+   what stays in Python.
+6. Prove the case reproduces the gap: it must fail without the suffix and pass with it. Record the exact command.
+7. Bounded: at most five new cases per run, and never at the expense of the artifact and cleanup reserve.
+
+Restamping a stale case belongs to the pull request that changes a codec or an identity, not to an onboarding run. A
+run that hits a stale case reports it and does not regenerate — it is not the author of the invalidation.
 
 ## 4. Decide Emmy eligibility
 
@@ -360,6 +397,8 @@ Also verify:
 - the experiment snapshot contains the shared `recipe.yaml` and `RESULTS.md` plus the exact platform's LFS archive;
   the archive contains the platform's records, no current-platform record remains at the experiment root, and other
   platform archives and report sections remain unchanged;
+- every new realization-corpus case reproduces the stage its filename names, `pytest tests/compiler/realization` is
+  green, `make test-corpus-regen` is a no-op, and every `_xfail_*` case carries an `# evidence:` line;
 - no ignored dated run directory, loose benchmark output, or onboarding summary is staged;
 - tracked artifacts contain no credentials, absolute scratch paths, or VM identifiers;
 - deployed workloads are torn down and `docker logout` has run.
@@ -379,7 +418,9 @@ final line. Include the requested mode on success and failure. List every reposi
 by the qualification run in `artifacts`. List only a complete repository golden in `compiler_artifacts`. In
 `experiment_artifacts`, list only the shared experiment recipe and report plus the current platform's compressed
 archive. List deleted legacy records for the current platform in `artifacts`, but not in `experiment_artifacts`. List
-any bounded implementation fix and its focused tests in `artifacts`. Do not list unchanged artifacts from other
+any bounded implementation fix and its focused tests in `artifacts`, and every realization-corpus case the run
+recorded — a case is staged only when the summary manifests it; report each one in `compiler.realization_gaps` too.
+Do not list unchanged artifacts from other
 platforms or the ignored dated run directory.
 
 ```json
@@ -396,6 +437,7 @@ platforms or the ignored dated run directory.
     "recipes/<model>/recipe.yaml",
     "recipes/<model>/RESULTS.md",
     "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
+    "tests/compiler/realization/cases/matmul/<name>_xfail_offered.yaml",
     "experiments/<model>/serving/recipe.yaml",
     "experiments/<model>/serving/RESULTS.md",
     "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz"
@@ -414,7 +456,11 @@ platforms or the ignored dated run directory.
     "golden": "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
     "traced_targets": 42,
     "tuned_targets": 42,
-    "blocked_paths": []
+    "blocked_paths": [],
+    "realization_gaps": [
+      {"file": "tests/compiler/realization/cases/matmul/<name>_xfail_offered.yaml",
+       "stage": "offered", "emmy_us": 30.81, "tcompile_us": 24.10}
+    ]
   },
   "emmy": {"eligible": true, "reason": "all eligibility gates passed", "image": "cloudriftai/...:tag"},
   "cleanup": {"workloads": "complete", "docker_logout": true},

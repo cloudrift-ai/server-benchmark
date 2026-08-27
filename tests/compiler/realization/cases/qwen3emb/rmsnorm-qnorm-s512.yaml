@@ -1,0 +1,39 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f32, [128]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 16, 512, 128]]]
+  - id: o
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, w]
+    outputs: [[o, f32, [1, 16, 512, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_rms_norm_ca445e.cda813764746
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+      WORK: t128
+    identity: e347933ba74fc5d5aea6484be099db21f0d31078760df9296c0d3d88433d9bce
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.814995083831934
+        tcompile_us: 4.086292191837611

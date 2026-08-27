@@ -179,6 +179,14 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
+    #: The record's stored ``deploy_identity`` (see :func:`kernel_identity`), when the file keeps
+    #: one. Model inventories do not; the realization corpus does, because a new fingerprint fact
+    #: must show up as a diff there rather than silently re-key a checked-in reproducer.
+    identity: str | None = None
+    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
+    #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
+    #: case is one file across many cards, which a flat block cannot hold.
+    latency: dict | None = None
 
     @property
     def is_routing(self) -> bool:
@@ -332,6 +340,32 @@ def _positive_number(value, where: str) -> None:
         raise ValueError(f"{where} must be a positive number")
 
 
+#: What one card's ``latency`` entry records. ``emmy_us`` is required — it is the ratchet, and a
+#: case without it stores nothing. ``tcompile_us`` is the "are we ahead of or behind torch" half
+#: and is OPTIONAL, because some targets have no torch twin to compile: a provenance-reconstructed
+#: frontend program benches against eager and Emmy only. Refusing to store the ratchet because the
+#: comparison is unavailable would discard the more important number of the two.
+LATENCY_FIELDS = ("emmy_us", "tcompile_us")
+_REQUIRED_LATENCY_FIELDS = ("emmy_us",)
+
+
+def _validate_latency(latency: object, where: str) -> None:
+    if not isinstance(latency, Mapping) or not latency:
+        raise ValueError(f"{where} must be a non-empty mapping of hardware id to timings")
+    for card, timings in latency.items():
+        if not isinstance(card, str) or not card:
+            raise ValueError(f"{where} keys must be non-empty hardware ids")
+        if not isinstance(timings, Mapping):
+            raise ValueError(f"{where}.{card} must be a mapping")
+        _require_keys(timings, set(LATENCY_FIELDS), f"{where}.{card}")
+        for field in _REQUIRED_LATENCY_FIELDS:
+            if field not in timings:
+                raise ValueError(f"{where}.{card} missing {field}")
+        for field in LATENCY_FIELDS:
+            if field in timings:
+                _positive_number(timings[field], f"{where}.{card}.{field}")
+
+
 def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
@@ -411,9 +445,19 @@ def validate_golden_file(
             realization_where = f"{where}.realizations[{realization_index}]"
             if not isinstance(realization, Mapping):
                 raise ValueError(f"{realization_where} must be a mapping")
-            _require_keys(realization, {"name", "bindings", "pins", "knobs", "measurements", "ranking"}, realization_where)
+            _require_keys(
+                realization,
+                {"name", "bindings", "pins", "knobs", "measurements", "ranking", "identity", "latency"},
+                realization_where,
+            )
             if not isinstance(realization.get("name"), str) or not realization["name"]:
                 raise ValueError(f"{realization_where}.name must be a non-empty string")
+            if "identity" in realization:
+                identity = realization["identity"]
+                if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+                    raise ValueError(f"{realization_where}.identity must be a 64-character lowercase hexadecimal digest")
+            if "latency" in realization:
+                _validate_latency(realization["latency"], f"{realization_where}.latency")
             bindings = realization.get("bindings")
             if not isinstance(bindings, Mapping):
                 raise ValueError(f"{realization_where}.bindings must be a mapping")
@@ -518,6 +562,8 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         knobs=dict(realization.get("knobs") or {}),
         measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
         ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
+        identity=realization.get("identity"),
+        latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
     )
 
 
@@ -533,7 +579,12 @@ _IDENTITY_CACHE: dict[tuple, str | None] = {}
 #: compiler fingerprint. Purely derived data — a stale or missing store just re-derives.
 _IDENTITY_STORE: dict | None = None
 _IDENTITY_STORE_DIRTY: bool = False
-_WIRE_DIGESTS: dict[int, str] = {}
+#: Wire payload digests, memoized per payload OBJECT. The value holds the wire itself, not just
+#: its digest: an ``id()``-keyed memo whose entry outlives the object it describes answers for
+#: whatever later lands at that address, and this memo feeds a record's identity fingerprint.
+#: Keeping the reference is what makes the address stable, and it matches how every sibling
+#: cache in this module (``_PROGRAM_GRAPH_CACHE``, ``_LOOP_GRAPH_CACHE``) is written.
+_WIRE_DIGESTS: dict[int, tuple[dict, str]] = {}
 
 
 def _compiler_fingerprint() -> str:
@@ -612,10 +663,11 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     import json  # noqa: PLC0415
 
     wire = record.loop_wire if record.loop_wire is not None else record.program_wire
-    wd = _WIRE_DIGESTS.get(id(wire))
-    if wd is None:
-        wd = _WIRE_DIGESTS.setdefault(id(wire), digest(json.dumps(wire, sort_keys=True, default=str)))
-    return digest(wd, str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
+    cached = _WIRE_DIGESTS.get(id(wire))
+    if cached is None or cached[0] is not wire:
+        cached = (wire, digest(json.dumps(wire, sort_keys=True, default=str)))
+        _WIRE_DIGESTS[id(wire)] = cached
+    return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
 #: Enumerated rows per (target, pins) — sibling realizations of one config decode against one

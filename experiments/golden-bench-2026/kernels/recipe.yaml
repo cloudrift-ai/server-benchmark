@@ -4,7 +4,7 @@
 # A row that names a `golden` replays `golden/<golden>.golden.yaml` instead of tracing and searching: those
 # schedules were tuned by the tune-kernels skill and committed beside this recipe, and the row only re-measures them
 # at deployable -O3. Rows with `golden: ""` keep the original trace + in-recipe search. Both paths end in the same
-# fresh-process `emmy run --golden ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
+# fresh-process `emmy run --golden-file ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
 # the same terminal correctness evidence. A separate torch.compile replay is diagnostic because a reference backend
 # can be unavailable for a valid target; its absence must not fail an otherwise-correct Emmy replay.
 command:
@@ -70,7 +70,7 @@ command:
 
     mkdir -p $task_dir/torch-compile
     if EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-      --golden $task_dir/working.yaml --bench \
+      --golden-file $task_dir/working.yaml --bench \
       --json $task_dir/torch-compile --warmup 10 --iters 100 \
       --bench-backends eager,tcompile 2>&1 | tee $task_dir/torch-compile.log; then
       torch_compile_status=0
@@ -85,7 +85,7 @@ command:
     verification_status=0
     for repeat in 0 1 2 3 4; do
       if EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-        --golden $task_dir/working.yaml --bench --strict \
+        --golden-file $task_dir/working.yaml --bench --strict \
         --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
         --bench-backends eager,emmy 2>&1 | tee $task_dir/verification-$$repeat.log; then
         repeat_status=0

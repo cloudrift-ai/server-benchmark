@@ -1,0 +1,42 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [q, k]
+  outputs: [c]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [2, 3, 128, 32]]]
+  - id: kt
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [0, 1, 3, 2]}}
+    inputs: [k]
+    outputs: [[kt, f16, [2, 3, 32, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [2, 3, 128, 32]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [q, kt]
+    outputs: [[c, f32, [2, 3, 128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+    - kt
+  realizations:
+  - name: k_matmul_aaf437.73cad75f65b1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      WORK: w2x2
+    identity: 1940289cc31ce30f3bb0d4268efb3049dee69d0cee5aa42c88da495af621c8f7
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.872253529276559
+        tcompile_us: 4.091707308117936

@@ -499,6 +499,35 @@ async def measure_proposals(
     return rankings
 
 
+def record_latency(path: str | Path, document: dict, name: str, *, hardware_id: str, emmy_us: float, tcompile_us: float | None) -> None:
+    """Write one card's measured latencies back into a working golden's realization.
+
+    The per-card block is keyed by ``Context.hardware_id`` — the identity that already separates
+    same-die SKUs like H100 from H200, which a free-text card name does not. It is separate from
+    the flat ``measurements`` block because a model golden is one file per card (so the card is
+    implied by the file) while a file measured on several cards needs a row each.
+
+    Both numbers where both exist, because the block answers two questions and only one of them is
+    a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
+    beside it says *are we ahead of or behind torch*, per case, per card. ``tcompile_us`` is
+    omitted rather than faked when the target has no torch twin to compile.
+    """
+    destination = Path(path)
+    if is_repository_golden_path(destination):
+        raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    for entry in document["configs"]:
+        for realization in entry["realizations"]:
+            if realization["name"] != name:
+                continue
+            timings = {"emmy_us": float(emmy_us)}
+            if tcompile_us:
+                timings["tcompile_us"] = float(tcompile_us)
+            realization.setdefault("latency", {})[hardware_id] = timings
+            dump_golden_file(document, destination, overwrite=True, incremental=True)
+            return
+    raise ValueError(f"{destination} has no realization named {name!r}")
+
+
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
     """Atomically persist measured proposal feedback for one target of a loaded document."""
     configs = document["configs"]

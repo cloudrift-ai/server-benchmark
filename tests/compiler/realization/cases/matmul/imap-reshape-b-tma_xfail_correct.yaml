@@ -1,0 +1,57 @@
+# A layout op between an activation and its matmul is absorbed into the operand's load index,
+# so the operand is no longer a plain window of its buffer — but every tiled loader reads one
+# anyway. Taking the operand's DECLARED trailing extent as the row stride was the miscompile:
+# a reshape that re-strides the rows reads a rectangle of the wrong buffer, silently, on plain
+# f16 with no quantization in sight. The contract now is that the row stride is DERIVED from
+# the index, the columns must be gmem-contiguous, and a form no loader can read falls back.
+#
+# The re-strided B under a TMA box. 85% of the output is wrong.
+#
+# evidence: imap-reshape-a-cp.yaml recovers a re-strided operand's row stride correctly, and
+# imap-slice-a-tma.yaml is this transport on a canonical index and is correct. Like the other
+# re-strided rows this one launches cleanly and returns a wrong answer rather than faulting.
+#
+# The third transport of this form — a re-strided B under cp.async — is NOT in the corpus. It
+# does not compute a wrong answer: the fill issues a misaligned 16-byte copy, the kernel hangs
+# until the 60 s launch watchdog fires, and the driver returns CUDA_ERROR_MISALIGNED_ADDRESS,
+# which leaves the context in a sticky-error state that every later CUDA call in the process
+# inherits. A case whose expected outcome is a poisoned device would end the run it is part of,
+# and the filename grammar has no way to say 'expected to fault, do not launch', so that row is
+# recorded here in prose instead of as a landmine.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [256, 64]]]
+  - id: wr
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [128, 128]}}
+    inputs: [w]
+    outputs: [[wr, f16, [128, 128]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [64, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x, wr]
+    outputs: [[o, f16, [64, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - wr
+  realizations:
+  - name: k_matmul_0ba8ca.61f1567bfecc
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      STAGE: d2/smem-tma
+    identity: 4ebd18af8f64f8aff0b639c82533981a89feadb37a52d3c6d04e1c708f059a44

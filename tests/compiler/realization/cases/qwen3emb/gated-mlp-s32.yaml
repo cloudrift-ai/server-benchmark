@@ -1,0 +1,55 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, wg, wu]
+  outputs: [o]
+  nodes:
+  - id: wg
+    op: input
+    outputs: [[wg, f32, [1024, 3072]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f32, [1024, 3072]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 32, 1024]]]
+  - id: gate
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x, wg]
+    outputs: [[gate, f32, [1, 32, 3072]]]
+  - id: sg
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: silu}}
+    inputs: [gate]
+    outputs: [[sg, f32, [1, 32, 3072]]]
+  - id: up
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x, wu]
+    outputs: [[up, f32, [1, 32, 3072]]]
+  - id: o
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [sg, up]
+    outputs: [[o, f32, [1, 32, 3072]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - gate
+    - o
+    - sg
+    - up
+  realizations:
+  - name: k_matmul_reduce_8d189d.551d7cb54e4e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: f8d3c496c21c04782e6b9ed10fedbe465656734f2fd8023f1f200bc28fea5510
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 115.85777335696751
+        tcompile_us: 26.80888937579261

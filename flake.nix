@@ -11,6 +11,12 @@
       # per-package option: it has to be set where nixpkgs is imported. The CUDA packages are
       # unfree, so that flag rides along. Nothing else in the shell comes from here, which keeps
       # the ordinary toolchain on the cached ``legacyPackages`` instance.
+      #
+      # These packages are NOT in the official binary cache, so a first ``nix develop`` builds
+      # them from source — hours, not minutes. Adding the community CUDA cache to the HOST
+      # configuration avoids that; this flake deliberately does not, because substituters are a
+      # trust decision that belongs to whoever runs the machine, not to a checked-in dev shell:
+      # https://wiki.nixos.org/wiki/CUDA#Setting_up_CUDA_Binary_Cache
       cudaPkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;

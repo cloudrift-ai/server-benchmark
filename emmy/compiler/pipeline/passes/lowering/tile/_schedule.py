@@ -1549,6 +1549,37 @@ class _Draw:
     total: int
 
 
+def _state(tile: TileOp, name: str, knobs: dict, ctx) -> _State:
+    """The per-kernel constants and FACTS one term's walk reads, computed once: the projection tail
+    and what it permits (the fragment epilogue, the transposed band's sweep + per-cell conditions),
+    the per-contraction facts (atom families, reduction domain, seam, producer, fragment edges,
+    packed readings), and the parsed WORK pin — the ONE read of that env var."""
+    sched = Sched(tile.op, {}, place=tile.place.on_grid())
+    tail = projection_tail(tile)
+    frag_ok = _fragment_epilogue_ok(tail, _fold_states(tile.op))
+    transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
+    facts = _site_facts(tile, ctx, sched, tail, frag_ok)
+    raw = WORK.raw()
+    return _State(
+        tile,
+        sched,
+        ctx,
+        name,
+        knobs,
+        _off(sched, tile.op),
+        facts,
+        frozenset(f.need for f in facts.values() if f.need is not None),
+        transposed_ok,
+        # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
+        # sliced axis carries (a realized split's independent projection sibling —
+        # ``split_consumed``): both mean the kernel-set decision was consumed, so a ``REDUCE``
+        # pin's ``g`` half strips.
+        carries_partition=carries_partition(tile.op) or tile.split_consumed,
+        work_pin=Workers.parse(raw) if raw is not None else None,
+        work_pinned=raw is not None,
+    )
+
+
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
 
@@ -1570,35 +1601,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     Under ``ctx.pool_sample`` (``emmy fit``, never a deploy) the lazy fork is NOT returned:
     the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
     exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
-    sched = Sched(tile.op, {}, place=tile.place.on_grid())
-    # The per-kernel FACTS, computed once: the projection tail and what it permits (the fragment
-    # epilogue, the transposed band's sweep + per-cell conditions), the per-contraction facts
-    # (atom families, reduction domain, seam, producer, fragment edges), and the parsed WORK pin —
-    # the ONE read of that env var.
-    tail = projection_tail(tile)
-    frag_ok = _fragment_epilogue_ok(tail, _fold_states(tile.op))
-    transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
-    facts = _site_facts(tile, ctx, sched, tail, frag_ok)
-    raw = WORK.raw()
-    off = _off(sched, tile.op)
-    # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
-    # sliced axis carries (a realized split's independent projection sibling — ``split_consumed``):
-    # both mean the kernel-set decision was consumed, so a ``REDUCE`` pin's ``g`` half strips.
-    partition = carries_partition(tile.op) or tile.split_consumed
-    state = _State(
-        tile,
-        sched,
-        ctx,
-        name,
-        knobs,
-        off,
-        facts,
-        frozenset(f.need for f in facts.values() if f.need is not None),
-        transposed_ok,
-        carries_partition=partition,
-        work_pin=Workers.parse(raw) if raw is not None else None,
-        work_pinned=raw is not None,
-    )
+    state = _state(tile, name, knobs, ctx)
+    facts, off, partition = state.facts, state.off, state.carries_partition
     nodes = tuple(_nodes(tile.op))
     cache = getattr(ctx, "session_cache", None)
     sample = getattr(ctx, "pool_sample", None)

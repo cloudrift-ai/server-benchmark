@@ -254,9 +254,10 @@ def _rows(node, inputs, axes, pins=None):
     from emmy.compiler.context import Context
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
-    from emmy.compiler.ir.tile.ir import Store
+    from emmy.compiler.ir.tile.ir import OutputSpec
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule
     from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import STAGE
 
     write = Write(output="y", index=(Var("m"), Var("n")), value="acc")
     op = TileOp(
@@ -264,12 +265,14 @@ def _rows(node, inputs, axes, pins=None):
         name="y",
         place=Placement(free=axes),
         inputs=inputs,
-        stores=(Store(write=write),),
+        output_specs=(OutputSpec(write=write),),
     )
-    term = _schedule._Term(op, op.place.on_grid(), Context.from_target((8, 9)))
+    ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     with pinned_knobs(pins or {}):
-        return [st.spell() for st in _schedule._fill_values(term, node, tile)]
+        state = _schedule._state(op, "y", {}, ctx)
+        pin = _schedule._pin(STAGE, state.sched.key("STAGE", node))
+        return [st.spell() for st in _schedule._fill_options(state, node, tile, pin, ctx.max_dynamic_smem)]
 
 
 def _transport(row: str) -> str:
@@ -361,7 +364,10 @@ def _nvfp4_matmul_graph(tmp_path, *, m, n, k, dtype="f16"):
 
 def _packed_pins(dtype="f16", stage="d2/smem-async"):
     atom = K16 if dtype == "f16" else K16_BF16
-    return {"TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": stage}
+    # ``PLACE=fuse`` keeps the decode cone INSIDE the matmul, which is the whole subject here: a
+    # cut lifts the weight into its own kernel and the consumer reads a materialized 16-bit tile,
+    # so there is no packed operand left for a ``STAGE`` pin to name.
+    return {"PLACE": "fuse", "TILE": f"{atom}/f2x2/k2", "WORK": "w1x4", "REDUCE": "", "STAGE": stage}
 
 
 PACKED_PINS = _packed_pins()
@@ -715,12 +721,19 @@ def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
 
 
 def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
-    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule
     from emmy.compiler.pipeline.search.space import Stage
 
     tma = Stage(depth=1, transport="smem-tma", bk_elems=64)
-    assert legal.producer_transport(tma, packed_byte_slab=True) is not None, "the combination hangs; it must decline"
-    assert legal.producer_transport(tma, packed_byte_slab=False) is None, "a band over an unpacked TMA operand stays legal"
+    assert _schedule._band_packed_slab_refusal(tma, True) is not None, "the combination hangs; it must decline"
+    assert _schedule._band_packed_slab_refusal(tma, False) is None, "a band over an unpacked TMA operand stays legal"
+    # The refusal reaches the OFFER, so a row over a packed slab claims no band at all. It is a
+    # legality, not a bound: the walk yields no leaf when the pinned inventory is never claimed, so
+    # an ``EMMY_WORK=...+p1`` pin here is refused rather than exempted.
+    work = Workers(kind="warp", units=(1, 4))
+    assert _schedule._producer_bands(work, tma, 128, True) == ()
+    assert _schedule._producer_bands(work, tma, 128, False) == (1, 2)
     # Only the BAND is refused, never the staging: the caller asks this at all only for a row whose
     # worker inventory declares producer warps, so the packed byte slab's own TMA transport — which
     # carries the weight's 4-bit traffic — keeps every stage it resolved.

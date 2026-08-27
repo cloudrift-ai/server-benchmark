@@ -189,7 +189,7 @@ def test_packed_operand_split_pair_fuses():
 def test_packed_split_nest_classifies_as_contraction():
     """Downstream: the fused packed nest binds the contraction with the weight as B — the tensor-core
     tier becomes reachable, which is what the split had locked out."""
-    tile = recognized_tile(_run(_packed_split_graph()))
+    tile = _lift(_run(_packed_split_graph()))
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     assert tile.op.axis is not None and tile.op.role is AxisRole.CONTRACTION
 

@@ -216,9 +216,20 @@ as maximum model length, wherever those defaults must remain comparable.
 
 ## 4. Trace an embedding request
 
-`EmmyEmbedModel` is an attention-free vLLM pooling model. It has no Torch parameters of its own because
-`EmmyForwardRunner` loads and binds the checkpoint weights. Its `load_weights` method returns an empty set, so vLLM
-does not read a second copy of the checkpoint into that wrapper.
+`EmmyEmbedModel` is an attention-free vLLM pooling model. **Pooling** means that vLLM runs the model once over a
+complete input, then reduces its token-level hidden states to one embedding vector. There is no next-token loop,
+language-model head, or sampler. “Attention-free” describes the vLLM interface, not the transformer: the compiled
+Emmy trunk still performs full-sequence attention, but it exposes no vLLM `Attention` layers and therefore needs no
+autoregressive KV cache.
+
+`EmmyGenModel` implements the generation contract instead. It repeatedly advances requests through prefill and
+decode, exposes one vLLM `Attention` layer per decoder layer so vLLM can manage the paged KV cache, and hands the
+result to vLLM's language-model head and sampler. In short, `EmmyEmbedModel` maps each input to one vector, whereas
+`EmmyGenModel` produces a sequence of tokens over multiple decoding steps.
+
+`EmmyEmbedModel` has no Torch parameters of its own because `EmmyForwardRunner` loads and binds the checkpoint
+weights. Its `load_weights` method returns an empty set, so vLLM does not read a second copy of the checkpoint into
+that wrapper.
 
 At engine startup, `EmmyForwardRunner.create`:
 
@@ -285,8 +296,8 @@ the buffer footprint and, in padded modes, the amount of wasted work.
 
 ## 5. Trace a generation step
 
-`EmmyGenModel` is not attention-free. It creates one real vLLM `Attention` layer per decoder layer so vLLM can discover
-the KV-cache requirements, allocate blocks, and run paged attention.
+Unlike the pooling model, `EmmyGenModel` is not attention-free. It creates one real vLLM `Attention` layer per decoder
+layer so vLLM can discover the KV-cache requirements, allocate blocks, and run paged attention.
 
 `EmmyGenRunner` splits each decoder layer into two compiled programs:
 

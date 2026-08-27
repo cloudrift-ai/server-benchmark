@@ -1620,7 +1620,7 @@ class _MmaOps(_AtomOps):
         """Per-operand slab element dtypes — the atom's operand dtype, except a 1-byte
         (fp8-stored) operand, whose slab keeps the STORAGE dtype: the raw bytes stage verbatim
         and the drain converts (W8A16) or repacks (the k32 atoms). Mirrors the resolver's dtype
-        legality (``_legality.resolve_warp_stage``), so a mismatch that staged would already
+        legality (``_staging.resolve_warp_stage``), so a mismatch that staged would already
         have declined there."""
         out = []
         for edge, role in ((self.c.a, "a"), (self.c.b, "b")):

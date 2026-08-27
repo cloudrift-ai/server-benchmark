@@ -20,9 +20,16 @@ own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
 
 Never recorded: ``pin_unmatched`` rows (the claimed config never ran — and "not offered"
 is not "doesn't launch"), rows carrying an integrity flag (wrong-answer / intensity
-floor: the measurement is untrue), and anything from the ``--ir`` path (serialization
-drops ``op.knobs``, so there is no honest feature dict). The caller
-(``emmy/commands/run.py``) owns those exclusions; this module records what it is given.
+floor: the measurement is untrue), a whole run whose greedy execution computed the wrong
+answer, a cross-target (``--gpu-arch``) run (the cubin is assembled for the LIVE device, so
+the timings are this card's while the row would key under the target's capability), and
+anything from a direct ``--ir`` input (serialization drops ``op.knobs`` AND ``op.source``,
+so a row would name only the knobs the short tail happened to re-decide). A ``--golden``
+replay is NOT a direct ``--ir`` input: it re-lowers an in-memory program through the full
+pipeline, so ``loop/stamp`` stamps every kernel and the rebind knob-merge carries the
+realized knobs onto the terminal op — its rows are as honest as the ``--code`` path's, and
+they record. The caller (``emmy/commands/run.py``) owns those exclusions; this module
+records what it is given.
 
 Pool fidelity: **one row describes one kernel**, the same rule the tune walk records by
 (``policy/mcts._measured_kernel_rows``) — its own knobs, its own launch time, and its own

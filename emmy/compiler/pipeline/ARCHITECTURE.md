@@ -1187,7 +1187,10 @@ label is (`SearchNode.visits`, the leaf's `bench_stats` / `bench_status` that `o
 benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement — plus the greedy
 pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with no parent and `depth=0`. This is on by
 default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes` turns it off. It
-is what stops measurements from a manual sweep evaporating.
+is what stops measurements from a manual sweep evaporating. Both input shapes that lower through the full pipeline
+record: a traced model / `--code` input and a `--golden` replay, which re-lowers an in-memory program through the same
+pass list, so `loop/stamp` stamps every kernel and the rebind knob-merge carries its realized knobs onto the terminal
+op. A direct `--ir` input does not.
 
 - **The row must be keyed to the same set of candidates the tuner used**, which means recovering each kernel's
   identity from its rewrite chain rather than from the op in hand (`passes/identity.chain_op_sig`, shared with the
@@ -1205,6 +1208,13 @@ is what stops measurements from a manual sweep evaporating.
   lacks a stamp the recorder warns loudly rather than silently recording nothing. Rows that were flagged (a pin that
   did not match, a wrong answer, an implausible arithmetic intensity) and anything from the `--ir` path are never
   recorded, and a failed bench records a sentinel only for a single-kernel variant.
+- **A whole run can be unrecordable, not just a row.** Two conditions disqualify every row a run produced. A run whose
+  greedy execution computed the wrong answer records nothing — the `--golden` path does not abort on that without
+  `--strict`, it logs the failure and benches anyway, and the greedy isolated row carries no flags of its own to catch
+  it. And a cross-target run (`--gpu-arch` / `--target`) records nothing: `--target` changes every lowering decision,
+  but the cubin is assembled for the LIVE device and runs on it (`backend/cuda/nvcc._launchable_arch`), so the
+  measurement is this card's while the row would be keyed under the target's capability, and neither table has a column
+  that could later tell the two apart.
 - `record_nodes` protects the leaf update by **comparing measurement quality**: a newer measurement that is
   unambiguously worse (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a casual bench
   cannot overwrite tune-grade data. When quality is comparable or unknown, newest simply wins, so an honest

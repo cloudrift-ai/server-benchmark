@@ -215,7 +215,10 @@ derived structural stamps. Registered Boolean values in an explicit `--ab` row r
 not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
-compiler pipeline. When that replay has
+compiler pipeline, which is also why its benched rows are recorded into the tune DB like the `--code` path's: the
+replay re-lowers through every pass, so each kernel carries the structural identity and the realized knobs a stored row
+needs. A run that computed the wrong answer, and a cross-target (`--gpu-arch`) run, record nothing at all;
+`--no-record-nodes` opts out of the whole write. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still

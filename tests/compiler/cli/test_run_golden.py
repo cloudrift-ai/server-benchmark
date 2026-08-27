@@ -211,3 +211,139 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     with pytest.raises(SystemExit) as excinfo:
         compile_mod.resolve_golden_arg(args)
     assert excinfo.value.code == 2
+
+
+# --- what a run must be before its benched rows are stored ---------------------------------
+#
+# ``_record_bench_nodes`` writes into the tune DB, and one of the tables it writes is read by a
+# later compile to decide a fork. These cover the conditions that disqualify a whole run, as
+# opposed to the per-row integrity flags ``_recordable_bench_leaves`` already filters.
+
+
+def _recording_args(**updates):
+    values = {"no_record_nodes": False, "warmup": 5, "iters": 20}
+    values.update(updates)
+    return SimpleNamespace(**values)
+
+
+@pytest.fixture
+def recorded(monkeypatch, tmp_path):
+    """Capture what ``_record_bench_nodes`` would write, without touching a real tune DB."""
+    from emmy.commands import compile as compile_mod
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search import bench_record
+
+    writes = []
+    monkeypatch.setattr(bench_record, "record_bench_leaves", lambda *a, **k: writes.append((a, k)) or 0)
+    monkeypatch.setattr(compile_mod, "resolve_tune_db", lambda: tmp_path / "autotune.db")
+    monkeypatch.setattr(Context, "probe", classmethod(lambda cls: Context((8, 9))))
+    monkeypatch.setattr(run_mod, "_recordable_bench_leaves", lambda *_: [object()])
+    return writes
+
+
+def test_a_clean_bench_records_its_rows(recorded):
+    run_mod._record_bench_nodes(_recording_args(), [SimpleNamespace()], None)
+
+    assert len(recorded) == 1
+
+
+def test_a_bench_below_the_tune_standard_records_nothing(recorded, capsys):
+    run_mod._record_bench_nodes(_recording_args(warmup=1, iters=3), [SimpleNamespace()], None)
+
+    assert recorded == []
+    assert "below the tune bench standard" in capsys.readouterr().out
+
+
+def test_a_cross_target_run_records_nothing(monkeypatch, recorded, capsys):
+    """``--gpu-arch`` changes every lowering decision, but the cubin is assembled for the LIVE
+    device and runs here — so the timings are this card's while the row would be keyed under the
+    target's capability, and neither table has a column that could later tell them apart."""
+    from emmy.compiler import target
+
+    monkeypatch.setattr(target, "compute_capability", lambda: (9, 0))
+    monkeypatch.setattr(target, "live_compute_capability", lambda: (12, 0))
+
+    run_mod._record_bench_nodes(_recording_args(), [SimpleNamespace()], None)
+
+    assert recorded == []
+    assert "NOT recorded" in capsys.readouterr().out
+
+
+def _stub_run_ir(monkeypatch, *, accuracy_error):
+    """Drive ``_handle_run_ir``'s golden path far enough to reach its recording decision.
+
+    ``CudaBackend`` / ``CompilerDump`` are already parameters of the handler, so the stubs go
+    in there; the pass pipeline and the torch-reference probe are the only two module-level
+    dependencies left to replace. ``golden_configs`` is empty on purpose — the decision under
+    test is whether the recorder is reached at all.
+    """
+    from emmy.compiler import pipeline as pipeline_mod
+    from emmy.compiler.backend import torch_ref
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+
+    monkeypatch.setattr(torch_ref, "is_runnable", lambda _graph: False)
+    monkeypatch.setattr(pipeline_mod.Pipeline, "build", classmethod(lambda cls, _passes: SimpleNamespace(run=lambda g, **_kw: g)))
+    calls = []
+    monkeypatch.setattr(run_mod, "_record_bench_nodes", lambda *a: calls.append(a))
+
+    bench = SimpleNamespace(time_ms=1.0, min_ms=1.0, per_launch=None, num_launches=0, captured=True, e2e_ms=None, e2e_min_ms=None)
+
+    class _Backend:
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+        tune_db = None
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def benchmark_compare_async(self, *_args, **_kwargs):
+            return {
+                "results": {"Emmy": 1.0},
+                "result": bench,
+                "captured": True,
+                "torch_available": False,
+                "accuracy_error": accuracy_error,
+                "run_io": None,
+                "reference_run_us": None,
+                "sym_env": {},
+                "correctness": None,
+                "greedy_error": None,
+            }
+
+        async def aclose_async_worker(self) -> None:
+            pass
+
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,)), node_id="x")
+    args = SimpleNamespace(
+        _golden_graph=graph,
+        ir=None,
+        ab=None,
+        golden_configs=[],
+        dynamic=None,
+        dump_dir=None,
+        debug=False,
+        bench=True,
+        strict_correctness=False,
+        warmup=5,
+        iters=20,
+        seed=0,
+        bench_backends="emmy",
+        json=None,
+        profile=False,
+        no_record_nodes=False,
+    )
+    run_mod._handle_run_ir(args, _Backend, SimpleNamespace(resolve=staticmethod(lambda _d: None)))
+    return calls
+
+
+def test_a_golden_replay_reaches_the_recorder(monkeypatch):
+    assert len(_stub_run_ir(monkeypatch, accuracy_error=None)) == 1
+
+
+def test_a_golden_replay_that_computed_the_wrong_answer_records_nothing(monkeypatch):
+    """This path does NOT abort on a bad answer: without ``--strict`` the failure is logged as
+    non-fatal and the run benches anyway, and the greedy isolated row carries no flags of its
+    own — so the recorder has to be gated here or wrong-answer timings become stored evidence."""
+    assert _stub_run_ir(monkeypatch, accuracy_error="emmy vs eager: max_diff 3.2") == []

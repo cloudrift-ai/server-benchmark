@@ -163,10 +163,13 @@ def register_run_command(subparsers):
         "--no-record-nodes",
         action="store_true",
         help=(
-            "Skip the default bench-to-node recording. When pinned rows bench (--golden / --ab) at tune-standard "
+            "Skip the default bench recording. When pinned rows bench (--golden / --ab) at tune-standard "
             "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
-            "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
-            "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
+            "in the tune DB: as leaf rows in the node store, which is the training-data feed for the offline prior, "
+            "and — for a row whose bench succeeded under graph capture — as a measured row a later compile reads to "
+            "decide the same fork. Nothing is recorded from a run that computed the wrong answer, from a flagged row "
+            "(pin mismatch, wrong answer, intensity floor), from a direct --ir input, or from a cross-target "
+            "(--gpu-arch) run, whose timings belong to this card and not to the target it compiled for."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -517,16 +520,32 @@ def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
 
 
 def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
-    """Default-on bench-to-node recording (``--no-record-nodes`` opts out): the pinned
+    """Default-on bench recording (``--no-record-nodes`` opts out): the pinned
     A/B rows and the greedy isolated re-bench become node-store leaves — the training
     data the tune-only write path let every manual sweep evaporate from. Records only
     at tune-standard measurement quality; ``record_nodes``' plausibility gate and
-    quality-aware leaf replacement still judge every row."""
+    quality-aware leaf replacement still judge every row.
+
+    A cross-target run records NOTHING. ``--gpu-arch`` / ``--target`` makes every lowering
+    decision as if on another card, but the cubin is assembled for the LIVE device and runs
+    here (``backend/cuda/nvcc._launchable_arch``), so the measurement belongs to this card
+    while ``Context.probe`` keys the row under the target's capability. Storing it would file
+    this card's numbers under a regime nothing measured — and the tune DB has no column that
+    could later tell them apart."""
     if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.target import compute_capability, live_compute_capability  # noqa: PLC0415
+
+    if compute_capability() != live_compute_capability():
+        print(
+            f"[record-nodes] compiled for sm_{''.join(map(str, compute_capability()))} but benched on "
+            f"sm_{''.join(map(str, live_compute_capability()))} — measurements NOT recorded "
+            f"(the timings are this card's, the row would key to the target's regime)"
+        )
+        return
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -2365,6 +2384,16 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
+    # A golden target re-lowers an in-memory program through the FULL pipeline, so ``loop/stamp``
+    # stamps every kernel and the rebind knob-merge carries its realized knobs onto the terminal
+    # ``CudaOp`` — the same honest rows the ``--code`` path records. A direct ``--ir`` input is left
+    # as it is (serialization drops ``op.knobs`` and ``op.source``); only the golden replay records.
+    # Correctness gates the write here because this path does NOT abort on a bad answer: without
+    # ``--strict`` an ``accuracy_error`` is logged non-fatally and the run continues, and the greedy
+    # isolated row carries no flags of its own — so a target computing the wrong answer would
+    # otherwise record its timings as if they meant something.
+    if embedded is not None and accuracy_error is None:
+        _record_bench_nodes(args, ab_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (

@@ -9,8 +9,6 @@ machine that can actually answer it, and it reports rather than fails.
 
 from __future__ import annotations
 
-import pytest
-
 
 def pytest_terminal_summary(terminalreporter) -> None:
     """Name every closed case this card could measure but has no recorded latency for.
@@ -31,7 +29,3 @@ def pytest_terminal_summary(terminalreporter) -> None:
             "Record them with `emmy run --golden-file <case> --golden <name> --bench "
             "--bench-backends eager,tcompile,emmy --record`, or let the corpus-timings workflow fill them."
         )
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line("markers", "perf: measurement lane, opt-in with -m perf")

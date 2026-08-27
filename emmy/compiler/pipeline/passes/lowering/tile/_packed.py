@@ -1,17 +1,17 @@
 """The PACKED-PAIR k-block operand reading — the NVFP4 weight's shape, recognized once.
 
 One question, asked by three consumers that must not drift apart: the schedule's offer
-(``_schedule._fill_values``), the stage resolver (``_legality.resolve_warp_stage``) and the
-materializer (``kernel/_atom._staged``). Each asks :func:`match_packed_b_node` and gets the same
-answer or ``None``.
+(``_schedule._fill_options``, off the prescan's ``_SiteFacts.packed``), the stage resolver
+(``_staging.resolve_warp_stage``) and the materializer (``kernel/_atom._staged``). Each asks
+:func:`match_packed_b_node` and gets the same answer or ``None``.
 
 It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logical_elems == 2``),
 a data-dependent gather into a pair-value table, and a scale factor whose every ``k`` reference is
 block-guarded. Any weight spelled that way is recognized; nothing here names a quantization scheme.
 
-Kept beside the classification rather than inside it: the shape is a CONSUMER'S reading of an
-already-bound contraction (``bind_bilinear`` binds the computed B as a plain projection, and this
-asks what that projection contains), not one of the classification stages that build the tree.
+Kept beside the lift rather than inside it: the shape is a CONSUMER'S reading of an already-built
+contraction (``TileOp`` post-init binds the computed B as a plain projection, and this asks what
+that projection contains), not one of the stages that build the tree.
 """
 
 from __future__ import annotations

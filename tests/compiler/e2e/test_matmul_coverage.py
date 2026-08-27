@@ -20,6 +20,8 @@ structure tests (forced sm_120) need no GPU; warp-tier accuracy needs sm_90+.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -1756,7 +1758,19 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
     lines = src.splitlines()
     score_loads = [ln for ln in lines if "scores[" in ln and "__half2float" in ln]
-    assert score_loads and all("< seq_len) ?" in ln for ln in score_loads), "score loads must clamp the runtime K"
+    # Every fragment score load carries TWO clamps — the masked M row AND the runtime K — so no
+    # element ever reads past the scores buffer (the seq-16 dirty-pool OOB defect).
+    assert score_loads and all(ln.count("< seq_len) ?") == 2 for ln in score_loads), "score loads must clamp both M and K"
+    # The compute-filled A slab covers the WHOLE bk=32 chunk the ldmatrix drain reads: with 8-wide
+    # fragment column cells the store offsets must reach 24 (cells at K+0/8/16/24 — sizing the
+    # cells off the output tile's n.reg left K 16..31 uninitialized smem, the dirty-pool defect).
+    fill_stores = [ln for ln in lines if "_a_smem[" in ln and "__floats2half2_rn" in ln]
+    offs = {int(m.group(1)) for ln in fill_stores for m in re.finditer(r"_ks \+ (\d+) - _ks", ln)} | {0}
+    # The count is invariant under arithmetic simplification of the offset spelling; the offsets
+    # pin the spread (pre-fix: 8 stores at [0, 8]).
+    assert len(fill_stores) == 16 and max(offs) == 24, (
+        f"the A slab fill must cover the whole 32-element chunk ({len(fill_stores)} stores, offsets {sorted(offs)})"
+    )
     masked = [ln for ln in lines if ">= seq_len) in0__f" in ln]
     assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
     fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
@@ -1920,41 +1934,7 @@ _MASKED_CASES = {
         _make_pv_materialized,
     ),
 }
-_MASKED_XFAIL = {
-    ("demoted_pv", 130),
-    ("demoted_pv", 512),
-    ("demoted_pv", 700),
-    ("computed_a_symbolic_k_warp", 31),
-    ("computed_a_symbolic_k_warp", 130),
-    ("computed_a_symbolic_k_warp", 512),
-    ("computed_a_symbolic_k_warp", 700),
-}
-# seq=16 is the same defect surfacing only on a DIRTY memory pool: the fragment score reads clamp
-# K but not the masked M ROW (rows 16..63 of a 16-row scores batch), so the kernel reads past the
-# buffer — zeros on a fresh CUDA pool (green), the previous program's data after any prior run in
-# the process (the output then varies with THAT data; measured err 0.42-0.82 after different
-# priors). Non-strict: whether it trips depends on what ran before, not on this test.
-_MASKED_FRESH_POOL_ONLY = {("computed_a_symbolic_k_warp", 16)}
-_MASKED_PARAMS = [
-    pytest.param(
-        label,
-        seq,
-        marks=pytest.mark.xfail(reason="masked symbolic computed-operand MMA is not yet numerically correct", strict=True),
-    )
-    if (label, seq) in _MASKED_XFAIL
-    else pytest.param(
-        label,
-        seq,
-        marks=pytest.mark.xfail(
-            reason="reads past the scores buffer on the masked M rows — correct only on a fresh (zeroed) memory pool",
-            strict=False,
-        ),
-    )
-    if (label, seq) in _MASKED_FRESH_POOL_ONLY
-    else (label, seq)
-    for label, (_e, _d, seqs, _m) in _MASKED_CASES.items()
-    for seq in seqs
-]
+_MASKED_PARAMS = [(label, seq) for label, (_e, _d, seqs, _m) in _MASKED_CASES.items() for seq in seqs]
 
 
 @requires_sm90

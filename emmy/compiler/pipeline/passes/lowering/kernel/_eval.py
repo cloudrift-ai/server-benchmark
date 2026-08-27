@@ -207,13 +207,20 @@ def evaluate(
     targets: dict[str, Value] | None = None,
     bases: tuple[tuple[tuple[Expr, Expr], ...], ...] | None = None,
     axes: tuple[str, str] | None = None,
-    boundary: tuple[str, Expr, float] | None = None,
+    bounds: tuple[tuple[str, Expr, float | None], ...] = (),
 ) -> tuple[list[Stmt], tuple[Value, ...], dict[str, Value]]:
     """Evaluate ``lam`` with residence-aware bindings.
 
     ``targets`` pre-binds carried result names, turning their final writes into reassignment.
     ``child`` is the only structural dispatch: it receives a scheduled Fold plus the live value
     environment and returns its statements and result residence.
+
+    ``bounds`` carries one ``(axis, extent, fill)`` entry per runtime-bounded coordinate axis:
+    every coordinate-dependent Load clamps that axis's coordinate in-bounds (the overhang reads a
+    duplicate of the last valid element), and an entry with a non-``None`` fill — a reduced axis,
+    whose overhang the fold consumes — additionally masks the loaded fragment to that identity.
+    A bound is applied per Load, to the axes that Load actually reads; an axis outside the
+    fragment's own ``axes`` pair has no fragment coordinate and its bound is silently ignored.
     """
 
     env = dict(bindings)
@@ -241,13 +248,18 @@ def evaluate(
             if bases is None or axes is None or not stmt.is_scalar:
                 raise ValueError("fragment Lambda needs cell bases for a coordinate-dependent scalar Load")
             sub = {axes[0]: Var(FRAG_ROW), axes[1]: Var(FRAG_COL)}
-            if boundary is not None and boundary[0] in coordinate:
-                coordinate_var = Var(FRAG_ROW if boundary[0] == axes[0] else FRAG_COL)
-                sub[boundary[0]] = TernaryExpr(
-                    BinaryExpr("<", coordinate_var, boundary[1]),
+            fills: list[tuple[Var, Expr, float]] = []
+            for axis, ext, fill in bounds:
+                if axis not in coordinate:
+                    continue
+                coordinate_var = Var(FRAG_ROW if axis == axes[0] else FRAG_COL)
+                sub[axis] = TernaryExpr(
+                    BinaryExpr("<", coordinate_var, ext),
                     coordinate_var,
-                    BinaryExpr("-", boundary[1], Literal(1, "int")),
+                    BinaryExpr("-", ext, Literal(1, "int")),
                 )
+                if fill is not None:
+                    fills.append((coordinate_var, ext, fill))
             rows, cols = len(bases), len(bases[0])
             value = _target(stmt.name, FRAG, (rows, cols), None)
             body.extend(
@@ -262,19 +274,18 @@ def evaluate(
                 for i in range(rows)
                 for j in range(cols)
             )
-            if boundary is not None and boundary[0] in coordinate:
-                coordinate_var = Var(FRAG_ROW if boundary[0] == axes[0] else FRAG_COL)
-                body.extend(
-                    FragmentMask(
-                        frag=value.data[i][j],
-                        mask_when=BinaryExpr(">=", coordinate_var, boundary[1]),
-                        row_base=bases[i][j][0],
-                        col_base=bases[i][j][1],
-                        fill=boundary[2],
-                    )
-                    for i in range(rows)
-                    for j in range(cols)
+            body.extend(
+                FragmentMask(
+                    frag=value.data[i][j],
+                    mask_when=BinaryExpr(">=", coordinate_var, ext),
+                    row_base=bases[i][j][0],
+                    col_base=bases[i][j][1],
+                    fill=fill,
                 )
+                for coordinate_var, ext, fill in fills
+                for i in range(rows)
+                for j in range(cols)
+            )
             env[stmt.name] = value
             continue
         if isinstance(stmt, Assign):

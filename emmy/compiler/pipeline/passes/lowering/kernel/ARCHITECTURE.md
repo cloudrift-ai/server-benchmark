@@ -209,8 +209,11 @@ materializer do not recognize operation families.
 The fragment Fold evaluator assigns each live value one of three residences: CTA-cell uniform, one scalar per fragment
 row, or one C fragment. It interprets the stored `Lambda` directly. `Assign` broadcasts to the highest input residence,
 `Select` substitutes the fragment layout's absolute coordinates, and coordinate-dependent `Load` becomes
-`FragmentLoad`. A symbolic reduce boundary adds `FragmentMask` with the Fold identity. The same evaluator applies the
-stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
+`FragmentLoad`. Every runtime-bounded coordinate clamp-reads in-bounds — a masked M row exactly like the reduce
+axis — and the reduce boundary additionally adds `FragmentMask` with the Fold identity (the overhanging M row is a
+discarded duplicate instead, the copy-transport contract). A Lambda-evaluated producer's fragment column cells span
+the whole `bk`-wide slab chunk the drain reads, independent of the output tile's register tiling. The same evaluator
+applies the stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
 
 A scheduled child contraction is supplied through the evaluator's structural callback. The ordinary atom strategy
 declares and drains its fragments; `FragmentRowReduce` derives row-resident partials; the parent Fold's `combine`

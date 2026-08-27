@@ -540,11 +540,11 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
     from emmy.compiler.target import compute_capability, live_compute_capability  # noqa: PLC0415
 
-    if compute_capability() != live_compute_capability():
+    target, live = compute_capability(), live_compute_capability()
+    if target != live:
         print(
-            f"[record-nodes] compiled for sm_{''.join(map(str, compute_capability()))} but benched on "
-            f"sm_{''.join(map(str, live_compute_capability()))} — measurements NOT recorded "
-            f"(the timings are this card's, the row would key to the target's regime)"
+            f"[record-nodes] compiled for sm_{target[0]}{target[1]} but benched on sm_{live[0]}{live[1]} — "
+            "measurements NOT recorded (the timings are this card's, the row would key to the target's regime)"
         )
         return
 
@@ -554,7 +554,7 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     if not meets_quality_bar(args.warmup, args.iters):
         print(
             f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
-            f"measurements NOT recorded (raise them or pass --no-record-nodes to silence)"
+            "measurements NOT recorded (raise them or pass --no-record-nodes to silence)"
         )
         return
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)

@@ -82,6 +82,25 @@ parallelize (add `-p no:randomly` for a stable order):
 `-n auto` spawns one worker per core; `--dist=loadgroup` keeps tests sharing an `xdist_group` (e.g. CUDA context) on the
 same worker.
 
+### macOS: the suite exits 139 (SIGSEGV)
+
+The loop backend JIT-compiles kernels in-process through cppyy / Cling (`emmy/compiler/ir/loop/runner.py`), and
+cppyy-cling 6.32.8 bundles LLVM 16. That compiler cannot parse the libc++ headers in the Xcode 26 SDK, whose
+`is_convertible.h` uses the `__is_nothrow_convertible` builtin unconditionally. Cling faults while building its
+precompiled header, so every test that imports cppyy dies on a native crash: `pytest tests/compiler/ir/ --collect-only`
+exits 139 during *collection*, and `make test` loses its xdist workers to "node down: Not properly terminated".
+
+Rebuild the precompiled header once against an SDK whose libc++ Cling can still parse — any installed 15.x will do:
+
+```bash
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk CLING_REBUILD_PCH=1 \
+  ./venv/bin/python -c 'import cppyy; cppyy.cppdef("int probe() { return 42; }"); assert cppyy.gbl.probe() == 42'
+```
+
+This writes `venv/lib/python3.12/site-packages/cppyy_backend/etc/allDict.cxx.pch.20.6.32.8`, after which cppyy imports
+cleanly with no `SDKROOT` set. Repeat it whenever `venv/` is recreated or cppyy is reinstalled. Once cppyy releases a
+Cling built on a newer LLVM, upgrading it replaces this workaround.
+
 ## CLI Commands
 
 The full CLI reference is linked from the README architecture index. Do **not** duplicate that reference here; read

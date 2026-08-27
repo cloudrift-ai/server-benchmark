@@ -605,7 +605,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | No
 @dataclass(frozen=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
-    mapping). ``010_recognize`` builds an UNMAPPED placement (just ``free``); the schedule
+    mapping). ``010_lift`` builds an UNMAPPED placement (just ``free``); the schedule
     maps every free axis onto ``grid`` (the per-cell tier)."""
 
     free: tuple[Axis, ...] = ()

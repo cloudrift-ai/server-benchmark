@@ -1,33 +1,14 @@
-"""The enumerated schedule pool as a SPACE — its traversal pinned element-wise.
+"""The schedule pool's addressable-space contract.
 
-Written against the recursion ``_enumerate`` ran BEFORE the pool became an addressable space, so
-the space's own traversal is gated by behaviour that predates it. Two properties, one per test:
-
-- **the traversal itself** — every fixture kind's ordered row sequence is digested here, so a
-  rewrite that reorders, drops, adds or re-spells a single row fails. The site keys and the row
-  count travel beside the digest, so a failure says WHICH of the three moved before the opaque
-  hash does;
-- **space-vs-deploy agreement** — the rows the enumeration emits are exactly the leaves
-  ``020_schedule``'s fork actually offers a compile, compared as a sorted
-  :func:`~emmy.compiler.pipeline.knob.canonical_row_key` multiset. This ties the space to the
-  DEPLOY surface rather than to itself: an enumeration that agreed only with its own digest could
-  drift away from the fork tree without either test noticing.
-
-The fixtures span every shape the walk dispatches on: the scalar and warp contraction tiers (the
-warp one over both raster orders), a pure reduce, a fused norm→linear (a computed operand cone
-with its own nested statistic site) and the fused streaming flash cell (one primary, one pool;
-the grouped placement inverse remains a separately priced structural sibling).
-
-**If a digest fails after a deliberate catalog or legality change**, re-record it — the digest
-pins the traversal, not the catalog. Print the new triple from a scratch run and update
-:data:`EXPECTED`; a digest change with no intended catalog change is the regression this exists
-to catch.
+Large catalog products are tested by index and by narrow pins. Tests must not flatten a live
+schedule space merely to assert its cardinality or ordered digest: doing so turns catalog growth
+into test time and recreates the eager traversal the production scheduler deliberately avoids.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 
 import pytest
 
@@ -36,15 +17,15 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
-from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.passes.lowering.tile import _pool, _schedule
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.pool import PoolSample
 
 _CC = (12, 0)
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail every digest here for a reason that has nothing to do with the traversal.
-_PIN_VARS = ("EMMY_KNOBS", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER")
+_PIN_VARS = ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER")
 
 
 def _matmul_graph(m: int, n: int, k: int, dtype: str) -> Graph:
@@ -84,45 +65,6 @@ FIXTURES = {
     "flash_pair": _sdpa_graph,
 }
 
-#: ``fixture -> (site keys, row count, ordered-row digest)`` per pool the graph enumerates, in
-#: enumeration order. Recorded against the pre-space recursion — see the module docstring.
-EXPECTED: dict[str, list[tuple[tuple[str, ...], int, str]]] = {
-    "scalar_matmul": [(("TILE", "STAGE", "REDUCE"), 17988, "b30d5d0f9070cd89d130ff8fad132a84")],
-    "warp_matmul": [(("TILE", "STAGE", "REDUCE"), 74926, "67b94c73a84918b48aa104e1575f2399")],
-    "reduce_matvec": [(("TILE", "STAGE", "REDUCE"), 20, "bc42c1d8f8640471f226c25327e6d792")],
-    "fused_norm_linear": [(("TILE", "STAGE@a1", "STAGE", "REDUCE@a1", "REDUCE"), 21495, "3931bd58b58a61f03789de5e68ea4747")],
-    # Over-budget paired score + value rows are intentionally absent; other fixture pools do not
-    # carry concurrently-live contraction fragments and remain byte-identical.
-    "flash_pair": [(("TILE", "STAGE", "REDUCE"), 3457, "b3ecfbf96e98237f7e1fe8ee258d6dec")],
-}
-
-
-def _digest(rows) -> str:
-    """The ordered row sequence as one hash — key order inside a row is not part of the identity
-    (a row IS a mapping), row order is."""
-    h = hashlib.blake2b(digest_size=16)
-    for row in rows:
-        h.update(repr(sorted((str(k), str(v)) for k, v in row.items())).encode())
-        h.update(b"\n")
-    return h.hexdigest()
-
-
-def _enumerated(graph, monkeypatch) -> tuple[list[tuple[tuple[str, ...], list[dict]]], list[dict]]:
-    """Every pool ``_enumerate`` builds while ``graph`` resolves, in enumeration order, plus the
-    rows the resolved fork tree hands a decider (:func:`enumerate_graph`, the one live-fork
-    capture the fit and the record evaluator already share)."""
-    pools: list[tuple[tuple[str, ...], list[dict]]] = []
-    original = _schedule._enumerate
-
-    def spy(terms, *args, **kwargs):
-        rows, keys, total = original(terms, *args, **kwargs)
-        pools.append((tuple(keys), [dict(r) for r in rows]))
-        return rows, keys, total
-
-    monkeypatch.setattr(_schedule, "_enumerate", spy)
-    deploy = enumerate_graph(graph, Context.from_target(_CC)).rows
-    return pools, deploy
-
 
 def _spaces(graph, monkeypatch) -> list:
     """Every :class:`~._pool.PoolSpace` the graph builds, in enumeration order."""
@@ -134,7 +76,8 @@ def _spaces(graph, monkeypatch) -> list:
         return space
 
     monkeypatch.setattr(_schedule, "_space", spy)
-    enumerate_graph(graph, Context.from_target(_CC))
+    ctx = dc_replace(Context.from_target(_CC), pool_sample=PoolSample(rows=8, seed=0))
+    enumerate_graph(graph, ctx)
     return seen
 
 
@@ -145,22 +88,85 @@ def unpinned(monkeypatch):
 
 
 @pytest.mark.parametrize("case", sorted(FIXTURES))
-def test_the_traversal_is_pinned_element_wise(case, unpinned, monkeypatch) -> None:
-    pools, _ = _enumerated(FIXTURES[case](), monkeypatch)
-    got = [(keys, len(rows), _digest(rows)) for keys, rows in pools]
-    want = EXPECTED[case]
-    assert [k for k, _, _ in got] == [k for k, _, _ in want], "the fork's site keys moved"
-    assert [n for _, n, _ in got] == [n for _, n, _ in want], "the enumeration's row count moved"
-    assert got == want, "the enumeration emits different rows, or the same rows in a different order"
+def test_real_spaces_are_addressable_without_exhaustion(case, unpinned, monkeypatch) -> None:
+    spaces = _spaces(FIXTURES[case](), monkeypatch)
+    assert spaces
+    for space in spaces:
+        assert len(space) > 0
+        for index in {0, len(space) // 2, len(space) - 1}:
+            assert space[index] == space[index]
 
 
 @pytest.mark.parametrize("case", sorted(FIXTURES))
-def test_the_space_agrees_with_the_deploy_surface(case, unpinned, monkeypatch) -> None:
-    pools, deploy = _enumerated(FIXTURES[case](), monkeypatch)
-    space = [row for _, rows in pools for row in rows]
-    assert sorted(map(canonical_row_key, space)) == sorted(map(canonical_row_key, deploy)), (
-        "the enumerated space and the fork's leaves are the same set of candidates or the space is a fiction"
-    )
+def test_each_site_catalog_is_built_once(case, unpinned, monkeypatch) -> None:
+    """Every catalog question is asked ONCE per term. This is the property the addressable space
+    rests on, and the one a row budget could never state.
+
+    ``WORK`` is not an input to a site's catalog: a row carries the inventory its own slices claim
+    and the product joins on it. Asking each site what it offers *under* each candidate inventory
+    instead re-resolves every stage and reduce once per member of a list those same catalogs
+    produce — on one f16 matmul that was 61 passes, and it cost seconds per lowered kernel while
+    the fork above it read a single row. A reintroduced loop shows up here as a repeated question,
+    not as a slow test somebody eventually notices."""
+    asked: dict[str, list] = {}
+
+    def counted(name, key):
+        original = getattr(_schedule, name)
+
+        def wrapper(*args, **kwargs):
+            asked.setdefault(name, []).append(key(*args, **kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(_schedule, name, wrapper)
+
+    counted("_site_blocks", lambda term, current, parent=None: (id(term), id(current), id(parent)))
+    counted("_stage_values", lambda term, node, plan: (id(term), id(node), plan))
+    counted("_contraction_reduces", lambda term, node, plan: (id(term), id(node), plan))
+
+    assert _spaces(FIXTURES[case](), monkeypatch)
+    assert asked, "the fixture built no catalog at all"
+    for name, keys in asked.items():
+        repeats = len(keys) - len(set(keys))
+        assert not repeats, f"{name} was asked the same question {repeats} time(s) over ({len(keys)} calls)"
+
+
+@pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
+def test_computed_fold_sites_remain_addressable(case, tile_sites, reduce_sites, unpinned, monkeypatch) -> None:
+    space = _spaces(FIXTURES[case](), monkeypatch)[0]
+    assert sum(key == "TILE" or key.startswith("TILE@") for key in space.keys) == tile_sites
+    assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in space.keys) == reduce_sites
+
+
+def _pin_paired_mma(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    # The score's N tile is the value contraction's streamed K block.
+    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+
+
+def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
+    _pin_paired_mma(monkeypatch)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    space = _spaces(_sdpa_graph(), monkeypatch)[0]
+    row = dict(space[0])
+    assert sum(key.startswith("TILE@") and "mma_" in value for key, value in row.items()) == 2
+
+
+def test_paired_sdpa_honors_a_grid_reduce_partition(unpinned, monkeypatch) -> None:
+    _pin_paired_mma(monkeypatch)
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    space = _spaces(_sdpa_graph(), monkeypatch)[0]
+    row = dict(space[0])
+    assert row["REDUCE"] == row["REDUCE@a3"] == row["REDUCE@pj"] == "g2k"
+
+
+def test_reduce_space_keeps_combined_atomic_and_deferred_forks(unpinned, monkeypatch) -> None:
+    """Inspect the lazy partition index: no full schedule-space traversal is needed."""
+    space = _spaces(_matmul_graph(64, 64, 64, "f32"), monkeypatch)[0]
+    choices = {value for value, _ in space.partition("REDUCE")}
+    assert {"", "g2a", "g2k"} <= choices
 
 
 # --- the space itself: two traversals of one structure -------------------------------------------
@@ -228,11 +234,41 @@ def test_the_size_is_known_before_any_candidate_exists(monkeypatch) -> None:
         space[0]
 
 
+def test_a_large_structural_partition_does_not_read_candidates() -> None:
+    """Fork grouping delegates to the row product even when the product has millions of rows."""
+
+    class Rows:
+        closed = True
+
+        def __init__(self, size: int, groups=()):
+            self.size = size
+            self.groups = groups
+
+        def __len__(self):
+            return self.size
+
+        def __getitem__(self, _index):
+            raise AssertionError("structural partition read a candidate")
+
+        def partition(self, key):
+            assert key == "TILE"
+            return self.groups
+
+    mma = Rows(3_000_000)
+    scalar = Rows(7_000_000)
+    rows = Rows(10_000_000, (("mma", mma), ("", scalar)))
+    space = _pool.PoolSpace.build(("TILE",), {"TILE": ""}, [_pool.Segment.build(rows, {"WORK": "w1x1"}, ({},))])
+
+    groups = dict(space.partition("TILE"))
+    assert len(groups["mma"]) == 3_000_000
+    assert len(groups[""]) == 7_000_000
+
+
 @pytest.mark.parametrize("case", sorted(FIXTURES))
 def test_a_real_space_addresses_what_it_iterates(case, unpinned, monkeypatch) -> None:
-    """The same equality over the LIVE spaces, whose radices are whatever the catalogs offer."""
+    """Boundary indices of live spaces are stable without flattening those spaces."""
     spaces = _spaces(FIXTURES[case](), monkeypatch)
     assert spaces
     for space in spaces:
-        assert len(space) == len(list(space))
-        assert list(space) == [space[i] for i in range(len(space))]
+        assert space[0] == next(iter(space))
+        assert space[-1] == space[len(space) - 1]

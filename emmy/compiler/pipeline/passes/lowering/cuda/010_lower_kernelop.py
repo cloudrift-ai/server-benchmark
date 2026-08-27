@@ -7,7 +7,7 @@ cooperative ``block_threads`` otherwise). A **symbolic reduce / output-sweep axi
 dynamic ``seq_len`` inside the body's loops) becomes a runtime ``int`` arg: the kernel
 signature gains one ``int <name>`` per symbolic ``Dim`` and the launch resolves it from the
 input array shapes (``sym_values`` → ``runtime_args``). The free (grid) axes are static
-here (``010_recognize`` defers a symbolic free axis), so the grid stays a static int.
+here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 """
 
 from dataclasses import replace

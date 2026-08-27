@@ -58,8 +58,8 @@ knowledge recorded earlier, in a fixed order — best evidence first:
 2. **Measured evidence** — first the measurements stored inside the online prior's checkpoint (its **reservoir**)
    that were taken at deployable flags, then rows from the tune database (Part 3).
 3. **The prior** — the online model when trained and calibrated, the offline model otherwise (Part 3).
-4. **Option-0** — the first option in the order the rule emitted them. Rule authors order options so this is always
-   safe.
+4. **Option-0** — the first option in the order the rule emitted them. This is only the no-evidence fallback;
+   enumeration order carries no performance meaning.
 
 That order has a name — the **deploy evidence hierarchy** — and each numbered step in it is called a **tier**. The
 list above is only a summary. **Part 3's "The deploy evidence hierarchy" is the authoritative statement** of the exact
@@ -108,15 +108,15 @@ A worked example, to fix the vocabulary. Take `emmy compile` on a machine with a
 rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
-2. `greedy_decide` **flattens** the fork to its complete leaves — knob dicts only; no kernel is built yet (Part 4).
-3. Each leaf becomes one row: the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
-   an earlier pass wrote onto the op (a summary of its body and loop extents), and the leaf's complete knob values
-   (Part 6).
+2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
+   it ranks the complete offered rows; no kernel is built until the choice is made (Part 4).
+3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
+   an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
 4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
    every knob the leaf has decided has the same value in the row. (The example starts here because this card records
    no golden for the op; the **verified** tier would otherwise decide first. Part 3 numbers the full list.)
 5. **The `perf` tier.** Otherwise: measured rows for this exact op, under this compile's own context key.
-6. **The prior.** Otherwise: the `mean_scores` argmin over all leaves, in one batched predict.
+6. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -181,7 +181,7 @@ Multi-node patterns only fire when each intermediate node has exactly one consum
 `match_pattern(graph, pattern) → list[Match]` walks every topo-ordered seed. Overlapping matches are allowed — the
 rewriter exits after the first successful rewrite per iteration, so overlap is just candidate enumeration.
 `Match.nodes` maps each pattern entry's name to the matched `Node`. `Match.consumed` and `Match.output` are
-overridable by the rewrite function, to control which nodes the splicer removes and which node's edges get rewired.
+overridable by the rewrite function, to control which nodes the splicer removes and which buffer edges get rewired.
 Matches retain the watched node objects themselves, so `Match.is_alive()` rejects removal followed by a different
 node at the same graph id even when the Python allocator would otherwise recycle an integer object address.
 
@@ -250,12 +250,12 @@ boundaries between operations. A pipeline built without the strategy has no prov
 imports none of it.
 **`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
 `op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
-`loop/stamp`), minted pieces (a cut's fragments, a split's pieces) at the splice event, before the fragment even
+`loop/stamp`), minted split pieces at the splice event, before the fragment even
 enters the graph, so no rule at any cursor position can observe an unstamped kernel. The stamped row rides the
 engine's rebind knob-merge into every later dialect (which is what keeps a terminal `CudaOp`'s cache key, DB rows,
-and prior feature columns carrying the loop-birth identity). It also threads decomposition attribution
-(`Op.source`) and serves the read API (`signature` / `op_sig` — knobs-first, compute-fallback) every identity
-consumer goes through. The search shapes (`SearchStrategy` subclasses) are the same idea one level up — they own
+and prior feature columns carrying the kernel-birth identity). It serves the read API (`signature` / `op_sig` —
+knobs-first, compute-fallback) every identity consumer goes through. The search shapes (`SearchStrategy` subclasses)
+are the same idea one level up — they own
 loop composition and terminal aggregation — but are constructed by their entry points, not discovered.
 
 A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
@@ -269,7 +269,8 @@ the kernel's measured mma rows because the warp atom gate read placeholder dtype
 The return type discriminates the rewrite flavor:
 
 - **Functional** — returns a `Graph` fragment, spliced in place of `match.output` (defaults to `match.root_node_id`).
-  Fragment `InputOp` nodes reference existing graph nodes by id; non-Input nodes get fresh ids.
+  A dictionary maps several old buffers, including secondary outputs, to fragment output buffers in one splice.
+  Fragment `InputOp` nodes reference existing graph buffers by id; non-Input nodes get fresh ids.
 - **In-place** — returns an `Op`. The engine assigns it to `root.op` directly, preserving the node id, inputs list,
   output Tensor and hints. The lowering rules use this because `KernelOp.arg_order` / `CudaOp.arg_order` embed the
   original node id as the output buffer name — a fresh id would break the generated kernel's buffer binding.
@@ -287,12 +288,12 @@ Most rules satisfy this implicitly via op-type changes (`LoopOp` → `TileOp`); 
 
 ### How fragments are spliced in (`engine._apply_replacement`)
 
-1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph node (external reference);
-   non-Input nodes are added with fresh ids.
-2. `replace_node(match.output or match.root_node_id, new_output)` rewires all consumers (and `graph.outputs` slots)
-   from the old output to the fragment's output id.
-3. Merge hints from every consumed node into the new output.
-4. Remove consumed nodes and run `_remove_orphans` to drop any now-dangling constants / inputs.
+1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph buffer (external
+   reference); non-Input nodes are added with fresh ids.
+2. Rewire each requested old buffer's consumers and `graph.outputs` slots to its fragment output buffer.
+3. Merge redirected owners' hints onto their new producers; when all ports belong to one multi-output node, merge
+   the dissolved internal nodes there too.
+4. Remove consumed nodes, restore each redirected primary or secondary buffer's old identity, and drop orphans.
 
 ## Part 2: Forks — how choices are represented
 
@@ -311,8 +312,9 @@ trees. `Fork` (`fork.py`) is an interface with three members:
 - `expand()` — builds the next level of options.
 
 The search loop pops a `LazyCandidate` waiting on a fork, calls `expand()` to build the children, pushes them back and
-continues, so only the subtrees the search actually walks into ever get built. `OptionFork` is a concrete `Op` /
-`Graph` leaf.
+continues, so only the subtrees the search actually walks into ever get built. `OptionFork` wraps a concrete `Op` or
+`Graph`; `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded. Structural leaves mark
+themselves directly, so graph-building can remain lazy without policy inspecting their implementation.
 
 A fork whose levels form a cartesian product of knob values reuses **`build_fork_tree`**. A rule supplies one `Level`
 per level plus a `materialize=` callable, and gets back a lazy root `_Branch` whose `expand()` builds children on
@@ -496,15 +498,15 @@ and that is an accepted outcome of the design — the fix is a measurement, a re
 prior, never a preference written into a pass or into this policy.
 
 1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
-   `deploy_identity` — the recognized term's α/buffer-invariant algebra digest folded with the operand/output dtype
+   `deploy_identity` — the lifted term's α/buffer-invariant algebra digest folded with the operand/output dtype
    fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
    digest canonicalizes sizes away, and without extents every same-algebra cone on a card would share one key),
-   derived record-side through the shared recognition core (`_lift.recognized_tile`) — equals the
+   derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
-   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A ROUTING record (`PLACE`-only
-   knobs) decides the placement fork by picking the cut fragment whose parent piece stamps its keys, and a fused
-   schedule record holds the fused side against the prior. The tier needs no prior, applies only at deployable
+   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A standalone `PLACE` routing record
+   instead decodes against the legal closed Fold seams of the same lifted tree.
+   The tier needs no prior, applies only at deployable
    `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row
    of the same op that was measured at `-O3` (`H_opt=3`);
@@ -536,10 +538,7 @@ Three definitions the list leans on:
 - **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
-  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided. At
-  a placement fork, `PLACE` is the exception: each candidate's complete `PLACE` subset must exactly equal the measured
-  row's subset, including the fused candidate's empty subset. A cut measurement therefore vouches only for that cut,
-  while the same prefix rule continues to apply to every non-`PLACE` knob.
+  That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -583,24 +582,9 @@ does not print that. What exists today is: the loud warning for measured evidenc
 candidates, and the resolve trace (`Decision.score` carries the deciding row's µs). Answering "which tier decided
 this fork, and did I expect that one?" means correlating those, not flipping one switch.
 
-**Where the kernel gets cut is settled before any of this.** Ahead of the schedule pick, a separate decision splits —
-or does not split — the recognized work into kernels (`lowering/tile/_cut.py`): `PLACE@<label> = cut` says "split at
-the edge labelled `label`, so that sub-computation becomes its own kernel". A `PLACE` pin is authoritative — it cuts
-(or keeps fused) with no prior involved. UNPINNED, placement is an ordinary **structural fork**: recognition offers
-the fused form plus one cut fragment per legal seam, so `tune` discovers cuts and a compile
-prices them through the same kernel-set costing as any structural option (Part 4) — measurements first, then
-whichever prior is loaded. That costing exists because a `Graph` leaf carries no knob row the ordinary ranking
-could score, not to defend the fused side: when some leaf cannot be priced the pricing decides nothing and every
-leaf, cuts included, goes on to the ordinary ranking. A measured whole-route row is direct evidence for the complete
-fused or cut candidate, so the reservoir and DB tiers consult it before estimating a route from its child kernels;
-only a placement fork without exact aggregate evidence reaches that structural cost estimate. Exactly two computed
-seams whose runnable normalized Loop bodies are alpha-equivalent collapse to one cut fragment: one workspace producer
-replaces both contextual uses. Different external buffers or operations, and equivalence classes larger than two,
-remain independent seams. A chosen cut's parent piece carries `PLACE@<seam>: cut` in its op knobs, so a measured cut
-records and replays as the exact pin. A
-**routing** golden entry (knobs that are only `PLACE@<label>` values; the loader rejects a mix of `PLACE` with
-schedule knobs) is the recorded form of that pin — replayed like any other pinned row, never consulted by an
-unpinned compile.
+**Placement does not weaken maximal fusion.** Maximal Loop IR fusion produces the canonical combined kernel. Tile IR
+then offers that kernel beside legal `PLACE` cuts of closed stored Fold edges and `REDUCE` cross-CTA splits. These are
+structural forks; the tuner chooses a kernel set, and no greedy or enumeration rule removes a legal sibling.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the DB perf index are
 memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar. A generative
@@ -618,8 +602,8 @@ replay (`run --golden NAME`, `--ab`), training data for the offline prior (`emmy
 and regression reference points.
 
 The tier's join is exact by construction. The record side lowers the record's OWN persisted program through the
-loop passes, selects its one target kernel, and recognizes it through the SAME core the live pass uses
-(`_lift.recognized_tile`) — so record-side and fork-side identity cannot drift, and there is no classified shape
+loop passes, selects its one target kernel, and lifts it through the SAME core the live pass uses
+(`_fromloop.lift_loop_op`) — so record-side and fork-side identity cannot drift, and there is no classified shape
 anywhere (the old `ShapeKey.kind` classifier and its offer-signal special cases are gone for good). The row decode
 is exact equality of the schedule-family view after the one recording canonicalizer; a record that stops equaling
 any enumerated row warns and decides nothing at deploy. The nightly `onboard-model` workflow strictly decodes and
@@ -733,21 +717,18 @@ tune winner is an automatic exact pin; verified rows remain automatic pins as be
 only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
 observations come from independent command invocations, not a second orchestration layer inside `run`.
 
-**Greedy flattens forks before ranking.** The lazy fork tree is an MCTS structure — it stages knob choices across
-levels (`BR` → `BM/BN` → `FM/FN`) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level: a branch
-carries only a *partial* tile, and `features.knob_features` can't compute its area / occupancy until `FM/FN` are
-pinned, so the prior would be blind at the `BM/BN` choice. Instead `greedy_decide` flattens each fork point to its
-complete leaves (`fork.flatten_leaves` expands branches depth-first; only knob dicts — materialization stays deferred
-to the chosen leaf) and picks the lowest `Prior.mean_scores` over the full `{H_*, S_*, complete-knob-row}` vector in
-one batched `predict`, invariant to the tree's level order. With no online prior the `OfflinePrior` ranks (including a
-positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing
-entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
+**Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Verified
+and measured rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
+and selects the global argmin. This preserves the fitted model's semantics, at the cost of traversing the row space
+until schedule composition and scoring are factorized end to end. With no online prior the `OfflinePrior` ranks
+(including a positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns
+nothing entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
-**And it flattens each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
+**And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
 keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
-blocklist content, so N same-shape kernels flatten-and-score once and the rest replay by descending the lazy tree's
+blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
 while a validate-retry with a blocked tile is a different key and re-decides.
 
@@ -841,9 +822,8 @@ two-level-shaped. **Outer**: drive the graph-changing passes (`TwoLevelStrategy.
 `loop`, the strategy's OWN boundary config, never an engine parameter). The outer never ventures into Tile IR; a
 **terminal** is the fused graph of finalized `LoopOp`s. Each terminal is one candidate grouping of ops into
 kernels; its **reward** is `1 / Σ best-per-op time` from the strategy's separable scoring, backpropagated by the
-reused `TuningSearch`. Tile-dialect structural forks (a `PLACE` cut, a cross-CTA split) stay INNER — they are part
-of a kernel's independent measurement, and a slice whose kernel set changed benches as the Σ over the pieces it
-minted.
+reused `TuningSearch`. The Tile-dialect cross-CTA split stays INNER — it is part of a kernel's independent
+measurement, and a slice whose kernel set changed benches as the Σ over the pieces it minted.
 
 Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
@@ -960,11 +940,12 @@ already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals cons
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
-provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its first
-exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule row for
-a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their heterogeneous
-schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune winner only
-when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a parent whose pins
+provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its
+first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
+row for a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their
+heterogeneous schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune
+winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
+parent whose pins
 name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
 claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
 with that search reward. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
@@ -1358,8 +1339,8 @@ explicit working file whose GPU header is checked against the selected tune devi
    registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
    raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it. Two realizations are **structural** and cannot be read off a knob stamp at all, so the check skips them:
-   a `PLACE` cut, and the `g<n>` cross-CTA stage of a `REDUCE` value. A split replaces the kernel it splits, and
+   match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
+   check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
    value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a
@@ -1439,15 +1420,16 @@ would be reporting mostly arithmetic.
 stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
 structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
 evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
-because the identity strategy stamps a kernel **at birth**, in recognition, before `020_schedule` offers the first
-fork — so nothing a schedule fork decides can move an `S_*` value, and sibling schedules cannot be split apart.
+because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
+`020_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
+schedules cannot be split apart.
 
 Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
 **over-merges**, because `op_sig` digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
 megakernel with a row for just one kernel of the same op's unfused realization — a 5.9 µs norm kernel filed as a
 rival of a 131 ms whole-op row, where the unfused pair actually costs 24–191 µs. And it **fragments**: 73 structures
 were searched in two separate pools, the losing pool's best landing a median 1.46× behind the winning pool's (p90
-3.89×, worst 14×) — the same kernel tuned twice because a placement cut minted one copy of it. Against `op_sig` the
+3.89×, worst 14×) — the same kernel appeared in two structural contexts. Against `op_sig` the
 kernel key gives 336 pools rather than 401, but more rows sitting beside a rival (3778 of 3817 against 3760) and a
 median pool of 7 rather than 5; the pool count falls because merging is the point.
 
@@ -1506,29 +1488,22 @@ comparing two fits is running the same eval against two files and diffing the re
 
 ## Part 9: Tile lowering at the pipeline level
 
-`lowering/tile/` lowers each fused `LoopOp` to a kernel-ready `TileOp` over the block-DAG Tile IR (`ir/tile/ir.py`):
-`010_recognize` (lift `LoopOp` → `TileOp`, recognize the online-softmax streaming form, annotate each reduce
-`Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — and **atomize**: resolve the
-algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_classify.py`) →
-`030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
-shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; the
-online-softmax reduce is the `TWISTED` fold, a twisted monoid is a monoid, selected structurally), not
-on a matmul / pointwise / attention archetype. The full design lives in
+`lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
+axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
+complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
+orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
+in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
+
+`015_twisted` rewrites the exp-family composition over that canonical tree. `018_cut` offers the maximal tree and
+every semantically closed stored child-Fold seam through `PLACE`; a selected cut writes the complete child state to
+workspaces and returns fresh unmapped producer and consumer TileOps. `020_schedule` then enumerates schedules over
+each stored Fold tree only. Independent roots stay fused and combine only schedules with matching physical
+output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition by
+slicing the same Fold and folding partial state tuples with its stored combine.
+
+The complete structural invariant is documented in
+[`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in
 [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
-
-The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
-`TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — is ONE recursive row enumerator over the term's own site
-tree (the `020_schedule` rule). It covers every single-site term and the COMPUTED `a` edge (the fused norm→linear /
-gate⊗up cone), whose nested statistic site is why it recurses. A term it cannot schedule
-enumerates NO rows and stays unmapped rather than being guessed at — the guardrail
-contract. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for
-the design.
-
-**The enumerator ranks nothing.** It narrows by legality alone — this node's dtypes, extents, divisibilities and
-smem budget — and hands back a SET whose emission order is an artefact of the recursion. No family leads with a
-default, no shape's stored layout promotes a spelling, and no candidate is dropped for having measured slow
-somewhere. Everything above (the deploy evidence hierarchy) is what turns that set into one kernel, and a compile
-with no evidence taking a poor row from it is the accepted cost of keeping the scheduler free of judgment.
 
 ## Tunable knobs
 
@@ -1580,6 +1555,11 @@ a wrong or un-launchable kernel:
 All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the per-rule mechanics.
 The "owning rule" for the schedule codecs is the tile scheduler (the `020_schedule` rule), whose recursive row
 enumerator spells each family exactly once, site-local, where a row becomes stored state.
+
+**`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
+tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings. A cut is
+consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
+the structural decision trace. Bare `PLACE=cut` selects the primary cut seam, while a scoped key pins one seam.
 
 **`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
 spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer
@@ -1665,9 +1645,10 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
 shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
 
-**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — the LoopOp's structural features (stmt/op histogram +
-loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
-online prior's feature vector). Skipped by `format_tuning_knobs`.
+**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
+histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
+Not tunable — identity facts that make a knob dict a complete variant identity (the online prior's feature vector).
+Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
@@ -1694,8 +1675,8 @@ VALUES are site-local too: the worker inventory is spelled once in `WORK` (`w<M>
 finalize letter kept: a MODE, not an axis token); the retired embedded-token spellings raise, and the
 golden corpus itself was re-spelled mechanically (715 rows, replay digest-identical; the one-shot script is gone
 with the grammar it read).
-The reserved
-graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
+The retired placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. Current
+`PLACE` uses the Fold tree-path grammar above. The
 golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its
 kind's tree and proves every spelling canonical. The tune DB / reservoir /
 online prior are REGENERATED after a re-key, never migrated — no reader special-cases pre-phase-3 axis-suffixed
@@ -1719,7 +1700,7 @@ re-spell deliberately and retires only when symbolic-trace keyed resolution exis
 
 Pass files are numerically prefixed so `sorted()` picks them up deterministically. Pick a fresh prefix when adding a
 rule; the loader ignores the prefix itself — it only makes the ordering readable. Per-pass authoring invariants are in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_recognize` → `030_split_reduce`) and the set
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_lift` → `030_split_reduce`) and the set
 of algebraic rewrites they may apply are documented there too.
 
 | Pass                      | What rules do                                                                                |
@@ -1727,13 +1708,11 @@ of algebraic rewrites they may apply are documented there too.
 | `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
-| `loop/prefusion/`         | `dissolve_narrowing` runs the SAME splice as `loop/fusion` (both call `_merge.merge_region`) over the subset of regions whose sink is no wider than the producer. A merge makes the sink the region's output, so those can only shrink what gets written; draining them to fixpoint first means every contraction has CLOSED before anything can splice into its open product and force the outer product to gmem. It refuses nothing — a widening merge is deferred, and `loop/fusion` offers it afterwards. A separate PASS because rule batches interleave WITHIN a pass but a pass is left only once quiescent. |
-| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them. A merged nested-reduce or multi-statistic cell stays fail-closed unless tile recognition proves one exact grouped placement inverse; that witness also replaces duplicated raw-loop work with the child-once + parent count for the boundedness gate, while fused and materialized forms remain priced siblings. `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
+| `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
-| `loop/recognize/`         | Empty (retired) — recognition is classification of the lifted Fold tree (`lowering/tile/_classify`), so the loop dialect carries no pattern recognizers. |
-| `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
-| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
-| `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/_classify.bind_bilinear` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` resolves dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
+| `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `015_twisted` rewrites the exp family; `018_cut` offers fused and closed Fold-edge kernel placements; `020_schedule` schedules each stored tree; `030_split_reduce` realizes cross-CTA partitions. |
+| `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
 SiLU decomposition follows PyTorch opmath precision: f16 and bf16 inputs widen once to f32, the primitive

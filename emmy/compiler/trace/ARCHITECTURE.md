@@ -190,6 +190,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
   blocks with uint8 E8M0 scales; biases stay in the requested value dtype. `expert_range=(lo, hi)` narrows the read to
   one tensor-parallel rank's expert shard, re-indexed rank-locally, so a rank never reads bytes it does not own.
+  The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
+  the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
+  the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
+  loader reloads the config with it.
 
   A checkpoint published in its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming
   Transformers itself publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second
@@ -283,8 +287,9 @@ shared with CausalLM traces.
   target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
   post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
   file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
-  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy, preserving an
-  internal storage boundary without changing an ordinary model call.
+  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy. Maximal fusion
+  retains that storage value as a live output in one frontend target; placement then enumerates its materialized cut
+  without changing an ordinary model call.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

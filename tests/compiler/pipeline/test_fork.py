@@ -3,16 +3,17 @@
 Covers the generic builder contract using synthetic knob rows so the suite
 stays decoupled from any specific Tile-IR pass (`partition_loops` is the
 canonical caller; its integration tests live in
-``tests/compiler/passes/test_partition_planner_forks.py``). The flat
-``Fork`` implementations (``OptionFork`` / ``ThunkFork``) are exercised
-through the engine in ``tests/compiler/pipeline/search/test_thunk_forks.py``.
+``tests/compiler/passes/test_partition_planner_forks.py``). The deferred structural leaf is covered
+directly because graph-building must remain lazy.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
-from emmy.compiler.pipeline.fork import Fork, Level, build_fork_tree
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree
 
 
 def _row(a: int, b: int, c: int) -> dict:
@@ -60,6 +61,15 @@ _LEVELS = [
     Level(("A",), lambda r: (r["A"],)),
     Level(("B",), lambda r: (r["B"],)),
 ]
+
+
+def test_deferred_structural_leaf_materializes_only_when_selected() -> None:
+    made: list[str] = []
+    leaf = DeferredFork(lambda: made.append("built") or "graph", {"PLACE": "cut"}, structural=True)
+    assert leaf.is_leaf and leaf.structural and leaf.knobs == {"PLACE": "cut"}
+    assert made == []
+    assert leaf.expand() == ["graph"]
+    assert made == ["built"]
 
 
 def test_empty_params_raises():
@@ -185,6 +195,34 @@ def test_materialize_is_lazy():
     assert len(calls) == 1
     leaves[1].expand()
     assert len(calls) == 2
+
+
+def test_addressable_space_is_not_materialized_at_construction():
+    """The root retains the addressable space and reads rows only when a branch expands."""
+
+    class Rows(Sequence):
+        def __init__(self):
+            self.reads: list[int] = []
+
+        def __len__(self):
+            return 3
+
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("the fork copied the schedule space")
+            self.reads.append(index)
+            return _row(index, 0, 0)
+
+        def __iter__(self):
+            raise AssertionError("the fork eagerly iterated the schedule space")
+
+    rows = Rows()
+    tree = build_fork_tree(params=rows, levels=_LEVELS, materialize=_stub_materialize)
+    assert rows.reads == []
+
+    branches = tree.expand()
+    assert rows.reads == [0, 1, 2]
+    assert [branch.knobs["A"] for branch in branches] == [0, 1, 2]
 
 
 def test_leaf_expand_returns_own_param_materialization():

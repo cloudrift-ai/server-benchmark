@@ -15,8 +15,7 @@ A/B operands themselves ride as an ``(a, b)`` :class:`Operand` pair, so a transp
 pair instead of spelling A then B. The staged K-loop itself is ONE liveness-scheduled
 skeleton, :func:`pipelined_kloop` — per operand-group a ``(transport, depth)`` pair, the fill /
 wait / barrier placement DERIVED from which tagged body segments read each group's slabs (the
-whole-body single-group entry is :func:`staged_kloop`; the warp-flash alternating form is the same
-walk over its three tagged segments) — driven by a :class:`Transport` strategy
+whole-body single-group entry is :func:`staged_kloop`) — driven by a :class:`Transport` strategy
 (:class:`SyncTransport` / :class:`CpAsyncTransport` / :class:`TmaTransport`) — the three
 producers put behind one ``fill``/``commit``/``wait`` seam. The
 slab feeds the same staged ``LdmatrixLoad`` / scalar ``Load`` drain regardless of which producer
@@ -29,9 +28,9 @@ sm_89 gap to cuBLAS). The two derivations differ in ONE place, and only for a sl
 wider than the swizzle atom: the XOR must read the slab's ROW index, so a software fill shifts by
 the slab's own stride while a TMA slab keeps the atom's (its descriptor already splits the box down
 to the atom). Shifting by the atom on a two-atom row collapses consecutive rows onto a quarter of
-the chunk positions — the 7.8-way flash drain conflict at ``D = 128`` that vanished at ``D = 64``.
+the chunk positions.
 The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
-vector store per 16 B run) and on the fragment ``RegStore``\\ s of a chained fill, and its per-cell
+vector store per 16 B run) and on a fragment producer's ``RegStore``\\ s, and its per-cell
 producer-cone replication is planned by
 :meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
 ``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
@@ -443,13 +442,10 @@ class SyncOperand:
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
     value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
-    # The CHAINED fill: ``chain(k0)`` is the whole slab's stmts, computed by a NESTED CONTRACTION on
-    # the tensor core instead of per-thread cell code (``_atom.chain_stream_fill`` — attention's
-    # score mma, the cone folded into its fragment store). Set ⇒ ``value`` is never called, and
-    # ``fill`` does not emit it either: the caller runs it as its OWN pipeline segment
-    # (:func:`staged_kloop`'s ``lead``), so the nested contraction's staged operands get a live
-    # range the scheduler can see and refill under the drain.
-    chain: Callable[[Expr], list[Stmt]] | None = None
+    # A scheduled producer that writes the whole slab. Set ⇒ ``value`` is never called: the caller
+    # runs the producer as its own pipeline segment, so a child contraction's operand live range
+    # ends before this slab's drain begins.
+    producer: Callable[[Expr], list[Stmt]] | None = None
     # Smem swizzle mode this slab is written with ("NONE"/"B32"/"B64"/"B128") — the mma tier's
     # `_MmaOps.slab_swizzles`, applied by the fill's ``Write`` (the same flattened-index XOR the
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
@@ -508,7 +504,7 @@ class SyncTransport:
     # Materialized peers filled by a vectorized copy instead of the per-thread compute loop.
     copy_operands: tuple[Operand, ...] = ()
     # LOOP-INVARIANT staged peers — copied ONCE ahead of the loop and never refilled, because their
-    # gmem address does not advance with the chunk (the chained fill's query tile). Declared and
+    # gmem address does not advance with the chunk. Declared and
     # filled here, and deliberately absent from :func:`_staged_slabs`: with nothing advancing there
     # is no live range to schedule, so they never enter the pipeline at all.
     invariant_operands: tuple[Operand, ...] = ()
@@ -646,8 +642,8 @@ class SyncTransport:
         if k0_cur is None:
             return out
         for op in self.operands:
-            if op.chain is not None:
-                continue  # a nested contraction fills it, as its own segment (see :attr:`SyncOperand.chain`)
+            if op.producer is not None:
+                continue  # a scheduled producer fills the whole slab in its own segment
             rows, cols = op.shape
             v = _cp_async_width(cols, self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
@@ -708,12 +704,10 @@ class SyncTransport:
 class LeadSegment:
     """A body segment placed BEFORE the drain, with the SINGLE-BUFFER operand group it reads.
 
-    One use today: the chained computed-A fill (``_atom.chain_stream_fill``), which reads the nested
-    score's key slab and WRITES the A slab the drain then reads. Splitting it out of the transport's
-    own fill is what lets the scheduler see two nested live ranges instead of one overlapping pair —
-    keys refill under the P·V drain, values under the next chunk's score. ``transport`` is ``None``
-    where the segment reads no staged slab of its own (the fill kept its operands gmem-direct); the
-    segment still runs first, and the drain's group ends its range after it."""
+    A scheduled Fold child uses this segment to produce the operand slab consumed by the following
+    contraction drain. ``transport`` is ``None`` when the child reads directly from global memory;
+    otherwise it carries the child's own staged operand group. Keeping the groups distinct exposes
+    their non-overlapping live ranges to the common pipeline skeleton."""
 
     build: Callable[[], list[Stmt]]
     transport: object | None = None
@@ -1010,9 +1004,8 @@ def pipelined_kloop(
     k_end: Expr | None = None,
     k_first: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
-    """The **one** liveness-scheduled staged K-loop skeleton — every staged form (the matmul tier's
-    paired prefetch ring, the warp-flash stream's alternating single-slab pipeline, the degenerate
-    single buffer) is this scheduler run over the loop body's dataflow, none is its own skeleton.
+    """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
+    run over the loop body's dataflow; none is its own skeleton.
 
     ``operands`` is the ``(transport, depth)`` pair per scheduled operand-group; ``build_segments``
     is called ONCE with each group's read-slot expr (positional) and returns the body as ordered
@@ -1026,12 +1019,10 @@ def pipelined_kloop(
       at the top of the body (today's paired ring). ``ring == 1`` live across the WHOLE body fills
       chunk ``i`` at the top and waits immediately (no overlap to be had — the single-buffer
       degenerate). ``ring == 1`` live in a PROPER sub-interval refills chunk ``i+1`` at its kill
-      point — the refill overlaps every segment outside the live range (the flash alternating
-      form: K refills under softmax + P·V, V under the next step's Q·K — not because attention
-      alternates, but because that is where their live ranges end). The prologue primes exactly
+      point — the refill overlaps every segment outside the live range. The prologue primes exactly
       ``lag`` chunks — the fills the ``lag`` virtual iterations before step 0 would have issued.
 
-    A loop-INVARIANT staged operand (value delta 0 per iteration — the alternating form's staged Q)
+    A loop-INVARIANT staged operand (value delta 0 per iteration)
     never enters the schedule: with nothing advancing there is no wait and no refill, so its whole
     derivation is a prologue-only fill the caller emits ahead of the loop.
 
@@ -1042,10 +1033,10 @@ def pipelined_kloop(
     count; the ring's ``ring-1`` likewise). Tail refills clamp onto the last needed chunk
     (re-fetched, never waited — keeps the fills unguarded and every barrier CTA-uniform).
 
-    ``k_end`` (CTA-uniform, ``≤ k_extent``) stops the chunk loop early — the causal flash stream's
-    triangular kv bound; the clamp re-pins onto the last NEEDED chunk via the loop's hoisted
+    ``k_end`` (CTA-uniform, ``≤ k_extent``) stops the chunk loop early; the clamp re-pins onto the
+    last NEEDED chunk via the loop's hoisted
     ``<k0>_end`` for-init bound. ``k_first`` (CTA-uniform, ``bk_elems``-aligned) STARTS it late —
-    the banded flash stream's sliding-window bound: the loop var stays absolute (drains index gmem
+    a sliding-window bound: the loop var stays absolute (drains index gmem
     by it), the slot / phase arithmetic rebases onto ``k0 − k_first``, and the prologue primes from
     ``k_first`` (each prime clamped onto the last needed chunk — a narrow band near the stream end
     could otherwise prime past a static extent). A symbolic ``k_extent`` (a ``Dim``) allocates the
@@ -1206,28 +1197,26 @@ def staged_kloop(
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
-    chunk base by name (the warp-flash stream's absolute score columns) passes its own axis name.
+    chunk base by name passes its own axis name.
 
     ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
-    loop early — the causal flash stream's triangular kv bound. Chunks past it fold the carrier
+    loop early. Chunks past it fold the carrier
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
     NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal.
     ``k_first`` starts it late (the banded stream's sliding-window bound) — same contract, applied
     at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped).
 
-    ``lead`` (a :class:`LeadSegment`) runs BEFORE the drain and brings its own single-buffer operand
-    group: the chained computed-A fill. It becomes segment 0, so the scheduler waits for its slab
-    ahead of it, barriers after it, and — its live range ending mid-body — refills it under the
-    drain, while the drain's group ends its range at segment 1 and refills there. That is the
-    alternating pipeline: keys under the P·V drain, values under the next chunk's score."""
-    # A symbolic ``k_extent`` (warp-flash over a runtime seq_len) is a ``Dim``: the chunk count is a
+    ``lead`` (a :class:`LeadSegment`) runs BEFORE the drain and may bring its own single-buffer
+    operand group. It becomes segment 0, so the scheduler waits before the producer, barriers after
+    it, and refills that group's next chunk while the drain consumes the current one."""
+    # A symbolic ``k_extent`` is a ``Dim``: the chunk count is a
     # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
     # the last valid key rows) — the drain masks those keys to the fold identity, so it stays
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
     if workers is not None:
         symbolic = isinstance(k_extent, Dim)
-        assert lead is None, "the producer band drives one operand group — a chained fill's key slab has no band placement"
+        assert lead is None, "the producer band drives one operand group — a nested producer has no band placement"
         assert not symbolic, "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"

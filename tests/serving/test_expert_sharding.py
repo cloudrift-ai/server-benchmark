@@ -84,3 +84,22 @@ def test_an_unrouted_shard_contributes_exactly_zero():
 
     assert partial.shape == xn.shape
     torch.testing.assert_close(partial, torch.zeros_like(partial))
+
+
+def test_hash_routing_needs_the_steps_token_ids():
+    """A hash router selects experts by token id; the router call must pass the ids through and
+    refuse to route without them (silently routing on garbage would serve noise)."""
+    pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    seen = []
+    moe = {"hash": True, "layer": 7, "gate": lambda xn, ids: seen.append((xn, ids)) or ("logits", "scores", "indices")}
+    xn, ids = object(), object()
+    assert EmmyGenRunner._route(None, moe, xn, ids) == ("logits", "scores", "indices")
+    assert seen == [(xn, ids)]
+    with pytest.raises(RuntimeError, match="hash-routed"):
+        EmmyGenRunner._route(None, moe, xn, None)
+
+    plain = {"hash": False, "gate": lambda xn: ("l", "s", "i")}
+    assert EmmyGenRunner._route(None, plain, xn, None) == ("l", "s", "i")

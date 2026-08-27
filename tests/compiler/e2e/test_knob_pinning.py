@@ -594,15 +594,15 @@ def test_masked_tile_accuracy_configs(label: str, dims: dict, knobs: dict, env: 
 # 16 B-aligned (N=3 fp32 → 12 B stride) pinned to a cp.async staging ring issued vectorized
 # ``cp.async`` copies at misaligned global addresses — ``CUDA_ERROR_MISALIGNED_ADDRESS`` + a 1 s
 # watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
-# TMA-only) now covers cp.async too: the pinned stage resolver-declines and the kernel lowers
-# gmem-direct with correct output.
+# TMA-only) now covers cp.async too: an invalid stage pin refuses instead of silently lowering a
+# different gmem-direct schedule.
 _ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async"}
 
 
 @requires_cuda
-def test_scalar_cpasync_declines_odd_stride(monkeypatch):
+def test_scalar_cpasync_pin_refuses_odd_stride(monkeypatch):
     """fp32 matmul with a 12 B B-row stride pinned to a cp.async ring — the alignment gate must
-    decline staging (→ gmem-direct) instead of issuing misaligned ``cp.async`` copies."""
+    refuse instead of issuing misaligned ``cp.async`` copies or selecting gmem-direct."""
     from emmy.compiler.dtype import F32
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -616,9 +616,8 @@ def test_scalar_cpasync_declines_odd_stride(monkeypatch):
     g.inputs, g.outputs = ["a", "b"], ["c"]
     rng = np.random.default_rng(0)
     inputs = {"a": rng.standard_normal((M, K), dtype=np.float32), "b": rng.standard_normal((K, N), dtype=np.float32)}
-    ref = inputs["a"] @ inputs["b"]
-    forced = _run_with_knobs(g, inputs, "c", _ODD_STRIDE_CPASYNC_KNOBS, monkeypatch)
-    np.testing.assert_allclose(forced, ref, atol=1e-3, rtol=1e-3)
+    with pytest.raises(ValueError, match="does not resolve"):
+        _run_with_knobs(g, inputs, "c", _ODD_STRIDE_CPASYNC_KNOBS, monkeypatch)
 
 
 # The Gemma finding-4 cluster: a MIXED-dtype staged contraction (fp32 A × fp16 B — the

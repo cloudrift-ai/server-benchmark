@@ -13,8 +13,8 @@ Phase 1 surface (this file): the protocol that lets every
 ``tuple[Stmt, ...]`` site accept Body, plus :meth:`iter` / :meth:`map`
 as method-shaped wrappers around the existing free functions.
 
-Phase 2 surface: def-use queries (``definitions``, ``deps_closure``,
-``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
+Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
+``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
 (:class:`Cone`, :meth:`Body.backward_cone` / :meth:`Body.forward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
@@ -278,6 +278,88 @@ class Body(tuple[Stmt, ...]):
         (``Loop`` / ``StridedLoop`` / ``Tile.axes``). Axes from
         enclosing scopes above this body are not included."""
         return frozenset(ax for s in self.iter() for ax in s.binds_axes())
+
+    @cached_property
+    def _exported_accums(self) -> frozenset[str]:
+        """Accumulator names exposed by this immutable subtree."""
+        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
+
+        out: set[str] = set()
+        for stmt in self:
+            if isinstance(stmt, Accum):
+                out.add(stmt.name)
+            for child in stmt.nested():
+                out.update(child._exported_accums)
+        return frozenset(out)
+
+    @cached_property
+    def _all_ssa_defs(self) -> frozenset[str]:
+        """Every SSA definition in this immutable subtree."""
+        out: set[str] = set()
+        for stmt in self:
+            out.update(stmt.defines())
+            for child in stmt.nested():
+                out.update(child._all_ssa_defs)
+        return frozenset(out)
+
+    @cached_property
+    def _all_ssa_uses(self) -> frozenset[str]:
+        """Every SSA read in this immutable subtree."""
+        out: set[str] = set()
+        for stmt in self:
+            out.update(stmt.deps())
+            for child in stmt.nested():
+                out.update(child._all_ssa_uses)
+        return frozenset(out)
+
+    @cached_property
+    def axis_dependencies(self) -> dict[str, frozenset[str]]:
+        """Map each SSA definition to the axes that its value depends on.
+
+        Unlike :attr:`deps_closure`, this summary never retains transitive
+        SSA names. Its total size is bounded by definitions × axes, which is
+        the representation normalization needs for invariant motion.
+
+        An Accum exported from a Loop loses that Loop's reduction axis. A
+        StridedLoop keeps its axis because the partial value still varies by
+        partition. These are the same outside-the-loop semantics as
+        :attr:`deps_closure`.
+        """
+        from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
+
+        dependencies: dict[str, frozenset[str]] = {}
+        axis_names = self.axis_names
+
+        def _immediate_axes(stmt: Stmt) -> frozenset[str]:
+            reads: set[str] = set(stmt.deps())
+            for expr in stmt.exprs():
+                reads.update(expr.free_vars())
+            axes = reads & axis_names
+            for name in reads:
+                axes.update(dependencies.get(name, frozenset()))
+            return frozenset(axes)
+
+        def walk(body: Body) -> None:
+            for stmt in body:
+                for child in stmt.nested():
+                    walk(child)
+                if isinstance(stmt, Loop):
+                    for child in stmt.body:
+                        if isinstance(child, Accum):
+                            dependencies[child.name] = dependencies.get(child.value, frozenset()) - {stmt.axis.name}
+                    continue
+                if isinstance(stmt, StridedLoop):
+                    for child in stmt.body:
+                        if isinstance(child, Accum):
+                            dependencies[child.name] = dependencies.get(child.value, frozenset())
+                    continue
+                axes = _immediate_axes(stmt)
+                for name in stmt.defines():
+                    dependencies[name] = axes
+
+        walk(self)
+        return dependencies
 
     @cached_property
     def deps_closure(self) -> dict[str, frozenset[str]]:
@@ -628,8 +710,11 @@ def _shared_structural_key(body: Body) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.
 
     The structural-key formula is fixed: ``normalize_body(body,
-    hoist=False, canonical_buffers=True, cluster_ops=True)`` joined as
-    pretty-printed text. With every concrete ``Stmt`` subclass a frozen
+    hoist=False, canonical_buffers=True, cluster_ops=True)`` rendered
+    through :func:`~emmy.compiler.structural.form`. Structural, not the
+    pretty text it used to join: ``pretty()`` is the human rendering, and
+    a cosmetic change to how a statement prints must not re-key every
+    kernel that contains it. With every concrete ``Stmt`` subclass a frozen
     dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
     bodies hash equal — so two structurally identical Body instances
     share one normalize+pretty walk through this cache. Tune mode hits
@@ -644,8 +729,8 @@ def _shared_structural_key(body: Body) -> str:
     queries but would be a *correctness bug* for any callsite running
     the normalized body.
     """
-    from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
     from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
     normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=True)
-    return "\n".join(pretty_body(normalized))
+    return digest(form(normalized))

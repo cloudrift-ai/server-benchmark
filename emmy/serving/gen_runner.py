@@ -840,7 +840,7 @@ class EmmyGenRunner:
         from transformers import AutoModelForCausalLM
 
         from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
-        from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, quantized_checkpoint_dir
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
@@ -900,7 +900,11 @@ class EmmyGenRunner:
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
         with torch.device("cpu"):
-            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str)).eval()
+            # Resolve the config through the shared helper: a host vLLM process re-registers some
+            # model types onto its own minimal config class (no derived fields — DeepSeek V4 loses
+            # ``layer_types``), and the helper reloads with Transformers' native class in that case.
+            config = _auto_config_from_pretrained(repo, revision=revision)
+            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str), config=config).eval()
             return cls.from_model(
                 model,
                 dtype_str=dtype_str,
@@ -1330,6 +1334,12 @@ class EmmyGenRunner:
                     if has_bias:
                         einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
                         einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
+                    if expert_range is not None:
+                        # The quantized store arrives pre-narrowed by the loader; the twin's own
+                        # tables carry every expert, so a shard keeps only its slice (every expert
+                        # tensor is E-leading) — the combine indexes them rank-locally.
+                        lo, hi = expert_range
+                        einputs = {nm: tensor[lo:hi].contiguous() for nm, tensor in einputs.items()}
                     if interleaved:
                         for nm in ("w_gate_up", "b_gate_up"):
                             if nm in einputs:
@@ -1337,6 +1347,9 @@ class EmmyGenRunner:
                 moe_meta.append(
                     {
                         "gate": copy.deepcopy(gate).to(dtype),
+                        # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
+                        # learned gate only weights them. Its call needs the step's token ids.
+                        "hash": getattr(gate, "tid2eid", None) is not None,
                         "inputs": einputs,
                         "local_layer": local_i,
                         "layer": i,
@@ -2004,12 +2017,13 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
-    def forward_layer_post_device(self, layer, attn_out, residual):
+    def forward_layer_post_device(self, layer, attn_out, residual, token_ids=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]``
         CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
         :meth:`forward_layer_pre_device`. A MoE layer's post program returns ``(h, xn)``; the
         routed expert dispatch + weighted combine run here in torch (the third seam) and the
-        layer output is ``h + combine``."""
+        layer output is ``h + combine``. ``token_ids`` are the step's (clamped) token ids —
+        a hash-routed layer selects its experts by them."""
         outs = self._route_post_device(layer, attn_out, residual)
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
@@ -2022,7 +2036,14 @@ class EmmyGenRunner:
             from emmy.compiler.trace.huggingface import place_routed_streams
 
             mixed, xn, mix = outs
-            routed = self._moe_combine(moe, xn)
+            # A compiled variant may hand its outputs back in its ACCUMULATION dtype (some
+            # geometries' post twins emit float32); the seam contract is the residual dtype for
+            # the carrier and the activation dtype for the routed input, so normalize before the
+            # consumers — the router and expert programs take activation-dtype rows, and the next
+            # layer's pre uploads the carrier at the residual dtype.
+            mixed = mixed.to(self.residual_dtype)
+            xn = xn.to(self._activation_dtype)
+            routed = self._moe_combine(moe, xn, token_ids)
             if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
                 routed = reduce_routed(routed)
             return place_routed_streams(mixed, routed, mix)
@@ -2033,11 +2054,12 @@ class EmmyGenRunner:
             shared = None
         # Single-token decode rides the FIXED-SLOT combine (capture-legal — no host sync, a
         # fixed launch set); every wider step keeps the routed dispatch, whose launch set
-        # varies with the routing (eager only).
-        if self._slots_ok and xn.shape[0] == 1:
-            combined = self._moe_combine_slots(moe, xn)
+        # varies with the routing (eager only). NEVER on an expert shard: the slot selector
+        # writes GLOBAL expert ids into tables that hold only this rank's experts.
+        if self._slots_ok and xn.shape[0] == 1 and moe.get("expert_range") is None:
+            combined = self._moe_combine_slots(moe, xn, token_ids)
         else:
-            combined = self._moe_combine(moe, xn)
+            combined = self._moe_combine(moe, xn, token_ids)
         if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
             combined = reduce_routed(combined)  # tensor-parallel expert shard: sum the ranks' partials
         if shared is not None:
@@ -2094,7 +2116,17 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return self._post[layer].run_device_sym([attn_out, residual])
 
-    def _moe_combine(self, moe, xn):
+    def _route(self, moe, xn, token_ids):
+        """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen
+        ``tid2eid`` table); the learned gate only weights the selection — so a hash layer without
+        the ids cannot route at all, and silently routing on garbage would serve noise."""
+        if not moe.get("hash"):
+            return moe["gate"](xn)
+        if token_ids is None:
+            raise RuntimeError(f"layer {moe['layer']} is hash-routed and needs the step's token ids to route")
+        return moe["gate"](xn, token_ids)
+
+    def _moe_combine(self, moe, xn, token_ids=None):
         """The torch half of the MoE third seam: route via the HF router module (linear +
         softmax + top-k — ops the tracer cannot map), launch the tier-routed shared expert
         program once per HIT expert on that expert's routed rows, and weighted-scatter the
@@ -2108,7 +2140,7 @@ class EmmyGenRunner:
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
         self._ensure_device()
-        gated = moe["gate"](xn)
+        gated = self._route(moe, xn, token_ids)
         self._record_routing(moe, gated[-1])
         with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
             return combine_routed_experts(
@@ -2119,7 +2151,7 @@ class EmmyGenRunner:
                 expert_range=moe.get("expert_range"),
             )
 
-    def _moe_combine_slots(self, moe, xn):
+    def _moe_combine_slots(self, moe, xn, token_ids=None):
         """Fixed-slot combine for single-token decode (``T == 1``) — the capture-legal twin of
         :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape
         write puts the router's top-k indices (plus this layer's table offset, cast to the
@@ -2137,7 +2169,7 @@ class EmmyGenRunner:
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
         self._ensure_device()
-        gated = moe["gate"](xn)
+        gated = self._route(moe, xn, token_ids)
         scores, indices = gated[-2], gated[-1]  # [1, k] each
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
@@ -2359,4 +2391,6 @@ class EmmyGenRunner:
         self._ensure_device()
         with torch.no_grad():
             out = self._norm_dev(self._collapse_streams(hidden))
-            return out.to(self._activation_dtype) if self._residual_float32 else out
+            # ALWAYS the activation dtype: the head consumes it, and the norm (or the stream
+            # collapse before it) may compute — and hand back — float32.
+            return out.to(self._activation_dtype)

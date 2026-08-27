@@ -255,6 +255,14 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         # the same boot guard.
         if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
             return []  # the caller decided; the boot guard validates capture against the runner
+        cfg = _local_config(model, vllm_args)
+        cfg = getattr(cfg, "text_config", cfg)
+        if int(getattr(cfg, "hc_mult", 1) or 1) > 1:
+            # A hyper-connection MoE (DeepSeek V4) has no fixed-slot tier: its routed combine
+            # host-syncs on every step (the placement closes the layer after the shard
+            # reduction), so decode capture is unsupported — the boot guard rejects it too.
+            logger.warning("hyper-connection MoE: decode capture is not supported (the routed combine host-syncs); serving eager")
+            return ["--enforce-eager"]
         bucket = emmy_config.gen_decode_bucket()
         if bucket <= 0:
             logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")

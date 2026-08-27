@@ -327,6 +327,33 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   seam reproduces the eager `DeepseekV4DecoderLayer`, and per-shard expert partials sum to the
   unsharded combine (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
 
+  Inside the plugin, the whole attention sublayer is the FORK's: `EmmyGenModel` constructs one of the
+  fork's own attention modules per local layer (shared top-k indexer buffer, shared aux streams,
+  absolute-layer prefixes so every SWA/compressor/indexer cache registers its own KV-cache spec), and
+  `load_weights` owns the attention family of the checkpoint stream: every `layers.N.attn.*` key of
+  the rank's interval routes through `_fork_attention_dest` — the fp8 `.scale` sibling rename, the
+  compressor's `mla_attn` placement, the two fused-projection stackings (which also cover the
+  indexer's inner compressor), and the head-sharded `attn_sink` copy — into the fork module's own
+  `weight_loader`s. The ownership table is enforced loudly BOTH ways (an unmapped attention key, and
+  a fork parameter the stream did not fully load), because vLLM's strict check waives fp8-quantized
+  parameters the same way it waives the head's. The trunk, experts and embedding need no claim (the
+  runner loaded them at construction), `head.weight` is the published spelling of `lm_head.weight`,
+  and the MTP head serves no twin. The forward hands each layer's `post` the step's (clamped) token
+  ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
+  gate only weights the selection), and the runner refuses to route such a layer without them.
+
+  Under tensor parallelism the plugin derives each rank's CONTIGUOUS expert slice from the config's
+  routed-expert count and hands it to the runner (`expert_range`): the quantized loader narrows its
+  checkpoint read to the shard, the unquantized lane slices the twin's own expert tables, and the
+  rank's partial combine is completed by the group all-reduce. The distributed gate is a REAL-engine
+  parity test: the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy
+  token ids (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the
+  engine enforces that in-process gates cannot: compiled twins may hand outputs back in their
+  ACCUMULATION dtype, so the runner normalizes the carrier to the residual dtype and the routed
+  input / final-norm output to the activation dtype at the seam; and the cross-process GPU lock is
+  scoped per physical device — serving ranks each own a card, and one machine-wide lock deadlocks
+  a rank inside its combine against the peer its pending collective is waiting for.
+
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
   `from_model` interns it into a group index, compiles that group's whole tier set on first sight
@@ -623,15 +650,14 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
-- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) is captured but not yet served.** The attention-sublayer seam
-  above is the compiler side; `EmmyGenRunner` / `EmmyGenModel` still assume the q/k/v seam and a replicated trunk.
-  Serving it on the 16× V100 recipe (TP8 × PP2, the 1Cat sm_70 fork image) additionally needs: the fork's
-  `DeepseekV4Attention` constructed per layer inside the plugin (its weights load through the fork's own mapper from the
-  checkpoint's native `layers.N.attn.*` names); a loader lane for that native naming with its `.scale` ue8m0 block
-  scales and **MXFP4 routed experts** (`expert_dtype: fp4` — the compiler has no fp4 input format; decoded to fp16 the
-  experts are ~554 GB); and tensor-parallel expert sharding with an all-reduce in the runner, because one pipeline
-  rank's experts (~69 GB at fp4) do not fit a 32 GB card replicated per TP rank. The embedding broadcasts to
-  `hc_mult` streams before layer 0 and the final norm follows the `hc_head` collapse.
+- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves in-repo; the 16× V100 recipe is not yet validated.**
+  The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
+  block scales and compressed MXFP4 routed experts, tensor-parallel expert sharding with the group all-reduce, the
+  carrier-width pipeline transport — are implemented and gated (see the hyper-connection section), including a
+  real-engine TP2×PP2 greedy-parity test on a small config. Decode capture is unsupported for this architecture
+  (the routed combine host-syncs every step; the fixed-slot selector is unsharded) — the boot guard and
+  `emmy serve` both force eager. Still ahead: the TP8×PP2 boot of the published checkpoint in the pinned 1Cat
+  sm_70 image serving mixed prefill/decode, and real-checkpoint numerics/greedy gates.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

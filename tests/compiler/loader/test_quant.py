@@ -250,6 +250,12 @@ def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
     result, _ = backend.run(compiled, input_data={"x": x, "w": blocks, "w_scale": scales})
     np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], x * decode_mxfp4(blocks, scales).T)
 
+    # A non-f32 weight input takes the closing cast, which an f32 trace never emits.
+    half = _input_graph(shape, "f16")
+    spell_mxfp4_inputs(half, {"w": ((8, 2, 16), (8, 2), False)})
+    half.validate()
+    assert half.nodes["w_logical"].output.dtype.name == "f16"
+
 
 def test_quantized_checkpoint_dir_detects_mxfp4(tmp_path):
     from emmy.compiler.trace.huggingface import quantized_checkpoint_dir

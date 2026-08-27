@@ -127,6 +127,14 @@ pick lands within 0.089 of the fork's: a near-tie between two continuations the 
 both of which continue coherently. Each arm is individually deterministic — two runs of each agree on every token —
 so the single divergence is arm-to-arm numerics at a tie, not run-to-run noise.
 
+**The routed-expert kernels are not covered by this model's serving golden.** The twin capture picks the expert
+format from `quantization_config.quant_method`, which this checkpoint declares as `fp8`, while the serving loader
+picks it from `expert_dtype: fp4` — so the golden records an `@f8e4m3` expert program and serving deploys an
+`@mxfp4` one. Goldens are keyed by strict structural kernel identity, so those kernels match nothing in it and
+resolve from measured or prior evidence instead. Serving correctness is unaffected — the agreement above was
+measured on exactly this configuration — but a release that warmed and baked this model today would seal
+unqualified picks for its dominant kernel, so that mismatch is a prerequisite for the image work, not a footnote.
+
 This is what makes the output the load-bearing evidence: a transposed expert matrix or a mis-scaled MXFP4 decode
 yields fluent-looking garbage, not correct capitals, a valid Python guard clause, and 101 of the corpus's 128 token
 ids identical to the reference implementation.

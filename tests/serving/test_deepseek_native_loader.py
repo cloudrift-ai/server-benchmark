@@ -257,3 +257,27 @@ def test_host_process_config_shadow_does_not_reach_the_twin(tmp_path):
 
     assert isinstance(model.config, transformers.DeepseekV4Config)
     assert model.config.layer_types == ["sliding_attention"]
+
+
+def test_eager_layer_twin_materializes_experts_in_the_modules_own_orientation(tmp_path):
+    """The eager reference decodes the same MXFP4 bytes the serving lane binds, but into a MODULE:
+    ``decode_mxfp4`` hands back the ``(in, out)`` matrix gpt-oss applies as ``x @ W``, while these
+    experts are ``F.linear`` parameters storing ``(out, in)``. ``w2`` catches a missing transpose on
+    shape alone; ``w1``/``w3`` are square here, exactly the case that would load silently wrong."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_layer_twin
+
+    hidden, inter, experts = 64, 32, 4
+    _config, references = _native_checkpoint(tmp_path, torch, hidden, inter, experts)
+    model = load_quantized_layer_twin(tmp_path, torch.float16, 0)
+
+    module = model.model.layers[0].mlp.experts
+    assert tuple(module.gate_up_proj.shape) == (experts, 2 * inter, hidden)
+    assert tuple(module.down_proj.shape) == (experts, hidden, inter)
+    for e in range(experts):
+        gate_up = module.gate_up_proj[e].detach().float().numpy()
+        np.testing.assert_array_equal(gate_up[:inter], references[(e, "w1")])
+        np.testing.assert_array_equal(gate_up[inter:], references[(e, "w3")])
+        np.testing.assert_array_equal(module.down_proj[e].detach().float().numpy(), references[(e, "w2")])

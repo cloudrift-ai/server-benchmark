@@ -119,7 +119,12 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
   `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
   plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four), and
-  native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales).
+  native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales, in the layout the experts
+  module declares). One checkpoint escapes that rule today: DeepSeek V4 declares `quant_method: fp8` with
+  `expert_dtype: fp4`, and the format choice here keys on `quant_method` while the serving loader keys on
+  `expert_dtype` — so its expert twin records `@f8e4m3` while serving deploys `@mxfp4`, leaving its routed-expert
+  kernels out of the golden entirely (they resolve from measured or prior evidence instead). Serving is unaffected;
+  a release that warms and bakes this model would seal unqualified picks for its dominant kernel.
   Query-head discovery validates the classic `q_proj` signature and DeepSeek's complete low-rank `q_a_proj` /
   `q_b_proj` plus shared-`kv_proj` layout. A DeepSeek V4 layer is captured through the attention-sublayer seam
   (`hyper_connection_seam` in `compiler/trace/huggingface.py`): the carrier is the `hc_mult` hyper-connection residual

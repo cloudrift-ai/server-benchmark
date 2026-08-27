@@ -123,6 +123,11 @@ The reference for `correct` is derived from the target, the way `emmy run` deriv
 (`target: {origins: …}`) compares against the numpy backend; an exact Loop target has no torch twin and compares
 against the same-input greedy execution of the same program.
 
+`offered` asks whether the pin *can be honoured*, not whether the tier would be offered to an **unpinned** search.
+Those differ, and the difference is load-bearing: a pin narrows the candidate grid authoritatively, so a schedule the
+cold search never enumerates can still be offered here. A tier the search will not reach on its own is a search
+shortfall, and the corpus does not express it.
+
 **Pinned-enumeration membership is the primary oracle, not `unreproducible_pin_flag` alone.** The flag answers `None`
 for a registered family that nothing stamped — serialized IR can omit knob stamps — so a pin that cannot be offered at
 all would read as satisfied. Membership is asked per row *through* the flag, so the families it already reads correctly

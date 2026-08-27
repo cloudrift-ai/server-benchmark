@@ -315,7 +315,7 @@ def test_moe_expert_program_takes_the_widest_admitted_step():
 
     from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
 
-    from emmy.serving.gen_runner import EmmyGenRunner
+    from emmy.serving.gen_runner import _EXPERT_PREFILL_M, EmmyGenRunner
 
     config = transformers.OlmoeConfig(
         vocab_size=128,
@@ -336,11 +336,15 @@ def test_moe_expert_program_takes_the_widest_admitted_step():
     for layer in model.model.layers:
         layer.mlp.gate.weight.data.zero_()
 
-    capacity, bucket = 64, 16
+    capacity, bucket = 512, 16
     runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=bucket, max_tokens=capacity, prefill_bucket=capacity)
     assert runner.rider_width == bucket, "the rider split must exist for this to be the widest step"
 
     t = capacity + bucket
+    # The launch has to land on the SYMBOLIC expert program: the static M=256 twin serves every
+    # row set up to _EXPERT_PREFILL_M, and a step inside that range never reaches — so never pins
+    # — the capacity this test is about.
+    assert t > _EXPERT_PREFILL_M
     hd, nh = runner.head_dim, runner.num_heads
     residual = torch.randn(t, config.hidden_size, dtype=torch.float32).cuda()
     attn_out = torch.randn(t, nh * hd, dtype=torch.float32).cuda()

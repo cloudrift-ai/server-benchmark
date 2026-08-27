@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import statistics
 
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
@@ -63,26 +62,6 @@ class TerminalBench:
 
     def _note(self, op, stats: PerfStats, status: str) -> None:
         self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), stats, status, chain_op_sig(op)))
-
-    @staticmethod
-    def _point_stats(us: float):
-
-        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
-
-    @classmethod
-    def _stats_from_launch(cls, lt):
-
-        if lt.samples and len(lt.samples) >= 1:
-            us = [s * 1000.0 for s in lt.samples]
-            return PerfStats(
-                median=statistics.median(us),
-                min=min(us),
-                max=max(us),
-                mean=statistics.fmean(us),
-                variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
-                n_samples=len(us),
-            )
-        return cls._point_stats(lt.time_ms * 1000.0)
 
     @staticmethod
     def _body_json(op, dialect: str) -> str:
@@ -191,10 +170,10 @@ class TerminalBench:
                 ", ".join(f"{nid}: {type(self.graph.nodes[nid].op).__name__}" for nid in self.unlowered),
             )
             fail_s = self.backend.bench_run_timeout_s if self.backend is not None else 1.0
-            return "done", (self._point_stats(float(fail_s) * 1_000_000.0), "bench_fail")
+            return "done", (PerfStats.point(float(fail_s) * 1_000_000.0), "bench_fail")
 
         if not self.cuda_nodes:
-            return "done", (self._point_stats(0.0), "ok")
+            return "done", (PerfStats.point(0.0), "ok")
 
         # Cache lookup: if every CudaOp already has a perf row for this
         # (context, backend), skip the benchmark entirely and rebuild the
@@ -218,7 +197,7 @@ class TerminalBench:
                 agg = self._accumulate(agg, row.stats)
                 self._note(node.op, row.stats, row.status)
                 logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
-            return "done", (agg or self._point_stats(0.0), status)
+            return "done", (agg or PerfStats.point(0.0), status)
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
@@ -230,9 +209,9 @@ class TerminalBench:
             # explicit stub backend.
             agg = None
             for node in self.cuda_nodes:
-                agg = self._accumulate(agg, self._point_stats(1.0))
-                self._note(node.op, self._point_stats(1.0), "ok")
-            return "done", (agg or self._point_stats(0.0), "ok")
+                agg = self._accumulate(agg, PerfStats.point(1.0))
+                self._note(node.op, PerfStats.point(1.0), "ok")
+            return "done", (agg or PerfStats.point(0.0), "ok")
 
         logger.info("[tune] benching %d kernel(s) in graph", len(self.cuda_nodes))
         return "bench", None
@@ -249,7 +228,7 @@ class TerminalBench:
                 len(self.cuda_nodes),
                 exc,
             )
-            return self._point_stats(0.0), "compile_timeout"
+            return PerfStats.point(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
         logger.warning(
             "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d kernel(s)",
@@ -257,13 +236,13 @@ class TerminalBench:
             fail_us,
             len(self.cuda_nodes),
         )
-        s = self._point_stats(fail_us)
+        s = PerfStats.point(fail_us)
         agg = None
         for node in self.cuda_nodes:
             self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
             self._note(node.op, s, "bench_fail")
             agg = self._accumulate(agg, s)
-        return agg or self._point_stats(0.0), "bench_fail"
+        return agg or PerfStats.point(0.0), "bench_fail"
 
     def finalize_result(self, result):
         agg = None
@@ -275,14 +254,14 @@ class TerminalBench:
                 len(self.cuda_nodes),
             )
             avg_us = (result.time_ms * 1000.0) / max(len(self.cuda_nodes), 1)
-            s = self._point_stats(avg_us)
+            s = PerfStats.point(avg_us)
             for node in self.cuda_nodes:
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
                 self._note(node.op, s, "ok")
                 agg = self._accumulate(agg, s)
         else:
             for node, lt in zip(self.cuda_nodes, per_launch, strict=True):
-                s = self._stats_from_launch(lt)
+                s = PerfStats.from_launch(lt)
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
                 self._note(node.op, s, "ok")
                 agg = self._accumulate(agg, s)
@@ -293,7 +272,7 @@ class TerminalBench:
             _cp.get_default_memory_pool().free_all_blocks()
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
-        return agg or self._point_stats(0.0), "ok"
+        return agg or PerfStats.point(0.0), "ok"
 
 
 async def bench_terminal_async(cand, *, backend, db):

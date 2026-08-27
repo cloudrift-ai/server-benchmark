@@ -11,7 +11,7 @@ Recording is **default-on behind a quality bar** (:func:`meets_quality_bar` — 
 own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
 
 - every cleanly-benched pinned golden / ``--ab`` row as an ``ok`` leaf;
-- a realized config whose bench failed as a ``bench_fail`` negative (its ``value_us`` is
+- a realized config whose bench failed as a ``bench_fail`` negative (its stored latency is
   :data:`FAIL_SENTINEL_US`, not a measurement — consumers read ``status``), and only when
   the config lowered to ONE kernel: a failure belongs to the variant, and spreading one
   sentinel across several kernels would file a number none of them measured;
@@ -53,12 +53,14 @@ provenance.
 from __future__ import annotations
 
 import logging
-import statistics
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
+
+from emmy.compiler.pipeline.search.db import PerfStats
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -71,7 +73,7 @@ logger = logging.getLogger(__name__)
 MIN_RECORD_WARMUP = 5
 MIN_RECORD_ITERS = 20
 
-# A ``bench_fail`` leaf's ``value_us`` — NOT a measurement (the tune stores the bench
+# A ``bench_fail`` leaf's stored latency — NOT a measurement (the tune stores the bench
 # watchdog's sentinel there; consumers read ``status`` and every metric excludes fails).
 FAIL_SENTINEL_US = 1e9
 
@@ -81,10 +83,10 @@ class BenchLeaf:
     """One benched KERNEL's measurement, extracted from a benched compiled graph."""
 
     op_sig: str  # the kernel's identity — the stamp it was born with (``chain_op_sig``)
+    op_key: str | None  # the kernel's ``perf``-table identity (``Op.cache_key``)
     knobs: dict  # the kernel's own realized knob dict (S_* stamps + tunables)
-    value_us: float  # the kernel's own launch time; sentinel on fail
-    variance: float | None
-    n_samples: int | None
+    stats: PerfStats  # the kernel's own launch statistics; a point sentinel on fail
+    captured: bool  # the bench ran under CUDA graph capture (pure GPU time)
     status: str  # 'ok' | 'bench_fail'
 
 
@@ -118,6 +120,7 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
 
     nids = [nid for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
+    captured = bool(getattr(bench, "captured", False))
     if status != "ok" and len(nids) != 1:
         logger.debug("[record-nodes] %d-kernel variant failed to bench — the failure is the variant's, no row recorded", len(nids))
         return []
@@ -131,22 +134,15 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
             skipped += 1
             logger.debug("[record-nodes] kernel %s carries no structural stamp in its chain — skipped", nid)
             continue
-        knobs = dict(op.knobs or {})
+        leaf = partial(BenchLeaf, op_sig=sig, op_key=op.cache_key(), knobs=dict(op.knobs or {}))
         if status != "ok":
-            leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=FAIL_SENTINEL_US, variance=None, n_samples=None, status=status))
+            leaves.append(leaf(stats=PerfStats.point(FAIL_SENTINEL_US), captured=False, status=status))
             continue
         launch = per_launch[idx] if idx < len(per_launch) else None
         if launch is None:
             logger.debug("[record-nodes] kernel %s has no per-launch timing — skipped", nid)
             continue
-        variance = n_samples = None
-        if launch.samples:
-            samples_us = [sample * 1000.0 for sample in launch.samples]
-            n_samples = len(samples_us)
-            variance = statistics.pvariance(samples_us) if n_samples >= 2 else None
-        leaves.append(
-            BenchLeaf(op_sig=sig, knobs=knobs, value_us=launch.time_ms * 1000.0, variance=variance, n_samples=n_samples, status="ok")
-        )
+        leaves.append(leaf(stats=PerfStats.from_launch(launch), captured=captured, status="ok"))
     if skipped and not leaves:
         # Silence must never read as success: a graph whose EVERY kernel lost its stamp means a
         # provenance gap in some lowering path, not "nothing to record".
@@ -174,6 +170,11 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     rows = []
     for leaf in leaves:
         features = {**h_feats, **leaf.knobs}
+        # ``n_samples=0`` is the "no per-iter sample list" marker (a point stat or a fail
+        # sentinel), and the node store spells that unknown as NULL: its quality guard
+        # requires BOTH sides known, and a row claiming zero samples at zero variance would
+        # read as "not worse" against every stored leaf and always replace it.
+        n_samples = leaf.stats.n_samples or None
         rows.append(
             NodeRow(
                 node_key=node_key(ctx_key, gpu, leaf.op_sig, features),
@@ -181,13 +182,13 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
                 context_key=ctx_key,
                 op_sig=leaf.op_sig,
                 features=features,
-                value_us=leaf.value_us,
+                value_us=leaf.stats.median,
                 depth=0,  # a bench leaf has no search tree above it
                 gpu=gpu,
                 visits=1,
                 is_leaf=True,
-                variance=leaf.variance,
-                n_samples=leaf.n_samples,
+                variance=leaf.stats.variance if n_samples is not None and n_samples >= 2 else None,
+                n_samples=n_samples,
                 status=leaf.status,
                 run_id=run_id,
             )

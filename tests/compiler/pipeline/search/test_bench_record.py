@@ -39,8 +39,19 @@ def _ancestors(*stamped: dict):
 
 
 def _kernel(name: str, knobs: dict, *stamped: dict) -> CudaOp:
-    """A compiled kernel carrying ``knobs``, descended from ``stamped`` (nearest first)."""
-    return CudaOp(kernel_name=name, knobs=knobs, source=_ancestors(*stamped))
+    """A compiled kernel carrying ``knobs``, descended from ``stamped`` (nearest first).
+
+    The rendered source spells the kernel's own knobs, because ``CudaOp.cache_key`` digests
+    the source and the launch geometry with the kernel NAME normalized out — two stubs
+    differing only by name genuinely share a key, exactly as two renamings of one kernel
+    should, so a per-kernel ``perf`` row needs bodies that actually differ."""
+    body = "; ".join(f"{key}={value}" for key, value in sorted(knobs.items()))
+    return CudaOp(
+        kernel_name=name,
+        kernel_source=f"__global__ void {name}() {{ /* {body} */ }}",
+        knobs=knobs,
+        source=_ancestors(*stamped),
+    )
 
 
 def _graph(*ops: CudaOp) -> Graph:
@@ -50,8 +61,11 @@ def _graph(*ops: CudaOp) -> Graph:
     return graph
 
 
-def _bench(*launches: tuple[float, list[float] | None]):
-    return SimpleNamespace(per_launch=[SimpleNamespace(time_ms=ms, samples=samples) for ms, samples in launches])
+def _bench(*launches: tuple[float, list[float] | None], captured: bool = True):
+    return SimpleNamespace(
+        captured=captured,
+        per_launch=[SimpleNamespace(time_ms=ms, samples=samples) for ms, samples in launches],
+    )
 
 
 def test_a_splits_kernels_are_two_rows_with_their_own_latencies() -> None:
@@ -63,7 +77,7 @@ def test_a_splits_kernels_are_two_rows_with_their_own_latencies() -> None:
 
     leaves = bench_leaves(graph, _bench((0.010, None), (0.002, None)))
 
-    assert [leaf.value_us for leaf in leaves] == [10.0, 2.0]
+    assert [leaf.stats.median for leaf in leaves] == [10.0, 2.0]
     assert [leaf.op_sig for leaf in leaves] == [kernel_sig(MAIN), kernel_sig(COMBINE)]
     assert [leaf.knobs["WORK"] for leaf in leaves] == ["w4x2", ""], "each row carries its own kernel's knobs"
 
@@ -94,8 +108,8 @@ def test_each_kernel_keeps_its_own_bench_statistics() -> None:
 
     leaves = bench_leaves(graph, _bench((0.010, [0.010, 0.012]), (0.002, [0.002, 0.002])))
 
-    assert [leaf.n_samples for leaf in leaves] == [2, 2]
-    assert leaves[0].variance > 0 and leaves[1].variance == 0
+    assert [leaf.stats.n_samples for leaf in leaves] == [2, 2]
+    assert leaves[0].stats.variance > 0 and leaves[1].stats.variance == 0
 
 
 def test_a_kernel_with_no_stamp_in_its_chain_is_skipped() -> None:
@@ -121,7 +135,7 @@ def test_a_single_kernel_failure_records_its_negative() -> None:
     [leaf] = bench_leaves(graph, None, status="bench_fail")
 
     assert leaf.status == "bench_fail"
-    assert leaf.value_us == FAIL_SENTINEL_US
+    assert leaf.stats.median == FAIL_SENTINEL_US
     assert leaf.op_sig == kernel_sig(MAIN)
 
 
@@ -139,3 +153,27 @@ def test_a_kernel_with_no_launch_timing_is_skipped_without_taking_the_others_dow
     leaves = bench_leaves(graph, _bench((0.010, None)))
 
     assert [leaf.op_sig for leaf in leaves] == [kernel_sig(MAIN)]
+
+
+def test_a_leaf_carries_the_kernels_perf_key_and_capture_flag() -> None:
+    """The perf key is the kernel's ``cache_key`` — the same identity the tune writes its own
+    measured row under, which is what lets the two meet on one row instead of racing."""
+    graph = _graph(_kernel("main", MAIN, MAIN), _kernel("combine", COMBINE, COMBINE))
+
+    leaves = bench_leaves(graph, _bench((0.010, None), (0.002, None)))
+
+    assert [leaf.op_key for leaf in leaves] == [node.op.cache_key() for node in graph.nodes.values()]
+    assert leaves[0].op_key != leaves[1].op_key
+    assert all(leaf.captured for leaf in leaves)
+    assert not bench_leaves(graph, _bench((0.010, None), (0.002, None), captured=False))[0].captured
+
+
+def test_a_launch_without_samples_keeps_its_median_and_no_sample_count() -> None:
+    """``time_ms`` already IS the median of the measured iters, so a launch that reported no
+    per-iter list loses nothing but the spread — which must read as unknown, not as zero."""
+    graph = _graph(_kernel("main", MAIN, MAIN))
+
+    [leaf] = bench_leaves(graph, _bench((0.010, None)))
+
+    assert leaf.stats.median == leaf.stats.min == leaf.stats.mean == 10.0
+    assert leaf.stats.n_samples == 0

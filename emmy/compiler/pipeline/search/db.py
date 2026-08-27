@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import statistics
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -95,6 +96,33 @@ class PerfStats:
     mean: float
     variance: float
     n_samples: int
+
+    @classmethod
+    def point(cls, us: float) -> PerfStats:
+        """A degenerate row carrying a single aggregate value (``n_samples=0`` marks it a
+        derived total or a sentinel, not a raw sample set)."""
+        return cls(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
+
+    @classmethod
+    def from_launch(cls, launch) -> PerfStats:
+        """One benched kernel's statistics from its :class:`LaunchTime` — the one spelling
+        every writer of a measured row uses, so a kernel benched by ``run --bench`` and the
+        same kernel benched by the tune summarize identically.
+
+        A launch that reported no per-iter samples degrades to :meth:`point` over its
+        ``time_ms``, which is the same number the sample list would give: the backend already
+        sets ``LaunchTime.time_ms`` to the median of the measured iters."""
+        if launch.samples:
+            us = [sample * 1000.0 for sample in launch.samples]
+            return cls(
+                median=statistics.median(us),
+                min=min(us),
+                max=max(us),
+                mean=statistics.fmean(us),
+                variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
+                n_samples=len(us),
+            )
+        return cls.point(launch.time_ms * 1000.0)
 
 
 @dataclass(frozen=True)

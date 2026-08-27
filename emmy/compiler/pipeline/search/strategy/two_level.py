@@ -148,12 +148,6 @@ class TwoLevelResult:
     prior_summaries: list[str] = field(default_factory=list)  # online-prior stats
 
 
-def _point_stats(us: float) -> PerfStats:
-    """A degenerate :class:`PerfStats` carrying a single aggregate value
-    (``n_samples=0`` marks it as a derived total, not a raw sample set)."""
-    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
-
-
 def _mint_run_id() -> str:
     """A sortable, unique tune-session id stamped on this run's ``node`` rows —
     UTC timestamp + a uuid tail (two sessions in the same second stay distinct)."""
@@ -288,7 +282,7 @@ class TwoLevelStrategy(SearchStrategy):
         for token, fused in outer_run.drive(graph):
             n_terminals += 1
             reward = await self._evaluate_terminal(fused.graph, ctx)
-            stats = _point_stats(reward.total_us)
+            stats = PerfStats.point(reward.total_us)
             outer.observe(token, stats, "ok" if reward.ok else "bench_fail")
             positions = sum(r.multiplicity for r in reward.per_op)
             logger.info(
@@ -425,7 +419,7 @@ class TwoLevelStrategy(SearchStrategy):
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.
-                    db.record_perf(ctx_key, work.key, backend=backend_name, status="ok", stats=_point_stats(best_total), captured=True)
+                    db.record_perf(ctx_key, work.key, backend=backend_name, status="ok", stats=PerfStats.point(best_total), captured=True)
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.

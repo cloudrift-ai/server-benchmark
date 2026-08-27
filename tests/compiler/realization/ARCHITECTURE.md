@@ -134,14 +134,18 @@ all would read as satisfied. Membership is asked per row *through* the flag, so 
 (a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read; and
 `realized` closes the flag's hole with an explicit stamping check over the authored knobs.
 
-## Stage 5 — latency
+## Latency
 
-`perf`-marked, `-O3`, and skipped unless the live card's capability matches the case's. It compares
-the best of three runs against the case's stored latency for this card, and a slower case
-**reports** rather than fails: enforcement belongs in a human reviewing the timing-refresh pull
-request, not in a red test a legitimate correctness fix could pin red forever. Nothing auto-updates
-a stored number — an automatic ratchet ends up pinned to the luckiest noise excursion ever
-observed. `emmy run --golden-file FILE --bench --record` is the only writer.
+A case may also carry measured microseconds. **The measuring lives in `tests/perf/`**, not here:
+`make test` compiles at `-Xcicc -O1`, which is not a measurement lane, so a latency assertion in
+this directory would measure the wrong regime entirely. That lane benches every closed case its
+card can run, joins the result to its comparison table, and compares the same measurement against
+the stored number — one bench, both answers. See `tests/perf/ARCHITECTURE.md`.
+
+A slower case **reports** rather than fails: enforcement belongs in a human reviewing the
+timing-refresh pull request, not in a red test a legitimate correctness fix could pin red forever.
+Nothing auto-updates a stored number — an automatic ratchet ends up pinned to the luckiest noise
+excursion ever observed. `emmy run --golden-file FILE --bench --record` is the only writer.
 
 The band is 5%, measured rather than guessed: ten cases spanning 1.5 us to 579 us, four estimates
 each on an idle RTX 5090, put the best-of-three estimator's own spread at a median of 0.17% and a

@@ -97,6 +97,11 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
 - **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
   above, and it is always fixable where you are: `offered` and `realized` run at the case's declared capability, while
   `built` and `correct` run only on a card whose capability equals it.
+- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` compiles at `-O1` and never
+  measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
+  `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
+- **Never write a benchmark script.** `emmy run --golden-file FILE --bench --record` benches a golden and writes its
+  timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
 
 Before adding a case, read `tests/compiler/realization/ARCHITECTURE.md` — it owns what earns a case, the knob spelling
 rules, and what deliberately stays in Python.

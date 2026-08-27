@@ -1,83 +1,71 @@
-# Perf Suite — `tests/perf/`
+# Perf suite architecture
 
-Apples-to-apples kernel-level performance comparison between Emmy and PyTorch eager. Gated by the `perf` pytest
-marker — **deselected by default** so `make test` stays fast. Run explicitly with `make bench-kernels` (or
-`pytest -m perf`).
-
-## What it measures
-
-The case list mirrors the 12 fused kernels Emmy emits when compiling a single Qwen3-Embedding-0.6B decoder layer
-(`emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --ir loop`). Each case is a small Python expression that
-lowers to the same single fused launch, so the suite is a kernel-by-kernel view of what the compiler actually runs at
-the model level. Model dims: hidden=1024, intermediate=3072, num_heads=16, num_kv_heads=8, head_dim=128. Each case
-runs at `seq_len ∈ {32, 128, 512}`.
-
-| Op          | Maps to Qwen3 kernel(s)                                | What runs (emmy)                              | What runs (PyTorch)                            |
-|-------------|--------------------------------------------------------|----------------------------------------------------|------------------------------------------------|
-| `rmsnorm`   | 0 / 9 (input + post-attn layernorm), 4 / 5 (q/k norm)  | `RmsNormOp(x, w)`                                  | `F.rms_norm`                                   |
-| `matmul`    | 1 / 2 / 3 (q_proj, kv_proj)                            | `MatmulOp(a, b)`                                   | `torch.matmul`                                 |
-| `sdpa`      | 6 + 7 (masked QK + softmax/AV)                         | `SdpaOp(q, k, v, is_causal=True)`                  | `F.scaled_dot_product_attention(..., GQA)`     |
-| `matmul_add`| 8 (o_proj+resid), 11 (down_proj+resid)                 | `MatmulOp → ElementwiseOp("add")`                  | `torch.matmul(x, w) + r`                       |
-| `gated_mlp` | 10 (gate·silu·up fused, sans down-proj)                | `MatmulOp ×2 → silu → multiply`                    | `F.silu(torch.matmul(x, wg)) * torch.matmul(x, wu)` |
-
-Primitive ops (`rmsnorm`, `matmul`) live in `test_primitives.py`. Fused signatures (`sdpa`, `matmul_add`,
-`gated_mlp`) live in `test_fused.py`. `gated_mlp` is the gate+up fused launch (Qwen3 layer kernel 10); both matmuls
-share the same hidden-dim reduce and the silu·multiply is folded into the epilogue. The down_proj+residual that
-follows is a separate kernel (`matmul_add.down_proj`).
-
-These cases run FP32 on both sides because the curated list was authored that way, not because the compiler is
-limited to it — Emmy emits FP16 and BF16 throughout, including the mma warp tier. The `dtype` field on `Case` exists
-so an FP16 column can be added without touching callers.
-
-## How it's wired
-
-- `cases.py` — `Case` dataclass + curated `CASES` list + `build_torch_ref` / `build_emmy_graph`.
-- `conftest.py` — `bench_pair` fixture (CUDA-event timing on the torch side, `CudaBackend.benchmark` on the emmy
-  side), session-end summary table, JSON dump to `.results/`. Subprocess cases read their latencies from
-  `emmy run --bench --json`, the record every other consumer reads, rather than from a dump-dir artifact.
-- `test_primitives.py` / `test_fused.py` — one parametrized test each, ids = `case.name`.
-
-The emmy-side timing reuses `CudaBackend.benchmark` (per-kernel CUDA events via cupy, see
-`emmy/compiler/backend/cuda/program.py:369`) so launch counts and per-kernel latency are available; the torch
-side uses `torch.cuda.Event` matching the pattern in `scripts/bench_block.py:194-202`.
-
-## Reading the output
-
-`pytest_terminal_summary` prints one table sorted by `ratio = torch_us / emmy_us` ascending — losses
-(ratio < 1) first:
-
-```
-case                          shape                          torch_us  depl_us  ratio  launches
-----------------------------  -----------------------------  --------  -------  -----  --------
-gated_mlp.qwen3emb.s512       (1,512,1024) x (1024,3072) ...   1230.0   2890.4  0.43x         1
-rmsnorm.qwen3emb.layer.s512   (1,512,1024) x (1024,)             12.1      9.8  1.23x         1
-...
-```
-
-The same data is dumped to `tests/perf/.results/<utc-timestamp>.json` for cross-run diffing. `EMMY_GIT_REV` is
-recorded if set. A self-contained ECharts plot of `ratio` per case (sorted ascending, bars colored by op, optional
-`torch.compile` overlay) is written next to the JSON as `<utc-timestamp>.html` — open it in a browser; no server
-needed (the chart loads ECharts from the jsDelivr CDN).
-
-`test_dit_comparison.py` is the separate block-level acceptance lane for `facebook/DiT-XL-2-256`. It is both
-`perf`-marked and gated by `EMMY_RUN_DIT_PRETRAINED=1` because it downloads a multi-gigabyte checkpoint. On CUDA it
-runs layer 0 through the fatal eager-correctness gate and requires eager PyTorch, `torch.compile`, and Emmy latency
-plus eager-relative speedups in the requested JSON report.
-
-## Adding a case
-
-Append to the appropriate builder in `cases.py` (`_matmul_proj_cases`, `_rmsnorm_layer_cases`, …) — no test code
-changes required, parametrize picks it up by name. If a new fused launch appears in the Qwen3-Embedding layer dump
-that the current taxonomy doesn't cover, add a new op to `Case.op` along with matching branches in `code`,
-`build_torch_ref`, and `build_emmy_graph`.
-
-## Running
+`tests/perf/` measures Emmy against PyTorch on the GPU. It is gated by the `perf` marker, which the
+root `tests/conftest.py` deselects for any `tests/` collection unless `-m perf` is passed — so
+`make test` never runs it. Invoke it explicitly:
 
 ```bash
-make bench-kernels                                                  # full suite
-./venv/bin/pytest tests/perf/ -m perf -v -k matmul                  # one op
-./venv/bin/pytest tests/perf/ -m perf -v -k 'qwen3emb.layer'        # one kernel family
-./venv/bin/pytest tests/perf/test_primitives.py -m perf -v -s       # primitives only
+make bench-kernels                 # the stock lane (no tune DB)
+make bench-kernels-tuned           # the same cases with EMMY_TUNE_DB pointed at a tuned DB
+pytest tests/perf/ -m perf -v      # directly
 ```
 
-`make test` continues to skip everything in `tests/perf/`.
+## The case list is the realization corpus
+
+There is no case table here. `test_corpus.py` parametrizes over every **closed**
+`tests/compiler/realization/cases/**.yaml` whose declared capability matches the live card, and
+benches each one pinned to the schedule that case authors.
+
+That is deliberate, and it replaced a hand-curated list of twelve Qwen3-Embedding-0.6B layer-0
+kernels. A curated list describes its programs in prose and shapes, so it drifts from the compiler
+without anything noticing: this one still claimed "Emmy currently emits FP32 only" long after that
+stopped being true, and its `EMMY_BK` parametrization pinned a knob that no longer existed, so both
+of its cells ran the same compile. A corpus case stores the program itself, is replayed by the
+correctness lane on every commit, and carries its own realization contract.
+
+Those twelve kernels survive as `cases/qwen3emb/` — RMSNorm at the layer and per-head widths, the
+Q and K/V projections, causal GQA attention, `o_proj` and `down_proj` with the residual fused into
+the epilogue, and the gated MLP, each at seq 32 / 128 / 512. Read
+`tests/compiler/realization/ARCHITECTURE.md` before adding a case.
+
+## One bench, two answers
+
+Each case is measured once and the result answers both questions the lane exists for:
+
+- **How do we compare to PyTorch** — the row joins the session-end table, emmy beside eager and
+  `torch.compile`, sorted worst-first.
+- **Did we regress** — the same measurement is compared against the case's stored `latency:` entry
+  for this card. Samples are taken lazily: a run inside the band settles the case, so only a case
+  that looks slow pays for the extra runs.
+
+**A regression is reported, never enforced.** A slower case prints a finding; the timing-refresh
+workflow turns it into a labelled pull request a human accepts or declines. A lane that goes red
+because one legitimate correctness fix cost latency is a lane nobody reads. What *does* fail is a
+case that cannot be benched at all — that is a broken measurement, not a slow kernel.
+
+A closed case with no stored latency for the live card is named at session end, with the command
+that records it. Only on a card that can answer: an agent on a machine without it is never asked.
+
+## How it runs
+
+- `conftest.py` — the `bench_pair` fixture, the session-end table, the JSON dump to `.results/`,
+  and the ECharts plot. Benching goes through `emmy run --golden-file … --golden … --bench --ab
+  <schedule> --json` at `-O3`, one fresh process per case: reusing the CLI keeps the
+  eager / `torch.compile` / emmy comparison and the ncu metrics on the code path users invoke
+  directly, and reusing the corpus keeps one case inventory in the tree instead of two.
+- `test_corpus.py` — the parametrized walker.
+- `test_dit_comparison.py` — a separate subject: one fixed-shape Diffusers DiT block. It needs the
+  `image` extra and `EMMY_RUN_DIT_PRETRAINED=1` for the real checkpoint, so normal CI never
+  downloads it.
+
+`EMMY_BENCH_NCU=1` adds an ncu pass with a curated metric set (occupancy, bank conflicts,
+SM/DRAM/FMA throughput, registers), appended as extra table columns and nested per row in the JSON.
+`EMMY_TUNE=1` switches the fixture to a tune-only path that populates the autotune DB and measures
+nothing.
+
+Bench subprocesses coordinate on a per-uid advisory GPU lock (`EMMY_GPU_LOCK`), so only the
+kernel-launch phase serializes across xdist workers; trace, compile and dump-writing run unlocked.
+
+**Never write a benchmark script.** `emmy run --bench --json` is the record every consumer reads,
+and `--record` writes a measured latency back into a case. A missing capability there is a flag to
+add, not a script to write.

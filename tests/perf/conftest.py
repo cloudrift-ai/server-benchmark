@@ -8,13 +8,17 @@ the root ``tests/conftest.py`` hook skips perf-marked items for any
 stays fast. Run explicitly with ``pytest -m perf`` (or ``make
 bench-kernels``).
 
-The ``bench_pair`` fixture drives ``emmy run --bench`` (and
+The ``bench_pair`` fixture drives ``emmy run --bench --json`` (and
 ``--profile`` when ``EMMY_BENCH_NCU=1``) as a subprocess per
-``Case`` and parses the dump files (``EMMY_DUMP_DIR``-rooted) to
-build a ``PerfRow``. Reusing the CLI's bench infra keeps the
-torch / torch.compile / emmy comparison and the ncu metrics on
-the same code path users invoke directly. Iteration count comes from
-``case.iters`` (heavy cases at 20, others at 100).
+realization-corpus case, pinned to the schedule that case authors, and
+reads the record to build a ``PerfRow``. Reusing the CLI keeps the
+torch / torch.compile / emmy comparison and the ncu metrics on the same
+code path users invoke directly, and reusing the corpus keeps one case
+inventory in the tree instead of two.
+
+The same measurement also answers the regression question: a case
+carrying a stored latency for this card is compared against it, best of
+a few runs, and a slower one REPORTS rather than fails.
 
 After the session, ``pytest_terminal_summary`` prints a table sorted
 by ratio (worst losses first) and writes the same data to
@@ -38,7 +42,8 @@ from pathlib import Path
 import pytest
 
 from tests.compiler.helpers import requires_cuda  # noqa: F401  (re-exported)
-from tests.perf.cases import Case
+from tests.compiler.realization import helpers
+from tests.compiler.realization.helpers import Case
 
 _RESULTS_DIR = Path(__file__).resolve().parent / ".results"
 
@@ -79,6 +84,11 @@ class PerfRow:
     # name; see ``emmy.commands.run._NCU_METRICS``). ``None`` when
     # not collected.
     ncu: dict[str, dict[str, float]] | None = None
+    #: This card's stored latency for the case, when it has one. ``None`` means the corpus has no
+    #: baseline for this card yet — reported at session end so coverage can grow, never a failure.
+    recorded_us: float | None = None
+    #: Set when every run came in above the band. A finding, not a failure.
+    regressed: bool = False
 
 
 def _collector(config) -> list[PerfRow]:
@@ -102,33 +112,23 @@ def _ncu_enabled() -> bool:
 
 @pytest.fixture
 def bench_pair(request):
-    """Return a callable ``run(case, *, warmup, iters) -> PerfRow``.
+    """Return a callable ``run(case) -> PerfRow`` for one realization-corpus case.
 
-    Each call spawns ``emmy run --code <case.code> --bench
-    [--profile]`` with a fresh ``EMMY_DUMP_DIR`` and parses the
-    resulting JSON / CSV. The CLI's ``--bench`` path interleaves
-    ``Eager PyTorch`` / ``torch.compile`` / ``Emmy`` per iter so
-    all three see the same warm GPU state. ``--profile`` (gated by
-    ``EMMY_BENCH_NCU=1``) runs ncu once with a curated metric set
-    and dumps the per-kernel CSV/JSON to the same dir.
+    Each call spawns ``emmy run --golden-file … --golden … --bench --ab <the case's schedule>
+    --json``, at deployable optimization, and reads the record. The case is pinned to the schedule
+    it authors rather than left to greedy, because a corpus case names a schedule and a timing for
+    a different kernel would answer a different question.
 
-    Does not assert on the ratio — the suite tracks performance, it
-    doesn't gate on it.
+    Does not assert on the ratio — the lane tracks performance, it does not gate on it.
     """
 
-    def _run(case: Case, *, warmup: int = 10, iters: int | None = None) -> PerfRow | None:
+    def _run(case: Case) -> PerfRow | None:
         if _tune_enabled():
-            # Tune-only path: run ``emmy tune`` per case to
-            # populate the autotune DB. Measurement is skipped entirely —
-            # run ``make bench-kernels-tuned`` afterwards to measure with
-            # the tuned knobs. Search runs until patience or tree
-            # exhaustion (no wall budget).
+            # Tune-only path: populate the autotune DB, measure nothing. Run
+            # ``make bench-kernels-tuned`` afterwards to measure with the tuned knobs.
             _tune_via_subprocess(case)
             return None
-
-        if iters is None:
-            iters = case.iters
-        row = _bench_via_subprocess(case, warmup=warmup, iters=iters, profile=_ncu_enabled())
+        row = _bench_corpus_case(case, profile=_ncu_enabled())
         _collector(request.config).append(row)
         return row
 
@@ -136,125 +136,76 @@ def bench_pair(request):
 
 
 def _tune_enabled() -> bool:
-    """``EMMY_TUNE=1`` enables the tune-only path: each case spawns
-    ``emmy tune`` to populate the autotune DB
-    (``EMMY_TUNE_DB``). The bench step is skipped — re-run the suite
-    without ``EMMY_TUNE`` (e.g. ``make bench-kernels-tuned``) to
-    measure with the tuned knobs."""
-    return os.environ.get("EMMY_TUNE", "").strip().lower() in ("1", "true", "yes")
+    return os.environ.get("EMMY_TUNE", "") in ("1", "true", "True")
 
 
 def _tune_via_subprocess(case: Case) -> None:
-    """Spawn ``emmy tune`` for one case. Writes knob
-    measurements to ``EMMY_TUNE_DB`` and exits — no bench is run."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "emmy.emmy",
-        "tune",
-        "--code",
-        case.code,
-        "-v",
-    ]
-    env = dict(os.environ)
-    sys.stderr.write(f"[tune {case.name}] launching: {' '.join(cmd)}\n")
-    sys.stderr.flush()
-    try:
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=None, env=env, timeout=180.0)
-    except subprocess.TimeoutExpired:
-        sys.stderr.write(f"[tune {case.name}] TIMEOUT after 180s\n")
-        return
-    if res.returncode != 0:
-        sys.stderr.write(f"[tune {case.name}] exit={res.returncode}\n")
+    """Search this case's kernel and record the winners into the autotune DB."""
+    subprocess.run(
+        [sys.executable, "-m", "emmy.emmy", "tune", "--golden-file", str(case.path), "--kernel", case.record.name],
+        check=False,
+        env={**os.environ, "EMMY_TUNE": "1"},
+        timeout=3600,
+    )
 
 
-def _bench_via_subprocess(case: Case, *, warmup: int, iters: int, profile: bool) -> PerfRow:
-    """Spawn ``emmy run --bench --json`` for one case and read its record.
+def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
+    """Measure one case and build its row, including the regression verdict.
 
-    The latencies come from ``--json`` — the machine-readable record every other consumer reads —
-    rather than from a dump-dir artifact, so there is one record shape in the tree instead of a
-    third harvest surface beside it. ``EMMY_DUMP_DIR`` is still set, because the optional launch
-    count and ncu counters have no home in the record.
+    Samples are taken lazily against the stored baseline: a run inside the band settles the case,
+    because the minimum can only fall. Only a case that looks slow pays for the extra runs — which
+    is exactly the case where interference is the question.
     """
-    with tempfile.TemporaryDirectory(prefix=f"emmy_bench_{case.name}_") as tmp:
-        record_path = Path(tmp, "record.json")
-        cmd = [
-            sys.executable,
-            "-m",
-            "emmy.emmy",
-            "run",
-            "--code",
-            case.code,
-            "--bench",
-            "--json",
-            str(record_path),
-            "--warmup",
-            str(warmup),
-            "--iters",
-            str(iters),
-        ]
-        if profile:
-            cmd.append("--profile")
-        env = dict(os.environ)
-        env["EMMY_DUMP_DIR"] = tmp
-        env.pop("EMMY_NCU_CHILD", None)
-
-        timeout_s = 900.0
-        res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_s)
-        res_stderr = res.stderr
-        if res.returncode != 0:
-            # Surface stderr so flaky-bench cases are diagnosable, but
-            # synthesize a minimal row so the suite doesn't abort.
-            sys.stderr.write(f"[bench {case.name}] exit={res.returncode}\n{res_stderr[-2000:]}\n")
-            return PerfRow(
-                name=case.name,
-                op=case.op,
-                shape=case.shape_str,
-                dtype=case.dtype,
-                torch_us=0.0,
-                emmy_us=0.0,
-                ratio=0.0,
-                launches=0,
-                tags=case.tags,
-                iters=iters,
+    facts = helpers.describe(case)
+    recorded = helpers.recorded_latency(case, helpers.live_hardware_id())
+    stored = float(recorded["emmy_us"]) if recorded else None
+    with tempfile.TemporaryDirectory(prefix=f"emmy_perf_{case.path.stem}_") as tmp:
+        record = None
+        samples: list[float] = []
+        for repeat in range(helpers.LATENCY_REPEATS if stored else 1):
+            output = Path(tmp, f"{repeat}.json")
+            command = helpers.bench_command(case, output)
+            if profile:
+                command.append("--profile")
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
+                timeout=1800,
             )
+            if result.returncode != 0 or not output.exists():
+                raise AssertionError(f"{case.id}: bench failed (exit {result.returncode})\n{result.stderr[-2000:]}")
+            record = json.loads(output.read_text())
+            pinned = [row for row in record.get("pinned", []) if row.get("status") == "ok" and row.get("total_us")]
+            if not pinned:
+                raise AssertionError(f"{case.id}: the pinned row measured nothing — {record.get('pinned')}")
+            samples.append(float(pinned[0]["total_us"]))
+            if stored is None or samples[-1] <= stored * (1 + helpers.LATENCY_BAND):
+                break
 
-        backends = json.loads(record_path.read_text())["backends"]
-        torch_us = float(backends.get("Eager PyTorch", {}).get("latency_us", 0) or 0)
-        depl_us = float(backends.get("Emmy", {}).get("latency_us", 0) or 0)
-        tcompile_us_raw = backends.get("torch.compile", {}).get("latency_us")
-        tcompile_us = float(tcompile_us_raw) if tcompile_us_raw is not None else None
-
-        launches = 0
-        bench_path = Path(tmp, "60_benchmark.json")
-        if bench_path.exists():
-            launches = int(json.loads(bench_path.read_text()).get("num_launches", 0))
-
-        ncu: dict[str, dict[str, float]] | None = None
+        backends = record["backends"]
+        emmy_us = min(samples)
+        torch_us = float(backends.get("Eager PyTorch", {}).get("latency_us") or 0.0)
+        tcompile = backends.get("torch.compile", {}).get("latency_us")
+        launches = len([row for row in record.get("pinned", []) if row.get("status") == "ok"][0].get("kernels", []))
         ncu_path = Path(tmp, "61_ncu_metrics.json")
-        if ncu_path.exists():
-            ncu = json.loads(ncu_path.read_text())
-
-        ratio = (torch_us / depl_us) if depl_us > 0 else 0.0
         return PerfRow(
-            name=case.name,
-            op=case.op,
-            shape=case.shape_str,
-            dtype=case.dtype,
+            name=case.id,
+            op=facts["op"],
+            shape=facts["shape"],
+            dtype=facts["dtype"],
             torch_us=torch_us,
-            emmy_us=depl_us,
-            ratio=ratio,
+            emmy_us=emmy_us,
+            ratio=(torch_us / emmy_us) if emmy_us > 0 else 0.0,
             launches=launches,
-            tags=case.tags,
-            iters=iters,
-            torch_compile_us=tcompile_us,
-            ncu=ncu,
+            tags=(facts["family"], facts["op"]),
+            iters=int(record.get("iters", 0)),
+            torch_compile_us=float(tcompile) if tcompile is not None else None,
+            ncu=json.loads(ncu_path.read_text()) if ncu_path.exists() else None,
+            recorded_us=stored,
+            regressed=bool(stored and emmy_us > stored * (1 + helpers.LATENCY_BAND)),
         )
-
-
-# ---------------------------------------------------------------------------
-# Aggregate ncu metrics for the summary table
-# ---------------------------------------------------------------------------
 
 
 def _aggregate_ncu(ncu: dict[str, dict[str, float]] | None) -> dict[str, float]:
@@ -384,6 +335,25 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     tw.write_sep("=", "perf summary (sorted by ratio; >1.00x means emmy wins)")
     tw.write_line(_format_table(rows))
+
+    # A regression is a FINDING, not a failure: the timing-refresh workflow turns it into a
+    # labelled pull request a human accepts or declines. A lane that goes red because one
+    # legitimate correctness fix cost latency is a lane nobody reads.
+    slower = [r for r in rows if r.regressed]
+    if slower:
+        tw.write_sep("-", f"{len(slower)} case(s) slower than their recorded latency (band {100 * helpers.LATENCY_BAND:.0f}%)")
+        for r in sorted(slower, key=lambda r: -(r.emmy_us / (r.recorded_us or 1))):
+            tw.write_line(f"  {r.name:56s} {r.emmy_us:9.2f} us against a recorded {r.recorded_us:9.2f} us")
+        tw.write_line("Accept a new baseline with `emmy run --golden-file <case> --golden <name> --bench --record`.")
+
+    # Coverage grows by being asked once, on a card that can answer, and never anywhere else.
+    missing = [r.name for r in rows if r.recorded_us is None]
+    if missing:
+        card = helpers.live_hardware_id()
+        tw.write_sep("-", f"{len(missing)} case(s) have no {card} latency recorded")
+        for name in sorted(missing):
+            tw.write_line(f"  {name}")
+        tw.write_line("Record them with the same command, or let the corpus-timings workflow fill them.")
 
     # Persist JSON for cross-run diffing. ncu metrics (when collected)
     # are nested under each row's ``ncu`` field; aggregated convenience

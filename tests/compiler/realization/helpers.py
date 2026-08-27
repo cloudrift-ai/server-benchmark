@@ -104,8 +104,8 @@ def load_case(path: Path) -> Case:
     if len(configs) != 1 or len(configs[0]["realizations"]) != 1:
         raise CaseError(f"{path.name}: a case holds exactly one config with exactly one realization")
     realization = configs[0]["realizations"][0]
-    if not realization.get("knobs"):
-        raise CaseError(f"{path.name}: a case must author the schedule it expects, as a knobs mapping")
+    if "knobs" not in realization:
+        raise CaseError(f"{path.name}: a case must carry a knobs mapping, empty only for a forkless kernel")
     stage = expectation(path)
     if stage is not None and not evidence_line(path):
         raise CaseError(f"{path.name}: an open case must carry a leading '# evidence:' comment naming why it should realize")
@@ -232,6 +232,12 @@ def offered(case: Case) -> str | None:
     except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
         return f"{type(exc).__name__}: {exc}"
     if any(unreproducible_pin_flag(pinned, [row]) is None for row in rows):
+        return None
+    if not case.record.knobs:
+        # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
+        # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
+        # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
+        # mirrors how `_candidate_row_keys` reads a forkless kernel's row off the resolved op.
         return None
     return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
 
@@ -468,3 +474,24 @@ def measure(case: Case, *, within: float | None = None) -> tuple[list[float], fl
             if within is not None and samples[-1] <= within:
                 break
     return samples, tcompile
+
+
+def describe(case: Case) -> dict[str, str]:
+    """What a case is, for a report: its operations, its input shapes and its dtype.
+
+    Derived from the stored program rather than carried as metadata. A curated case list has to
+    keep these in sync by hand — which is how the list it replaces came to claim a dtype the
+    compiler had outgrown.
+    """
+    program = case.record.program_wire
+    by_id = {node["id"]: node for node in program["nodes"]}
+    ops = [by_id[origin]["op"] for origin in case.record.origins if origin in by_id]
+    inputs = [by_id[name]["outputs"][0] for name in program["inputs"] if name in by_id]
+    shapes = " x ".join("(" + ",".join(str(dim) for dim in spec[2]) + ")" for spec in inputs)
+    dtypes = {spec[1] for spec in inputs} or {"?"}
+    return {
+        "op": "+".join(dict.fromkeys(op.rsplit(".", 1)[-1] for op in ops)) or "loop",
+        "shape": shapes,
+        "dtype": "/".join(sorted(dtypes)),
+        "family": case.path.parent.name,
+    }

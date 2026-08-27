@@ -25,14 +25,16 @@ Primitive ops (`rmsnorm`, `matmul`) live in `test_primitives.py`. Fused signatur
 share the same hidden-dim reduce and the silu·multiply is folded into the epilogue. The down_proj+residual that
 follows is a separate kernel (`matmul_add.down_proj`).
 
-Emmy currently emits FP32 only, so both sides run FP32. The `dtype` field on `Case` is kept for future FP16
-support.
+These cases run FP32 on both sides because the curated list was authored that way, not because the compiler is
+limited to it — Emmy emits FP16 and BF16 throughout, including the mma warp tier. The `dtype` field on `Case` exists
+so an FP16 column can be added without touching callers.
 
 ## How it's wired
 
 - `cases.py` — `Case` dataclass + curated `CASES` list + `build_torch_ref` / `build_emmy_graph`.
 - `conftest.py` — `bench_pair` fixture (CUDA-event timing on the torch side, `CudaBackend.benchmark` on the emmy
-  side), session-end summary table, JSON dump to `.results/`.
+  side), session-end summary table, JSON dump to `.results/`. Subprocess cases read their latencies from
+  `emmy run --bench --json`, the record every other consumer reads, rather than from a dump-dir artifact.
 - `test_primitives.py` / `test_fused.py` — one parametrized test each, ids = `case.name`.
 
 The emmy-side timing reuses `CudaBackend.benchmark` (per-kernel CUDA events via cupy, see

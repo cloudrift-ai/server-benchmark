@@ -1,0 +1,40 @@
+# The carrier-generic cooperative combine at one cell of its matrix: an Accum carrier under a pre-map (the squaring tensor-product partial),
+# partitioned as standalone ILP — 4 register accumulators folded by a register tree, no cross-thread stage.
+#
+# Every carrier folds through the SAME combine and differs only in its state, so one
+# partition kind breaking on a carrier it was not tuned on is exactly what the matrix
+# catches. The reduce axis is 1024 so the 128-thread row reaches the cross-warp tree.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [x, x]
+    outputs: [[mul, f32, [4, 1024]]]
+  - id: sum_1
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: 1}
+    inputs: [mul]
+    outputs: [[sum_1, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - mul
+    - sum_1
+  realizations:
+  - name: k_sum_1_reduce.8d32fa768a1f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: r4
+    identity: 5250c0074f2d8a15c6987af262569ecbdb040c8904ac32a0fbc295cf0a9e32e8

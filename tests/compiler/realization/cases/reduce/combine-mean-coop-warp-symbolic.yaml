@@ -1,0 +1,39 @@
+# The same combine cell over a SYMBOLIC reduce axis: a degenerate Accum carrier with a constant-scale projection (the 1/N divisor),
+# partitioned as a single-warp __shfl_xor_sync butterfly (coop at a 32-thread block).
+#
+# The kernel carries the runtime extent as an argument and each lane strides to it, so
+# the strided bound IS the masked tail — a lane starting past the extent folds the
+# carrier identity. mean's divisor is the runtime extent too, resolved at launch.
+#
+# The case runs at the axis hint, 512. The test this replaces also ran the same kernel
+# at 700 to straddle the tile; a case file cannot spell 'compile symbolic, run at some
+# other size', so the off-hint sweep stays in Python.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [mean]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: mean
+    op: torch.mean
+    attrs: {axis: 1}
+    inputs: [x]
+    outputs: [[mean, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - mean
+  realizations:
+  - name: k_mean_2c850e.a334095dce5a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: coop
+      WORK: t32
+    identity: 881946c1096329190b963d5e3d64151fb71841b9d1be233071806a7679d13888

@@ -1,0 +1,49 @@
+# The two-pass softmax (row max, then the exp sum, then normalize) rewritten into ONE
+# streaming pass over the (m, d) monoid — three reads of the row collapse to two.
+#
+# The schedule here is the one greedy picks; the test this replaces pinned nothing at all,
+# and a case must author the row it expects, so the greedy row is written out. Its
+# signature in the emitted kernel is the dissolved merge's rescale temps.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: softmax_c1
+    op: constant
+    attrs:
+      name: softmax_c1
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[softmax_c1, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [8, 256]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [8, 256]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: k_softmax_4f256c.8be320a47123
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: ''
+      REDUCE: coop
+      WORK: t128
+    identity: 3d7036c5bf2eb88505fcb550f04ee525f2dc04ba44e4dc54a32ec028474fd984

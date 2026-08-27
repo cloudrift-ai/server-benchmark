@@ -169,8 +169,15 @@ def _tune_via_subprocess(case: Case) -> None:
 
 
 def _bench_via_subprocess(case: Case, *, warmup: int, iters: int, profile: bool) -> PerfRow:
-    """Spawn ``emmy run --bench`` for one case and harvest the dumps."""
+    """Spawn ``emmy run --bench --json`` for one case and read its record.
+
+    The latencies come from ``--json`` — the machine-readable record every other consumer reads —
+    rather than from a dump-dir artifact, so there is one record shape in the tree instead of a
+    third harvest surface beside it. ``EMMY_DUMP_DIR`` is still set, because the optional launch
+    count and ncu counters have no home in the record.
+    """
     with tempfile.TemporaryDirectory(prefix=f"emmy_bench_{case.name}_") as tmp:
+        record_path = Path(tmp, "record.json")
         cmd = [
             sys.executable,
             "-m",
@@ -179,6 +186,8 @@ def _bench_via_subprocess(case: Case, *, warmup: int, iters: int, profile: bool)
             "--code",
             case.code,
             "--bench",
+            "--json",
+            str(record_path),
             "--warmup",
             str(warmup),
             "--iters",
@@ -210,8 +219,7 @@ def _bench_via_subprocess(case: Case, *, warmup: int, iters: int, profile: bool)
                 iters=iters,
             )
 
-        bench = json.loads(Path(tmp, "60_bench_compare.json").read_text())
-        backends = bench["backends"]
+        backends = json.loads(record_path.read_text())["backends"]
         torch_us = float(backends.get("Eager PyTorch", {}).get("latency_us", 0) or 0)
         depl_us = float(backends.get("Emmy", {}).get("latency_us", 0) or 0)
         tcompile_us_raw = backends.get("torch.compile", {}).get("latency_us")

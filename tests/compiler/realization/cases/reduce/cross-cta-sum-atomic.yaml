@@ -1,0 +1,38 @@
+# The carrier-generic cross-CTA split and finalize, one cell: an additive Accum split-reduce,
+# under the ATOMIC finalize: one kernel, each CTA's partition folded in by atomicAdd.
+#
+# One REDUCE letter owns both halves — the split across 2 CTAs and which finalize folds
+# them — so matmul, a plain reduce and flash all reach it through the same fork. The
+# twisted carrier admits only the deferred kernel: its e^dm rescale is not an atomicAdd.
+#
+# The split is realized by REPLACING the kernel, so no piece stamps the g2 it came from;
+# the pin is read structurally. PLACE=fuse is an input pin, not part of the schedule row.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: sum_1
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: 1}
+    inputs: [x]
+    outputs: [[sum_1, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - sum_1
+  realizations:
+  - name: k_sum_1_reduce.1c621961d604
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      REDUCE: g2a
+    identity: 0c009627a43d16ae681f3d3d5ce3a825eb7c3faecf29f3f54b02983657d854a7

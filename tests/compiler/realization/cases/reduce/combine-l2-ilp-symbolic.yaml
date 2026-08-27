@@ -1,0 +1,50 @@
+# The same combine cell over a SYMBOLIC reduce axis: an Accum carrier under both a pre-map (square) and a projection epilogue (sqrt),
+# partitioned as standalone ILP — 4 register accumulators folded by a register tree, no cross-thread stage.
+#
+# The kernel carries the runtime extent as an argument and each lane strides to it, so
+# the strided bound IS the masked tail — a lane starting past the extent folds the
+# carrier identity. mean's divisor is the runtime extent too, resolved at launch.
+#
+# The case runs at the axis hint, 512. The test this replaces also ran the same kernel
+# at 700 to straddle the tile; a case file cannot spell 'compile symbolic, run at some
+# other size', so the off-hint sweep stays in Python.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [sqrt]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [x, x]
+    outputs: [[mul, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: sum_1
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: 1}
+    inputs: [mul]
+    outputs: [[sum_1, f32, [4, 1]]]
+  - id: sqrt
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: sqrt}}
+    inputs: [sum_1]
+    outputs: [[sqrt, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - mul
+    - sqrt
+    - sum_1
+  realizations:
+  - name: k_sqrt_reduce.19fcf38e2cb6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: r4
+    identity: 3708b63cced34fdcddce1117dcbf280891334d1fd858454859728c914b1d75df

@@ -1,0 +1,36 @@
+# A 2D cooperative reduce: free-axis threads alongside cooperative lanes, so the cross-thread
+# combine is a SEGMENTED warp shuffle folding each row independently.
+#
+# The test this replaces set EMMY_BN / EMMY_BR / EMMY_FN / EMMY_FK / EMMY_BK, none of which is
+# a registered knob or read anywhere, so it pinned nothing and ran fully greedy. The schedule
+# written here is the one greedy actually realizes.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [o]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [64, 128]]]
+  - id: o
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[o, f32, [64, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_o_reduce.42ffa08cd51d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: ''
+      REDUCE: coop
+      WORK: t64
+    identity: 05d748c14c3f8d63cb56efc77af14a85fa2185e3bf94c6a656085cb21bac07db

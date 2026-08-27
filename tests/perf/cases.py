@@ -17,10 +17,10 @@ For each Case both:
   kernel that comes out of the Qwen3-Embedding layer.
 
 Shapes are pinned to Qwen3-Embedding-0.6B: hidden=1024, intermediate=
-3072, num_heads=16, num_kv_heads=8, head_dim=128. Emmy currently
-emits FP32 only, so all cases run FP32 on both sides; the ``dtype``
-field is kept on ``Case`` so an FP16 column can be added later
-without touching callers.
+3072, num_heads=16, num_kv_heads=8, head_dim=128. These cases run FP32
+on both sides because the curated list was authored that way, not
+because the compiler is limited to it; the ``dtype`` field is kept on
+``Case`` so an FP16 column can be added later without touching callers.
 """
 
 from __future__ import annotations

@@ -65,14 +65,20 @@ def register_run_command(subparsers):
     )
     parser.add_argument(
         "--golden",
-        metavar="PATH",
-        help="Run every embedded target in this working golden YAML. Mutually exclusive with other inputs.",
+        metavar="NAME",
+        help=(
+            "Run the embedded Torch IR program for a golden record. NAME is an exact golden name OR a name "
+            "substring, resolved against --golden-file when given and against the live card's corpus otherwise. "
+            "Mutually exclusive with --code / positional input / --ir."
+        ),
     )
     parser.add_argument(
-        "--target",
-        dest="golden_target",
-        metavar="NAME",
-        help="Run only the matching target from --golden instead of every target.",
+        "--golden-file",
+        metavar="PATH",
+        help=(
+            "Resolve --golden NAME from this explicit working YAML instead of the canonical live-GPU corpus. "
+            "Alone, without --golden, runs every target in the file."
+        ),
     )
     parser.add_argument(
         "--layer",
@@ -206,10 +212,7 @@ def handle_run(args):
     else:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.golden_target and not args.golden:
-        logger.error("--target requires --golden PATH")
-        sys.exit(2)
-    if args.golden:
+    if args.golden_file and not args.golden:
         _run_golden_targets(args)
         return
 
@@ -227,7 +230,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if getattr(args, "golden_file", None):
+    if args.golden_file or args.golden:
         resolve_golden_arg(args)
     else:
         args.golden_configs = []
@@ -456,23 +459,27 @@ def _handle_run_once(args):
 
 
 def _run_golden_targets(args) -> None:
-    """Run a working golden's selected targets sequentially in this process."""
+    """Run every target of a working golden sequentially in this process.
+
+    Reached only by a bare ``--golden-file``; naming one target with ``--golden NAME`` goes
+    straight down the single-run path, which already thinks in the (file, name) pair.
+    """
     from copy import copy  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
-        logger.error("--golden is mutually exclusive with positional input / --code / --ir")
+        logger.error("--golden-file is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden_file(args.golden)
+        document = load_golden_file(args.golden_file)
         records = load_golden_records(document)
     except (OSError, ValueError) as exc:
-        logger.error("cannot load --golden %s: %s", args.golden, exc)
+        logger.error("cannot load --golden-file %s: %s", args.golden_file, exc)
         sys.exit(2)
-    names = [args.golden_target] if args.golden_target else list(dict.fromkeys(record.name for record in records))
+    names = list(dict.fromkeys(record.name for record in records))
     if not names:
-        logger.error("--golden contains no targets: %s", args.golden)
+        logger.error("--golden-file contains no targets: %s", args.golden_file)
         sys.exit(2)
 
     output_dir = None
@@ -485,10 +492,8 @@ def _run_golden_targets(args) -> None:
 
     for index, name in enumerate(names):
         target_args = copy(args)
-        target_args.golden_file = args.golden
         target_args._golden_document = document
         target_args.golden = name
-        target_args.golden_target = None
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
@@ -1542,8 +1547,10 @@ def _run_ncu_profile(args, *, dump_dir=None):
         "emmy.emmy",
         "run",
     ]
-    if getattr(args, "golden_file", None):
-        cmd.extend(["--golden", args.golden_file, "--target", args.golden])
+    if args.golden_file or args.golden:
+        cmd.extend(["--golden", args.golden])
+        if args.golden_file:
+            cmd.extend(["--golden-file", args.golden_file])
     elif args.code is not None:
         cmd.extend(["--code", args.code])
     elif args.ir is not None:

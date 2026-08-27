@@ -1,0 +1,48 @@
+# The carrier-generic cooperative combine at one cell of its matrix: the twisted full-row (m, d) online-softmax carrier,
+# partitioned as the 4-warp hierarchical shuffle-then-smem-tree (coop at a 128-thread block).
+#
+# Every carrier folds through the SAME combine and differs only in its state, so one
+# partition kind breaking on a carrier it was not tuned on is exactly what the matrix
+# catches. The reduce axis is 1024 so the 128-thread row reaches the cross-warp tree.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: softmax_c1
+    op: constant
+    attrs:
+      name: softmax_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[softmax_c1, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: 1}
+    inputs: [x]
+    outputs: [[softmax, f32, [4, 1024]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: k_softmax_653dcd.c9e648f0c193
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: coop
+      WORK: t128
+    identity: 4ca26ca32fa63a6e295bf1ae47702fbe88078e0d69af88f569dc40b5533250f7

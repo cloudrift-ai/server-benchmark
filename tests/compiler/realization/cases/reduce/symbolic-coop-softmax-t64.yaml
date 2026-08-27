@@ -1,0 +1,49 @@
+# The deployed softmax producer over a symbolic key axis: a cooperative reduce splitting the
+# symbolic extent across 64 lanes (a 2-warp block), each striding to the runtime extent.
+#
+# The strided bound is the whole masking story — no ceil-div tiling, no gmem clamp, no explicit
+# per-element mask — so an idle lane must fold the reduce identity rather than garbage. The
+# case pins the kernel at the 512 hint; the sweep that runs this one kernel at 1, 31, 513 and
+# 700 stays in Python, since a case cannot size a run apart from the program it compiles.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: softmax_c1
+    op: constant
+    attrs:
+      name: softmax_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[softmax_c1, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [8, {sym: seq_len, hint: 512}]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: 1}
+    inputs: [x]
+    outputs: [[softmax, f32, [8, {sym: seq_len, hint: 512}]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: k_softmax_99ed8c.ae3d35fcbbec
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: coop
+      WORK: t64
+    identity: 859dc608cd4669f41524fa8cc4c61ae9442274b517831a206527d8fc7ae72814

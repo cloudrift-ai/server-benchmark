@@ -1,0 +1,40 @@
+# The flash (m, l, O) twisted-monoid carrier through the carrier-generic combine, as
+# one thread per cell — no cross-thread or register fold at all.
+#
+# A multi-component carrier must fold EVERY component through the same butterfly; folding
+# only the accumulator leaves the max and the denominator behind and the answer is quietly
+# wrong. KV is 64 here, within a warp's reach.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1, 4, 64, 32]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1, 4, 64, 32]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f32, [1, 4, 64, 32]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f32, [1, 4, 64, 32]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_4bc992.4be07fc41c65
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: ''
+    identity: f29920a0cff12bea23a410738ab9df989d8b2efeb999de582a7cb8601fbeefef

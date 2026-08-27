@@ -1,26 +1,31 @@
 """Worklist-driven splicer for a DAG of ``LoopOp``s.
 
-Three public entry points wrap the same underlying ``_Splicer``:
+Two entry points wrap the same underlying ``_Splicer``:
 
-- :func:`splice_loop_ops` — pairwise producer / consumer helper.
 - :func:`splice_loops` — tag-generic N-way: caller supplies ``loops``
   (tag → ``LoopOp``), ``splice_edges`` ((origin_tag, src) →
-  (target_tag, target_output)), and ``input_remap``. Sink is derived
-  as the one tag that never appears as a splice target.
+  (target_tag, target_output)), and optional output roots.
 - :func:`splice_graph` — consumes a ``Graph`` fragment directly;
   classifies each Load by its node.inputs edge (LoopOp → splice,
   otherwise → external slot in first-seen order).
 
-Algorithm. Seed: every ``Write`` of the sink loop. Each iteration pops
+Before seeding roots, ``splice_graph`` collapses each output equivalence
+cluster: a single-owner chain of same-dtype copies proven to be reshape/axis-
+permutation bijections. The computed source's Write retargets through the
+layout chain, so a terminal layout does not force reduction reconstruction at
+its loads.
+
+Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
 Resolution dispatches on stmt kind:
 
 - **Load on a splice edge** — emit a copy alias at the demand scope;
   σ is solved by pairing target's ``Write.index`` against the reader's
   σ-substituted index, and the target's ``Write.value`` is queued under
-  the solved σ. A narrowing reduction at a declared frontend output keeps its
-  tensor dtype when the consumer has a distinct origin; a decomposition-private
-  output may reconstruct within the frontend operation. The target's expression
+  the solved σ. The alias is dtype-free: a narrowing store spells its rounding
+  as an ordinary ``Assign`` conversion ahead of the Write
+  (``loop/lifting/090_spell_store_rounding``), so inlining the value chain
+  carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
 - **Accum** — freshen its reduce axis, place
   ``Loop(fresh_reduce_axis, Accum(...))`` at
@@ -56,12 +61,12 @@ need its own ordering pass; constructing the ``LoopOp`` is enough.
 from __future__ import annotations
 
 import logging
+import math
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from emmy.compiler.dtype import F32, DataType
-from emmy.compiler.ir.expr import Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
     Accum,
@@ -98,6 +103,19 @@ class _NotSupported(Exception):
 _BindKey = tuple[str, str, Scope, Sigma]
 
 
+@dataclass(frozen=True)
+class _OutputEquivalenceCluster:
+    """A single-owner chain of bijective output-layout copies.
+
+    ``buffers`` runs from the computed source to the live graph output;
+    ``copy_nodes`` are the intervening LoopOp nodes in the same order.
+    """
+
+    buffers: tuple[str, ...]
+    copy_nodes: tuple[str, ...]
+    inverse_strides: tuple[tuple[int, ...], ...]
+
+
 @dataclass
 class _Demand:
     """A pending dep in the worklist.
@@ -115,36 +133,15 @@ class _Demand:
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoint
+# Public entrypoints
 # ---------------------------------------------------------------------------
-
-
-def splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
-    """Pairwise splicer: inline ``producer`` into every ``consumer`` Load
-    whose ``source`` (buf name) matches the producer's output. Returns
-    ``None`` when the pattern isn't supported.
-
-    Thin wrapper over ``splice_loops``. The merged kernel's Loads keep
-    their original buf names — no remap needed since names are stable
-    across kernels. The producer's output buf name comes from its (sole)
-    Write.
-    """
-    prod_writes = [s for s in producer if isinstance(s, Write)]
-    if len(prod_writes) != 1:
-        return None
-    prod_buf = prod_writes[0].output
-    return splice_loops(
-        loops={"producer": producer, "consumer": consumer},
-        splice_edges={("consumer", source): ("producer", prod_buf)},
-    )
 
 
 def splice_loops(
     loops: dict[str, LoopOp],
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
-    splice_dtypes: dict[tuple[str, str], DataType] | None = None,
-    max_work: int | None = None,
+    roots: tuple[tuple[str, str], ...] | None = None,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -154,32 +151,27 @@ def splice_loops(
     ``(target_tag, target_output_buf)`` meaning "this loop's Load whose
     ``source`` is ``source_buf`` reads ``target_tag``'s Write whose
     ``output`` is ``target_output_buf`` and should be inlined."
-    ``splice_dtypes`` optionally gives an edge's required dtype conversion.
-    The emitted copy alias retains that dtype so reconstructing a reduction
-    cannot bypass its tensor boundary.
-
     Non-splice Loads keep their original ``source`` buf names — buf
-    identity is global, no remap needed. The sink — the loop whose Writes
-    seed the traversal — is derived from ``splice_edges``: it's the
-    unique tag in ``loops`` that never appears as a splice target.
-    Returns ``None`` if the sink is ambiguous (cycle or multiple sinks)
-    or if any splice edge hits an unsupported pattern. ``max_work`` bounds
-    the arithmetic work accumulated while constructing the body; fusion uses
-    it to reject a merge as soon as its existing work-growth limit cannot be
-    met.
+    identity is global, no remap needed. ``roots`` selects the observable
+    Writes as ``(loop_tag, output_buffer)`` pairs. When omitted, every Write
+    of the unique loop that never appears as a splice target is selected.
+    Returns ``None`` if roots cannot be derived or any splice edge hits an
+    unsupported pattern.
     """
-    target_tags = {tag for tag, _out in splice_edges.values()}
-    candidates = [tag for tag in loops if tag not in target_tags]
-    if len(candidates) != 1:
+    if roots is None:
+        target_tags = {tag for tag, _out in splice_edges.values()}
+        candidates = [tag for tag in loops if tag not in target_tags]
+        if len(candidates) != 1:
+            return None
+        root_tag = candidates[0]
+        roots = tuple((root_tag, write.output) for write in loops[root_tag].writes)
+    if not roots:
         return None
-    root = candidates[0]
     try:
         return _Splicer(
             loops={tag: op.analyze() for tag, op in loops.items()},
             splice_edges=splice_edges,
-            splice_dtypes=splice_dtypes or {},
-            root=root,
-            max_work=max_work,
+            roots=roots,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -190,7 +182,7 @@ def splice_loops(
         return None
 
 
-def splice_graph(graph, *, max_work: int | None = None) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -199,70 +191,294 @@ def splice_graph(graph, *, max_work: int | None = None) -> tuple[LoopOp, list[st
     source points at a non-``LoopOp`` node (e.g. ``InputOp``) becomes
     an external read, assigned a slot in first-seen order.
 
-    Returns ``(merged_op, external_node_ids)`` where ``external_node_ids``
-    is the list of non-``LoopOp`` input node ids in merged-slot order.
-    Returns ``None`` if the graph has zero / multiple outputs, the sink
-    is not a ``LoopOp``, or any splice edge hits an unsupported pattern.
+    Every graph output is a root, so separate terminal branches become one
+    multi-output LoopOp. A single-owner chain of bijective layout copies
+    ending at a root is an output equivalence cluster: its source Write is
+    retargeted through the chain before ordinary dependency reconstruction.
+    Returns ``(merged_op, external_buffer_ids)`` where the ids are the
+    non-``LoopOp`` inputs in merged first-use order. Returns ``None`` if an
+    output is not produced by a ``LoopOp`` or any splice edge hits an
+    unsupported pattern.
     """
-    if len(graph.outputs) != 1:
-        return None
-    root_node = graph.producer(graph.outputs[0])
-    if root_node is None or not isinstance(root_node.op, LoopOp):
+    if not graph.outputs:
         return None
 
     loop_nodes = {n.id: n for n in graph.nodes.values() if isinstance(n.op, LoopOp)}
+    loops = {nid: node.op for nid, node in loop_nodes.items()}
+    root_overrides: dict[str, tuple[str, str]] = {}
+    collapsed: set[str] = set()
+    for cluster in _output_equivalence_clusters(graph, loop_nodes):
+        source, output = cluster.buffers[0], cluster.buffers[-1]
+        source_node = graph.producer(source)
+        if source_node is None:
+            continue
+        retargeted = _retarget_equivalent_output(graph, loops[source_node.id], cluster)
+        if retargeted is None:
+            continue
+        loops[source_node.id] = retargeted
+        collapsed.update(cluster.copy_nodes)
+        root_overrides[output] = (source_node.id, output)
+    for nid in collapsed:
+        loops.pop(nid, None)
+
+    roots: list[tuple[str, str]] = []
+    for output in graph.outputs:
+        if output in root_overrides:
+            roots.append(root_overrides[output])
+            continue
+        root_node = graph.producer(output)
+        if root_node is None or root_node.id not in loops:
+            return None
+        roots.append((root_node.id, output))
     splice_edges: dict[tuple[str, str], tuple[str, str]] = {}
-    splice_dtypes: dict[tuple[str, str], DataType] = {}
     external_order: list[str] = []
     seen_external: set[str] = set()
 
-    for node in loop_nodes.values():
-        for ld in node.op.body.loads:
+    for node_id, op in loops.items():
+        for ld in op.body.loads:
             inp = ld.input
             # A Load is a splice edge if its source buf names another LoopOp node;
             # otherwise it's an external input. We key edges off the buf name
             # (Load.source is the producing node's id), not a positional input
             # index — so a single edge entry covers every Load that reads the
             # same producer.
-            if inp in loop_nodes:
-                splice_edges[(node.id, inp)] = (inp, inp)  # producer's Write.output is its node id
-                producer = graph.buffer(inp)
-                producer_meta = loop_nodes[inp].op.analyze()
-                producer_write = next((write for write, _ in producer_meta.writes if write.output == inp), None)
-                producer_value = producer_meta.defs.get(producer_write.value) if producer_write is not None else None
-                producer_origin = _ultimate_source(loop_nodes[inp].op)
-                same_origin = producer_origin is _ultimate_source(node.op)
-                origin_outputs = getattr(producer_origin, "outputs", {})
-                private_output = producer_origin is not loop_nodes[inp].op and bool(origin_outputs) and inp not in origin_outputs
-                if (
-                    not same_origin
-                    and not private_output
-                    and isinstance(producer_value, Accum)
-                    and producer is not None
-                    and producer.dtype != (producer_value.dtype or F32)
-                ):
-                    splice_dtypes[(node.id, inp)] = producer.dtype
+            input_producer = graph.producer(inp)
+            if input_producer is not None and input_producer.id in loops:
+                producer_id = input_producer.id
+                splice_edges[(node_id, inp)] = (producer_id, inp)
             elif inp not in seen_external:
                 seen_external.add(inp)
                 external_order.append(inp)
 
-    merged = splice_loops(
-        loops={nid: n.op for nid, n in loop_nodes.items()},
-        splice_edges=splice_edges,
-        splice_dtypes=splice_dtypes,
-        max_work=max_work,
-    )
+    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots))
     if merged is None:
         return None
     return merged, external_order
 
 
-def _ultimate_source(op):
-    """The frontend-origin object at the end of an op rewrite chain."""
-    root = op
-    for source in op.source_chain():
-        root = source
-    return root
+def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[_OutputEquivalenceCluster, ...]:
+    """Find single-owner bijective layout-copy chains ending at graph outputs."""
+    clusters: list[_OutputEquivalenceCluster] = []
+    for output in graph.outputs:
+        if graph.buffer_users(output):
+            continue
+        buffers = [output]
+        copy_nodes: list[str] = []
+        inverse_strides: list[tuple[int, ...]] = []
+        current = output
+        while True:
+            copy = graph.producer(current)
+            if copy is None or copy.id not in loop_nodes:
+                break
+            inverse = _layout_copy_inverse(graph, copy, current)
+            if inverse is None:
+                break
+            source, strides = inverse
+            if source in graph.outputs or graph.buffer_users(source) != {copy.id}:
+                break
+            source_node = graph.producer(source)
+            if source_node is None or source_node.id not in loop_nodes:
+                break
+            buffers.append(source)
+            copy_nodes.append(copy.id)
+            inverse_strides.append(strides)
+            current = source
+        if copy_nodes:
+            clusters.append(
+                _OutputEquivalenceCluster(
+                    buffers=tuple(reversed(buffers)),
+                    copy_nodes=tuple(reversed(copy_nodes)),
+                    inverse_strides=tuple(reversed(inverse_strides)),
+                )
+            )
+    return tuple(clusters)
+
+
+def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]] | None:
+    """Return ``(source, destination-flat stride per source dimension)``.
+
+    A reshape/axis permutation spells every non-unit source coordinate as one mixed-radix digit
+    of the destination's dense flat address. Matching digits from the innermost stride outward
+    recovers that permutation symbolically; no tensor coordinates are enumerated.
+    """
+    if not isinstance(node.op, LoopOp) or node.buffer_names() != (output,):
+        return None
+    if any(not isinstance(stmt, (Loop, Load, Write)) for stmt in node.op.body.iter()):
+        return None
+    loads = node.op.body.loads
+    writes = node.op.body.writes
+    if len(loads) != 1 or len(writes) != 1:
+        return None
+    load, write = loads[0], writes[0]
+    if not load.is_scalar or not write.is_scalar or write.value != load.name or write.output != output:
+        return None
+    if write.atomic or write.swizzle != "NONE":
+        return None
+
+    source = graph.buffer(load.input)
+    destination = graph.buffer(output)
+    if source is None or destination is None or source.dtype != destination.dtype:
+        return None
+    source_dims = tuple(dim.as_static() for dim in source.shape if dim.is_static)
+    destination_strides = _static_strides(destination.shape)
+    if len(source_dims) != len(source.shape) or destination_strides is None:
+        return None
+    source_numel = math.prod(source_dims)
+    destination_numel = math.prod(dim.as_static() for dim in destination.shape)
+    if source_numel != destination_numel:
+        return None
+    extents = _loop_extents(node.op)
+    if extents is None or math.prod(extents.values()) != destination_numel:
+        return None
+    if len(load.index) != len(source_dims) or len(write.index) != len(destination_strides):
+        return None
+
+    ctx = _extent_ctx(extents)
+    destination_flat = _dense_flat_address(write.index, destination_strides, extents, ctx)
+    if destination_flat is None:
+        return None
+    actual = tuple(expr.simplify(ctx) for expr in load.index)
+    inverse = [0] * len(source_dims)
+    if any(actual[i] != Literal(0, "int") for i, dim in enumerate(source_dims) if dim == 1):
+        return None
+    remaining = {i for i, dim in enumerate(source_dims) if dim > 1}
+    stride = 1
+    while remaining:
+        matches = [i for i in remaining if actual[i] == _flat_digit(destination_flat, stride, source_dims[i], ctx)]
+        if len(matches) != 1:
+            return None
+        index = matches[0]
+        inverse[index] = stride
+        stride *= source_dims[index]
+        remaining.remove(index)
+    return load.input, tuple(inverse)
+
+
+def _extent_ctx(extents: dict[str, int]) -> SimplifyCtx:
+    """Build the static loop-range context used by layout proofs and retargeting."""
+    ctx = SimplifyCtx.empty()
+    for name, extent in extents.items():
+        ctx = ctx.extend(name, Interval(0, extent - 1), Literal(extent, "int"))
+    return ctx
+
+
+def _flat_expr(index: tuple[Expr, ...], strides: list[int], ctx: SimplifyCtx) -> Expr:
+    """Flatten one row-major index and simplify it under ``ctx``."""
+    flat: Expr = Literal(0, "int")
+    for expression, stride in zip(index, strides, strict=True):
+        term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
+        flat = BinaryExpr("+", flat, term)
+    return flat.simplify(ctx)
+
+
+def _dense_flat_address(index: tuple[Expr, ...], strides: list[int], extents: dict[str, int], ctx: SimplifyCtx) -> Expr | None:
+    """Return the flat address when it densely enumerates the loop domain."""
+    flat = _flat_expr(index, strides, ctx)
+    affine = affine_form(flat, set(extents))
+    if affine is None:
+        return None
+    anchor = affine[0].simplify(ctx)
+    if not isinstance(anchor, Literal) or anchor.value != 0:
+        return None
+    active = {name for name, extent in extents.items() if extent > 1}
+    coefficients = {name: coefficient for name, coefficient in affine[1].items() if coefficient}
+    if set(coefficients) != active or any(coefficient <= 0 for coefficient in coefficients.values()):
+        return None
+    stride = 1
+    for name in sorted(active, key=coefficients.get):
+        if coefficients[name] != stride:
+            return None
+        stride *= extents[name]
+    return flat
+
+
+def _flat_digit(flat: Expr, stride: int, extent: int, ctx: SimplifyCtx) -> Expr:
+    """Return one mixed-radix digit of ``flat``; unit dimensions are literal zero."""
+    if extent == 1:
+        return Literal(0, "int")
+    digit = flat if stride == 1 else BinaryExpr("/", flat, Literal(stride, "int"))
+    return BinaryExpr("%", digit, Literal(extent, "int")).simplify(ctx)
+
+
+def _unflatten(flat: Expr, shape, ctx: SimplifyCtx) -> tuple[Expr, ...] | None:
+    """Decompose ``flat`` into one static row-major coordinate tuple."""
+    strides = _static_strides(shape)
+    if strides is None:
+        return None
+    return tuple(_flat_digit(flat, stride, dim.as_static(), ctx) for stride, dim in zip(strides, shape, strict=True))
+
+
+def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCluster) -> LoopOp | None:
+    """Retarget the source Writes through a chain of equivalent output layouts."""
+    source, output = cluster.buffers[0], cluster.buffers[-1]
+    extents = _loop_extents(op)
+    if extents is None or any(isinstance(stmt, Load) and stmt.input == source for stmt in op.body.iter()):
+        return None
+    source_tensor = graph.buffer(source)
+    source_writes = [write for write in op.body.writes if write.output == source]
+    if source_tensor is None or not source_writes:
+        return None
+    if any(not write.is_scalar or len(write.index) != len(source_tensor.shape) for write in source_writes):
+        return None
+
+    steps: list[tuple[tuple[int, ...], object]] = []
+    for inverse, destination in zip(cluster.inverse_strides, cluster.buffers[1:], strict=True):
+        tensor = graph.buffer(destination)
+        if tensor is None:
+            return None
+        steps.append((inverse, tensor.shape))
+
+    ctx = _extent_ctx(extents)
+    replacement: dict[int, Write] = {}
+    for write in source_writes:
+        coordinates = write.index
+        for inverse, shape in steps:
+            if len(coordinates) != len(inverse):
+                return None
+            flat: Expr = Literal(0, "int")
+            for expression, stride in zip(coordinates, inverse, strict=True):
+                if not stride:
+                    continue
+                term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
+                flat = BinaryExpr("+", flat, term)
+            coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
+            if coordinates is None:
+                return None
+        replacement[id(write)] = replace(write, output=output, index=coordinates)
+
+    return LoopOp(
+        body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),
+        name=op.name,
+        source=op.source,
+        knobs=dict(op.knobs),
+    )
+
+
+def _static_strides(shape) -> list[int] | None:
+    """Return row-major element strides, or ``None`` for a symbolic shape."""
+    strides: list[int] = []
+    step = 1
+    for dim in reversed(tuple(shape)):
+        if not dim.is_static:
+            return None
+        strides.append(step)
+        step *= dim.as_static()
+    return list(reversed(strides))
+
+
+def _loop_extents(op: LoopOp) -> dict[str, int] | None:
+    """Return each distinct static loop-axis extent, declining conflicting reuse."""
+    extents: dict[str, int] = {}
+    for stmt in op.body.iter():
+        if not isinstance(stmt, Loop):
+            continue
+        if not stmt.axis.extent.is_static:
+            return None
+        extent = stmt.axis.extent.as_static()
+        if stmt.axis.name in extents and extents[stmt.axis.name] != extent:
+            return None
+        extents[stmt.axis.name] = extent
+    return extents
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +492,7 @@ class _Splicer(LoopBuilder):
     Each registered loop has a tag (opaque string). ``splice_edges``
     identifies which Loads are inlined from another registered loop;
     all other Loads are re-indexed into the merged kernel's external
-    input list via ``input_remap``. ``root`` names the tag whose Writes
-    seed the traversal — typically the chain's final consumer.
+    input list. ``roots`` names the exact Writes that seed the traversal.
 
     Inherits body building (``insert`` / ``fresh`` / ``finish``) from
     ``LoopBuilder``; adds the worklist of pending demands and the dedup
@@ -292,9 +507,7 @@ class _Splicer(LoopBuilder):
         *,
         loops: dict[str, LoopMeta],
         splice_edges: dict[tuple[str, str], tuple[str, str]],
-        splice_dtypes: dict[tuple[str, str], DataType],
-        root: str,
-        max_work: int | None,
+        roots: tuple[tuple[str, str], ...],
     ) -> None:
         used: set[str] = set()
         for meta in loops.values():
@@ -302,10 +515,7 @@ class _Splicer(LoopBuilder):
         super().__init__(used_names=used)
         self.loops = loops
         self.splice_edges = splice_edges
-        self.splice_dtypes = splice_dtypes
-        self.root = root
-        self._max_work = max_work
-        self._partial_work = 0
+        self.roots = roots
         self._pending: deque[_Demand] = deque()
         # Dedup: a stmt is uniquely identified by its (origin, name), the
         # emit scope it lands at in the merged body, and the σ restricted
@@ -317,25 +527,6 @@ class _Splicer(LoopBuilder):
         # avoiding structural hashing (which would perform another recursive tree walk).
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
 
-    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
-        """Insert one statement while maintaining fusion's work lower bound.
-
-        Source LoopOps are normalized before splicing, so their arithmetic leaves already sit at
-        the shallowest valid scope. Coordinate substitution may only remove axes, which
-        ``_scope_for_axes`` does before insertion. Identity copies are omitted because
-        ``LoopOp`` normalization removes them from the final body. Every other inserted Assign
-        or Accum therefore contributes permanently to the final ``_total_work`` metric.
-        """
-        extent = 1
-        for axis in enclosure.enclosing:
-            extent *= axis.extent.as_static() if axis.extent.is_static else 128
-        is_copy = isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype is None
-        added = extent if isinstance(stmt, (Assign, Accum)) and not is_copy else 0
-        if self._max_work is not None and self._partial_work + added > self._max_work:
-            raise _NotSupported(f"partial work exceeds construction limit: {self._partial_work + added} > {self._max_work}")
-        self._partial_work += added
-        super().insert(stmt, enclosure)
-
     def run(self) -> LoopOp:
         self._seed()
         while self._pending:
@@ -346,7 +537,7 @@ class _Splicer(LoopBuilder):
         # at construction time, not here.
         return LoopOp(body=self.finish())
 
-    # -- Seed: every root Write, with its value queued ----------------------
+    # -- Seed: every selected root Write, with its value queued -------------
 
     @staticmethod
     def _write_observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
@@ -356,12 +547,28 @@ class _Splicer(LoopBuilder):
         return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
 
     def _seed(self) -> None:
-        root = self.loops[self.root]
-        for w, scope in root.writes:
+        for root_tag, output in self.roots:
+            root = self.loops.get(root_tag)
+            if root is None:
+                raise _NotSupported(f"root names unknown loop {root_tag!r}")
+            found = next(((write, scope) for write, scope in root.writes if write.output == output), None)
+            if found is None:
+                raise _NotSupported(f"root loop {root_tag!r} has no Write to {output!r}")
+            w, scope = found
             if self._write_observes_running_accumulator(root, w, scope):
                 raise _NotSupported(f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced")
-            v_bound = self._ensure_dep(w.value, self.root, Sigma(), scope)
-            self.insert(Write(output=w.output, index=w.index, value=v_bound), scope)
+            v_bound = self._ensure_dep(w.value, root_tag, Sigma(), scope)
+            self.insert(
+                Write(
+                    output=w.output,
+                    index=w.index,
+                    value=v_bound,
+                    value_dtype=w.value_dtype,
+                    atomic=w.atomic,
+                    swizzle=w.swizzle,
+                ),
+                scope,
+            )
 
     # -- Dep binding: look up or queue --------------------------------------
 
@@ -472,8 +679,7 @@ class _Splicer(LoopBuilder):
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
         v_bound = self._ensure_dep(target_write.value, target_tag, sigma, d.demand_scope)
-        dtype = self.splice_dtypes.get((d.origin, stmt.input))
-        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,), dtype=dtype), d.demand_scope)
+        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Emit ``Loop(fresh_reduce_axis, [Accum(bound, value_bound, op)])`` at

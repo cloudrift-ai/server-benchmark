@@ -4,8 +4,9 @@ A computed operand is stored INLINE on its edge (there is no let table and no na
 "these two matmuls read the same A" is ONE bilinear ``Fold`` with one ``a`` edge and N product
 :class:`Channel`\\ s ``(b_i, acc_i)``. These pin the node's derived product loop (shared A lifted
 once, N-component product-monoid carrier), the arity-vs-copies distinction, the inline-arm
-canonicalization through ``rewrite``, and the closure predicate a placement cut asks before
-lifting a subtree (``_cut._captured_values``).
+and inline-arm canonicalization through ``rewrite``, and the CLOSURE predicate a placement cut asks
+before lifting a subtree into its own kernel (``_cut._closed_at``, successor to the deleted
+``_captured_values``).
 """
 
 from __future__ import annotations
@@ -16,8 +17,6 @@ from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
-from emmy.compiler.ir.tile.ops import axis_names
-from emmy.compiler.pipeline.passes.lowering.tile._cut import _captured_values
 
 
 def _cone(name: str = "xhat") -> Fold:
@@ -95,10 +94,6 @@ def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
     assert operand_name(node.a) == "xhat"
 
 
-def test_external_reads_cover_every_channel() -> None:
-    assert set(_product().external_reads()) == {"x", "w", "Wg", "Wu"}
-
-
 def test_pretty_prints_the_channels_once() -> None:
     """One shared A edge, one branch per channel, each labelled by the lift param it binds."""
     from emmy.compiler.ir.tile._dump import pretty
@@ -107,38 +102,6 @@ def test_pretty_prints_the_channels_once() -> None:
     assert text.count("operand[xhat]:") == 1  # the SHARED A edge — printed once, not once per channel
     assert text.count("xhat = multiply") == 1  # and its cone body with it
     assert "operand[acc_g_b] -> acc_g" in text and "operand[acc_u_b] -> acc_u" in text
-
-
-# --- closure: the predicate a placement cut asks ------------------------------------------------- #
-
-
-def _capturing_cone(name: str = "xhat") -> Fold:
-    """A cone that READS a value the enclosing body defines (``m_run``) instead of producing it —
-    the flash ``P = exp(s − m)`` shape, where the running max comes from the carrier merge."""
-    load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
-    return Fold.projection(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
-
-
-def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
-    """Flash's ``P`` is exactly this: an inline operand reading the running max its own loop step
-    updates. Legal to build and lower (its one home is in scope) — just not cuttable, which
-    ``_captured_values`` is the predicate for."""
-    node = _node(_capturing_cone(), ("acc_g", "Wg"))
-    fold = node
-    assert fold.lower()  # lowers fine — position in the enclosing body is what makes it legal
-    cone = node.a
-    # The output axes are the CALLER's placement — never on the node — so the cut supplies them
-    # from ``TileOp.place`` alongside the term's own iteration names.
-    axes = axis_names(fold) | {"m", "n"}
-    assert _captured_values(cone, axes | axis_names(cone)) == ("m_run",)
-
-
-def test_iteration_variables_are_not_captures() -> None:
-    """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
-    the enclosing nest — excluding them is what makes the predicate mean anything."""
-    cone = _cone()
-    assert _captured_values(cone, set()) == ("k", "m")  # unfiltered: the axes show up
-    assert _captured_values(cone, {"m", "k"}) == ()  # filtered: closed
 
 
 # --- canonicalization: inline arms rewrite like any other subtree -------------------------------- #
@@ -159,4 +122,55 @@ def test_rewrite_reaches_a_channels_b_edge() -> None:
     assert renamed.channels[1].b.names == ("vb",)
 
 
-# --- Map.fn: the binder (1n — the ``source`` compat read retired with the ``out`` convention) ---- #
+# --- closure: the predicate a placement cut asks -------------------------------------------------- #
+
+
+def _capturing_cone(name: str = "xhat") -> Fold:
+    """A cone that READS a value the enclosing body defines (``m_run``) instead of producing it —
+    the flash ``P = exp(s - m)`` shape, where the running max comes from the carrier merge."""
+    load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
+    return Fold.projection(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
+
+
+def test_external_reads_cover_every_channel() -> None:
+    """RESTORED: the node's derived loop reads every buffer it touches — the shared A's two and
+    both channels' weights. A channel dropped from the reading is a kernel missing an argument.
+
+    ``Fold.external_reads`` is gone with the recognition-era node API, so the reading comes off the
+    derived loop, which is what materialization and kernel binding actually walk."""
+
+    def buffers(stmts):
+        for stmt in stmts:
+            if isinstance(stmt, Load):
+                yield stmt.input
+            for body in stmt.nested():
+                yield from buffers(body)
+
+    assert set(buffers(_product().lower())) == {"x", "w", "Wg", "Wu"}
+
+
+def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
+    """Flash's ``P`` is exactly this: an inline operand reading the running max its own loop step
+    updates. Legal to build and lower (its one home is in scope) — just not CUTTABLE, which is
+    what the closure predicate is for. RESTORED: cutting a capturing cone into its own kernel
+    produces a kernel that reads an undefined name."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+
+    node = _node(_capturing_cone(), ("acc_g", "Wg"))
+    assert node.lower()  # lowers fine — position in the enclosing body is what makes it legal
+    cone = node.a
+    # The output axes are the CALLER's placement — never on the node — so the cut supplies them.
+    assert not _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "a cone capturing carrier state is not closed"
+
+
+def test_iteration_variables_are_not_captures() -> None:
+    """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
+    the enclosing nest — excluding them is what makes the predicate mean anything."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+
+    cone = _cone()
+    assert _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "an ordinary cone over its own axes is closed"
+    assert not _closed_at(cone, ()), "unfiltered, the axes themselves read as captures"
+
+
+# --- the projection binder ----------------------------------------------------------------------- #

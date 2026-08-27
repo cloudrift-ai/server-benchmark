@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -179,6 +180,11 @@ class GoldenRecord:
     loop_index: int | None = None
     loop_wire: dict | None = None
 
+    @property
+    def is_routing(self) -> bool:
+        """Whether this row records a kernel-placement decision rather than a kernel schedule."""
+        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
     @cached_property
     def pool_key(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
@@ -302,10 +308,6 @@ class GoldenRecord:
     @property
     def reference_backend(self) -> str | None:
         return str(self.measurements["reference_backend"]) if self.measurements else None
-
-    @property
-    def is_routing(self) -> bool:
-        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
 
     @property
     def dynamic(self) -> bool:
@@ -660,17 +662,16 @@ def _target_kernel_nodes(record: GoldenRecord):
     return lowered, nodes
 
 
-def _recognized_target(record: GoldenRecord):
-    """The record's ONE recognized tile (loud): the target must select exactly one kernel, and the
-    shared recognition core must lift it. Returns the ``TileOp``."""
-    from emmy.compiler.pipeline.passes.lowering.tile._lift import recognized_tile  # noqa: PLC0415
+def _lifted_target(record: GoldenRecord):
+    """Lift the record's single selected kernel to Tile IR."""
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op.populate_io(lowered, node)
-    tile = recognized_tile(node.op, name=node.id)
+    tile = lift_loop_op(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (``deploy_identity``) reads the same output fingerprint.
     tile.outputs = {node.output.name: node.output}
@@ -680,52 +681,44 @@ def _recognized_target(record: GoldenRecord):
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; a ROUTING record's ``PLACE`` keys resolve to legal cut
-    seams on the recognized tree; a SCHEDULE record's spelled row equals EXACTLY ONE enumerated
+    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
+    equals one enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
     any-of, no classified shape."""
-    from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._classify import fused_view  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
 
     try:
-        tile = _recognized_target(record)
+        tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
-    if record.is_routing:
-        verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
-        store = _identity_store()
-        verdicts = store.setdefault("verdicts", {})
-        if verdict_key in verdicts:
-            return verdicts[verdict_key]
-        pro = fused_view(tile)
-        route_tree, route_free, route_stores = (
-            (pro[0], (*tile.place.free, *pro[1]), pro[2]) if pro is not None else (tile.op, tile.place.free, tile.stores)
-        )
-        seams = cuttable_seams(route_tree, route_stores, route_free)
-        all_sites = sites(route_tree)
-        for key, value in record.knobs.items():
-            if str(value) != "cut":
-                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
-            if str(key) == "PLACE":
-                # The bare family key IS the codec's "shallowest cuttable seam" spelling
-                # (``route_cut``'s pin semantics) — it decodes iff any seam is legal.
-                if not seams:
-                    return _remember_verdict(verdict_key, "bare PLACE=cut recorded, but the recognized tree has no legal cut seam")
-                continue
-            try:
-                site = resolve(route_tree, str(key), all_sites=all_sites)
-            except ValueError as exc:
-                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or not any(site in cut.members for cut in seams):
-                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the recognized tree")
-        return _remember_verdict(verdict_key, None)
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
+    if record.is_routing:
+        from dataclasses import replace  # noqa: PLC0415
+
+        from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
+
+        axes = [axis.name for axis in tile.place.free]
+        axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
+        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
+        seams = cuttable_seams(tile)
+        seam_ids = {id(seam.node) for seam in seams}
+        all_sites = sites(tile.op)
+        for key, value in record.knobs.items():
+            if str(value) != "cut":
+                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
+            try:
+                site = resolve(tile.op, str(key), all_sites=all_sites)
+            except ValueError as exc:
+                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
+            if site is None or id(site.node) not in seam_ids:
+                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
+        return _remember_verdict(verdict_key, None)
     candidates = _candidate_row_keys(record)
     if schedule_row_key(record.knobs) in candidates:
         reason = None
@@ -788,10 +781,10 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``) of the recognized tile of the record's ONE target kernel,
-    derived through the exact recognition core the live compile uses (``_lift.recognized_tile``).
+    (``_schedule.deploy_identity``) of the lifted tile of the record's ONE target kernel,
+    derived through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
-    (a schedule row decorates exactly one), or the selector/recognition fails — best-effort here
+    (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
     (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
     global _IDENTITY_STORE_DIRTY
     key = _record_cache_key(record)
@@ -804,9 +797,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
         _IDENTITY_CACHE[key] = identity
         return identity
     try:
-        from emmy.compiler.pipeline.passes.lowering.tile._schedule import deploy_identity  # noqa: PLC0415
-
-        identity = deploy_identity(_recognized_target(record))
+        identity = deploy_identity(_lifted_target(record))
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity
@@ -1005,8 +996,30 @@ def _file_gpu_name(path: Path) -> str | None:
 #: Optional scope override for :func:`records_for_card` — the corpus the deploy tier reads.
 #: ``None`` (the default, and the only value a real deploy ever sees) reads the repository files.
 #: The drift audit (``search/audit.py``) installs one file's / one precision lane's records here so
-#: its verdicts judge exactly that set, the way the release gate needs them scoped.
+#: its verdicts judge exactly that set, the way the release gate needs them scoped. Set it through
+#: :func:`records_override`, never by hand.
 RECORDS_OVERRIDE: list[GoldenRecord] | None = None
+
+
+@contextmanager
+def records_override(records: list[GoldenRecord] | None):
+    """Scope the corpus :func:`records_for_card` reads, restoring the previous scope after.
+    ``[]`` hides every record — how a caller that must not consult the verified tier says so;
+    ``None`` is a no-op, leaving whatever scope is already installed.
+
+    **The body must not ``await``.** This swaps a module global, so it is only atomic with respect
+    to other coroutines while the block stays synchronous — and it is used inside concurrently
+    gathered tune targets, which share one event loop."""
+    global RECORDS_OVERRIDE  # noqa: PLW0603 — the documented scope seam, one owner
+    if records is None:
+        yield
+        return
+    prev = RECORDS_OVERRIDE
+    RECORDS_OVERRIDE = records
+    try:
+        yield
+    finally:
+        RECORDS_OVERRIDE = prev
 
 
 def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:

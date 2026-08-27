@@ -515,14 +515,30 @@ def fp8_weight_profile(hf_config) -> tuple[str, tuple[int, int] | None, list[str
     return fmt, (None if block is None else tuple(int(b) for b in block)), _skip_patterns(qc)
 
 
+def native_mxfp4_experts(hf_config) -> bool:
+    """True when the ROUTED EXPERTS are stored as native MXFP4 under the checkpoint's own
+    declaration (``expert_dtype: fp4``), whatever the trunk's ``quant_method`` says.
+
+    DeepSeek V4 publishes an fp8 trunk beside fp4 experts, so the expert storage is named by
+    this field and by nothing in ``quantization_config``. The serving loader and the twin
+    capture both key on it, which is what keeps the recorded expert program the one serving
+    binds."""
+    return str(getattr(hf_config, "expert_dtype", "") or "") == "fp4"
+
+
 def mxfp4_weight_profile(hf_config) -> list[str] | None:
-    """MXFP4 skip patterns from a shape-only config, or ``None`` for another scheme."""
+    """MXFP4 skip patterns from a shape-only config, or ``None`` for another scheme.
+
+    Two declarations select native MXFP4: ``quant_method: mxfp4`` for a wholly-MXFP4 checkpoint
+    (gpt-oss), and :func:`native_mxfp4_experts` for one whose routed experts alone are MXFP4."""
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return None
     if not isinstance(qc, dict):
         qc = {key: getattr(qc, key, None) for key in ("quant_method", *_SKIP_KEYS)}
-    return _skip_patterns(qc) if qc.get("quant_method") == "mxfp4" else None
+    if qc.get("quant_method") == "mxfp4" or native_mxfp4_experts(hf_config):
+        return _skip_patterns(qc)
+    return None
 
 
 _SKIP_KEYS = ("ignored_layers", "modules_to_not_convert", "ignore")
@@ -1968,16 +1984,27 @@ def spell_quantized_inputs(
 def spell_mxfp4_inputs(
     graph: Graph,
     specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    *,
+    transposed: bool,
 ) -> dict[str, str]:
     """Spell logical expert inputs as native MXFP4 blocks plus E8M0 scales.
 
-    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice.
-    The traced logical input remains the wrapper's ``(in, out)`` value matrix,
-    while the re-minted ``name`` input binds ``(out, in/32, 16)`` uint8 blocks
-    and the appended ``<name>_scale`` input binds ``(out, in/32)`` uint8 scales.
-    Generic tensor algebra decodes the nibbles and scale exponents in-graph, so
-    lowering can fuse those operations into the ordinary matrix multiplication
-    instead of materializing a persistent dense expert table.
+    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice. The re-minted
+    ``name`` input binds ``(out, in/32, 16)`` uint8 blocks and the appended ``<name>_scale``
+    input binds ``(out, in/32)`` uint8 scales; the nibbles always decode in that stored
+    ``(out, in)`` orientation.
+
+    ``transposed`` is the experts MODULE's weight layout
+    (:func:`~emmy.compiler.trace.huggingface.moe_expert_layout`), one fact for the whole call
+    rather than per input: ``True`` when the traced placeholder is the ``(in, out)`` matrix
+    applied as ``x @ W``, so the decode ends in a transpose, and ``False`` for the
+    ``F.linear`` ``(out, in)`` orientation the decode already lands in. It is declared rather
+    than read off the shapes because a square expert matrix fits both readings, and the wrong
+    one transposes the weights silently.
+
+    Generic tensor algebra decodes the nibbles and scale exponents in-graph, so lowering can
+    fuse those operations into the ordinary matrix multiplication instead of materializing a
+    persistent dense expert table.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
@@ -1998,7 +2025,7 @@ def spell_mxfp4_inputs(
         blocks_shape, scales_shape = tuple(blocks_shape), tuple(scales_shape)
         if len(logical) != 2:
             raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be rank-2, got {logical}")
-        k, n = logical
+        k, n = logical if transposed else logical[::-1]
         expected_blocks = (n, k // 32, 16) if k % 32 == 0 else None
         expected_scales = (n, k // 32) if k % 32 == 0 else None
         if blocks_shape != expected_blocks or scales_shape != expected_scales:
@@ -2148,11 +2175,12 @@ def spell_mxfp4_inputs(
             inputs=[decoded],
             output=Tensor(f"{name}_stored_orientation", (n, k), "f32"),
         )
-        decoded = graph.add_node(
-            op=TransposeOp(axes=(1, 0)),
-            inputs=[decoded],
-            output=Tensor(f"{name}_logical_f32", logical, "f32"),
-        )
+        if transposed:
+            decoded = graph.add_node(
+                op=TransposeOp(axes=(1, 0)),
+                inputs=[decoded],
+                output=Tensor(f"{name}_logical_f32", logical, "f32"),
+            )
         if out.dtype.name != "f32":
             decoded = graph.add_node(
                 op=ElementwiseOp(op="copy"),

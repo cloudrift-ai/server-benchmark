@@ -1,8 +1,8 @@
 """Bench + DB persistence for one tune terminal — terminal valuation, the policy's half.
 
 What a terminal is worth is search policy, not engine mechanics: ``TuningSearch.evaluate`` drives
-:func:`bench_terminal_async` (and the deployable-regime :func:`rebench_o3_async`) per terminal the
-engine's loop yields. The engine never benches, persists, or reads a policy attribute.
+:func:`bench_terminal_async` per terminal the engine's loop yields. The engine never benches,
+persists, or reads a policy attribute.
 """
 
 from __future__ import annotations
@@ -11,9 +11,7 @@ import json
 import logging
 import statistics
 
-from emmy import config
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
-from emmy.compiler.context import split_opt_level
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.kernel.ir import KernelOp
@@ -22,26 +20,6 @@ from emmy.compiler.pipeline.search.db import PerfStats
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
-
-# The nvcc flags of the deployable -O3 re-bench (:func:`rebench_o3_async`) — also the regime its
-# node rows are keyed under (``two_level`` derives their ``context_key`` from the tune context
-# with these flags substituted).
-O3_NVCC_FLAGS = "-Xcicc -O3"
-
-
-async def rebench_o3_async(cand, backend):
-    """Re-bench an already-lowered tune winner at ``-Xcicc -O3`` (deployable codegen)
-    for a clean prior sample, awaiting the device-pinned worker. Returns the -O3
-    median latency in µs, or ``None`` when the sweep is already at -O3 or the bench
-    errors (best-effort — a re-bench hiccup must never abort the sweep). The winner
-    already benched OK at -O1, so the only added cost is one -O3 compile (cubin-cached)."""
-    if split_opt_level(config.nvcc_flags())[0] == 3:  # already deployable, however it is spelled
-        return None
-    try:
-        result = await backend.benchmark_async(cand.graph, nvcc_flags=O3_NVCC_FLAGS)
-    except Exception:  # noqa: BLE001 — a re-bench failure is non-fatal to tuning
-        return None
-    return result.time_ms * 1000.0 if result.time_ms else None
 
 
 class TerminalBench:

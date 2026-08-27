@@ -14,6 +14,7 @@ of use (``algebra.merge_stmts``), never spliced in as one.
   state⊕state combine's ONE statement realization) and the denotational foldMap spec oracle.
 - :mod:`.carrier` — the exp/LSE-family combine GENERATORS (twisted monoid via ψ-conjugation) and
   the stability certificate.
+- :mod:`.normalize` — construction and alpha-equivalence normalization for pure Lambdas.
 
 The invariant these modules exist to state lives in ``ir/ARCHITECTURE.md`` ("Pure terms vs statements").
 """
@@ -42,6 +43,7 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 
 __all__ = [
     "Channel",
@@ -60,6 +62,7 @@ __all__ = [
     "foldmap_eval",
     "is_contraction",
     "merge_stmts",
+    "normalize_lambda_body",
     "operand_body",
     "operand_name",
     "refs_axis",

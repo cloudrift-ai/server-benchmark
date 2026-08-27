@@ -948,7 +948,13 @@ def _interleave_gate_up(t):
 
 
 def _materialize_mxfp4_expert_store(model, layers_store: dict[int, dict], dtype) -> None:
-    """Decode a shard-streamed MXFP4 store into the selected eager-reference layers."""
+    """Decode a shard-streamed MXFP4 store into the selected eager-reference layers.
+
+    ``decode_mxfp4`` yields the ``(in, out)`` matrix and the loader de-interleaved gate/up on
+    the way in, so both are restored to whatever THIS experts module stores
+    (:func:`moe_expert_layout`) — an ``F.linear`` module keeps ``(out, in)`` and concatenated
+    halves. Assuming the gpt-oss pair here loads a transposed expert table, which a square
+    weight accepts silently."""
     import torch  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import decode_mxfp4  # noqa: PLC0415
@@ -957,16 +963,20 @@ def _materialize_mxfp4_expert_store(model, layers_store: dict[int, dict], dtype)
     trunk = getattr(trunk, "language_model", trunk)
     for layer, store in layers_store.items():
         experts = trunk.layers[layer].mlp.experts
-        values = {
-            "gate_up_proj": _interleave_gate_up(
-                torch.from_numpy(decode_mxfp4(store["w_gate_up"].numpy(), store["w_gate_up_scale"].numpy())).to(dtype)
-            ),
-            "down_proj": torch.from_numpy(decode_mxfp4(store["w_down"].numpy(), store["w_down_scale"].numpy())).to(
-                dtype=dtype, memory_format=torch.contiguous_format
-            ),
-        }
+        transposed, interleaved, _ = moe_expert_layout(experts)
+
+        def _decoded(name, *, _store=store):
+            return torch.from_numpy(decode_mxfp4(_store[name].numpy(), _store[f"{name}_scale"].numpy()))
+
+        gate_up, down = _decoded("w_gate_up"), _decoded("w_down")
+        if interleaved:  # the out axis is last while the matrix is still (in, out)
+            gate_up = _interleave_gate_up(gate_up)
+        if not transposed:  # an F.linear module stores the transpose
+            gate_up, down = gate_up.transpose(-2, -1), down.transpose(-2, -1)
+        values = {"gate_up_proj": gate_up.to(dtype).contiguous(), "down_proj": down.to(dtype).contiguous()}
         if "b_gate_up" in store:
-            values["gate_up_proj_bias"] = _interleave_gate_up(store["b_gate_up"]).to(dtype)
+            bias = store["b_gate_up"]
+            values["gate_up_proj_bias"] = (_interleave_gate_up(bias) if interleaved else bias).to(dtype)
         if "b_down" in store:
             values["down_proj_bias"] = store["b_down"].to(dtype)
         experts.load_state_dict(values, strict=True, assign=True)
@@ -1525,21 +1535,33 @@ _EXL3_EXPERT_LEAF = {"trellis": "", "suh": "_suh", "svh": "_svh"}
 _PER_EXPERT_LEAF = {"weight": "", "weight_scale_inv": "_scale", "weight_scale": "_scale"}
 
 
-def _auto_config_from_pretrained(model_dir):
+def _auto_config_from_pretrained(model_dir, **kwargs):
     """Load an architecture config, trusting repository code only when required.
 
     Keep the quantized-twin path aligned with the ordinary Hugging Face trace path:
     built-in architectures stay on Transformers' implementation, while repositories
     whose config explicitly requires custom code get one guarded retry.
+
+    A host process can re-register a model type onto its own minimal config class
+    (vLLM's ``HFConfigParser`` does, via ``AutoConfig.register``), after which
+    ``AutoConfig.from_pretrained`` returns that class instead of Transformers' own —
+    dropping every derived field its ``__init__`` computes (DeepSeek V4 derives
+    ``layer_types`` from ``compress_ratios``). When Transformers exports a native class
+    of the same name, reload with it: the twin must see the architecture's own config.
     """
+    import transformers  # noqa: PLC0415
     from transformers import AutoConfig  # noqa: PLC0415
 
     try:
-        return AutoConfig.from_pretrained(model_dir)
+        config = AutoConfig.from_pretrained(model_dir, **kwargs)
     except ValueError as e:
         if "trust_remote_code" not in str(e):
             raise
-        return AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        return AutoConfig.from_pretrained(model_dir, trust_remote_code=True, **kwargs)
+    native = getattr(transformers, type(config).__name__, None)
+    if isinstance(native, type) and not isinstance(config, native):
+        config = native.from_pretrained(model_dir, **kwargs)
+    return config
 
 
 def _auto_model_from_config(config, **kwargs):
@@ -1911,6 +1933,7 @@ def load_quantized_split(
         dequantize,
         dequantize_awq4,
         dequantize_nvfp4,
+        native_mxfp4_experts,
         scale_is_reciprocal,
     )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
@@ -1923,8 +1946,9 @@ def load_quantized_split(
         model = _auto_model_from_config(config)
     mxfp4_qc = _mxfp4_quant_config(model_dir)
     # DeepSeek V4 declares an fp8 TRUNK while storing its routed experts as native MXFP4: the expert
-    # storage is named by ``expert_dtype``, not by ``quant_method``.
-    native_mxfp4_experts = str(getattr(config, "expert_dtype", "") or "") == "fp4"
+    # storage is named by ``expert_dtype``, not by ``quant_method``. The twin capture reads the same
+    # predicate, so the golden records the expert program this load produces.
+    native_experts = native_mxfp4_experts(config)
     qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc)
@@ -2021,7 +2045,7 @@ def load_quantized_split(
                         # index 0, and the router maps global selections onto that axis at dispatch.
                         expert -= expert_range[0]
                     t = f.get_tensor(k)
-                    if native_mxfp4_experts:
+                    if native_experts:
                         # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
                         # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW
                         # (never cast) and give the blocks the ``(out, groups, 16)`` shape the

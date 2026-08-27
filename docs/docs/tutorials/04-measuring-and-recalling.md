@@ -72,26 +72,22 @@ One more thing has to be introduced here, because everything after this page dep
 true of the settings it was taken under. Those settings are called the **regime**, and the part of it that matters
 most is the optimization level the CUDA compiler ran at.
 
-- `-O3` is the **deployable** setting. It is what `emmy compile` and `emmy run` use, so it is what a served model
-  actually runs.
-- `-Xcicc -O1` is the **ranking** setting. It compiles roughly three times faster, which is what makes a tuning sweep
-  of thousands of kernels practical at all.
+`-O3` is the **deployable** setting. It is what `emmy compile` and `emmy run` use, so it is what a served model
+actually runs — and it is what a tuning sweep measures at too. **Emmy tunes in the regime it deploys into**, so a
+tuned latency is the latency you get.
 
-A tuning sweep uses the fast setting because it only needs to *rank*: for most choices, the configuration that is
-faster at `-O1` is also faster at `-O3`. But not for all of them. Some optimizations — unrolling a loop into
-registers, dedicating a group of warps to fetching data — barely show up at `-O1` and matter a lot at `-O3`. So the
-two orderings are known to disagree, and a measurement taken at the ranking setting must never be allowed to overrule
-one taken at the deployable setting.
+That sounds too obvious to state, so it is worth saying why it needs stating. A sweep benches thousands of
+configurations, and a cheaper compiler setting (`-Xcicc -O1`) was once used to make that affordable, on the
+assumption that it would still *rank* correctly even if the absolute numbers were off. It did not. The cheap
+setting's error was not random noise but a systematic bias along tile size: it made big register tiles look slow,
+which is exactly the family it was most important to get right. Ranking in a regime you do not deploy in means the
+winner of the search need not be the winner in production.
 
-Emmy handles this by keeping the regime on every stored measurement and gating on it. Two consequences follow, and
-both come back later:
-
-- A tuning sweep **re-measures its near-best configurations at the deployable setting** before it is done. Those
-  second measurements are the ones worth deploying from.
-- Those re-measurements go into the reservoir and the search-tree table — **not** into the measurements table. So on
-  a machine tuned in the ordinary way, the measurements table holds ranking-setting numbers and the deployable-setting
-  numbers live in the reservoir. That asymmetry is why the reservoir is consulted *before* the measurements table
-  when compiling.
+The general lesson outlives the specific setting: **a measurement is only evidence about the conditions it was taken
+under.** Emmy therefore keeps the regime on every stored measurement and gates on it, so a number taken under some
+other setting is never silently read as if it applied here. If you deliberately pin a different optimization level
+with `--nvcc-flags`, the sweep still runs and still records — but under that regime's own identity, where no ordinary
+compile will read it. You will get a warning saying so.
 
 ## Where this is going
 

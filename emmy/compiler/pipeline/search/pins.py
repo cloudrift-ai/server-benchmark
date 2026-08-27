@@ -4,33 +4,41 @@ from __future__ import annotations
 
 import contextlib
 import os
-import re
 
 from emmy import config
+from emmy.compiler.ir.schedule import Level, ReducePlan, Workers
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
-#: A ``REDUCE`` value's leading cross-CTA stage — ``g<n>`` plus the atomic/deferred finalize
-#: letter (``ReducePlan.spell``).
-_GRID_STAGE = re.compile(r"g\d+[ak]?\Z")
+#: A synthetic thread inventory so ``ReducePlan.parse`` accepts a ``coop`` token here. The width
+#: value never matters — ``spell`` is site-local and drops it — but a count > 1 is load-bearing:
+#: at ``units=(1, 1)`` the parsed ``coop`` collapses to 1 and ``spell`` drops the token entirely,
+#: silently reading ``g2k/coop`` as ``""``.
+_ANY_THREAD_WORK = Workers(kind="thread", units=(1, 32))
 
 
 def _stampable_reduce(want: str) -> str | None:
     """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
-    cross-CTA stage.
+    cross-CTA stage. Read through :class:`ReducePlan` — the same typed reading the schedule
+    walk's pin path consumes the ``g`` half with — so the rule has one statement; a value the
+    codec does not parse answers ``None`` and is probed as-is.
 
-    A cross-CTA split is realized by REPLACING the kernel: ``030_split_reduce`` mints brand-new
+    A cross-CTA split is realized by REPLACING the kernel: the structural ``035_split_reduce``
+    fork mints brand-new
     pieces and ``knob.consume_kernel_row`` strips their schedule row, so no piece may carry the
     ``g<n>`` it came from (``test_split_fresh_kernels`` asserts that outright). The receipt is
     structural — the piece's reduce axis is a slice of the parent — and knob stamps cannot show
-    it, exactly as a realized ``PLACE`` cut cannot be read off one.
+    it.
 
     Only the cross-CTA stage is invisible. The rest of the value (``coop`` / ``r<n>``) is decided
     by the piece on its own body and stamped there, so it stays gateable.
     """
-    tokens = [t for t in str(want).split("/") if t]
-    if not tokens or not _GRID_STAGE.match(tokens[0]):
+    try:
+        plan = ReducePlan.parse(str(want), _ANY_THREAD_WORK)
+    except ValueError:
         return None
-    return "/".join(tokens[1:])
+    if not plan.needs_split:
+        return None
+    return ReducePlan(tuple(st for st in plan.stages if st.level is not Level.GRID)).spell()
 
 
 def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_conflicts: bool = False) -> str | None:
@@ -48,7 +56,7 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
     for name, want in pinned.items():
         fam = family_of(name)
         if fam == "PLACE":
-            continue  # a realized cut is visible structurally, not as a knob stamp
+            continue  # graph placement is consumed by a splice, not stamped on either resulting kernel
         probe = want
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
@@ -94,8 +102,7 @@ def pinned_knobs(knobs: dict):
     """Temporarily publish ``knobs`` as authoritative environment pins.
 
     Axis-scoped keys ride both their programmatic ``EMMY_<KNOB@site>`` splat and the raw
-    ``EMMY_KNOBS`` aggregate. Schedule readers consume the splat after import, while placement
-    routing reads the aggregate directly because ``@`` is not a portable shell-variable name.
+    ``EMMY_KNOBS`` aggregate because ``@`` is not a portable shell-variable name.
     """
     saved: dict[str, str | None] = {}
     try:

@@ -227,3 +227,57 @@ def test_learned_hyper_connection_scale_is_not_mistaken_for_a_block_scale(tmp_pa
     state = model.state_dict()
     for key in ("model.layers.0.attn_hc.scale", "model.layers.0.ffn_hc.scale"):
         assert key in state and not state[key].is_meta, f"{key} did not load from the native checkpoint"
+
+
+def test_host_process_config_shadow_does_not_reach_the_twin(tmp_path):
+    """A hosting vLLM process re-registers ``deepseek_v4`` onto its own rope-only config class
+    (``AutoConfig.register(..., exist_ok=True)`` in its config parser), and from then on EVERY
+    ``AutoConfig.from_pretrained`` in that process returns that class — none of the fields the real
+    ``__init__`` derives (``layer_types`` from ``compress_ratios``), so the twin cannot be built.
+    The loader must resolve the architecture's OWN config even inside such a process."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import AutoConfig, PretrainedConfig
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _config, _references = _native_checkpoint(tmp_path, torch)
+
+    # The host's class as vLLM ships it: SAME name as the native class (that sameness is what the
+    # loader's recovery keys on), raw kwargs, no derivation.
+    class DeepseekV4Config(PretrainedConfig):
+        model_type = "deepseek_v4"
+
+    AutoConfig.register("deepseek_v4", DeepseekV4Config, exist_ok=True)
+    try:
+        model, _store = load_quantized_split(tmp_path, torch.float16)
+    finally:
+        CONFIG_MAPPING._extra_content.pop("deepseek_v4", None)
+
+    assert isinstance(model.config, transformers.DeepseekV4Config)
+    assert model.config.layer_types == ["sliding_attention"]
+
+
+def test_eager_layer_twin_materializes_experts_in_the_modules_own_orientation(tmp_path):
+    """The eager reference decodes the same MXFP4 bytes the serving lane binds, but into a MODULE:
+    ``decode_mxfp4`` hands back the ``(in, out)`` matrix gpt-oss applies as ``x @ W``, while these
+    experts are ``F.linear`` parameters storing ``(out, in)``. ``w2`` catches a missing transpose on
+    shape alone; ``w1``/``w3`` are square here, exactly the case that would load silently wrong."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_layer_twin
+
+    hidden, inter, experts = 64, 32, 4
+    _config, references = _native_checkpoint(tmp_path, torch, hidden, inter, experts)
+    model = load_quantized_layer_twin(tmp_path, torch.float16, 0)
+
+    module = model.model.layers[0].mlp.experts
+    assert tuple(module.gate_up_proj.shape) == (experts, 2 * inter, hidden)
+    assert tuple(module.down_proj.shape) == (experts, hidden, inter)
+    for e in range(experts):
+        gate_up = module.gate_up_proj[e].detach().float().numpy()
+        np.testing.assert_array_equal(gate_up[:inter], references[(e, "w1")])
+        np.testing.assert_array_equal(gate_up[inter:], references[(e, "w3")])
+        np.testing.assert_array_equal(module.down_proj[e].detach().float().numpy(), references[(e, "w2")])

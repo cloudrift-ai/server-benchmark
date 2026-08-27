@@ -64,6 +64,40 @@ def _term(t: str | float) -> _T:
 _OP = {"exp": "exp", "neg": "negative", "maximum": "maximum", "add": "add", "multiply": "multiply", "subtract": "subtract"}
 
 
+@dataclass(frozen=True)
+class Family:
+    """The exp/LSE family's OP VOCABULARY — the ψ, its pivot, and the base semiring.
+
+    The generator below emits this spelling and the Tile-IR recognizer
+    (``lowering/tile/020_twisted``) reads it back. Sharing the table is the point: a recognizer
+    with its own copy of ``"exp"`` / ``"subtract"`` / ``"reciprocal"`` drifts from the generator
+    the day either is respelled, and the failure is silent — the rewrite simply declines and the
+    kernel demotes to the planar fold.
+
+    The family is genuinely exp-specific (see the module docstring: generation is family-agnostic,
+    the stabilizer is not), so this is a NAMED SCOPE rather than an op-name list standing in for a
+    trait. What it must not be is a scope spelled twice.
+    """
+
+    #: ψ and its inverse's ingredients — ``exp(score − pivot)`` is the stable weight.
+    psi: str = "exp"
+    #: the pivot's fold combine — the ``max`` of ``(max, Σ)``.
+    pivot: str = "maximum"
+    #: how the weight's exponent is formed against the pivot.
+    shift: str = "subtract"
+    #: the multiplicative inverse the projection applies (``· 1/denominator``).
+    inverse: str = "reciprocal"
+    #: the base monoid the twisted carrier conjugates, as ``(⊗, ⊕)``.
+    product: str = "multiply"
+    plus: str = "add"
+    #: the transparent alias a carried value may be read through.
+    alias: str = "copy"
+
+
+#: The one exp/LSE vocabulary. Recognition and generation both read it.
+EXP_FAMILY = Family()
+
+
 def _flatten_mul(t: _T) -> list[_T]:
     if t.op == "multiply":
         return _flatten_mul(t.a[0]) + _flatten_mul(t.a[1])
@@ -162,7 +196,7 @@ def _gen_outputs(state: tuple[str, ...], b0: _T, b_rest: list[_T]) -> list[_T]:
 # --------------------------------------------------------------------------------------------
 
 
-def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, accum: bool) -> tuple[Stmt, ...]:
+def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, accum: bool, dtype=F32) -> tuple[Stmt, ...]:
     """Emit the combine program in one of the two FORMS the same algebra takes. ``accum`` retags
     each channel's final write into a seed-riding ``base``-``Accum`` — the STATEMENT form, whose
     seed the identity placement derives from ``op.identity``; else a plain ``Assign``
@@ -201,7 +235,7 @@ def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, accum: bool) -> t
         base_t, val_t = (p, q) if _reads(p, sname) else (q, p)
         base = realize(base_t)  # the rescaled old carried state (e.g. l·alpha)
         val = realize(val_t)  # this element's contribution (e.g. p or p·v)
-        writes.append(Accum(name=sname, value=val, op="add", base=base, dtype=F32))
+        writes.append(Accum(name=sname, value=val, op="add", base=base, dtype=dtype))
     # Pivot (channel 0).
     pivot = outs[0]
     assert pivot.op == "maximum"
@@ -211,7 +245,7 @@ def _emit(outs: list[_T], state: tuple[str, ...], key: str, *, accum: bool) -> t
         realize(pivot)  # the max temp the rescales read
         a0, b0 = pivot.a
         other = b0 if a0.op == "leaf" and a0.a[0] == state[0] else a0
-        writes.append(Accum(name=state[0], value=realize(other), op="maximum", dtype=F32))
+        writes.append(Accum(name=state[0], value=realize(other), op="maximum", dtype=dtype))
     return tuple(body + writes)
 
 
@@ -255,15 +289,16 @@ def _certify(prog: tuple[Stmt, ...]) -> None:
 
 
 def exp_combine_states(
-    state: tuple[str, ...], state_b: tuple[str, ...], *, key: str | None = None, accum: bool = False
+    state: tuple[str, ...], state_b: tuple[str, ...], *, key: str | None = None, accum: bool = False, dtype=F32
 ) -> tuple[Stmt, ...]:
     """The cross-partition state⊕state combine for an exp-family carrier of arity ``len(state)``.
     Temps namespaced on ``key`` (defaults to ``state_b[0]`` so distinct REG-tier folds — which
     rename ``state_b`` — never collide). ``accum`` selects the STATEMENT form (final writes as
     ``base``-``Accum``, so the identity placement seeds them) over the pure ``Assign`` form a
-    stored ``combine`` holds — one algebra, two spellings."""
+    stored ``combine`` holds — one algebra, two spellings. ``dtype=None`` leaves that statement
+    form in canonical Loop IR for total lift; kernel lowering passes an explicit accumulator dtype."""
     outs = _gen_outputs(state, _leaf(state_b[0]), [_leaf(n) for n in state_b[1:]])
-    prog = _emit(outs, state, key or state_b[0], accum=accum)
+    prog = _emit(outs, state, key or state_b[0], accum=accum, dtype=dtype)
     _certify(prog)
     return prog
 

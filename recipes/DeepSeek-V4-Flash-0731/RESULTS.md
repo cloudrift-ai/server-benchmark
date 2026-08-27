@@ -1,9 +1,10 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
 Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Reverified 2026-08-21 on 16× V100 SXM3 at
-repository revision `fd7b09041`. Emmy serving remains ineligible: the attention-sublayer seam is captured by the
-compiler, but the runner has no loader lane for the checkpoint's MXFP4 experts and no tensor-parallel expert sharding,
-so `EMMY_FAST_MATH` is not set and there is no Emmy comparison lane.
+repository revision `fd7b09041`. Emmy serving became eligible on 2026-08-26: the runner reads the checkpoint's MXFP4
+experts, shards them across the tensor-parallel group, and `EmmyGenModel` serves this checkpoint at TP8 × PP2 while
+hosting the fork's attention sublayer (see "Emmy serving lane" below). What is still missing is an equal-envelope A/B
+against the numbers here, and a prebuilt serving image.
 
 ## Qualified deployment
 
@@ -63,18 +64,15 @@ the reported run contains no mention of Emmy at all. The `VLLM_SM70_*` variables
 Volta features — flash attention, and the turbomind FP8 / MXFP4 quantized paths — not Emmy code. So the baseline a
 reader usually wants, "vLLM without Emmy", is exactly what the throughput, TTFT and TPOT figures above already measure.
 
-What does not exist for this model is the other arm: vLLM **with** Emmy kernels. Emmy's serving A/B is
-`emmy serve <model> --bench` against `emmy serve <model> --bench --stock`, and neither side of it can run here, for two
-independent reasons.
+The other arm — vLLM **with** Emmy kernels — now exists, but is not yet measured at this report's envelope. Emmy's
+serving A/B is `emmy serve <model> --bench` against `emmy serve <model> --bench --stock`, and only the second of those
+two lanes is still impossible here.
 
-**The Emmy side has no executable serving path for this architecture.** The compiler seam exists —
-`emmy/serving/twins.py` captures DeepSeek V4 through the attention-sublayer seam (hyper-connection streams as the
-carrier, the 1Cat fork's paged MLA attention as the sublayer; see `emmy/serving/ARCHITECTURE.md`) — but the runner and
-plugin cannot serve it: the checkpoint's native naming with MXFP4 routed experts has no loader lane, the runner has no
-tensor-parallel expert sharding, and the `post` twin's lowering sits in the same Loop-splicer stall this report records
-below for fresh layer traces. Consistent with that, `docker/vllm-emmy-serve/models/` holds serving configs only for
-`gemma-4-12b`, and no `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` image exists. This is the same Emmy-eligibility
-gate recorded at the top of this report.
+**The Emmy side serves as of 2026-08-26** (see "Emmy serving lane" below): `EmmyGenModel` hosts the fork's attention
+sublayer per layer and owns everything else — hyper-connection stream mixing, norms, shared and routed experts — at
+TP8 × PP2 on this host, in the pinned 1Cat image. What it does not yet have is an equal-envelope comparison against
+the numbers above, a prebuilt image, or a serving config: `docker/vllm-emmy-serve/models/` still holds none for this
+model, and no `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` image exists.
 
 **The stock side has no Volta kernels.** Measured on the target host with `vllm/vllm-openai@sha256:03768d94…`, the
 exact stock image the sibling `DeepSeek-V4-Flash` recipe pins for this checkpoint on H200 (vLLM
@@ -97,6 +95,52 @@ measured against itself across repository revisions. They are not a speedup over
 arm to beat, and no stock arm that survives the architecture gap. The `emmy bench` reproduction accordingly has no
 second engine lane to filter to. The compiler work recorded below is kernel-level evidence (the golden) and is
 independent of serving eligibility.
+
+## Emmy serving lane (2026-08-26)
+
+`EmmyGenModel` serves this checkpoint at TP8 × PP2 on this host, inside the same pinned 1Cat image, with the fork's
+attention sublayer hosted per layer and Emmy owning the hyper-connection stream mixing, norms, shared expert and
+routed experts. Serving shape: `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256
+--gpu-memory-utilization 0.90`, eager (decode capture is unsupported for this architecture — the routed combine
+host-syncs every step).
+
+| Item | Emmy lane | Plain 1Cat, same shape |
+| --- | --- | --- |
+| Boot, engine init → serving | ~19 min (55 s load, ~5 min compile on a warm cubin cache, ~12 min profile + KV) | ~3 min |
+| Free for KV after residents | 12.99 GiB | 5.68 GiB |
+| KV capacity | 78,730 tokens (PP0) / 81,190 (PP1) | 34,397 / 35,472 |
+| Single-stream decode | ~3.6 tok/s | ~8.8 tok/s |
+| Mixed prefill/decode | 8 concurrent requests, prompts 5–361 tokens, outputs 8 and 128: 544 output tokens in 101.9 s | not measured at this shape |
+
+The KV difference is structural, not tuning: Emmy shards the 256 routed experts across the tensor-parallel group
+(32 per rank) and completes the partial sums with the group all-reduce, while the fork replicates all 256 experts on
+every rank (`local_experts=256` in its own log). At equal `--gpu-memory-utilization` that buys the Emmy lane 2.3× the
+KV capacity, which is the ceiling on context and concurrency. It costs decode throughput today, and the comparison
+above is indicative rather than a protocol A/B — the same-envelope measurement with repeats is still to come.
+
+**Greedy agreement against the fork's own implementation.** Both arms served the same checkpoint revision at the same
+shape and answered a fixed four-prompt corpus at temperature 0, 32 tokens each. Three prompts — including a
+361-token one that spills past the 128-token sliding window into the compressed and indexed attention layers, and a
+code prompt — agree on all 32 token ids exactly. The fourth diverges at token 6, where the fork's own distribution
+puts its pick and Emmy's 0.125 nats apart (` Italy` −1.3242 against ` Spain` −1.4492), and Emmy's logprob for its own
+pick lands within 0.089 of the fork's: a near-tie between two continuations the model has no real preference between,
+both of which continue coherently. Each arm is individually deterministic — two runs of each agree on every token —
+so the single divergence is arm-to-arm numerics at a tie, not run-to-run noise.
+
+**The routed-expert kernels have no golden coverage.** The committed golden is the per-layer compiler-qualification
+trace below — layers 0/2/3/4 plus the model seam, expert weights as dense values. Serving's routed-expert program is
+input-sourced instead: packed MXFP4 blocks and E8M0 scales that decode in-graph. Goldens key on strict structural
+kernel identity, so that program matches nothing in the file and resolves its forks from measured or prior evidence.
+Serving correctness is unaffected — the agreement above was measured in exactly that state — but a release that warms
+and bakes this model seals whatever those forks resolved to, unqualified.
+
+Closing it needs a *serving* golden, which this model does not have: `emmy trace --serving-twins` derives its width
+and pin matrix from `models/<slug>.env`, and that config is what the image stage's headroom sweep produces. So the
+serving golden comes with the image work rather than before it.
+
+This is what makes the output the load-bearing evidence: a transposed expert matrix or a mis-scaled MXFP4 decode
+yields fluent-looking garbage, not correct capitals, a valid Python guard clause, and 101 of the corpus's 128 token
+ids identical to the reference implementation.
 
 ## Context and accuracy
 
@@ -264,5 +308,6 @@ system-only experiment records, and factual artifact index.
 
 The performance table covers one short-context shape (1,024 in / 64 out at concurrency 8); long-context and
 high-concurrency serving are validated for capacity and correctness but not for throughput. The cross-run comparison
-against 2026-08-11 changes host and driver together. No Emmy lane exists for this checkpoint, so no compiler-versus-
-stock comparison is available.
+against 2026-08-11 changes host and driver together. The Emmy lane's figures are indicative single-run measurements at
+a 4,096-token context, not the protocol A/B (equal envelope, one priming plus three steady repeats, spread reported),
+so they support "it serves, correctly, and where it stands roughly" and nothing finer.

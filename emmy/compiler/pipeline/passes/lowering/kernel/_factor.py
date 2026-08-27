@@ -1,18 +1,18 @@
-"""The factorizer — the recursive ``TileOp``-root emitter and the ONE root binder every kernel
-seals through. The per-atom codegen **strategies** it drives live in ``_atom.py``, and the
+"""The factorizer — the recursive ``TileOp`` emitter and the ONE root-binding pipeline every
+scheduled Fold seals through. Compatible independent roots each use that pipeline, then share one
+physical grid. The per-atom codegen **strategies** it drives live in ``_atom.py``, and the
 axis-realization layer it seals through in ``_tiling.py``.
 
 :func:`factorize` is the entry ``010_materialize`` calls once per kernel: it builds the ambient
 :class:`Ctx` and dispatches ``tile.op`` through the recursion :func:`_factorize`, which walks the
 ``Fold`` node node tree. A :class:`~...ir.Fold` with a ``source``
-**recurses** (its projection walked into the ``tail``); the leaf binds to the grid via the single
+**recurses** (its projection walked into the ``tail``); each leaf binds to the grid via the single
 :func:`_bind` pipeline, whose form is read off the node's SCHEDULE — which axes are tiled — never a
 kernel kind: a tiled :class:`~...ir.bilinear fold` tiles its OUTPUT ``(m, n)`` axes (register / warp
 cells), a cooperating :class:`~...ir.Fold` tiles its REDUCE axis (:func:`_tile_reduce_axis` —
 ``coop`` lanes + ``reg`` ILP chains), and everything else tiles nothing (the degenerate
 one-thread-per-cell fold). All three seal through the one :func:`grid_tile` finalizer; the per-cell
-body is built by the shared recursion :func:`_emit` (which walks ``source`` AND ``step``,
-reaching flash's Q@K / P@V as nodes).
+body is built by the shared recursion :func:`_emit`, which walks every stored operand and step.
 
 The output tiling reads its **geometry straight off the** contraction **node** (``tile_m`` /
 ``mask_m`` / ``m_b`` / ``block_threads`` / …, derived there from the ``tile`` schedule + the output
@@ -22,9 +22,8 @@ the schedule's plan into bound ``Axis`` objects), and splices in two codegen hal
 the per-atom strategies in **``_atom.py``**: :func:`~...kernel._atom.reduce_codegen` — the reusable,
 **sink-agnostic** ``(state_decls, reduce_region)`` (accumulator/operand decls + the contraction
 K-loop) — and a per-cell **sink** ``store(i, j, offset, mn)`` (default
-:func:`~...kernel._atom.store_sink`, the matmul sink; ``factorize(tile, root, store=…)`` swaps it —
-the flash inner QK/PV pass a sink that bridges the accumulator into the streaming-softmax twist,
-reusing the same ``reduce_codegen``).
+:func:`~...kernel._atom.store_sink`, the matmul sink). A caller may replace the sink while reusing
+the same ``reduce_codegen``.
 
 The reduce-axis tiling (:func:`_tile_reduce_axis` + the shared-row staging apply) folds the reduce
 axis ``coop`` ways across threads and ``reg`` ways across per-thread accumulators, then the
@@ -47,20 +46,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, _unique_edges, is_contraction
+from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import effect_tail
-from emmy.compiler.ir.tile.ops import cone_seam
+from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs
+from emmy.compiler.ir.tile.ops import cone_seam, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
-from emmy.compiler.pipeline.passes.lowering.kernel._atom import clamp_last, copy_cell, reduce_codegen, store_sink
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
+    clamp_last,
+    copy_cell,
+    fold_store_sink,
+    fold_store_tail,
+    reduce_codegen,
+    scheduled_fold_contraction,
+    store_sink,
+)
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 
@@ -69,7 +78,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_
 # divergent codegen path). :func:`_emit` walks a ``Fold`` node tree —
 # through ``source`` AND ``step`` — threading a :class:`Ctx` down (the ambient cell environment)
 # and returning a :class:`Frag` up (the per-cell loop-IR body + the produced :class:`Handle` wire +
-# the reduce ``carrier`` when the node folds one). The ONE root binder (:func:`_bind`) consumes the
+# the reduce ``carrier`` when the node folds one). The ONE root-binding pipeline (:func:`_bind`) consumes the
 # recursion: the output-tiled contraction arm splices the atom's codegen through ``grid_tile``,
 # and the reduce partitioner (:func:`_tile_reduce_axis`) builds its per-cell reduce loop via
 # :func:`_emit`, so a nested contraction is reached AS A NODE — scalar-nested at block=1.
@@ -104,9 +113,7 @@ class Ctx:
     kernel and passed unchanged so every node reads/writes at the same output cell. ``grid`` is the
     kernel's grid axes; ``inputs`` the operand buffer table (dtype/shape); ``output`` the root
     output buffer name. The operand smem pipeline is NOT here — it rides the node it decorates
-    (the ``STAGE`` slice). (The tensor-core rebuild adds the warp
-    ``bind``/``cell`` register tile — owned per-node by contraction's ``tile`` — and the
-    inbound ``wires`` handles, e.g. flash's score fragment feeding P@V's A operand.)"""
+    (the ``STAGE`` slice)."""
 
     grid: tuple
     inputs: dict | None = None
@@ -117,31 +124,30 @@ class Ctx:
     # per-node ``tile`` / ``reduce`` / ``stage`` reads all go through here (1r — the term stores
     # no slices).
     sched: object = None
-    # The placement's FREE axes — the un-shrunk originals (a warp-flash grid shrinks the query axis
-    # and folds the value axis away; a split partial prefixes ``_ksplit``). The twist / chain
-    # realizers derive their contraction views' output axes from the trailing pair.
+    # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
+    # contraction views derive their output axes from the trailing pair.
     free: tuple = ()
 
 
-def _emit(op, ctx: Ctx) -> Frag:
+def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
     """Recurse over a structural node, returning its :class:`Frag` (per-cell body + wire + carrier).
     The single node-kind dispatch every kernel's compute flows through — walking ``source`` AND
     ``step`` so nested contractions are reached as nodes. Scalar-nested: a node's body is its
     lowered loop-IR (byte-identical to ``Fold.lower``)."""
+    if isinstance(op, Load):
+        return Frag(body=[op], out=Handle(op.names[-1]))
     if isinstance(op, Fold) and op.axis is None:
         # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
-        # edge per computed input: the row statistic, plus (attention) the per-cell score
-        # contraction its ``exp(s − m)`` reads.
-        prefix = [s for e in op.operands for s in _emit(e, ctx).body]
-        # A body member that is itself a node (a fold reading the store's sweep axis, chained
-        # over its statistic) emits in place, per cell.
+        # edge per computed input, including nested reductions and contractions.
+        prefix = [s for e in _unique_edges(op.operands) for s in _emit(e, ctx).body]
+        # A body member that is itself a node emits in place, per cell.
         body = [s for m in op.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
-        return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx)], out=_map_wire(op))
+        return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx, output_specs)], out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
         # included, since a contraction is this same node under the bilinear reading. Loop-
-        # invariant edges (a chained statistic) emit once ahead of the loop; the rest splice into
-        # the step ahead of first use.
+        # invariant edges emit once ahead of the loop; the rest splice into the step ahead of first
+        # use.
         hoisted = [s for e in op._hoisted_edges() for s in _emit(e, ctx).body]
         stmts = _emit_body(Body(op.spliced_step()), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
@@ -151,7 +157,7 @@ def _emit(op, ctx: Ctx) -> Frag:
 
 def _map_wire(op: Fold) -> Handle:
     """The :class:`Handle` a parent wires to for a zero-axis ``Fold`` node — mirrors ``Fold.out``'s cases but
-    stays robust where ``Fold.out`` would raise. An empty body surfaces the ``source``'s wire; a
+    stays robust where ``Fold.out`` would raise. An empty body surfaces the operand's wire; a
     ``Write``-terminated body is a ROOT sink (stored to gmem, never wired) so surfaces the written
     value at ``gmem`` residence; a body ending in an annotated reduce / contraction ``Loop`` surfaces
     its carried state's head (:func:`loop_state_head` — the acc / carried value, NOT the loop's
@@ -172,12 +178,14 @@ def _map_wire(op: Fold) -> Handle:
 def _emit_wire(op) -> Handle:
     """The produced-value :class:`Handle` of any node — a ``Fold`` / contraction names its
     carrier / accumulator; a zero-axis ``Fold`` scans for its last defining stmt (:func:`_map_wire`)."""
+    if isinstance(op, Load):
+        return Handle(op.names[-1])
     if isinstance(op, Fold) and op.axis is None:
         return _map_wire(op)
     return Handle(op.out)  # Fold.out — the carrier state, or a contraction's primary acc; always safe
 
 
-def _emit_body(body, ctx: Ctx) -> list[Stmt]:
+def _emit_body(body, ctx: Ctx, output_specs: tuple = ()) -> list[Stmt]:
     """Walk a ``Body`` of loop-IR stmts, recursing into any nested structural node (a
     :class:`Fold` tree) via :func:`_emit` and passing plain
     stmts through — the codegen-layer node-walk (the dispatch seam ``ir._flatten_nodes`` cannot host,
@@ -186,6 +194,12 @@ def _emit_body(body, ctx: Ctx) -> list[Stmt]:
     for s in body:
         if isinstance(s, Fold):
             out.extend(_emit(s, ctx).body)
+        elif isinstance(s, ProjectionRegion):
+            results = set(s.results)
+            owned = tuple(spec for spec in output_specs if set(spec.write.values) <= results)
+            inner = _emit_body(s.body, ctx, output_specs)
+            inner.extend(spec.write for spec in owned)
+            out.append(Loop(axis=s.axis, body=Body(inner), unroll=s.unroll))
         else:
             out.append(s)
     return out
@@ -196,13 +210,9 @@ def factorize(tile, root, store=None) -> Tile:
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
-    from emmy.compiler.ir.schedule import Raster  # noqa: PLC0415 — keep the module torch-free at import
-
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``Fold.a``.
-    from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
-
     # An empty schedule fork deliberately leaves the term unmapped. Materialization is the
     # guardrail's scalar fallback: bind one thread to every free-axis cell instead of carrying an
     # empty grid into loop lowering while the body still references those coordinates.
@@ -223,37 +233,83 @@ def factorize(tile, root, store=None) -> Tile:
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
     )
     out_val = _emit_wire(op).name if op is not None else ""
-    return _factorize(op, ctx, tail=(), out_val=out_val, store=store, stores=tuple(tile.stores))
+    return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, stores: tuple = ()) -> Tile:
-    """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind the leaf to the grid via
-    the ONE binder. A :class:`Fold` with a ``source`` **recurses**: its ``body`` (the projection /
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = ()) -> Tile:
+    """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
+    the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
-    ``stores`` reconstituted into it (``effect_tail`` — 1q: the root ``Write``\\ s / output sweep
-    left the term for ``TileOp.stores``, so the tail downstream sees is byte-identical to the
-    stored-``Write`` era), and the result prepended to ``tail``;
+    output specifications reconstituted into it (``apply_output_specs``), and the result prepended to ``tail``;
     everything else is a leaf, bound by :func:`_bind` — the single pipeline, whose form is read off
-    the node's SCHEDULE (which axes are tiled), never a kernel kind. There is **no** flash /
-    attention special case: flash is the two-contraction ``TWISTED`` reduce tree, so its Q@K /
-    P@V contractions and its streaming reduce factorize through this one walk (scalar block=1
-    today; a nested warp-tiled contraction routes through the ``_emit`` contraction seam). A
-    bespoke emitter would be a divergent codegen path the mandate forbids."""
+    the node's SCHEDULE (which axes are tiled), never a kernel kind. Nested scheduled contractions
+    and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        proj = _emit_body(op.body, ctx)
-        if stores:
-            proj = effect_tail(proj, stores)
-        return _factorize(op.operands[0], ctx, tail=(*proj, *tail), out_val=out_val, store=store)
-    if stores and isinstance(op, Fold) and op.axis is None:
+        tiled = [edge for edge in op.operands if is_contraction(edge) and ctx.sched.tile_of(edge) is not None]
+        if len(tiled) > 1:
+            return _bind_roots(op, ctx, output_specs)
+        root = tiled[0] if tiled else op.operands[0]
+        siblings = [stmt for edge in op.operands if edge is not root for stmt in _emit(edge, ctx).body]
+        proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
+        region_results = _projection_results(op.body)
+        root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
+        if root_specs:
+            proj = apply_output_specs(proj, root_specs)
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+    if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
-        # its boundary stores only after that body is emitted so an output sweep wraps every stmt
+        # its output specifications only after that body is emitted so an output sweep wraps every stmt
         # that reads the sweep coordinate.
-        return _bind(op, ctx, tail, out_val, store, boundary_stores=stores)
-    if stores:
+        return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
+    if output_specs:
         # A non-projection flat root can carry plain root ``Write``\\ s only.
-        assert all(st.sweep is None for st in stores), "sweep stores ride a projecting zero-axis fold"
-        tail = (*tail, *(st.write for st in stores))
+        assert all(st.sweep is None for st in output_specs), "sweep stores ride a projecting zero-axis fold"
+        tail = (*tail, *(st.write for st in output_specs))
     return _bind(op, ctx, tail, out_val, store)
+
+
+def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
+    """Merge independently bound regions that use one physical grid and worker inventory."""
+    first = tiles[0]
+    axes = {axis.name: axis for axis in first.axes}
+    for tile in tiles[1:]:
+        current = {axis.name: axis for axis in tile.axes}
+        if current != axes:
+            raise ValueError("output-tiled roots disagree on their physical grid")
+        if (tile.block_threads, tile.aux_threads) != (first.block_threads, first.aux_threads):
+            raise ValueError("output-tiled roots disagree on their worker inventory")
+
+    local = {}
+    body = []
+    top_defs = set()
+    for tile in tiles:
+        for stmt in tile.body:
+            declarations = stmt.local_decls()
+            if declarations:
+                prior = tuple(local.get(name) for name in declarations)
+                if any(previous is not None and previous != stmt for previous in prior):
+                    conflict = next(name for name, previous in zip(declarations, prior, strict=True) if previous not in (None, stmt))
+                    raise ValueError(f"output-tiled roots require incompatible local buffer {conflict!r}")
+                if all(previous is not None for previous in prior):
+                    continue
+                for name in declarations:
+                    local[name] = stmt
+            overlap = top_defs & set(stmt.defines())
+            if overlap:
+                raise ValueError(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
+            top_defs.update(stmt.defines())
+            body.append(stmt)
+    return replace(first, body=Body(body))
+
+
+def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
+    """Bind compatible independent contraction roots separately, then share their physical grid."""
+    regions = projection_regions(op, output_specs)
+    tiles = []
+    for index, (root, body, owned_specs) in enumerate(regions):
+        tail = tuple(apply_output_specs(body, owned_specs))
+        tiles.append(_bind(root, ctx, tail, root.out, frag_ns=f"_r{index}"))
+    return _merge_root_tiles(tuple(tiles))
 
 
 def has_write(stmts: list[Stmt]) -> bool:
@@ -279,7 +335,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_stores: tuple = ()) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -287,8 +343,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
 
     - a contraction tiles its OUTPUT ``(m, n)`` axes — register / warp cells through
       ``atomize → register_tile → unit_tile``, the reduce (K) serial per cell from the atom's
-      :func:`reduce_codegen`, ``store`` the per-cell sink (default :func:`store_sink`; the flash
-      inner QK/PV pass a sink that bridges the accumulator into the softmax twist). Its projection
+      :func:`reduce_codegen`, and ``store`` the per-cell sink (default :func:`store_sink`). Its projection
       arrives as ``tail`` — peeled off the wrapping zero-axis fold, the ONE home for a projection; the bare
       grid-``Write`` glue is synthesized here (it needs ``ctx.output``, so it can't ride the node).
     - a :class:`Fold` whose :class:`ReducePlan` cooperates tiles its REDUCE axis instead
@@ -306,34 +361,62 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
     # geometry the atom reads is the slice's own, not a separate view object's. A stored node
     # WITHOUT a TILE slice takes the reduce tiers instead (the per-cell / coop-K forms), where the
     # whole grid rides untiled.
-    tile = ctx.sched.tile_of(op) if is_contraction(op) else None
+    folded = scheduled_fold_contraction(op, ctx.sched) if isinstance(op, Fold) and op.axis is not None else None
+    if folded is not None:
+        c, value_child, tile, stage = folded
+        projection = tail
+        tail = fold_store_tail(tail, op, c)
+    else:
+        c, value_child, projection = op, None, ()
+        tile = ctx.sched.tile_of(op) if is_contraction(op) else None
+        stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
-        c = op
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.out)
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
-        seam = cone_seam(c.a, c.axis.name) if (not isinstance(c.a, Load)) else None
+        seam = cone_seam(c.a, c.axis.name) if value_child is None and not isinstance(c.a, Load) else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
         lead = grid[:-2]
-        state_decls, reduce_region = reduce_codegen(c, tile, ctx.sched.get("STAGE", c), ctx.inputs, ctx.workers, seam, lead)
-        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead)
+        carried = {}
+        state_decls, reduce_region = reduce_codegen(
+            c,
+            tile,
+            stage,
+            ctx.inputs,
+            ctx.workers,
+            seam,
+            lead,
+            frag_ns,
+            fold=op if value_child is not None else None,
+            value_child=value_child,
+            sched=ctx.sched,
+            projection=projection,
+            carried=carried,
+        )
+        if store is not None:
+            sink = store
+        elif value_child is not None:
+            sink = fold_store_sink(tile, tuple(epi), carried, frag_ns)
+        else:
+            sink = store_sink(c, tile, Body(tuple(epi)), lead, frag_ns)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
-        # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduce — monoid, flash, coop-K /
-        # split contraction — is a ``Fold`` node after ``ops.nodify_reduce`` (a projecting
-        # zero-axis ``Fold`` was already peeled off by :func:`_factorize`).
+        # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
+        # ``Fold`` node (a projecting zero-axis
+        # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         if plan is None or (plan.coop <= 1 and plan.reg <= 1):
-            body = [*_emit(op, ctx).body, *tail]
-            if boundary_stores:
-                body = effect_tail(body, boundary_stores)
+            body = [*_emit(op, ctx, output_specs).body, *tail]
+            root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
+            if root_specs:
+                body = apply_output_specs(body, root_specs)
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
@@ -370,8 +453,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, boundary_store
         state_decls=state_decls,
         reduce_region=reduce_region,
         store=sink,
-        # The scheduler stamps ``workers`` on a contraction row or a warp-flash (TWISTED) row only;
-        # every other arm arrives with ``None`` — safe to thread unconditionally.
+        # The scheduler stamps ``workers`` on scheduled contractions; every other arm arrives with
+        # ``None`` — safe to thread unconditionally.
         workers=ctx.workers,
         raster=ctx.raster,
     )
@@ -513,9 +596,7 @@ def emit_combine(
     prog = red.combine_states
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
-    from emmy.compiler.backend.cuda.dtype import cuda_name as _cuda_name  # noqa: PLC0415
-
-    smem_c = _cuda_name(dtype)
+    smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
         # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
@@ -664,7 +745,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     coop, reg = plan.coop, plan.reg
 
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
-    # **node** — the walk reaches any nested contraction (flash Q@K / P@V) as a node. The algebra
+    # **node** — the walk reaches any nested contraction as a node. The algebra
     # is read off the ``Fold`` node itself (:class:`Reduction` — a contraction's K fold and a
     # monoid's reduce fold both answer it, so the algebra-generic ``merge_stmts`` /
     # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
@@ -690,8 +771,6 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     fill_stmts: list[Stmt] = []
     op_stage = ctx.sched.get("STAGE", op)
     if lane is not None and op_stage is not None and op_stage.smem:
-        from emmy.compiler.backend.cuda.dtype import cuda_name  # noqa: PLC0415
-
         (staged,) = op_stage.smem
         grid_vars = tuple(Var(a.name) for a in grid)
         smem_name = f"{staged}_smem"
@@ -713,7 +792,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # accumulator (``StridedLoop.render``).
     # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
     # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
-    # them from the per-copy SSA rename. So too any NESTED loop-axis var (a flash Q@K / P@V
+    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
     # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
     # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
     # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares

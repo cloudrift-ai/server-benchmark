@@ -9,11 +9,9 @@ kernel, at birth:
   computed stamp boundary; run start for a pipeline entering at lowering): the fused body is
   final, so the identity reflects the final form; earlier would give the same logical kernel two
   identities (pre- and post-stamp) and split the tune DB's keyings.
-- **minted during lowering** — a placement cut's fragments, a cross-CTA split's pieces
-  (``on_splice`` of a lowering pass): fresh knob-less ``LoopOp``\\ s stamped before the fragment
-  even enters the graph, so no rule, whatever the cursor position, can observe an unstamped
-  kernel. The same moment threads decomposition attribution (``Op.source`` — the two-level
-  tuner's composed Σ rows group by it).
+- **minted during lowering** — a cross-CTA split's pieces (``on_splice`` of a lowering pass):
+  fresh knob-less TileOps stamped before the fragment enters the graph, so no rule can
+  observe an unstamped kernel.
 
 Materializing into knobs (rather than compute-on-read everywhere) is deliberate: the stamped row
 rides the engine's rebind knob-merge into every later dialect, which is what keeps a terminal
@@ -30,23 +28,24 @@ mutation of a possibly-shared knob dict.
 from __future__ import annotations
 
 from collections import Counter
-from math import prod
+from sys import float_info
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign, Mma
+from emmy.compiler.ir.tile import TileOp, lower_with_output_specs
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
-    from emmy.compiler.ir.stmt.body import Body
 
 
 class IdentityStrategy(PipelineStrategy):
-    """Stamps every loop-dialect kernel's ``S_*`` structural identity at birth and serves the
+    """Stamp every kernel's ``S_*`` structural identity at birth and serve the
     one spelling of identity to every reader (``signature`` / ``op_sig``)."""
 
     @staticmethod
@@ -61,7 +60,7 @@ class IdentityStrategy(PipelineStrategy):
 
     def on_run_start(self, e: RunStartEvent) -> None:
         # A pipeline entering AFTER the fusion boundary never fires a boundary pass end — but
-        # its entry graph's loop kernels are already final, so they stamp at the door. A
+        # its entry graph's kernels are already final, so they stamp at the door. A
         # pipeline that still runs fusion defers to the pass-end stamp: a premature stamp would
         # ride the rebind knob-merge onto fused bodies it no longer describes.
         if self._stamp_boundary(e.passes) is None:
@@ -81,7 +80,7 @@ class IdentityStrategy(PipelineStrategy):
             return
         for node in e.fragment.nodes.values():
             op = node.op
-            if not isinstance(op, LoopOp):
+            if not isinstance(op, (LoopOp, TileOp)):
                 continue
             if op.source is None and e.root_op.dialect == "loop":
                 op.source = e.root_op
@@ -90,9 +89,10 @@ class IdentityStrategy(PipelineStrategy):
             self._stamp(op, e.fragment)
 
     def _stamp(self, op, graph: Graph) -> None:
-        if not isinstance(op, LoopOp) or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
+        if not isinstance(op, (LoopOp, TileOp)) or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
             return
-        op.knobs = {**op.knobs, **structure_features(op.body, graph)}
+        body = _identity_body(op)
+        op.knobs = {**op.knobs, **structure_features(body, graph)}
 
     # --- the read API: the one spelling of identity ------------------------------------------
 
@@ -103,7 +103,7 @@ class IdentityStrategy(PipelineStrategy):
         stamped = tuple(sorted((k, float(v)) for k, v in (getattr(op, "knobs", None) or {}).items() if k.startswith(STRUCT_PREFIX)))
         if stamped:
             return stamped
-        body = getattr(op, "body", None)
+        body = _identity_body(op)
         if body is None:
             return ()
         return tuple(sorted(structure_features(body, graph).items()))
@@ -117,6 +117,18 @@ class IdentityStrategy(PipelineStrategy):
 # ---------------------------------------------------------------------------
 # The feature function — the identity's content
 # ---------------------------------------------------------------------------
+
+
+def _identity_body(op) -> Body | None:
+    """Return the loop-shaped body used only to compute a kernel's structural features."""
+    if isinstance(op, LoopOp):
+        return op.body
+    if not isinstance(op, TileOp):
+        return getattr(op, "body", None)
+    body = Body(lower_with_output_specs(op.op, op.output_specs))
+    for axis in reversed(op.place.free):
+        body = Body((Loop(axis=axis, body=body),))
+    return body
 
 
 def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:
@@ -185,12 +197,22 @@ def _extents(body: Body) -> dict[str, float]:
             n_symbolic += 1
             continue
         (reduce_ if loop.is_reduce else free).append(ext.as_static())
+
+    def bounded_product(values: list[int]) -> float:
+        """Multiply extent features without constructing an unbounded Python integer."""
+        value = 1.0
+        for extent in values:
+            if extent and value > float_info.max / extent:
+                return float_info.max
+            value *= extent
+        return value
+
     return {
         "S_ext_n_free_axis": float(len(free)),
-        "S_ext_free_prod": float(prod(free)) if free else 1.0,
+        "S_ext_free_prod": bounded_product(free),
         "S_ext_free_max": float(max(free)) if free else 0.0,
         "S_ext_n_reduce_axis": float(len(reduce_)),
-        "S_ext_reduce_prod": float(prod(reduce_)) if reduce_ else 1.0,
+        "S_ext_reduce_prod": bounded_product(reduce_),
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
     }

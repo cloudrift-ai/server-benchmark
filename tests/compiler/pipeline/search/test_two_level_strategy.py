@@ -106,18 +106,23 @@ def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row
 
 def test_scoring_is_separable_over_unique_kernels() -> None:
     """Two structurally distinct kernels: each measured independently, the terminal reward is
-    their Σ, and the bench count stays far below the cross-product (the old whole-graph MCTS
-    failure this design guards against)."""
-    fused = _fuse(_graph(("x", 64, 128, 48), ("y", 96, 64, 32)))
+    their Σ, and no whole-graph Cartesian candidate is introduced."""
+    specs = (("x", 64, 128, 48), ("y", 96, 64, 32))
+    fused = _fuse(_graph(*specs))
     backend = _CountingBackend()
     reward = run_inner_reward(fused, ctx=Context.from_target((8, 0)), db=SearchDB(), backends=[backend], patience=_PATIENCE, prior=None)
     assert reward.ok
     assert len(reward.per_op) == 2
     assert all(r.best_us is not None and r.multiplicity == 1 for r in reward.per_op)
     assert reward.total_us == pytest.approx(sum(r.best_us for r in reward.per_op))
-    # Patience is stagnation-based, so a per-op window stretches by a handful of benches; the
-    # guarantee is linear scaling in kernels, never the cross-product (hundreds here).
-    assert backend.calls <= 8 * _PATIENCE, "separable: benches scale per-op, never as the product"
+    individual_calls = []
+    for spec in specs:
+        one = _CountingBackend()
+        run_inner_reward(
+            _fuse(_graph(spec)), ctx=Context.from_target((8, 0)), db=SearchDB(), backends=[one], patience=_PATIENCE, prior=None
+        )
+        individual_calls.append(one.calls)
+    assert backend.calls == sum(individual_calls), "the joint graph spends exactly the sum of its independent tuning budgets"
 
 
 def test_identical_kernels_dedup_with_multiplicity() -> None:

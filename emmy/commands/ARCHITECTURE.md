@@ -666,10 +666,11 @@ instead of looking like lost data. A golden whose signature matches no row in it
 and counted per card as `unranked`.
 
 **Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
-that many candidates per pool while the pool is still an addressable space, before a candidate dict exists —
-the corpus is millions of rows and tens of gigabytes otherwise, and one golden's pool alone is past the
-scheduler's materialization budget, so an unsampled `--data golden` fit does not finish. The draw is a pure
-function of `(pool size, N, --seed)` and never looks at a row, so a refit of the same corpus is byte-identical
+that many candidates per pool by single-pass reservoir sampling over the schedule walk's leaf stream — each
+candidate dict exists only for the moment it passes the draw — because the corpus is millions of rows and tens
+of gigabytes otherwise, and one golden's pool alone is past the scheduler's materialization budget, so an
+unsampled `--data golden` fit does not finish. The draw is a pure function of the stream and `(N, --seed)` and
+never reads a row, so a refit of the same corpus is byte-identical
 and two goldens over one pool still retain identical rows and still merge into one group. Every recorded
 config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
 always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the

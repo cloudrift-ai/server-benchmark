@@ -9,8 +9,9 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants
+from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants, split_invariant_divides
 
 
 def test_hoists_invariant_load_above_loop() -> None:
@@ -170,3 +171,58 @@ def test_does_not_hoist_block_containing_write() -> None:
     assert len(out) == 1 and isinstance(out[0], Loop) and out[0].axis.name == "a"
     inner = tuple(out[0].body)
     assert any(isinstance(s, Loop) and s.axis.name == "b" for s in inner)
+
+
+def test_nested_side_effect_summary_is_cached_bottom_up() -> None:
+    """One root query populates the immutable summary on every nested loop."""
+    stmt = Write(output="out", index=(), value="value")
+    loops = []
+    for depth in range(32):
+        stmt = Loop(axis=Axis(f"a{depth}", 2), body=(stmt,))
+        loops.append(stmt)
+
+    assert stmt.has_side_effects
+    assert all(loop.__dict__.get("has_side_effects") is True for loop in loops)
+
+
+def test_nested_axis_dependency_summary_does_not_rescan_each_loop(monkeypatch) -> None:
+    """LICM does not rediscover one leaf through every enclosing loop."""
+    calls = 0
+    original = Load.deps
+
+    def counted(load):
+        nonlocal calls
+        calls += 1
+        return original(load)
+
+    monkeypatch.setattr(Load, "deps", counted)
+    axes = tuple(Axis(f"a{depth}", 2) for depth in range(32))
+    body = (Load(name="value", input="x", index=tuple(Var(axis.name) for axis in axes)),)
+    for axis in reversed(axes):
+        body = (Loop(axis=axis, body=body),)
+
+    hoist_loop_invariants(body)
+
+    assert calls < len(axes)
+
+
+def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
+    body = Body(
+        (
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="x", input="X", index=(Var("a"),)),
+                    Load(name="scale", input="scale", index=()),
+                    Assign(name="value", op="divide", args=("x", "scale")),
+                    Write(output="out", index=(Var("a"),), value="value"),
+                ),
+            ),
+        )
+    )
+
+    split = split_invariant_divides(body)
+    hoist_loop_invariants(split)
+
+    assert "deps_closure" not in body.__dict__
+    assert "deps_closure" not in split.__dict__

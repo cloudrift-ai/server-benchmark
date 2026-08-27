@@ -69,7 +69,25 @@ def test_pinned_knobs_sets_and_restores_env(monkeypatch):
 
 
 def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch):
-    """Axis-scoped programmatic pins preserve the raw aggregate that placement routing reads."""
+    """Axis-scoped programmatic pins preserve the raw aggregate and their environment splat."""
+    import os
+
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,STAGE@a=d1/smem")
+    monkeypatch.setenv("EMMY_STAGE@A", "d1/smem")
+    with pinned_knobs({"STAGE@a": "d2/smem", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_STAGE@A"] == "d2/smem"
+        assert os.environ["EMMY_TILE@DD"] == "f2x2"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem,STAGE@a=d2/smem,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["STAGE@a"] == "d2/smem"
+    assert os.environ["EMMY_STAGE@A"] == "d1/smem"
+    assert "EMMY_TILE@DD" not in os.environ
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem"
+
+
+def test_pinned_knobs_restores_scoped_placement_keys(monkeypatch):
     import os
 
     from emmy.compiler.pipeline.knob import parse_knob_spec
@@ -79,11 +97,9 @@ def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch
     monkeypatch.setenv("EMMY_PLACE@A", "fuse")
     with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
         assert os.environ["EMMY_PLACE@A"] == "cut"
-        assert os.environ["EMMY_TILE@DD"] == "f2x2"
         assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
         assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
     assert os.environ["EMMY_PLACE@A"] == "fuse"
-    assert "EMMY_TILE@DD" not in os.environ
     assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
 
 
@@ -1658,7 +1674,7 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
 def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatch):
     """A realized cross-CTA ``REDUCE`` split leaves no knob stamp, so the gate must not read one.
 
-    ``030_split_reduce`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
+    ``035_split_reduce`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
     schedule row, so no piece may carry the ``g<n>`` it came from — ``test_split_fresh_kernels``
     asserts exactly that. The receipt is the piece's sliced reduce axis, which knob stamps cannot
     show, so a ``g2a`` pin that DID realize used to be reported ``realized (off)`` and its row went

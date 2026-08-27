@@ -2,7 +2,7 @@
 
 Lives in a ``_``-prefixed module so the pass loader skips it (only ``NNN_<name>.py`` files load
 as rules); ``005_delegate_zero_init`` and ``010_lower_kernelop`` both need the atomic-output
-walk, so it is defined once here (the ``loop/fusion/_helpers`` precedent).
+walk, so it is defined once here.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from emmy.compiler.ir.stmt import Write
 
 
 def atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
-    """Output buffers an atomic reduce-write (``030_split_reduce``'s atomic finalize) accumulates
+    """Output buffers an atomic reduce-write (``035_split_reduce``'s atomic finalize) accumulates
     into — they must be zero-init'd before each launch (``CudaOp.zero_outputs``), since every
     contributing CTA ``atomicAdd``\\ s into the same cell. The scalar tier's atomic ``Write``
     survives materialization verbatim; the mma tier's is a ``RegStore(atomic=True)``.

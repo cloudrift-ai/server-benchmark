@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
@@ -77,6 +77,7 @@ def normalize_body(
         stmts = split_invariant_divides(stmts)
         stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
+    stmts = dedup_loads(stmts)
     stmts = rename_ssa_sequential(stmts)
     if canonical_buffers:
         stmts = canonicalize_buffer_names(stmts)
@@ -133,12 +134,35 @@ def _recurse_canonicalize(s: Stmt) -> Stmt:
     return s.with_bodies(tuple(canonicalize_free_axis_order(b) for b in nested))
 
 
+def _output_storage_depth(stmts: Body, axis: str) -> int | None:
+    """The row-major output-coordinate depth of one unit-affine free axis."""
+    depths = []
+    for write in stmts.iter_of_type(Write):
+        positions = []
+        for position, expr in enumerate(write.index):
+            form = affine_form(expr, {axis})
+            if form is None:
+                return None
+            coefficient = form[1].get(axis, 0)
+            if coefficient:
+                if coefficient != 1:
+                    return None
+                positions.append(position)
+        if len(positions) > 1:
+            return None
+        if positions:
+            depths.append(len(write.index) - positions[0] - 1)
+    return depths[0] if depths and len(set(depths)) == 1 else None
+
+
 def canonicalize_free_axis_order(stmts: Body) -> Body:
-    """Sort the outer chain of free ``Loop`` blocks alphabetically by axis
-    name. The chain is the sequence of single-child free Loops at the top of
-    ``stmts``; it terminates at a reduce Loop or a branching body.
-    Recursion continues into terminal block bodies (Loop / StridedLoop /
-    Tile / Cond)."""
+    """Sort an outer free-loop chain by row-major output storage order.
+
+    Boundary writes provide the canonical geometry: larger coordinate depth is outer, so the
+    innermost loop follows the output's contiguous dimension. If the writes do not totally order
+    the chain, axis names provide the deterministic fallback. Recursion continues into terminal
+    block bodies (Loop / StridedLoop / Tile / Cond).
+    """
     stmts = Body.coerce(stmts)
     chain: list[Loop] = []
     current = stmts
@@ -151,7 +175,11 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
 
     terminal = tuple(_recurse_canonicalize(s) for s in current)
 
-    chain_sorted = sorted(chain, key=lambda lp: lp.axis.name)
+    depths = [_output_storage_depth(Body(terminal), loop.axis.name) for loop in chain]
+    if all(depth is not None for depth in depths) and len(set(depths)) == len(depths):
+        chain_sorted = [loop for _, loop in sorted(zip(depths, chain, strict=True), key=lambda item: -item[0])]
+    else:
+        chain_sorted = sorted(chain, key=lambda lp: lp.axis.name)
     result: Body = terminal
     for loop in reversed(chain_sorted):
         result = (Loop(axis=loop.axis, body=result, unroll=loop.unroll),)
@@ -310,7 +338,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
 # bodies into one Loop so the reduce axis is traversed once instead of
-# twice. Downstream ``dedup_loads`` then collapses the duplicate Loads
+# twice. Later normalization by ``dedup_loads`` collapses the duplicate Loads
 # both halves share — e.g. ``load x[0, a0, k]`` in the gated-MLP
 # pattern ``silu(x@Wg) * (x@Wu)`` where both matmuls reduce over the
 # same K and share x as a Load source. Symmetric staging follows: once
@@ -444,20 +472,20 @@ def split_invariant_divides(stmts: Body) -> Body:
     """Rewrite ``divide(x, y)`` → ``reciprocal(y) + multiply(x, recip)``
     when ``y``'s axis-dependency set is a strict subset of ``x``'s.
 
-    Invariance is queried via :meth:`Body.deps_closure` over the
-    pre-rewrite body, filtered to axis names. The strict-subset check
-    means there's at least one axis ``x`` depends on that ``y``
-    doesn't — splitting moves the rcp out of that axis's Loop while
-    the multiply stays. Generates fresh SSA names for the rcp; the
-    trailing :func:`rename_ssa_sequential` pass renumbers them into
-    ``vN`` form.
+    Invariance is queried via :attr:`Body.axis_dependencies` over the
+    pre-rewrite body. The strict-subset check means there's at least one
+    axis ``x`` depends on that ``y`` doesn't — splitting moves the rcp out
+    of that axis's Loop while the multiply stays. Generates fresh SSA names
+    for the rcp; the trailing :func:`rename_ssa_sequential` pass renumbers
+    them into ``vN`` form.
     """
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
 
     stmts = Body.coerce(stmts)
-    closure = stmts.deps_closure
-    axes = stmts.axis_names
-    ssa_names: set[str] = set(closure.keys())
+    if not any(isinstance(stmt, Assign) and stmt.op.name == "divide" for stmt in stmts.iter()):
+        return stmts
+    axis_dependencies = dict(stmts.axis_dependencies)
+    ssa_names: set[str] = set(axis_dependencies)
     fresh_counter = [0]
 
     def _fresh(prefix: str) -> str:
@@ -469,7 +497,7 @@ def split_invariant_divides(stmts: Body) -> Body:
                 return n
 
     def _axes_of(name: str) -> frozenset[str]:
-        return closure.get(name, frozenset()) & axes
+        return axis_dependencies.get(name, frozenset())
 
     def walk(body: Body) -> Body:
         out: list[Stmt] = []
@@ -488,11 +516,11 @@ def split_invariant_divides(stmts: Body) -> Body:
                     recip_name = _fresh(f"recip_{y_name}")
                     recip = Assign(name=recip_name, op=ElementwiseImpl("reciprocal"), args=(y_name,))
                     mult = Assign(name=s.name, op=ElementwiseImpl("multiply"), args=(x_name, recip_name))
-                    # Patch closure for the freshly-introduced rcp so a
+                    # Patch dependencies for the freshly-introduced rcp so a
                     # later divide reading the same y in the same body
                     # still sees the correct axis set.
-                    closure[recip_name] = closure.get(y_name, frozenset())
-                    closure[mult.name] = closure.get(x_name, frozenset()) | closure[recip_name]
+                    axis_dependencies[recip_name] = axis_dependencies.get(y_name, frozenset())
+                    axis_dependencies[mult.name] = axis_dependencies.get(x_name, frozenset()) | axis_dependencies[recip_name]
                     out.append(recip)
                     out.append(mult)
                     continue
@@ -525,15 +553,36 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     check is needed.
     """
     stmts = Body.coerce(stmts)
+    name_axes = stmts.axis_dependencies
+    axis_names = stmts.axis_names
+    axis_deps: dict[int, tuple[Stmt, frozenset[str]]] = {}
+
+    def _axis_deps(s: Stmt) -> frozenset[str]:
+        """Axes read by one immutable subtree, computed bottom-up once."""
+        key = id(s)
+        cached = axis_deps.get(key)
+        if cached is not None and cached[0] is s:
+            return cached[1]
+        reads = set(s.deps())
+        for expr in s.exprs():
+            reads.update(expr.free_vars())
+        deps = reads & axis_names
+        for name in reads:
+            deps.update(name_axes.get(name, frozenset()))
+        for child in (child for body in s.nested() for child in body):
+            deps.update(_axis_deps(child))
+        result = frozenset(deps - s.binds_axes())
+        axis_deps[key] = (s, result)
+        return result
 
     def _hoistable(s: Stmt, axis: str) -> bool:
         # Accum / Init are scope-bound to their enclosing Loop's reduction (an Init seeds an
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
         # Write) pin their iteration count and stay put.
-        if isinstance(s, (Accum, Init)) or s.has_side_effects():
+        if isinstance(s, (Accum, Init)) or s.has_side_effects:
             return False
-        return not stmts.depends_on(s, axis)
+        return axis not in _axis_deps(s)
 
     def walk(body: Body) -> list[Stmt]:
         new_body: list[Stmt] = []
@@ -734,31 +783,15 @@ def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _exported_accs(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        if isinstance(s, Accum):
-            out.add(s.name)
-        for b in s.nested():
-            out |= _exported_accs(b)
-    return frozenset(out)
+    return Body.coerce(body)._exported_accums
 
 
 def _all_ssa_defs(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        out.update(s.defines())
-        for b in s.nested():
-            out |= _all_ssa_defs(b)
-    return frozenset(out)
+    return Body.coerce(body)._all_ssa_defs
 
 
 def _all_ssa_uses(body: Body) -> frozenset[str]:
-    out: set[str] = set()
-    for s in body:
-        out.update(s.deps())
-        for b in s.nested():
-            out |= _all_ssa_uses(b)
-    return frozenset(out)
+    return Body.coerce(body)._all_ssa_uses
 
 
 # ---------------------------------------------------------------------------

@@ -94,15 +94,16 @@ def test_option0_decide_matches_no_prior_greedy() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_trace_records_partition_fork() -> None:
+def test_trace_records_partition_fork(monkeypatch) -> None:
     """The contraction's schedule fork traces as ONE decision under the recognizer rule (the
     hierarchical tile → stage → reduce fork tree is one fork point, not a per-family chain), with
     the kernel's node id, ``chosen_kind == "op"`` (a ``TileOp`` rebind), the decide's score
     annotation (``None`` for the unranked option-0 decide), and the chosen leaf's COMPLETE knob
-    row (the axis-named ``TILE@<k>`` key; on this fixture the first-emitted leaf is the per-cell
-    one — an enumeration fact this assertion reads, not a policy it defends)."""
-    from emmy.compiler.pipeline.knob import family_of, family_value
+    row. The reduction is pinned unsplit so the assertion tests one-kernel trace shape without
+    depending on schedule enumeration order."""
+    from emmy.compiler.pipeline.knob import family_of
 
+    monkeypatch.setenv("EMMY_REDUCE", "")
     g = _f32_matmul_graph()
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((8, 0)))
     terminal, trace = run.resolve(g, _option0)
@@ -113,7 +114,6 @@ def test_trace_records_partition_fork() -> None:
     assert d.chosen_kind == "op"
     assert d.score is None
     assert d.n_options >= 1, "the fork offers its lazy fork tree as the raw option"
-    assert family_value(d.knob_delta, "TILE") == "", "this fixture emits the per-cell leaf first"
 
 
 def test_decide_score_lands_on_trace() -> None:

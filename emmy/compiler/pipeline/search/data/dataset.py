@@ -108,11 +108,12 @@ class Dataset:
 
         ``by`` selects the axis:
 
-        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's -O1 tree, its
-          -O3 regime rows, and its ``bench_fail`` leaves all share one ``op_sig``
-          (and ``parent_key`` edges never leave an op's tree), so the whole op
-          moves to one side atomically — a row-level split would leak the
-          value-correlated parent/child chains and the O1/O3 twins.
+        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's whole search tree and its
+          ``bench_fail`` leaves share one ``op_sig`` (and ``parent_key`` edges never leave an
+          op's tree), so the whole op moves to one side atomically — a row-level split would leak
+          the value-correlated parent/child chains. A store written before sweeps moved to the
+          deployable regime also holds that op's rows under two opt levels; those move together
+          too, for the same reason.
         - ``"gpu"`` — key on ``gpu``: leave-one-GPU-out (cross-hardware transfer).
 
         ``"run"`` is **rejected**: ``run_id`` is provenance, not a fold axis — the

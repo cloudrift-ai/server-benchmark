@@ -377,29 +377,11 @@ class _ProposalLoopIdentity(PipelineStrategy):
         self._capture(event.graph)
 
     def on_splice(self, event) -> None:
-        """Capture the consumed parent whose route changes the kernel set.
-
-        A cross-CTA split carries its route on ``root_op``. A placement cut carries
-        it on the fresh fragment instead, so fold that decision back onto an exact
-        copy of the consumed parent before computing its route-specific cache key.
-        """
+        """Capture the consumed parent whose cross-CTA route changes the kernel set."""
         from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
-        from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
         root = event.root_op
-        root_route = TuningSearch._structural_row(getattr(root, "knobs", None))
-        fragment_knobs: dict = {}
-        for node in event.fragment.nodes.values():
-            fragment_knobs.update(getattr(node.op, "knobs", None) or {})
-        fragment_route = TuningSearch._structural_row(fragment_knobs)
-        fragment_cut = fragment_route is not None and any(family_of(key) == "PLACE" for key in fragment_route)
-        root_cut = root_route is not None and any(family_of(key) == "PLACE" for key in root_route)
-        if fragment_cut:
-            route = fragment_route
-        elif root_route is not None and not root_cut:
-            route = root_route
-        else:
-            route = None
+        route = TuningSearch._structural_row(getattr(root, "knobs", None))
         if route is None:
             return
         parent = copy.copy(root)
@@ -487,7 +469,7 @@ async def measure_proposals(
                 captured=True,
             )
         if prior is not None:
-            prior.add_rows(search._collect_rows() + search.o3_rows)
+            prior.add_rows(search._collect_rows())
             prior.maybe_refit()
         if loop_identity.value is not None:
             db.record_nodes(

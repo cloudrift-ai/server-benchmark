@@ -2,9 +2,9 @@
 materializers derive from a :class:`~emmy.compiler.ir.pure.fold.Fold`'s stored ``(combine, lift,
 dtypes)``. This is a LOWERING helper, not IR vocabulary: the stored term keeps exactly one ⊕
 program (the flat ``combine``), and everything here — the state⊕state re-emission, the one-shot
-statement realization of the cross-partition combine, the twist facts —
-is derived on demand at the two consumers, the kernel materializer (``lowering/kernel/_factor``
-and friends) and the cross-CTA split (``lowering/tile/030_split_reduce``). Nothing else reads it.
+statement realization of the cross-thread combine, and the twist facts — is derived on demand by
+the kernel materializer (``lowering/kernel/_factor`` and friends). Tile split-reduce preserves the
+Fold directly and does not use this lowering view.
 
 Leading ``_`` so the pass loader skips this module."""
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.pure import component_ops, merge_stmts
 from emmy.compiler.ir.stmt import Accum, Assign, Stmt
 
@@ -77,12 +78,12 @@ class Reduction:
             return tuple(self.fold.combine.body)
         return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
-    def merge_stmts(self, other: tuple[str, ...]) -> tuple[Stmt, ...]:
+    def merge_stmts(self, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
         """This fold's cross-partition combine against a second fully-reduced state named
         ``other``, as loop-IR statements (:func:`~emmy.compiler.ir.pure.algebra.merge_stmts` — the
         stored ``combine`` rendered to ``Assign`` temps plus one ``Accum`` per component, whose
         ``op.identity`` is the seed the ONE identity placement emits)."""
-        return merge_stmts(self.fold.combine, other)
+        return merge_stmts(self.fold.combine, other, dtype=dtype)
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:

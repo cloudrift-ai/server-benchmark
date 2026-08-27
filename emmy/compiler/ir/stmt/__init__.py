@@ -16,7 +16,7 @@ Defined here rather than under any one IR package because all three IRs
 - Tree walks: :meth:`Body.iter` (pre-order recursive) and
   :meth:`Body.map` (flat 1:N transformer) — methods on
   :class:`Body` (in :mod:`.body`).
-- Body normalization: ``normalize_body`` driver + 8 passes
+- Body normalization: ``normalize_body`` driver and its ordered passes
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
   reduce-axis-unify, hoist, simplify, dedup-loads, rename-ssa) in
   :mod:`.normalize`.

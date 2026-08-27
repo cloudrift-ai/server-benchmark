@@ -228,6 +228,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane has no packed-trio
   decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
   rank-locally, so a rank never reads bytes it does not own.
+  The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
+  the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
+  the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
+  loader reloads the config with it.
 
   Checkpoint keys are translated to the twin's own parameter names before any of that, by two composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
@@ -336,8 +340,9 @@ shared with CausalLM traces.
   target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
   post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
   file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
-  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy, preserving an
-  internal storage boundary without changing an ordinary model call.
+  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy. Maximal fusion
+  retains that storage value as a live output in one frontend target; placement then enumerates its materialized cut
+  without changing an ordinary model call.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

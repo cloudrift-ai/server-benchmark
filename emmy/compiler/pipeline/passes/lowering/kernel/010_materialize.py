@@ -5,8 +5,7 @@ node-kind dispatcher, ``_factor.factorize`` — every ``TileOp`` root (a tiled c
 cooperative / ILP reduce, or a pointwise / scalar cell) lowers through that single emitter, which
 reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
 
-- **Tiled ``CONTRACTION``** (warp / register tile) — the high-level contraction was
-  built recognize-side (``_classify.bind_bilinear``); ``factorize`` synthesizes its bare
+- **Tiled ``CONTRACTION``** (warp / register tile) — ``factorize`` synthesizes its bare
   grid-``Write`` (needs ``root.output``, so it can't ride the node) and expands it (mma → the
   ``RegFragment`` / ``LdmatrixLoad`` / ``MmaSyncPtx`` / ``RegStore`` fragment soup; scalar → the
   per-thread register cell tile) through the shared four-level tiling layer (in ``_factor``).
@@ -35,9 +34,10 @@ PATTERN = [Pattern("root", TileOp)]
 
 def rewrite(match: Match, root: Node) -> KernelOp | None:
     tile: TileOp = root.op
-    # By the kernel pass, ``030_split_reduce`` has consumed every cross-CTA ``GRID`` stage (the
-    # partial's plan is stripped, the finalize is a fresh ``ReducePlan``). A surviving split
+    # By the kernel pass no schedule slice can carry a cross-CTA ``GRID`` stage: the split is the
+    # structural ``tile/035_split_reduce`` fork's, decided BEFORE scheduling (the walk's catalog
+    # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
     rplan = reduce_plan(tile) if tile.op is not None else None
-    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage survived 030_split_reduce"
+    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 035_split_reduce"
     return KernelOp(body=Body((factorize(tile, root),)), name=tile.name)

@@ -8,6 +8,7 @@ Tile / Cond) live in ``blocks``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
@@ -726,7 +727,7 @@ class Write(Stmt):
     index: tuple[Expr, ...]
     values: tuple[str, ...]
     value_dtype: DataType | None
-    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_split_reduce``'s atomic finalize):
+    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``035_split_reduce``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
     # atomic accumulate (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
     # Scalar only; never vectorized (each lane needs its own ``atomicAdd``).
@@ -799,6 +800,7 @@ class Write(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 
@@ -974,6 +976,7 @@ class ZeroPrologue(Stmt):
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 

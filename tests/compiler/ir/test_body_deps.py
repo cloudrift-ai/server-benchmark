@@ -1,4 +1,4 @@
-"""Unit tests for ``Body.deps_closure`` / ``depends_on`` / ``independent``.
+"""Unit tests for ``Body`` dependency summaries and queries.
 
 Exercises the dataflow-dependency primitives on small hand-built
 bodies — softmax-style reduces, sibling cross-loop reads, hoisted
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 
 
@@ -69,6 +69,55 @@ def test_accum_outer_axis_kept():
     body = Body([Loop(axis=Axis("a", 8), body=inner)])
     closure = body.deps_closure
     assert closure["acc"] == frozenset({"a"})
+
+
+def test_axis_dependencies_stay_compact_through_a_long_ssa_chain():
+    """Axis dependence grows with definitions × axes, not transitive SSA edges."""
+    chain_length = 4096
+    stmts = [_ld("v0", "x", "a")]
+    for i in range(1, chain_length + 1):
+        stmts.append(_asn(f"v{i}", "negative", f"v{i - 1}"))
+    body = Body([Loop(axis=Axis("a", 4), body=stmts)])
+
+    dependencies = body.axis_dependencies
+
+    assert len(dependencies) == chain_length + 1
+    assert sum(map(len, dependencies.values())) == chain_length + 1
+    assert all(axes == frozenset({"a"}) for axes in dependencies.values())
+
+
+def test_axis_dependencies_remove_only_the_closed_reduce_axis():
+    body = Body(
+        [
+            Loop(
+                axis=Axis("a", 8),
+                body=(
+                    Loop(
+                        axis=Axis("k", 32),
+                        body=(_ld("value", "x", "a", "k"), _acc("acc", "value")),
+                    ),
+                ),
+            )
+        ]
+    )
+
+    assert body.axis_dependencies["value"] == frozenset({"a", "k"})
+    assert body.axis_dependencies["acc"] == frozenset({"a"})
+
+
+def test_axis_dependencies_keep_a_strided_partial_axis():
+    body = Body(
+        [
+            StridedLoop(
+                axis=Axis("k", 32),
+                start=Var("start"),
+                step=Var("step"),
+                body=(_ld("value", "x", "k"), _acc("partial", "value")),
+            )
+        ]
+    )
+
+    assert body.axis_dependencies["partial"] == frozenset({"k"})
 
 
 # --- depends_on ------------------------------------------------------

@@ -125,6 +125,37 @@ def test_float32_residual_moe_rider_keeps_normalized_activation_in_float16():
     assert torch.nn.Linear(8, 2, dtype=torch.float16)(normalized).dtype == torch.float16
 
 
+def test_fork_attention_pre_rider_sizes_its_destination_at_hidden_width():
+    """A chunk step carrying decode riders splits across two programs into one joint destination.
+    The classic seam sizes those from ``(q, k, v)``; the fork-attention seam has no projections
+    here — its ``pre`` returns one hidden-width activation, and sizing that from the attention
+    metadata instead (``num_heads * head_dim``, 32768 on DeepSeek V4 against a hidden size of
+    4096) makes every rider-width step fail its copy."""
+    torch = pytest.importorskip("torch")
+
+    class PreProgram:
+        output_names = ("x",)
+
+        def run_device(self, inputs, *, out):
+            out[0].copy_(inputs[0])
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._pre_m1 = None
+    runner._pre_decode = [PreProgram()]
+    runner._pre_prefill = [PreProgram()]
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._hidden_size = 8
+    runner._activation_dtype = torch.float16
+    # The attention metadata a fork-attention layer still carries: 4 heads x head_dim 16 is
+    # 64 wide, eight times the seam's real width — the shape the old sizing would have used.
+    runner._attn_meta = [(16, 4, 1, 0.5)]
+
+    (x,) = runner.forward_layer_pre_device(0, torch.randn(6, 8, dtype=torch.float16))
+
+    assert x.shape == (6, 8)
+
+
 def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
     runner = EmmyGenRunner(
         embed_weight=None,

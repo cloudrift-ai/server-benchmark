@@ -10,9 +10,8 @@
 - **Scoring is DECLARED SEPARABLE**: an outer terminal's reward is the Σ of its unique kernels'
   bests, each kernel measured independently in its own single-node slice
   (:func:`single_node_graph`) by a plain :class:`TuningSearch` (MCTS) over ``INNER_PASSES``.
-  Tile-dialect structural forks (a ``PLACE`` cut, a cross-CTA split) are part of a kernel's
-  independent measurement — a slice whose kernel set changed benches as the Σ over the pieces it
-  minted.
+  A Tile-dialect cross-CTA split is part of a kernel's independent measurement — a slice whose
+  kernel set changed benches as the Σ over the pieces it minted.
 - **Minted kernels become first-class targets**: the strategy's private splice watcher
   (:class:`_KernelInventory`) rides every inner run; each genuinely new kernel it reports (deduped by structural identity across the
   whole session, outer kernels included) is ENROLLED — tuned in its own slice, its rows keyed
@@ -32,19 +31,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from emmy.compiler.context import Context, split_opt_level
+from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import stamp_schedule_families
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.policy.terminal_bench import O3_NVCC_FLAGS
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent, discovered_strategies
@@ -185,10 +183,10 @@ class _Work:
 class _KernelInventory(PipelineStrategy):
     """TwoLevelStrategy's PRIVATE splice watcher — not a composable component: the strategy
     composes one instance into every inner run's pipeline (``Pipeline.with_strategies``) so
-    kernels minted during lowering (a cut's fragments, a split's pieces) can be enrolled as
-    tuning targets. Reports each new loop-dialect kernel — one whose structural identity has not
+    kernels minted during lowering (currently a split's pieces) can be enrolled as
+    tuning targets. Reports each new kernel-bearing op — one whose structural identity has not
     been seen — to ``on_kernel(node_id, op, fragment)``. Cross-trajectory by design: the MCTS
-    re-minting the same cut on every variant reports it once, and the seen-set is seeded with
+    re-minting the same piece on every variant reports it once, and the seen-set is seeded with
     the outer terminal's kernels so pieces structurally identical to an outer kernel are not
     re-enrolled. Identity is COMPUTED through the IdentityStrategy's read API, so nothing here
     depends on a stamp having happened or on strategy dispatch order. It derives from
@@ -203,7 +201,7 @@ class _KernelInventory(PipelineStrategy):
     def on_splice(self, e: SpliceEvent) -> None:
         for nid, node in e.fragment.nodes.items():
             op = node.op
-            if not isinstance(op, LoopOp):
+            if op.dialect is None:
                 continue
             key = self.identity.op_sig(op, e.fragment)
             if key in self.seen:
@@ -317,7 +315,18 @@ class TwoLevelStrategy(SearchStrategy):
             # lowers each via the DB-best forks the inner search recorded. No backend →
             # nothing persisted (so the 1.0us stub never clobbers a tuned row). The dump (if
             # any) rides here so it captures the winning config's full stage artifacts.
-            assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=self.db, dump=self.dump)
+            #
+            # The card's recorded goldens are held OUT of this replay. They are a DEPLOY tier —
+            # "this config is known good on this card" — and now that the sweep measures in the
+            # deployable regime the tier would activate here for the first time and decide ahead
+            # of the search's own evidence. A tune must assemble what it measured: ``--output``
+            # and ``tune --bench`` read this graph while ``persist_tune_winner`` records the
+            # searched winner, so a golden overriding it would report a benched number for a
+            # config the tune did not choose.
+            from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+
+            with records_override([]):  # synchronous body — see the helper's note
+                assembled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=self.db, dump=self.dump)
         return TwoLevelResult(
             best_fused=best_fused, best_reward=best_reward, n_terminals=n_terminals, assembled=assembled, prior_summaries=prior_summaries
         )
@@ -336,10 +345,6 @@ class TwoLevelStrategy(SearchStrategy):
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
         ctx_key = ctx.structural_key()
-        # The regime the deployable -O3 re-benches are keyed under in the node store — the tune
-        # context with the re-bench's flags substituted, so an -O3 leaf row never collides with
-        # its -O1 twin. ``None`` when the sweep itself already runs at -O3.
-        o3_ctx_key = None if split_opt_level(ctx.compile_flags)[0] == 3 else replace(ctx, compile_flags=O3_NVCC_FLAGS).structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
         # Group structurally-identical LoopOps under one ``Op.cache_key`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
@@ -423,7 +428,7 @@ class TwoLevelStrategy(SearchStrategy):
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
-                    prior.add_rows(inner._collect_rows() + inner.o3_rows)
+                    prior.add_rows(inner._collect_rows())
                     if prior.maybe_refit():
                         prior.checkpoint()
                 # Persist every search-tree node to the keyed/deduped ``node`` table. The
@@ -435,7 +440,6 @@ class TwoLevelStrategy(SearchStrategy):
                         op_sig=identity.op_sig(work.op),
                         gpu=ctx.hardware_id(),
                         run_id=self.run_id,
-                        o3_context_key=o3_ctx_key,
                     )
                 )
                 if work.enrolled:

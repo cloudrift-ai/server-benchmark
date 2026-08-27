@@ -49,8 +49,6 @@ def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_REDUCE", "")
-    # The subject is ONE fused kernel's transport; an unpinned placement fork is prior-dependent.
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
 
 
 def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:
@@ -132,6 +130,20 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
         assert forbidden not in src
 
 
+def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
+    """A literal unit output row is still the M side of a plain m1xKxN contraction.
+
+    RESTORED: the decode row is the only shape a V100 deployment runs at serving time, and without
+    it the m=1 linear falls to the scalar path with no assertion anywhere noticing.
+    """
+    _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
+    src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert knobs["TILE"] == f"{VOLTA}/f1x1"
+    assert knobs["WORK"] == "w1x1"
+    assert "emmy_mma_m8n8k4_f16_f32" in src
+    assert "_um_b" in src and "< (1)" in src
+
+
 @pytest.mark.parametrize("trans", [False, True])
 def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA, stage="d1/smem")
@@ -162,16 +174,6 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     assert "cp.async" not in src and "ldmatrix" not in src
 
 
-def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
-    """A literal unit output row is still the M side of a plain m1×K×N contraction."""
-    _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
-    src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
-    assert knobs["WORK"] == "w1x1"
-    assert "emmy_mma_m8n8k4_f16_f32" in src
-    assert "_um_b" in src and "< (1)" in src
-
-
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
     """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
 
@@ -195,6 +197,7 @@ def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, 
     A slab the Volta shared gather reads, and the materialized B peer rides the BLOCKING vector
     copy — sm_70 has no ``cp.async`` to fly it under the fill."""
     _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
     assert knobs["TILE"] == f"{VOLTA}/f1x1"
     assert knobs["STAGE"] == stage
@@ -210,6 +213,7 @@ def test_modern_computed_a_edge_keeps_the_cp_async_peer_copy(monkeypatch) -> Non
     """The same fused edge on a cp.async target still flies its peer copy asynchronously — the
     blocking copy is the sm_70 fallback, not a new default."""
     _pin(monkeypatch, AMPERE, tile="f1x1", stage="d1/smem")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, _ = _source(_norm_linear_graph(k=32), Context(compute_capability=(8, 0)))
     assert "emmy_cp_async" in src
     assert "ldmatrix" in src and "rsqrtf" in src

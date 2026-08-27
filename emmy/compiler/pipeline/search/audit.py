@@ -18,7 +18,7 @@ classification and no prefix acceptance anywhere in the verdicts, so a MATCH mea
 really did realize that recording.
 
 The audit is machine-independent by construction — it forces the deployable nvcc regime (records
-are -O3 truth; under ``make test``'s ``-Xcicc -O1`` lane the tier is not consulted at all) and
+are deployable truth; under ``make test``'s ``-Xcicc -O1`` lane the tier is not consulted at all) and
 targets the golden file's own card via ``Context.from_target``, so it runs identically on a
 GPU-less CI box and the 5090 host.
 
@@ -87,11 +87,8 @@ def audit_card(
         # non-verified forks, so the compile follows the real cold-deploy path.
         absent = Path(tmp) / "absent-online.json"
         prev_target = target._OVERRIDE  # noqa: SLF001 — save/restore around the audit
-        scoped = golden.RECORDS_OVERRIDE
-        with config.nvcc_flags_override(""), config.online_file_override(absent):
+        with config.nvcc_flags_override(""), config.online_file_override(absent), golden.records_override(goldens):
             target.set_target(cap)
-            if goldens is not None:
-                golden.RECORDS_OVERRIDE = goldens
             try:
                 # Built inside the overrides: ``compile_flags`` (→ ``H_opt=3``, the
                 # deployable regime the tier is gated on) reads the env at construction time.
@@ -103,7 +100,6 @@ def audit_card(
                         logger.error("golden audit: %s failed to compile: %s", name, ex)
                         out[name] = [{"node": None, "key": None, "verdict": COMPILE_FAIL, "golden": None, "us": None, "error": str(ex)}]
             finally:
-                golden.RECORDS_OVERRIDE = scoped
                 target.set_target(prev_target)
     return out
 

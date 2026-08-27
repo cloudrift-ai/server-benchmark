@@ -12,14 +12,15 @@ is consumed. This module holds only what the STORED TERM itself needs:
   combine (the family discriminator; no family annotation exists).
 - :func:`rename_combine` — the SSA-rename lockstep for the stored program (a generated twisted
   program is REGENERATED over the renamed state, keeping the formation invariant).
+- :func:`merge_stmts` — the one statement realization of a complete state⊕state combine.
 - :func:`eval_lambda` / :func:`foldmap_eval` — the denotational spec oracle the agreement +
   associativity property tests run against.
 
 The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.pure.carrier`; the
-lowering-side derivations (state⊕state re-emission, finalize seeds) live with their one consumer
-(``pipeline/passes/lowering/_reduction``). The old ``Monoid`` / ``Semiring`` node wrappers, the
-ψ-conjugation apparatus (``Carrier`` / ``Twist`` / ``State``) and the loop-annotation ``Algebra``
-bundle are all retired: the node's stored combine is the single spelling of ⊕.
+kernel-level partition helpers live in ``pipeline/passes/lowering/_reduction``. The old
+``Monoid`` / ``Semiring`` node wrappers, the ψ-conjugation apparatus (``Carrier`` / ``Twist`` /
+``State``) and the loop-annotation ``Algebra`` bundle are all retired: the node's stored combine
+is the single spelling of ⊕.
 """
 
 from __future__ import annotations
@@ -111,7 +112,8 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     if component_ops(combine) is None:
         old = tuple(r for r in combine.results if isinstance(r, str))
         old_other = tuple(f"{n}__o" for n in old)
-        if combine.params == old + old_other and tuple(combine.body) == tuple(exp_combine_states(old, old_other)):
+        expected = Lambda(params=old + old_other, body=Body(exp_combine_states(old, old_other)), results=old)
+        if combine == expected:
             names = tuple(rename_ssa(n) for n in old)
             other = tuple(f"{n}__o" for n in names)
             return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
@@ -128,7 +130,7 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
 # --------------------------------------------------------------------------------------------
 
 
-def merge_stmts(combine: Lambda, other: tuple[str, ...]) -> tuple[Stmt, ...]:
+def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
     """The cross-partition state⊕state combine, realized as loop-IR statements: ``combine``
     applied at ``S × S → S`` with its second operand naming ``other`` — a second FULLY-REDUCED
     state (a REG copy ``<n>__r1``, a tree neighbour's partial, a workspace slice ``<n>__p``).
@@ -143,12 +145,13 @@ def merge_stmts(combine: Lambda, other: tuple[str, ...]) -> tuple[Stmt, ...]:
     ``Accum`` form keyed on ``other[0]``: its temps are namespaced on the second operand's
     spelling, so two merges of different partials into one state cannot collide. Regenerating
     rather than patching is the same rule :func:`rename_combine` follows — a generated program is
-    the deterministic function of its state names."""
+    the deterministic function of its state names. ``dtype=None`` produces canonical Loop IR;
+    kernel-level consumers keep the default f32 accumulator stamp."""
     names = tuple(r for r in combine.results if isinstance(r, str))
     ops = component_ops(combine)
     if ops is None:
-        return exp_combine_states(names, other, key=other[0], accum=True)
-    return tuple(Accum(name=n, value=o, op=op, dtype=F32) for n, op, o in zip(names, ops, other, strict=True))
+        return exp_combine_states(names, other, key=other[0], accum=True, dtype=dtype)
+    return tuple(Accum(name=n, value=o, op=op, dtype=dtype) for n, op, o in zip(names, ops, other, strict=True))
 
 
 # --------------------------------------------------------------------------------------------
@@ -179,4 +182,37 @@ def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:
     return state
 
 
-__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "rename_combine"]
+def product_spine(defs: dict, name: str, *, divide: bool = False):
+    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)``.
+
+    The ONE reading of a product tree. The spine is recognized by the ``semiring_product`` TRAIT,
+    never an op-name list, so a newly registered ⊗ is covered without touching this. ``divide``
+    additionally admits a division node on the numerator side — ``(Σ x)/c`` equals ``Σ (x/c)`` for
+    a fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor
+    is recorded as a leaf and only the numerator continues the spine.
+
+    Returns ``None`` when a spine node is not binary; a name with no product above it is the
+    degenerate one-leaf product.
+    """
+    spine: list = []
+    leaves: list[str] = []
+
+    def walk(current: str) -> bool:
+        stmt = defs.get(current)
+        if isinstance(stmt, Assign):
+            if stmt.op.semiring_product:
+                if len(stmt.args) != 2:
+                    return False
+                spine.append(stmt)
+                return all(walk(arg) for arg in stmt.args)
+            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
+                spine.append(stmt)
+                leaves.append(stmt.args[1])
+                return walk(stmt.args[0])
+        leaves.append(current)
+        return True
+
+    return (tuple(leaves), tuple(spine)) if walk(name) else None
+
+
+__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "product_spine", "rename_combine"]

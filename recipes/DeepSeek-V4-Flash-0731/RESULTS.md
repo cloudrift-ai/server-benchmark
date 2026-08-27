@@ -128,8 +128,8 @@ both of which continue coherently. Each arm is individually deterministic — tw
 so the single divergence is arm-to-arm numerics at a tie, not run-to-run noise.
 
 This is what makes the output the load-bearing evidence: a transposed expert matrix or a mis-scaled MXFP4 decode
-yields fluent-looking garbage, not correct capitals, a valid Python guard clause, and 96 of 128 token ids identical
-to the reference implementation.
+yields fluent-looking garbage, not correct capitals, a valid Python guard clause, and 101 of the corpus's 128 token
+ids identical to the reference implementation.
 
 ## Context and accuracy
 

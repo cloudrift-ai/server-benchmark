@@ -1980,7 +1980,8 @@ class EmmyGenRunner:
 
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
-        ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
+        ``(q, k, v)`` CUDA tensors, or the single hidden-width activation the fork-attention
+        seam hands its own sublayer. ``T <= decode_bucket`` rides the static decode twin
         (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
         width the twin was built for — rides the static chunk twin's exact grids;
         ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
@@ -2006,11 +2007,14 @@ class EmmyGenRunner:
             # rider step). Under a whole-step capture the copies are recorded (run_device's
             # out= contract); the destinations are persistent, minted on the warmup step.
             pb = self._prefill_bucket
-            hd, nh, nkv, _ = self._attn_meta[layer]
-            widths = (nh * hd, nkv * hd, nkv * hd)
-            dests = [
-                self._rider_dest(nm, t, w, hidden, dtype=self._activation_dtype) for nm, w in zip(("q", "k", "v"), widths, strict=True)
-            ]
+            if len(self._pre_prefill[layer].output_names) == 1:
+                # The fork-attention seam hands back ONE hidden-width activation: the engine's
+                # attention sublayer owns the projections, so there is no q/k/v split to size.
+                specs = (("x", self._hidden_size),)
+            else:
+                hd, nh, nkv, _ = self._attn_meta[layer]
+                specs = (("q", nh * hd), ("k", nkv * hd), ("v", nkv * hd))
+            dests = [self._rider_dest(nm, t, w, hidden, dtype=self._activation_dtype) for nm, w in specs]
             self._pre_prefill[layer].run_device([hidden[:pb]], out=[d[:pb] for d in dests])
             self._pre_decode[layer].run_device([hidden[pb:]], out=[d[pb:] for d in dests])
             return tuple(dests)

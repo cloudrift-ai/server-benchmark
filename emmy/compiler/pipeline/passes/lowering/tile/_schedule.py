@@ -937,10 +937,15 @@ def _node_refusal(tile: TileOp, ctx, node, frag_ok: bool) -> str | None:
         return "the grid supplies no (m, n) output pair for a fragment to tile"
     if not frag_ok:
         return "the projection epilogue is not a per-fragment straight-line program"
-    # A ZERO-axis Fold edge is a cone the smem compute fill evaluates into its slab; a nonzero-axis
-    # one is a nested scheduling site, which no operand transport realizes.
-    if any(isinstance(e, Fold) and e.axis is not None for e in (node.a, *(ch.b for ch in node.channels))):
-        return "a nested scheduling site inhabits an operand edge; only a zero-axis cone rides the smem compute fill"
+    # A ZERO-axis Fold edge is a cone the smem compute fill evaluates into its slab. A
+    # nonzero-axis edge is a nested scheduling site, which no operand TRANSPORT realizes — but the
+    # MANDATORY multi-channel fill evaluates every non-materialized B channel into its slab, nested
+    # reduce included (the streamed computed-B decode cone), so only the forms with no mandatory
+    # fill to ride refuse: a nested A, and a nested B on a single-channel node.
+    if isinstance(node.a, Fold) and node.a.axis is not None:
+        return "a nested scheduling site inhabits the A edge; only a zero-axis cone rides the smem compute fill"
+    if any(isinstance(ch.b, Fold) and ch.b.axis is not None for ch in node.channels) and len(node.channels) == 1:
+        return "a nested scheduling site inhabits the B edge and no multi-channel fill is mandated to evaluate it"
     dtype = edge_dtypes(node.a, tile.inputs)[0]
     if dtype is not None and dtype.nbytes == 1:
         # The native fp8 (k32) family's STRUCTURAL requirements, which hold under any pin: the
@@ -1464,7 +1469,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     facts = _site_facts(tile, ctx, sched, tail, frag_ok)
     raw = WORK.raw()
     off = _off(sched, tile.op)
-    partition = carries_partition(tile.op)
+    # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
+    # sliced axis carries (a realized split's independent projection sibling — ``split_consumed``):
+    # both mean the kernel-set decision was consumed, so a ``REDUCE`` pin's ``g`` half strips.
+    partition = carries_partition(tile.op) or tile.split_consumed
     state = _State(
         tile,
         sched,

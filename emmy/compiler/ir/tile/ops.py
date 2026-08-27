@@ -26,6 +26,7 @@ from emmy.compiler.ir.pure.fold import (
     deep_reads,
     edge_refs_axis,
     is_contraction,
+    operand_body,
     refs_axis,
     splice_operands,
     stmt_axis_names,
@@ -58,7 +59,7 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
     varying = [edge_refs_axis(e, k_name) for e in cone.operands]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
     cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
     stats = tuple(sorted(pro_results & deep_reads(list(cell))))

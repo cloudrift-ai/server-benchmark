@@ -37,7 +37,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import ReducePlan, Workers
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
@@ -51,6 +51,7 @@ from emmy.compiler.ir.tile import (
 )
 from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
@@ -151,8 +152,18 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
     MIMO decomposition the realizer performs, asked at the OFFER so an unrealizable split is never
     offered: an independent-projection kernel must partition into output-owning regions and the
     split fold must own one of them (a projection reading SEVERAL roots into one output has no
-    piece to hand the epilogue to)."""
+    piece to hand the epilogue to). The residence guard leads: a head fold the realization cannot
+    STRIP from the projection — neither the kernel's own node, an operand edge, nor a top-level
+    projection member (``head``'s sweep case: a fold reading the boundary store's sweep axis lands
+    inside the sweep ``Loop`` ``apply_output_specs`` wraps) — would leave the epilogue re-running
+    the whole reduction and shadowing the workspace states, so the split declines there."""
     op = tile.op
+    if (
+        op is not node
+        and all(edge is not node for edge in getattr(op, "operands", ()))
+        and not any(stmt is node for stmt in projection_tail(tile))
+    ):
+        return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
         return None
     try:
@@ -172,7 +183,11 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     per :func:`splitk_moves` member the head fold admits — or ``None`` when there is nothing to
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
     partition ``Window`` is the receipt, so the pieces re-entering the scan skip here and an
-    ambient pin can never split twice).
+    ambient pin can never split twice). In the engine's batch order the pieces reach ``040`` FIRST
+    (the splice lands mid-batch, and the scan only wraps back to ``030``/``035`` after ``040``
+    schedules them, whose ``tile.schedule`` guard then skips) — traced empirically on a pinned
+    ``g2k`` matmul resolve — so the receipt's LIVE consumer is ``040``'s pin path (the ``g``-half
+    strip); the check here bites only on a piece ``040`` could not schedule.
 
     A ``REDUCE`` pin is authoritative over its cross-CTA ``g<n>[a|k]`` half and ONLY that half:
     the rest of the value (``coop`` / ``r<n>``) is the pieces' own schedule, which the walk reads
@@ -186,7 +201,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     if carries_partition(tile.op):
         return None  # a piece of a realized split — the partition was consumed
     key = Sched(tile.op, {}).key("REDUCE", node) or "REDUCE"
-    unsplit = DeferredFork(lambda: replace(tile, split_decided=True), {key: ""})
+    unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
     element = axis_of(key)
     pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
@@ -418,11 +433,31 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
 
 
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
-    """Add the unsplit independent projection Folds as fresh schedulable kernels."""
+    """Add the unsplit independent projection Folds as fresh schedulable kernels. Each is a piece
+    of the REALIZED split — the kernel-set decision was consumed by the kernel it addressed, and
+    one pinned split means one split — so it carries the consumed-split receipt
+    (``split_consumed``): a ``REDUCE`` pin's ``g`` half strips on it instead of splitting the
+    sibling region again (or raising)."""
     for root, fold, body, stores in pieces:
-        tile = _piece(_project(fold, body), free, output_specs=stores)
+        tile = replace(_piece(_project(fold, body), free, output_specs=stores), split_consumed=True)
         _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
+
+
+def _captured_prologue(partial_fold: Fold, pre: tuple, split: Axis, free: tuple) -> tuple:
+    """The projection-prologue stmts the sliced fold still CAPTURES — their backward cone, carried
+    into the partial. The chain form keeps the head fold as a BODY member of its projection
+    wrapper (:func:`~emmy.compiler.ir.tile.ops.head`), so a prologue stmt evaluated once per cell
+    (a scalar scale load) can define a name the fold's lift reads; slicing the fold alone would
+    leave that capture dangling in the partial."""
+    lowered = tuple(partial_fold.lower())
+    defined = set().union(*(deep_defines(stmt) for stmt in lowered)) if lowered else set()
+    axes = {split.name, *(a.name for a in free)}
+    axes.update(site.node.axis.name for site in sites(partial_fold) if isinstance(site.node, Fold) and site.node.axis is not None)
+    captures = deep_reads(list(lowered)) - defined - axes
+    if not captures:
+        return ()
+    return Body(pre).backward_cone(captures).members
 
 
 # ---- the realization -------------------------------------------------------------------------- #
@@ -453,6 +488,16 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     n_comp = len(states)
     out = root.output
     cell = _cell_index(projection, free)
+    # The chain form keeps the head fold as a BODY member of its projection wrapper (``head``'s
+    # sweep case), so ``projection`` still contains it. Strip it — the epilogue's states come from
+    # the workspace combine (or the atomic partial), and keeping the fold would re-run the whole
+    # reduction per cell AND shadow those states — and carry the prologue cone the sliced fold
+    # still captures into the partial (:func:`_captured_prologue`).
+    fold_at = next((i for i, stmt in enumerate(projection) if stmt is node), None)
+    prologue: tuple = ()
+    if fold_at is not None:
+        prologue = _captured_prologue(partial_fold, projection[:fold_at], split, free)
+        projection = (*projection[:fold_at], *projection[fold_at + 1 :])
     frag = _frag(match, root)
 
     if finalize == "atomic":
@@ -468,7 +513,16 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         else:
             atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
         p_body, p_stores = _boundary(atomic_proj)
-        piece = _piece(_project(partial_fold, p_body), (split, *free), output_specs=p_stores)
+        if fold_at is not None:
+            # Body-resident form: keep the wrapper's own shape — prologue, the sliced fold in
+            # place, then the per-partition epilogue (operand edges evaluate before the body, so
+            # ``_project`` would put a captured prologue AFTER the fold that reads it).
+            # ``fold_at`` indexes the PRE-strip ``projection``, and it stays valid against
+            # ``p_body`` because the strip removed exactly the stmt AT that index and
+            # ``_boundary`` only extracts trailing ``Write``s, which sit after the fold.
+            piece = _piece((*p_body[:fold_at], partial_fold, *p_body[fold_at:]), (split, *free), output_specs=p_stores)
+        else:
+            piece = _piece(_project(partial_fold, p_body), (split, *free), output_specs=p_stores)
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
@@ -495,7 +549,8 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores)
+    partial_body = (*prologue, partial_fold) if prologue else partial_fold
+    partial_tile = _piece(partial_body, (split, *free), output_specs=ws_stores)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the

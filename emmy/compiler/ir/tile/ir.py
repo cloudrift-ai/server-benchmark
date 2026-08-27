@@ -335,9 +335,14 @@ class TileOp(Op):
     # Whether the graph-level Fold-edge placement fork kept this kernel fused. Cut pieces are
     # fresh TileOps with the default ``False`` and may expose their own smaller seam set.
     placement_decided: bool = False
-    # Whether the structural cross-CTA split fork (``035_split_reduce``) kept this kernel whole.
-    # Split pieces need no flag: their sliced axis's partition ``Window`` is the receipt.
-    split_decided: bool = False
+    # Whether the split QUESTION is consumed for this kernel: the structural cross-CTA fork
+    # (``035_split_reduce``) declined it (the unsplit arm), or the kernel is a realized split's
+    # independent projection SIBLING — which has no sliced axis, so it carries this flag as its
+    # consumed-split receipt (a ``REDUCE`` pin's ``g`` half strips on it). The partial / finalize
+    # pieces need no flag: their sliced axis's partition ``Window`` is the receipt. Widening the
+    # flag past "declined" is safe because the partition receipt is an explicit pool-key term of
+    # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
+    split_consumed: bool = False
 
     def __post_init__(self) -> None:
         from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp

@@ -537,7 +537,6 @@ def test_input_spelling_is_generic_and_matches_reference():
     np.testing.assert_allclose(got, expected, rtol=3e-3, atol=3e-3)
 
 
-@pytest.mark.skip(reason="global greedy ranking still traverses the full computed-operand schedule space")
 def test_input_spelling_reaches_cuda_source_without_format_ir():
     """A runtime-coded dense contraction lowers entirely through generic integer IR."""
     from emmy.compiler.context import Context
@@ -588,11 +587,14 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
 def _prefer_mma_leaf(fp):
     """Descend one schedule path, preferring warp MMA and synchronous computed fills.
 
-    Rank each branch by one complete descendant row. Branch knobs are only the current level's
-    delta, so comparing them directly with an already-complete leaf would make the leaf win merely
-    because it contains more fields.
-    """
-    from emmy.compiler.pipeline.fork import Fork
+    Scan the fork's (lazy) leaf stream and keep the max-scoring COMPLETE row, bounded so a
+    research-class pool cannot burn the test. A greedy per-level descent — by first-leaf
+    representative (the pre-rebuild spelling) or by branch prefix — dead-ends on the recursive
+    walk: an early tile pick can be one no later site composes an mma with (the multi-root
+    trellis kernel), and only the complete row shows it."""
+    import itertools
+
+    from emmy.compiler.pipeline.fork import Fork, iter_leaves
 
     def score(option):
         knobs = dict(getattr(option, "knobs", {}) or {})
@@ -609,18 +611,9 @@ def _prefer_mma_leaf(fp):
             for key, value in knobs.items()
         )
 
-    options = list(fp.options)
-    while options:
-
-        def representative(option):
-            return next(option.leaves()) if isinstance(option, Fork) and not option.is_leaf else option
-
-        chosen = max(options, key=lambda option: score(representative(option)))
-        if isinstance(chosen, Fork) and not chosen.is_leaf:
-            options = chosen.expand()
-            continue
-        return chosen
-    return None
+    if not any(isinstance(o, Fork) and not o.is_leaf for o in fp.options):
+        return max(fp.options, key=score, default=None)
+    return max(itertools.islice(iter_leaves(fp.options), 500_000), key=score, default=None)
 
 
 def test_input_spelling_streams_computed_b_through_tensor_cores():
@@ -836,23 +829,39 @@ def _computed_b_rows(rows):
     ]
 
 
-@pytest.mark.skip(reason="computed-operand schedule inspection still traverses the full schedule space")
 def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
-    """The computed-B warp lane admits the cross-CTA split — no GPU, enumeration only.
+    """The computed-B warp lane admits the cross-CTA split — no GPU, the OFFER only.
 
-    RESTORED: the split factors a static K into ``ksplit x kslice`` and sigma-reindexes each
-    operand to absolute k. A materialized edge rewrites its gmem index; a computed cone rewrites
-    its own k coordinate, which is the SAME rule. This lane once offered the serial fold alone, so
-    no golden could record a split quantized linear — an enumeration gap, invisible to every
-    numerics test, that costs the whole split family on quantized weights."""
+    RE-EXPRESSED against the structural split fork: the cross-CTA ``g`` half is a kernel-set
+    decision (``035_split_reduce``), never a schedule row — ``golden_eval``'s rows spell no ``g``
+    by design — and a resolve's decide cannot observe the offer either: the count replay
+    (``_replay_structural_decision``) applies the unsplit arm inline once the cut fork decided
+    fuse on the same kernel. So the offer is asked of ``split_forks`` itself, on the kernel the
+    cut fork surfaced. The pinned realization is covered by
+    ``test_computed_b_split_k_matches_decoded_linear`` and
+    ``test_computed_b_split_partial_reindexes_the_cone``."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import iter_leaves
+    from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
+    from emmy.compiler.pipeline.pipeline import Run
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
-    rows = _computed_b_rows(enumerate_graph(_trellis_linear_graph(), Context.from_target((12, 0))).rows)
-    assert rows, "the trellis linear must offer a compute-filled warp lane"
-    offered = {str(value) for row in rows for key, value in row.items() if key.split("@", 1)[0] == "REDUCE"}
+    captured = []
+
+    def decide(fp):
+        if fp.structural:
+            captured.append((fp.match, fp.match.graph.nodes[fp.node_id]))
+            return fp.options[0]  # keep the one-kernel fused arm; the offer is inspected below
+        return next(iter_leaves(fp.options))
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)
+    assert captured, "the trellis linear must surface its structural fork"
+    match, node = captured[0]
+    options = split_forks(match, node)
+    assert options, "the computed-B kernel must offer the split fork"
+    offered = {str(v) for o in options for v in (dict(getattr(o, "knobs", {}) or {})).values()}
     assert any(spelling.startswith("g") for spelling in offered), offered
 
 
@@ -1038,7 +1047,6 @@ def test_fold_preserves_storage_expanding_trellis_cone(tmp_path):
     assert all(leaf.source_path is None and not leaf.source_parts for record in records for _leaf_id, leaf in record.loadable_constants())
 
 
-@pytest.mark.skip(reason="global greedy ranking still traverses the full computed-operand schedule space")
 def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path):
     """The serving trunk keeps compact source leaves all the way into its execution plan."""
     torch = pytest.importorskip("torch")

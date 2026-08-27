@@ -26,8 +26,8 @@ PATTERN = [Pattern("root", TileOp)]
 def rewrite(match: Match, root: Node, ctx=None):
     del ctx
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.schedule or tile.split_decided:
-        raise RuleSkipped("TileOp already split-decided / scheduled")
+    if tile.op is None or tile.place.is_mapped or tile.schedule or tile.split_consumed:
+        raise RuleSkipped("TileOp already split-consumed / scheduled")
     options = split_forks(match, root)
     if options is None:
         raise RuleSkipped("no reduce fold to split, or the kernel is itself a piece of a realized split")

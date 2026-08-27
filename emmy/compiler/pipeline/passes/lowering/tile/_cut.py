@@ -44,8 +44,22 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
     return deep_reads(list(lowered)) <= defined | available
 
 
+def _workspace_dtypes(node: Fold, inputs) -> tuple | None:
+    """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
+    Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
+    stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
+    typed pure program instead. A seam whose dtypes stay undetermined is not offered: the offer
+    and the realization must agree, and a raise past the offer would kill the compile."""
+    names = _operand_result_names(node)
+    dtypes = (F32,) * len(names) if node.axis is not None else edge_dtypes(node, inputs)
+    if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
+        return None
+    return dtypes
+
+
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
-    """Every semantically closed stored Fold edge, grouped only by object sharing."""
+    """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
+    only by object sharing."""
     all_sites = sites(tile.op)
     contraction_operands = {
         id(edge)
@@ -69,6 +83,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             or id(node) in contraction_operands
             or not scopes
             or not all(_closed_at(node, scope) for scope in scopes)
+            or _workspace_dtypes(node, tile.inputs) is None
         ):
             continue
         seen.add(id(node))
@@ -133,11 +148,8 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     token = digest(tile.structural_key(), seam.spelling)[:10]
     buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-    # Reduction carrier precision is a Kernel IR policy: every Fold state is f32 until lowering
-    # stamps the concrete Accum/Init pair. A zero-axis value has no carrier and is inferred from
-    # its typed pure program instead.
-    dtypes = (F32,) * len(names) if child.axis is not None else edge_dtypes(child, tile.inputs)
-    if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
+    dtypes = _workspace_dtypes(child, tile.inputs)
+    if dtypes is None:  # the offer filters this seam out (`cuttable_seams`), so reaching it is a pass bug
         raise ValueError(f"cannot cut {seam.spelling}: workspace result dtypes are not fully determined")
     loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
     parent_fold = _replace_fold(tile.op, child, loads)

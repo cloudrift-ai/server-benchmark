@@ -100,20 +100,7 @@ def test_rms_norm_cut_pin_splits_statistic_and_scale() -> None:
     assert any("__place_" in node.id for node in kernels)
 
 
-@pytest.mark.parametrize(
-    "spelling",
-    (
-        pytest.param(
-            "PLACE",
-            marks=pytest.mark.xfail(
-                reason="the primary seam is a contraction operand whose workspace storage dtype is not represented",
-                strict=True,
-            ),
-        ),
-        "PLACE@map",
-        "PLACE@a1",
-    ),
-)
+@pytest.mark.parametrize("spelling", ("PLACE", "PLACE@map", "PLACE@a1"))
 def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
     kernels = _kernels(_compile(_norm_linear_graph(), {spelling: "cut"}))
     assert len(kernels) == 2

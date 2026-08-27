@@ -1623,6 +1623,12 @@ _MASK_WARP = ("mma_m16n8k16_f16/f2x2/k2", "w2x2")
 # sibling deploys a partial+finalize pair, and these tests assert on the one ``o`` kernel.
 _CP_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d2/smem-async", "REDUCE": ""}
 _TMA_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d2/smem-tma", "REDUCE": ""}
+# The gmem-direct warp row, pinned EXPLICITLY: a byte-copied operand stages K as its contiguous
+# inner dim and a copied inner-row chunk cannot clamp a masked N cell, so a symbolic K (and a
+# masked N) has NO staged transport — the #293 resolver treated a pinned stage as advisory and
+# silently fell back to gmem-direct, which is what made the old ``*_cp`` spellings of these cases
+# green; pins are authoritative now, so the row every one of these shapes actually ran is pinned.
+_GMEM_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "", "REDUCE": ""}
 
 
 def _symbolic_m_graph(*, K: int = 512, N: int = 1024) -> Graph:
@@ -1876,9 +1882,9 @@ def _make_pv_materialized(seq):
 _MASKED_CASES = {
     "symbolic_m_cp": (_CP_KNOBS, (), [1, 31, 512, 700], _make_symbolic_m),
     "symbolic_m_tma": (_TMA_KNOBS, (), [1, 31, 512, 700], _make_symbolic_m),
-    "symbolic_mn_cp": (_CP_KNOBS, (), [31, 512, 700], _make_symbolic_mn),
+    "symbolic_mn_gmem": (_GMEM_KNOBS, (), [31, 512, 700], _make_symbolic_mn),
     "residual_cp": (_CP_KNOBS, (), [100], _make_symbolic_m_residual),
-    "symbolic_k_cp": (_CP_KNOBS, (), [16, 31, 130, 512, 700], _make_symbolic_k),
+    "symbolic_k_gmem": (_GMEM_KNOBS, (), [16, 31, 130, 512, 700], _make_symbolic_k),
     # Transposed-B (A @ Bᵀ, K contiguous) symbolic-K: the mma zero-fills the masked-K tail through
     # the (n,k)-swapped trans helper. Gmem-direct (no STAGE), M/N are tile divisors so only K masks.
     "symbolic_k_trans": (
@@ -1923,6 +1929,12 @@ _MASKED_XFAIL = {
     ("computed_a_symbolic_k_warp", 512),
     ("computed_a_symbolic_k_warp", 700),
 }
+# seq=16 is the same defect surfacing only on a DIRTY memory pool: the fragment score reads clamp
+# K but not the masked M ROW (rows 16..63 of a 16-row scores batch), so the kernel reads past the
+# buffer — zeros on a fresh CUDA pool (green), the previous program's data after any prior run in
+# the process (the output then varies with THAT data; measured err 0.42-0.82 after different
+# priors). Non-strict: whether it trips depends on what ran before, not on this test.
+_MASKED_FRESH_POOL_ONLY = {("computed_a_symbolic_k_warp", 16)}
 _MASKED_PARAMS = [
     pytest.param(
         label,
@@ -1930,6 +1942,15 @@ _MASKED_PARAMS = [
         marks=pytest.mark.xfail(reason="masked symbolic computed-operand MMA is not yet numerically correct", strict=True),
     )
     if (label, seq) in _MASKED_XFAIL
+    else pytest.param(
+        label,
+        seq,
+        marks=pytest.mark.xfail(
+            reason="reads past the scores buffer on the masked M rows — correct only on a fresh (zeroed) memory pool",
+            strict=False,
+        ),
+    )
+    if (label, seq) in _MASKED_FRESH_POOL_ONLY
     else (label, seq)
     for label, (_e, _d, seqs, _m) in _MASKED_CASES.items()
     for seq in seqs

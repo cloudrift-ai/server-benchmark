@@ -72,19 +72,28 @@ post-decomposition Python source file for known format names.
 ## The tile scheduler: one stored tree
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `030_cut` then
-offers the maximal fused tree beside every semantically closed stored Fold-edge cut, and `035_split_reduce` offers
-the unsplit tree beside every cross-CTA reduce split the head fold admits — both STRUCTURAL forks whose chosen side
-replaces the kernel with fresh unmapped pieces. `040_schedule` maps the free axes and enumerates the schedule. Keys
+offers the maximal fused tree beside every semantically closed stored Fold-edge cut whose workspace dtypes are
+determined (an undeterminable seam is not offered — the offer and the realization must agree), and
+`035_split_reduce` offers the unsplit tree beside every cross-CTA reduce split the head fold admits — both
+STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped pieces. A bare `PLACE=cut` pin names the
+placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
+codec's primary rule over every PLACE site (which can land on a contraction operand no cut realizes).
+`040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
 row-invariant statistic staying full-row in every partition; any other fold slices through the generic
-`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The split is CONSUMED
+`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The chain form keeps
+its head fold as a BODY member of the projection wrapper, so the realization slices it in place: the sliced fold
+carries the prologue cone it still captures (a per-cell scalar scale) into the partial, and the finalize's epilogue
+drops the fold whose states now arrive from the workspace. The split is CONSUMED
 by the kernel that realizes it — the sliced axis's partition `Window` is the receipt, kernel-scoped — so the pieces
 skip the fork, and the walk's pin path strips a `REDUCE` pin's `g<n>[a|k]` half on a kernel that carries the
-receipt (`g2k/coop` on a piece is `coop`). The atomic arm's refusals (one additive state, a distributive
+receipt (`g2k/coop` on a piece is `coop`); a realized split's independent projection SIBLING has no sliced axis, so
+it carries the consumed-split receipt as the `split_consumed` flag instead — one pinned split is one split, however
+the regions partition. The atomic arm's refusals (one additive state, a distributive
 projection, an output that rounds once) sit beside the offer in `tile/_split.py`; the walk's own catalog carries no
 `GRID` stage at all.
 
@@ -146,7 +155,10 @@ failing at materialization, and the row's spelling is the RESOLVED one. Three tr
 the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
 new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a
 materialized A the atom cannot bind (only the fill's typed slab store converts — byte transports move raw bits), so it
-has no gmem-direct sibling and a `STAGE` pin can only choose its depth. The fp8 (k32) gmem-direct tier rides the same
+has no gmem-direct sibling and a `STAGE` pin can only choose its depth. A NESTED-reduce B edge (the streamed
+computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
+channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
+refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32) gmem-direct tier rides the same
 two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
 bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
 overrides.

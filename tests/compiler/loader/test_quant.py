@@ -1095,7 +1095,10 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 
 
 @requires_cuda
-@pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
+@pytest.mark.skip(
+    reason="greedy flattens the fused dequant-cone schedule pool to score it (the lazify-greedy roadblock): "
+    "measured 2026-08 on a 5090 box, the compile burns >100 s inside iter_leaves at 1.7 GB RSS and climbing"
+)
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
     compiled on the CUDA backend with the dequant cone unconditionally in-graph: fp8 bits stay

@@ -269,3 +269,106 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
     scored = {d.node_id: d.score for d in trace}
     total = greedy._resolved_price(terminal, trace, _CTX, _Flat())
     assert total == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
+
+
+def _softmax_scale_chain() -> Graph:
+    """``softmax(x · c)`` with a broadcast scalar — the CHAIN form: the head fold is a BODY member
+    of its projection wrapper (``head``'s sweep case is the same family), and its lift CAPTURES
+    ``in0``, the scalar the projection loads once per cell."""
+    from emmy.compiler.ir.frontend.ir import SoftmaxOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (Dim(4), Dim(512)), dtype=F16), node_id="x")
+    g.add_node(InputOp(), [], Tensor("c", (Dim(1),), dtype=F16), node_id="c")
+    g.add_node(ElementwiseOp("multiply"), ["x", "c"], Tensor("xs", (Dim(4), Dim(512)), dtype=F16), node_id="xs")
+    g.add_node(SoftmaxOp(axis=-1), ["xs"], Tensor("y", (Dim(4), Dim(512)), dtype=F16), node_id="y")
+    g.inputs, g.outputs = ["x", "c"], ["y"]
+    return g
+
+
+def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monkeypatch) -> None:
+    """The body-resident (chain-form) head fold splits WHOLE: the partial carries the prologue
+    cone its slice still captures (the ``c`` load — a bare sliced fold would leave ``in0``
+    dangling, the ``k_softmax__partial`` nvcc miscompile), and the finalize's epilogue DROPS the
+    original fold (keeping it would re-run the whole reduction per cell and shadow the workspace
+    states — its only remaining axis fold is the ``_state_fold`` over the two partitions)."""
+    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.tile.path import sites
+
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    out, _ = _resolve(TILE_PASSES, _softmax_scale_chain())
+    tiles = {nid: n.op for nid, n in out.nodes.items() if isinstance(n.op, TileOp)}
+    partial = next(op for nid, op in tiles.items() if nid.endswith("__partial"))
+    finalize = next(op for nid, op in tiles.items() if not nid.endswith("__partial"))
+    assert "c" in {load.input for load in Body.coerce(tuple(partial.op.lower())).loads}, (
+        "the partial must carry the captured prologue's defining load"
+    )
+    extents = {
+        s.node.axis.extent.as_static()
+        for s in sites(finalize.op)
+        if isinstance(s.node, Fold) and s.node.axis is not None and s.node.axis.extent.is_static
+    }
+    assert extents == {2}, f"the finalize may fold only the two partitions, got axis extents {sorted(extents)}"
+
+
+def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
+    """A head fold that READS the boundary store's sweep axis lands inside the sweep ``Loop``
+    ``apply_output_specs`` wraps — neither an operand nor a top-level projection member — so the
+    realization cannot strip it from the epilogue and the split declines at the offer (a pin
+    raises the recorded refusal; the catalog arm keeps the unsplit tree)."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Lambda, M
+    from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+    from emmy.compiler.ir.tile import OutputSpec, Placement
+    from emmy.compiler.ir.tile.ops import head
+    from emmy.compiler.pipeline.passes.lowering.tile._split import _projection_refusal, split_forks
+
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    # The fold reads ``in0``, a name the projection body defines, so normalization keeps it a BODY
+    # member (a free-standing fold would be hoisted to an operand edge) — and that prologue reads
+    # the sweep axis ``j``, so the whole chain lands inside the sweep ``Loop``.
+    fold = Fold(
+        axis=Axis("k", Dim(16)),
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    Load(name="v", input="x", index=(Var("k"), Var("j"))),
+                    Assign(name="p", op="multiply", args=("v", "in0")),
+                )
+            ),
+            results=("p",),
+        ),
+        init=init,
+        combine=combine,
+    )
+    wrapper = Fold.projection(
+        body=Body(
+            (
+                Load(name="in0", input="c", index=(Var("j"),)),
+                fold,
+                Assign(name="y", op="multiply", args=("acc", "in0")),
+            )
+        )
+    )
+    tile = TileOp(
+        op=wrapper,
+        place=Placement(free=(Axis("i", Dim(4)),)),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=Axis("j", Dim(8))),),
+    )
+    node = head(tile.op)
+    assert node is not None and node.axis is not None
+    why = _projection_refusal(tile, node)
+    assert why is not None and "cannot strip" in why
+    root = SimpleNamespace(op=tile, id="o")
+    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+        monkeypatch.delenv(var, raising=False)
+    options = split_forks(None, root)
+    assert options is not None and len(options) == 1, "only the unsplit arm may survive the residence refusal"
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    with pytest.raises(ValueError, match="cannot strip"):
+        split_forks(None, root)

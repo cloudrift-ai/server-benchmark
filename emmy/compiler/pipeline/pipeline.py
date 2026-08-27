@@ -949,7 +949,9 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     distinguish them, and this answers ``None`` so the fork is offered normally. The count evidence
     is also per-OP, not per-rule: two structural rules offering on one op (a cut and a cross-CTA
     split both mint two kernels) can replay each other's counts, so a rule's siblings may never
-    reach a decide on such a kernel and stay reachable by pin only. Correctness never depended on
+    reach a decide on such a kernel and stay reachable by pin only — which also makes offer-side
+    TESTS for a second structural family unwritable through ``resolve``: ask the offer function
+    directly (the exl3 split-offer test does). Correctness never depended on
     the replay; only the tree's width does."""
     key = root_op.cache_key()
     if key is None:

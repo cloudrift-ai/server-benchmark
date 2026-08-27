@@ -654,14 +654,15 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
-- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves in-repo; the 16× V100 recipe is not yet validated.**
+- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves the published checkpoint at TP8 × PP2.**
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
   block scales and compressed MXFP4 routed experts, tensor-parallel expert sharding with the group all-reduce, the
   carrier-width pipeline transport — are implemented and gated (see the hyper-connection section), including a
   real-engine TP2×PP2 greedy-parity test on a small config. Decode capture is unsupported for this architecture
   (the routed combine host-syncs every step; the fixed-slot selector is unsharded) — the boot guard and
-  `emmy serve` both force eager. Still ahead: the TP8×PP2 boot of the published checkpoint in the pinned 1Cat
-  sm_70 image serving mixed prefill/decode, and real-checkpoint numerics/greedy gates.
+  `emmy serve` both force eager. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and
+  greedy agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead:
+  a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

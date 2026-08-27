@@ -77,7 +77,24 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
     write_ids = {id(stmt) for stmt in writes}
     step = Body(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     names = tuple(stmt.name for stmt in accums)
-    lift = Lambda(params=(loop.axis.name,), body=step, results=tuple(stmt.value for stmt in accums))
+    # An accumulated value defined in an ENCLOSING scope (a loop-invariant accumulate — e.g. the
+    # single-key decode softmax's max over an extent-1 axis after maximal fusion) is not a name the
+    # step defines, and a Lambda result must be defined by its own body. Alias it through a pure
+    # copy in the step: the original loop accumulates the same value every iteration, so a
+    # per-iteration copy is faithful for every monoid (max→v, add→N·v, mul→v^N).
+    available = Lambda(params=(loop.axis.name,), body=step, results=()).defined
+    values: list[str | float] = []
+    aliases: list[Assign] = []
+    for stmt in accums:
+        value = stmt.value
+        if isinstance(value, str) and value not in available:
+            alias = f"{value}__inv_{loop.axis.name}"
+            aliases.append(Assign(name=alias, op="copy", args=(value,)))
+            value = alias
+        values.append(value)
+    if aliases:
+        step = Body((*step, *aliases))
+    lift = Lambda(params=(loop.axis.name,), body=step, results=tuple(values))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
         return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine), ()

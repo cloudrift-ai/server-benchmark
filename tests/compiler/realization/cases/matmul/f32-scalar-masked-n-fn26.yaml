@@ -1,0 +1,35 @@
+# The symmetric masked-N case: 26 columns over 512 leaves a 320-column overhang, so the
+# boundary guard is on N. Kept small — the masked scalar kernel is slow enough that the
+# article shape would crowd the per-launch watchdog.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [512, 512]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [512, 512]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [512, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_b8f400.a55c93e3b97d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f26x4
+      WORK: t32x8
+    identity: c29482da5ac4a78836e6d5e29813a09ae8076d1d2fb0b9958af8d7a1ba244c05

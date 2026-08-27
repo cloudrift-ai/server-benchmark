@@ -1,0 +1,35 @@
+# A non-divisor output axis: 47 columns over a 64-wide tile, so the store carries a
+# boundary guard. Gmem-direct — see the staged sibling for why this shape cannot stage.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [64, 64]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [64, 47]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [64, 47]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_fa3f68.d8fee7834d5c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f2x4
+      WORK: t16x8
+      STAGE: ''
+    identity: a1bbc1798a0bc1c314a22c6f210347547b96965a0c1d06dc4ac2f88fdfd6b0ea

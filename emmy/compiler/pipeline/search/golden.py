@@ -574,7 +574,12 @@ _IDENTITY_CACHE: dict[tuple, str | None] = {}
 #: compiler fingerprint. Purely derived data — a stale or missing store just re-derives.
 _IDENTITY_STORE: dict | None = None
 _IDENTITY_STORE_DIRTY: bool = False
-_WIRE_DIGESTS: dict[int, str] = {}
+#: Wire payload digests, memoized per payload OBJECT. The value holds the wire itself, not just
+#: its digest: an ``id()``-keyed memo whose entry outlives the object it describes answers for
+#: whatever later lands at that address, and this memo feeds a record's identity fingerprint.
+#: Keeping the reference is what makes the address stable, and it matches how every sibling
+#: cache in this module (``_PROGRAM_GRAPH_CACHE``, ``_LOOP_GRAPH_CACHE``) is written.
+_WIRE_DIGESTS: dict[int, tuple[dict, str]] = {}
 
 
 def _compiler_fingerprint() -> str:
@@ -653,10 +658,11 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     import json  # noqa: PLC0415
 
     wire = record.loop_wire if record.loop_wire is not None else record.program_wire
-    wd = _WIRE_DIGESTS.get(id(wire))
-    if wd is None:
-        wd = _WIRE_DIGESTS.setdefault(id(wire), digest(json.dumps(wire, sort_keys=True, default=str)))
-    return digest(wd, str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
+    cached = _WIRE_DIGESTS.get(id(wire))
+    if cached is None or cached[0] is not wire:
+        cached = (wire, digest(json.dumps(wire, sort_keys=True, default=str)))
+        _WIRE_DIGESTS[id(wire)] = cached
+    return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
 #: Enumerated rows per (target, pins) — sibling realizations of one config decode against one

@@ -1,0 +1,35 @@
+# One scalar-tier staging depth: gmem-direct, a single cp.async slab, and the
+# double-buffered ring must all lower to a kernel that matches the reference.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [128, 128]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [128, 128]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_91f3d9.677eaacd90bf
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f1x8
+      WORK: t64x8
+      STAGE: d1/smem-async
+    identity: 923b88cdd5e946ac3fb750b422b5cc97a5a7d9920cb2f57674611399adf3479f

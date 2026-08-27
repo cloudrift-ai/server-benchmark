@@ -1,0 +1,36 @@
+# f16 operands forced onto the scalar register-tile FMA path. At 512 cubed the atom is
+# eligible and greedy prefers it, so the scalar codec is load-bearing here: this guards
+# both the pin's authority and the f16 scalar render (half-to-float multiply, float-to-
+# half store).
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [512, 512]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [512, 512]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f16, [512, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_a116c0.a78ccce50086
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f4x26
+      WORK: t32x8
+    identity: e681966fd19068a501d742302b8875a119de8949e2f2fdcc4b40734565f09a90

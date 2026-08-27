@@ -226,8 +226,11 @@ def offered(case: Case) -> str | None:
     the structural families it already reads correctly stay correctly read here.
     """
     pinned = case.pinned
-    with pinned_knobs(pinned):
-        rows = enumerate_graph(case.record.target_program.copy(), case.context()).rows
+    try:
+        with pinned_knobs(pinned):
+            rows = enumerate_graph(case.record.target_program.copy(), case.context()).rows
+    except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
+        return f"{type(exc).__name__}: {exc}"
     if any(unreproducible_pin_flag(pinned, [row]) is None for row in rows):
         return None
     return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"

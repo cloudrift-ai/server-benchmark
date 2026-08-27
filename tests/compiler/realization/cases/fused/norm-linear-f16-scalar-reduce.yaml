@@ -1,0 +1,51 @@
+# A scalar cooperative norm-reduce over the fused norm-to-linear edge, kept on the
+# fused placement so the reduce and the contraction stay one kernel.
+#
+# The test this case replaces additionally pinned STAGE=d2/smem-async here, but that pin
+# has not been realizable for some time and was silently declined: at these dims the
+# smem compute fill's slabs need 135232 B, over the budget, and a byte transport has no
+# sibling at all because the fused edge's A operand is COMPUTED. The kernel it asserted
+# on was gmem-direct. The staging claim is dropped rather than recorded as a gap: a
+# slab that does not fit is a correct refusal, not a lockout.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, wn, w]
+  outputs: [y]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [512, 128]]]
+  - id: wn
+    op: input
+    outputs: [[wn, f16, [128]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [1, 32, 128]]]
+  - id: xn
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, wn]
+    outputs: [[xn, f16, [1, 32, 128]]]
+  - id: y
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [xn, w]
+    outputs: [[y, f16, [1, 32, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - xn
+    - y
+  realizations:
+  - name: k_rms_norm_linear_reduce_dee3f2.bbeb54a322f3
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      TILE: ''
+      WORK: t128
+    identity: 553b4d18697c2e63412b4d4a4c77b5aa71fef69b6fd3c0d9c4fb58dcfa3c9eba

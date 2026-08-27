@@ -1,0 +1,34 @@
+# A non-divisor register tile on M: 26 rows over 2048 is a 208-row masked tile — ceil-div
+# grid plus a per-row boundary guard on the store. The matmul articles' hero tile.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [2048, 2048]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [2048, 2048]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [2048, 2048]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_a259a0.1412480570f0
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f1x26
+      WORK: t32x8
+    identity: fe3edc49cbd972e835987f471e9e1c66852afe54073783541b5a0f45bf98fb5e

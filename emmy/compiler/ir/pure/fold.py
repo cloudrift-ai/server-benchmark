@@ -286,7 +286,7 @@ class Fold:
     # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
     # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
     # across the whole schedule search (a fork is a different map, never a rebuilt tree).
-    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_split_reduce``
+    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``035_split_reduce``
     # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
     # split parentage uses, read by the realizer and the mask machinery alike.
@@ -453,8 +453,9 @@ class Fold:
     def composed(self) -> Fold | None:
         """The single sliced contraction this outer reduce COMPOSES (split-K's
         reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
-        λ spelling (one inline node operand carrying the outer's exact accumulator state). The ONE
-        read ``030_split_reduce`` and the derived :attr:`role` share."""
+        λ spelling (one inline node operand carrying the outer's exact accumulator state). The
+        structural probe the derived :attr:`role` reads (``035_split_reduce`` builds its sliced
+        partial directly, so the composition is a recognized FORM here, never a required input)."""
         if len(self.lift.body) or len(self.operands) != 1:
             return None
         inner = self.operands[0]

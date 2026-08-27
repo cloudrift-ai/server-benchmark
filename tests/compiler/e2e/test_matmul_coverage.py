@@ -20,6 +20,8 @@ structure tests (forced sm_120) need no GPU; warp-tier accuracy needs sm_90+.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -915,25 +917,25 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
 
 
 def test_f16acc_enumeration_policy(monkeypatch):
-    """The precision policy is target-blind: the ``FAST_MATH`` umbrella offers the f16-accumulate
+    """The precision policy is target-blind — the scheduler's catalog arm reads ``precision_pin``
+    alone, with no target in the question: the ``FAST_MATH`` umbrella offers the f16-accumulate
     forks everywhere they are legal (which sibling deploys is evidence's decision per shape and
     card), and the precise ``F16_MMA_F32_ACC`` pin stays authoritative in both directions."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _f16acc_allowed  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
-    def allowed(cc, **env) -> bool:
+    def allowed(**env) -> bool:
         for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
             monkeypatch.delenv(var, raising=False)
         for var, val in env.items():
             monkeypatch.setenv(var, val)
-        return _f16acc_allowed(Context.from_target(cc))
+        return bool(precision_pin(F16_MMA_F32_ACC))
 
-    assert not allowed((12, 0)), "policy unset: no f16acc forks"
-    assert allowed((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks"
-    assert allowed((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks on every target — evidence ranks them"
-    assert allowed((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
-    assert not allowed((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
+    assert not allowed(), "policy unset: no f16acc forks"
+    assert allowed(EMMY_FAST_MATH="1"), "FAST_MATH offers the forks — on every target, evidence ranks them"
+    assert allowed(EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
+    assert not allowed(EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
 
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target((12, 0))).rows
@@ -1464,7 +1466,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 # --- split-K finalizes on the warp tier --------------------------------------
 # MMA split-K rides the structural ``Fold(axis=ksplit, step=[Fold.contraction(k_axis=kslice)])`` fork
 # (the split-K option): the inner bilinear ``Fold`` factorizes to mma exactly like a non-split
-# matmul. Deferred (``g2k``): ``030_split_reduce`` retargets each partition's C-fragment into a
+# matmul. Deferred (``g2k``): ``035_split_reduce`` retargets each partition's C-fragment into a
 # ``ws[ksplit, M, N]`` workspace summed by a sibling additive finalize kernel — NO codegen
 # ``atomicAdd``. Atomic (``g2a``): ONE kernel — each partition's C-fragment ``atomicAdd``\\ s into a
 # per-launch zero-init'd f32 output (``RegStore.atomic`` + ``zero_outputs``). Low-precision output
@@ -1518,7 +1520,7 @@ def test_mma_splitk_finalize(monkeypatch, finalize):
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
 def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     """Operand staging composes with split-K: the ``STAGE`` resolved against the SLICED inner node
-    threads onto the split partial (``030_split_reduce``), whose K-loop stages its slice through the smem
+    reaches the split partial (a fresh kernel scheduling itself past ``035_split_reduce``), whose K-loop stages its slice through the smem
     pipeline. A pure perf transform — the staged split is **bit-identical** to the gmem-direct
     split (same partials, same finalize), and the partial kernel actually stages."""
     if transport == "smem-tma" and not _supports_tma():
@@ -1623,6 +1625,12 @@ _MASK_WARP = ("mma_m16n8k16_f16/f2x2/k2", "w2x2")
 # sibling deploys a partial+finalize pair, and these tests assert on the one ``o`` kernel.
 _CP_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d2/smem-async", "REDUCE": ""}
 _TMA_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d2/smem-tma", "REDUCE": ""}
+# The gmem-direct warp row, pinned EXPLICITLY: a byte-copied operand stages K as its contiguous
+# inner dim and a copied inner-row chunk cannot clamp a masked N cell, so a symbolic K (and a
+# masked N) has NO staged transport — the #293 resolver treated a pinned stage as advisory and
+# silently fell back to gmem-direct, which is what made the old ``*_cp`` spellings of these cases
+# green; pins are authoritative now, so the row every one of these shapes actually ran is pinned.
+_GMEM_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "", "REDUCE": ""}
 
 
 def _symbolic_m_graph(*, K: int = 512, N: int = 1024) -> Graph:
@@ -1750,7 +1758,19 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
     lines = src.splitlines()
     score_loads = [ln for ln in lines if "scores[" in ln and "__half2float" in ln]
-    assert score_loads and all("< seq_len) ?" in ln for ln in score_loads), "score loads must clamp the runtime K"
+    # Every fragment score load carries TWO clamps — the masked M row AND the runtime K — so no
+    # element ever reads past the scores buffer (the seq-16 dirty-pool OOB defect).
+    assert score_loads and all(ln.count("< seq_len) ?") == 2 for ln in score_loads), "score loads must clamp both M and K"
+    # The compute-filled A slab covers the WHOLE bk=32 chunk the ldmatrix drain reads: with 8-wide
+    # fragment column cells the store offsets must reach 24 (cells at K+0/8/16/24 — sizing the
+    # cells off the output tile's n.reg left K 16..31 uninitialized smem, the dirty-pool defect).
+    fill_stores = [ln for ln in lines if "_a_smem[" in ln and "__floats2half2_rn" in ln]
+    offs = {int(m.group(1)) for ln in fill_stores for m in re.finditer(r"_ks \+ (\d+) - _ks", ln)} | {0}
+    # The count is invariant under arithmetic simplification of the offset spelling; the offsets
+    # pin the spread (pre-fix: 8 stores at [0, 8]).
+    assert len(fill_stores) == 16 and max(offs) == 24, (
+        f"the A slab fill must cover the whole 32-element chunk ({len(fill_stores)} stores, offsets {sorted(offs)})"
+    )
     masked = [ln for ln in lines if ">= seq_len) in0__f" in ln]
     assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
     fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
@@ -1876,9 +1896,9 @@ def _make_pv_materialized(seq):
 _MASKED_CASES = {
     "symbolic_m_cp": (_CP_KNOBS, (), [1, 31, 512, 700], _make_symbolic_m),
     "symbolic_m_tma": (_TMA_KNOBS, (), [1, 31, 512, 700], _make_symbolic_m),
-    "symbolic_mn_cp": (_CP_KNOBS, (), [31, 512, 700], _make_symbolic_mn),
+    "symbolic_mn_gmem": (_GMEM_KNOBS, (), [31, 512, 700], _make_symbolic_mn),
     "residual_cp": (_CP_KNOBS, (), [100], _make_symbolic_m_residual),
-    "symbolic_k_cp": (_CP_KNOBS, (), [16, 31, 130, 512, 700], _make_symbolic_k),
+    "symbolic_k_gmem": (_GMEM_KNOBS, (), [16, 31, 130, 512, 700], _make_symbolic_k),
     # Transposed-B (A @ Bᵀ, K contiguous) symbolic-K: the mma zero-fills the masked-K tail through
     # the (n,k)-swapped trans helper. Gmem-direct (no STAGE), M/N are tile divisors so only K masks.
     "symbolic_k_trans": (
@@ -1891,10 +1911,11 @@ _MASKED_CASES = {
     # at runtime is a separate gap, so accuracy rides the scalar tier (the structure render
     # reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).
     "batched_mk": ({}, (), [16, 31, 130, 512, 700], _make_batched_mk),
-    # The demoted B-cone / softmax-P@V splits run under GREEDY — the planner's own pick over the
-    # fused computed-operand cone. ``SPLIT_CONE`` forces the demotion split.
-    "demoted_n": ({"SPLIT_CONE": "1"}, (), [31, 130, 512, 700], _make_demoted_n),
-    "demoted_pv": ({"SPLIT_CONE": "1"}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
+    # The demoted B-cone / softmax-P@V shapes run under GREEDY — the planner's own pick over the
+    # fused computed-operand cone. (``SPLIT_CONE``, which once forced the demotion split here, has
+    # no reader any more.)
+    "demoted_n": ({}, (), [31, 130, 512, 700], _make_demoted_n),
+    "demoted_pv": ({}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
     # The same softmax-P@V shape PINNED onto the mma tier: a COMPUTED A over a symbolic K, which
     # only the smem compute fill's K mask makes realizable. The straddling extents are where that
     # mask earns its keep — 16 and 31 are shorter than one whole slab chunk.
@@ -1914,26 +1935,7 @@ _MASKED_CASES = {
         _make_pv_materialized,
     ),
 }
-_MASKED_XFAIL = {
-    ("demoted_pv", 130),
-    ("demoted_pv", 512),
-    ("demoted_pv", 700),
-    ("computed_a_symbolic_k_warp", 31),
-    ("computed_a_symbolic_k_warp", 130),
-    ("computed_a_symbolic_k_warp", 512),
-    ("computed_a_symbolic_k_warp", 700),
-}
-_MASKED_PARAMS = [
-    pytest.param(
-        label,
-        seq,
-        marks=pytest.mark.xfail(reason="masked symbolic computed-operand MMA is not yet numerically correct", strict=True),
-    )
-    if (label, seq) in _MASKED_XFAIL
-    else (label, seq)
-    for label, (_e, _d, seqs, _m) in _MASKED_CASES.items()
-    for seq in seqs
-]
+_MASKED_PARAMS = [(label, seq) for label, (_e, _d, seqs, _m) in _MASKED_CASES.items() for seq in seqs]
 
 
 @requires_sm90

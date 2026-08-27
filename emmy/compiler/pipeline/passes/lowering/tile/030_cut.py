@@ -24,8 +24,16 @@ def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
     for name, value in pins:
         if value not in {"fuse", "cut"}:
             raise ValueError(f"bad PLACE value {value!r}; expected 'fuse' or 'cut'")
-        if value == "fuse" and name == "PLACE":
-            return name, value
+        if name == "PLACE":
+            if value == "fuse":
+                return name, value
+            # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
+            # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
+            # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
+            # the CUTTABLE seams instead: the root-most one.
+            depth = {id(site.node): site.depth for site in all_sites}
+            seam = min(seams, key=lambda s: depth[id(s.node)])
+            return seam.spelling, value
         site = resolve(tile.op, name, all_sites=all_sites)
         if site is None or id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")

@@ -82,7 +82,7 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
 class Level(enum.Enum):
     """One hardware level the reduce axis can be partitioned across, coarse→fine."""
 
-    GRID = "grid"  # across CTAs (split-K) — emitted by 030_split_reduce, never the in-kernel walk
+    GRID = "grid"  # across CTAs (split-K) — realized by the structural 035_split_reduce fork, never the in-kernel walk
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -93,14 +93,14 @@ class FoldMove(enum.Enum):
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
     ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence) and
-    ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    ``035_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
     SHFL = "shfl"  # lane-level ``__shfl_xor_sync`` butterfly (within-warp)
     SMEM = "smem"  # cross-warp / block-wide smem tree-halve (within-block)
-    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_split_reduce's one-kernel arm)
-    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_split_reduce)
+    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (035_split_reduce's one-kernel arm)
+    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (035_split_reduce)
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,7 @@ class ReduceStage:
     implies the fold, and a BLOCK width derives warp-shuffle vs hierarchical-smem from the
     warp size. ``width`` is power-of-two for BLOCK (the butterfly / tree reorder).
 
-    ``finalize`` is meaningful only at ``GRID``: how ``030_split_reduce`` realizes the cross-CTA
+    ``finalize`` is meaningful only at ``GRID``: how ``035_split_reduce`` realizes the cross-CTA
     combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
     additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
     workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
@@ -132,8 +132,8 @@ class ReduceStage:
 
         - ``SERIAL`` / ``REG`` → ``()`` (no cross-unit combine; REG-fold is TODO(reg)).
         - ``GRID`` → ``(ATOMIC,)`` or ``(KERNEL,)`` per the ``finalize`` letter (the split-K
-          cross-CTA move — consumed by ``030_split_reduce``; the carrier / projection legality raises
-          stay with the graph rewrite, which alone holds the context).
+          cross-CTA move — realized by the structural ``035_split_reduce`` fork; the carrier /
+          projection refusals live beside that offer, which alone holds the context).
         - ``BLOCK`` → the intra-CTA hierarchy: a lone ``SHFL`` when ``segmented`` (the
           per-row segmented butterfly for strided-cooperative rows) or ``width ≤ warp``
           (one warp); ``(SHFL, SMEM)`` when ``width`` is a clean warp multiple (lanes then
@@ -232,7 +232,7 @@ class ReducePlan:
 
     @property
     def needs_split(self) -> bool:
-        """True iff any stage is a cross-CTA GRID split (``030_split_reduce`` territory)."""
+        """True iff any stage is a cross-CTA GRID split (``035_split_reduce`` territory)."""
         return any(s.level is Level.GRID for s in self.stages)
 
     def _width(self, level: Level) -> int:
@@ -762,6 +762,18 @@ class Stage:
         """True for the asynchronous-copy transports (``cp.async`` / ``tma``) — the ones
         that issue a commit/wait or mbarrier handshake rather than a plain ``__syncthreads``."""
         return self.transport in ("smem-async", "smem-tma")
+
+    def available_on(self, ctx) -> bool:
+        """Whether this stage's copy instruction family exists on ``ctx`` — the ONE statement of
+        the transport/target rule (``cp.async`` is sm_80+, TMA sm_90+; the synchronous ``smem``
+        fill is universal). ``stage_moves`` filters the catalog through it, exactly as the atom
+        registry filters through :meth:`AtomKind.available_on`; a PIN's refusal message reads it
+        through the scheduler's ``stage_target``."""
+        if self.transport == "smem-async":
+            return ctx.has_cp_async
+        if self.transport == "smem-tma":
+            return ctx.has_tma
+        return True
 
 
 @dataclass(frozen=True)

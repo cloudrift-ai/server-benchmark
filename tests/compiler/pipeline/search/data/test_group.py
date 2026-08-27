@@ -89,7 +89,7 @@ def test_alternative_schedules_of_one_kernel_stay_one_group():
     pool a comparison at all.
 
     They share them by construction, not by luck: the identity strategy stamps a kernel at BIRTH, in
-    recognition, before ``020_schedule`` offers the first fork — that pass's own error text says so. Nothing
+    recognition, before ``040_schedule`` offers the first fork — that pass's own error text says so. Nothing
     a schedule fork decides can move an ``S_*`` value, which is what makes keying on them safe."""
     rows = [
         _row("a", value_us=200.0, features=_feats(TILE="f2x2", WORK="w1x8")),

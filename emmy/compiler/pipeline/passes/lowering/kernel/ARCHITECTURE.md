@@ -209,8 +209,11 @@ materializer do not recognize operation families.
 The fragment Fold evaluator assigns each live value one of three residences: CTA-cell uniform, one scalar per fragment
 row, or one C fragment. It interprets the stored `Lambda` directly. `Assign` broadcasts to the highest input residence,
 `Select` substitutes the fragment layout's absolute coordinates, and coordinate-dependent `Load` becomes
-`FragmentLoad`. A symbolic reduce boundary adds `FragmentMask` with the Fold identity. The same evaluator applies the
-stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
+`FragmentLoad`. Every runtime-bounded coordinate clamp-reads in-bounds — a masked M row exactly like the reduce
+axis — and the reduce boundary additionally adds `FragmentMask` with the Fold identity (the overhanging M row is a
+discarded duplicate instead, the copy-transport contract). A Lambda-evaluated producer's fragment column cells span
+the whole `bk`-wide slab chunk the drain reads, independent of the output tile's register tiling. The same evaluator
+applies the stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
 
 A scheduled child contraction is supplied through the evaluator's structural callback. The ordinary atom strategy
 declares and drains its fragments; `FragmentRowReduce` derives row-resident partials; the parent Fold's `combine`
@@ -282,10 +285,10 @@ loop) and marking the inner drain `Loop(seed=False)` so it folds without re-decl
 masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab fill would fault a row-crossing copy.
 Unstaged is byte-identical gmem-direct.
 
-**Split-K composes with staging.** The split-K option resolves a `STAGE` spec against the SLICED inner view
-(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split_reduce` threads the resolved `Stage` onto its
-partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
-the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
+**Split-K composes with staging.** A split partial is a fresh kernel whose own schedule fork resolves a `STAGE`
+spec against the SLICED view (the `kslice` extent + the `ksplit`-offset operand indices), so the partial kernel's
+K-loop stages its slice through the same pipeline (the TMA box origin is the operand's own index evaluated at the
+tile base — an offset operand lands the box at absolute coordinates).
 
 ## Fold carriers lower at their scheduled residence
 
@@ -302,7 +305,7 @@ assuming that all components share the contraction accumulator's residence.
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
 (a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
-`030_split_reduce` realizes the graph-level partition.
+the structural `tile/035_split_reduce` fork realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

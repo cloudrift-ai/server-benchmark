@@ -3,27 +3,34 @@
 Building the offline-prior dataset enumerates every golden's candidate pool and featurizes every
 row. The corpus is millions of rows and tens of gigabytes, paid again on every experiment, and one
 golden's pool alone exceeds the enumerator's materialization budget — so the fit does not finish.
-The fix is to draw the sample where the pool is still a SPACE
-(:mod:`~emmy.compiler.pipeline.passes.lowering.tile._pool`), before a candidate dict exists, rather
-than to build everything and throw most of it away.
+The fix is to draw the sample from the schedule walk's leaf STREAM as it is produced — reservoir
+sampling — rather than to build everything and throw most of it away: the walk stays lazy, each
+candidate dict exists only for the moment it passes the reservoir, and nothing proportional to the
+pool is ever retained. What is bounded is MEMORY, not time: the draw is one pass over every leaf,
+so a fit still pays O(pool) walk time per golden — the 19.4M-row EXL3 coded-linear pool included —
+where the deleted product space could address ``size`` members without visiting the rest. That
+old guarantee is gone by design; the walk has no index to address by.
 
-**The index set is a pure function of** ``(n, size, seed)``. It never looks at a row, so two
-byte-identical pools draw byte-identical samples — which is what keeps the fit reproducible and
-keeps two goldens over one pool mergeable into one training group.
+**The draw is a pure function of the stream and** ``(size, seed)``. The walk's leaf order is
+deterministic and the reservoir never reads a row, so two byte-identical pools draw byte-identical
+samples — which is what keeps the fit reproducible and keeps two goldens over one pool mergeable
+into one training group.
 
 **Membership survives the draw exactly.** ``keep`` is the set of :func:`~.features.tile_signature`
-values that must be retained whatever the draw picks. With one, :meth:`PoolSample.take` VISITS every
-candidate and retains the drawn ones plus every signature in the set: a golden that is genuinely
-absent from its pool still reads as absent, which is a real defect class (a pin or dtype mismatch)
-the fit and ``eval golden`` both detect by exactly that miss.
+values that must be retained whatever the draw picks. The reservoir visits every candidate by
+construction, and a row whose signature is in the set is retained beside the draw: a golden that is
+genuinely absent from its pool still reads as absent, which is a real defect class (a pin or dtype
+mismatch) the fit and ``eval golden`` both detect by exactly that miss.
 
 **Reported rank is the RAW sample rank with the exact total beside it, never scaled**
 (:class:`Candidates`). A sample's rank resolution floor is ``n / size``; pretending otherwise would
-report a precision the draw does not have.
+report a precision the draw does not have. The exact total is the reservoir's candidate count —
+known the moment the stream ends, with no product space to pre-sum.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -81,29 +88,36 @@ class PoolSample:
         would key the same sample differently on two runs."""
         return digest(self.rows, self.seed, sorted(str(s) for s in self.keep))
 
-    def take(self, space) -> list[dict]:
-        """The drawn candidates of ``space``, in index order.
+    def take(self, rows: Iterable[dict]) -> Candidates:
+        """Reservoir-sample the candidate stream ``rows``, returning the drawn rows in stream
+        order beside the exact count behind them.
 
-        Two paths, and the difference is what ``keep`` costs: with no keep-set the draw addresses
-        ``size`` members and builds nothing else; with one it iterates the space so membership stays
-        exact, building and dropping one dict per candidate. That is the same order of work the
-        full-pool scan it replaces already did, so it is not the thing to optimize first."""
-        n = len(space)
-        if self.rows <= 0 or n <= self.rows:
-            return list(space)  # nothing to draw — the pool IS the sample
-        picked = _indices(n, self.rows, self.seed)
-        if not self.keep:
-            return [space[i] for i in picked]
-        want = set(picked.tolist())
-        return [row for i, row in enumerate(space) if i in want or features.tile_signature(row) in self.keep]
-
-
-def _indices(n: int, size: int, seed: int) -> np.ndarray:
-    """``size`` distinct indices below ``n``, ascending — a PURE function of ``(n, size, seed)``.
-
-    It never reads a candidate, which is the whole determinism argument: the draw cannot depend on
-    anything a rebuild might reorder, so a refit of the same corpus is byte-identical."""
-    return np.sort(np.random.default_rng(seed).choice(n, size=size, replace=False))
+        One pass, O(size) retained: the first ``size`` candidates fill the reservoir and each later
+        one displaces a uniformly chosen slot, so the draw is uniform without knowing the count up
+        front — the property that lets a lazy walk be sampled at all. The kept-signature rows ride
+        beside the reservoir (the keep-set ADDS to the draw, it never displaces it), and the whole
+        stream is returned when ``size`` is 0 or the stream is no larger."""
+        stream = iter(rows)
+        if self.rows <= 0:
+            out = list(stream)
+            return Candidates(out, len(out))
+        rng = np.random.default_rng(self.seed)
+        reservoir: list[tuple[int, dict]] = []
+        kept: dict[int, dict] = {}
+        count = 0
+        for index, row in enumerate(stream):
+            count = index + 1
+            if self.keep and features.tile_signature(row) in self.keep:
+                kept[index] = row
+            if index < self.rows:
+                reservoir.append((index, row))
+            else:
+                slot = int(rng.integers(0, index + 1))
+                if slot < self.rows:
+                    reservoir[slot] = (index, row)
+        chosen = dict(reservoir)
+        chosen.update(kept)
+        return Candidates([chosen[index] for index in sorted(chosen)], count)
 
 
 __all__ = ["DEFAULT_SAMPLE", "Candidates", "PoolSample"]

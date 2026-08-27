@@ -1,13 +1,13 @@
 """Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, used to
 construct σ-tiled load/store indices in the lowering passes (`enumeration/_build` warp-tier σ-tiling,
-`assembly/_assemble` carrier realization), plus `split_pair` — the re-fused split-store spelling of an
-axis across two buffer dims — and `gmem_axis_step` / `gmem_row_stride` — how a gmem
-`Load`'s flat address moves along one axis, the row step (`ldm`) a fragment loader reads off the
-index and buffer shape and the contiguity its columns need, plus `BYTE_SLAB_PAD` — the smem row pad
-a cp.async-staged byte slab carries. Generic Expr / addressing algebra — no flash / attention /
-dialect dependency. Lives in `lowering/` so both the enumeration and assembly layers — and both the
-`tile/` and `kernel/` lowering stages — import it without crossing the enumeration↔assembly
-boundary.
+`assembly/_assemble` carrier realization), plus `split_pair` / `split_addressable` — the re-fused
+split-store spelling of an axis across two buffer dims, and whether per-atom-origin addressing is
+exact for one — and `gmem_axis_step` / `gmem_row_stride` — how a gmem `Load`'s flat address moves
+along one axis, the row step (`ldm`) a fragment loader reads off the index and buffer shape and the
+contiguity its columns need, plus `BYTE_SLAB_PAD` — the smem row pad a cp.async-staged byte slab
+carries. Generic Expr / addressing algebra — no flash / attention / dialect dependency. Lives in
+`lowering/` so both the enumeration and assembly layers — and both the `tile/` and `kernel/`
+lowering stages — import it without crossing the enumeration↔assembly boundary.
 """
 
 from __future__ import annotations
@@ -249,3 +249,30 @@ def split_pair(index: tuple, name: str) -> int | None:
             return None
         parts[e.op] = int(e.right.value)
     return parts["//"] if set(parts) == {"//", "%"} and parts["//"] == parts["%"] else None
+
+
+def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: bool) -> bool:
+    """Whether per-atom-origin addressing — the cell base evaluated once at the atom origin, then
+    ``+ col`` / ``+ row · ldm`` across an ``atom_ext``-wide cell — is exact for an ``index`` whose
+    ``name`` axis reaches the buffer as a split dim pair. It is when the row-major flatten
+    recomposes the pair to an affine address (the strides match the split), or when the ``%`` dim
+    is the innermost carrier (the trailing dim, when ``trailing``) and its modulus is a whole
+    number of atom cells, so an aligned atom never straddles a ``Q`` boundary. An axis carried by
+    fewer than two dims is trivially addressable."""
+    dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+    if len(dims) < 2:
+        return True
+    q = split_pair(index, name)
+    inner = index[dims[1]]
+    if q is None or not (isinstance(inner, BinaryExpr) and inner.op == "%"):
+        return False  # not a bare f/Q, f%Q pair, or the quotient dim is the inner one
+    if trailing and dims[1] != len(index) - 1:
+        return False  # the remainder dim is not the contiguous one
+    if shape is not None and len(shape) == len(index) and all(getattr(d, "is_static", False) for d in shape):
+        stride, strides = 1, [1] * len(index)
+        for d in reversed(range(len(index))):
+            strides[d] = stride
+            stride *= shape[d].as_static()
+        if strides[dims[0]] == q * strides[dims[1]]:
+            return True  # row-major recomposition — the address is affine in the axis
+    return q % atom_ext == 0

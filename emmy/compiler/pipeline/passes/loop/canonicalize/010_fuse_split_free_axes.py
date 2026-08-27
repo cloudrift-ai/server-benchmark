@@ -21,7 +21,7 @@ f``, the recomposition fold in ``Expr.simplify``); a store that indexes the pair
 buffer dims keeps the honest split-store spelling — ``[…, f/Q, f%Q]`` when the buffer's
 row-major flatten folds it back to an affine address, or the permuted ``[…, f/Q, …, f%Q]`` of a
 transposed output, whose address is per-element exact on every scalar tier and whose warp-tier
-addressability is the scheduler's legality question (``warp_split_store``). Any access where a
+addressability is the scheduler's legality question (``lowering/_addr.split_addressable``). Any access where a
 div/mod residue would otherwise survive — an axis used alone, a predicate over the pair —
 declines the pair, and the nest stands.
 

@@ -8,7 +8,6 @@ multi-output fused kernels without a GPU.
 """
 
 import numpy as np
-import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -283,18 +282,37 @@ def _decompose_and_fuse(graph: Graph) -> Graph:
     return Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion"]).run(graph)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="gate-free merge-loop experiment duplicates the transcendental across contraction columns",
-)
 def test_transcendental_is_not_duplicated_across_contraction_columns():
-    """Materialize exp once per (M,K), instead of recomputing it N times."""
-    result = _decompose_and_fuse(_make_activation_linear("exp"))
-    kernels = _kernel_nodes(result)
+    """The exp-once-per-(M,K) decomposition lives at the CUT fork, not in fusion.
+
+    Loop fusion is maximal and schedule-blind, so it inlines exp N-wide into the contraction —
+    one kernel, by design. The materialization decision belongs to ``030_cut``: the contraction's
+    A-operand cone is a cuttable seam, and choosing it materializes exp once per (M,K) into its
+    own kernel while the contraction reads the workspace back as an ordinary load."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.pure.fold import Fold
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    fused = _decompose_and_fuse(_make_activation_linear("exp"))
+    assert len(_kernel_nodes(fused)) == 1  # fusion stays maximal: exp is inlined, not a boundary
+
+    def fold_ops(node, acc):
+        if isinstance(node, Fold):
+            for child in (*node.operands, *node.lift.body):
+                fold_ops(child, acc)
+        elif getattr(node, "op", None) is not None:
+            acc.append(node.op.name)
+        return acc
+
+    with pinned_knobs({"PLACE@a": "cut"}):
+        result = Pipeline.build(TILE_PASSES).run(_make_activation_linear("exp"), ctx=Context.from_target((12, 0)))
+    kernels = [node for node in result.nodes.values() if isinstance(node.op, TileOp)]
     assert len(kernels) == 2
-    exp_kernels = [node for node in kernels if "exp" in _assign_fns(node.op.body)]
+    exp_kernels = [node for node in kernels if "exp" in fold_ops(node.op.op, [])]
     assert len(exp_kernels) == 1
-    assert exp_kernels[0].output.shape == (2, 16)
+    assert tuple(dim.as_static() for dim in exp_kernels[0].output.shape) == (2, 16)  # once per (M, K), never N-wide
 
 
 def test_cheap_activation_still_fuses_into_contraction():

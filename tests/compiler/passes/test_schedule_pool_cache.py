@@ -1,10 +1,11 @@
-"""The schedule pool cache — ``ctx.session_cache`` memoizing ``_enumerate`` per term.
+"""The schedule pool cache — ``ctx.session_cache`` memoizing the walk's prescan per term.
 
 What these pin: (a) SHARING — a second resolve against the same ``Context`` answers the
-enumeration from the pool, and two same-shape kernels in one graph share one enumeration;
-(b) EQUALITY — a cache hit serves byte-identical rows, so the fork a policy walks is the same
-either way; (c) ISOLATION — pool rows are read-only, and a live schedule pin changes the pool
-key rather than narrowing a shared pool in place."""
+enumeration from the memoized per-node option lists, and two same-shape kernels in one graph
+share one prescan; (b) EQUALITY — a cache hit replays the walk to byte-identical rows, so the
+fork a policy walks is the same either way; (c) ISOLATION — the memoized options are read-only,
+and a live schedule pin (or any other enumeration input: dtypes, extents, stores, the sample)
+changes the pool key rather than narrowing a shared pool in place."""
 
 from __future__ import annotations
 
@@ -76,13 +77,17 @@ def test_fresh_context_starts_cold() -> None:
     assert ctx2.session_cache.hits == 0, "a fresh Context is a fresh session — no cross-session sharing"
 
 
-def test_pool_rows_are_read_only() -> None:
+def test_pool_options_are_read_only() -> None:
+    """The memo shares OPTION LISTS, not rows — each leaf row is a fresh dict merged per walk, so
+    a consumer mutating a row cannot corrupt the pool. The shared objects themselves must refuse
+    writes: frozen options over read-only knob mappings."""
     ctx = Context.from_target((12, 0))
     _resolve(ctx, _matmul_graph())
     (pool,) = ctx.session_cache._store.values()
-    assert pool.rows
+    assert pool.options
+    option = next(opt for opts in pool.options for opt in opts if opt.knobs)
     with pytest.raises(TypeError):
-        pool.rows[0]["TILE"] = "corrupted"
+        option.knobs["TILE"] = "corrupted"
 
 
 def test_a_dtype_change_keys_a_different_pool() -> None:
@@ -100,10 +105,10 @@ def test_a_dtype_change_keys_a_different_pool() -> None:
     f32 = ctx.session_cache._store[next(iter(before))]
     f16 = ctx.session_cache._store[next(iter(new))]
 
-    def sample(pool):
-        return tuple(canonical_row_key(dict(pool.rows[i])) for i in {0, len(pool.rows) // 2, len(pool.rows) - 1})
+    def spelled(pool):
+        return {tuple(sorted(opt.knobs.items())) for opts in pool.options for opt in opts}
 
-    assert (f16.total, sample(f16)) != (f32.total, sample(f32)), "the f16 pool must differ (the warp tier is dtype-gated)"
+    assert spelled(f16) != spelled(f32), "the f16 pool must differ (the warp tier is dtype-gated)"
 
 
 def test_a_precision_gate_pin_keys_a_different_pool() -> None:
@@ -130,7 +135,11 @@ def test_a_live_pin_keys_a_different_pool() -> None:
     (pinned_key,) = set(ctx.session_cache._store) - before
     pinned_pool = ctx.session_cache._store[pinned_key]
     assert ctx.session_cache.misses >= 2, "a pin state must never share the unpinned pool"
-    assert 0 < len(pinned_pool.rows) < len(unpinned_pool.rows), "the pinned fork must be a narrowing of the unpinned one"
+
+    def tiles(pool):
+        return {v for opts in pool.options for opt in opts for k, v in opt.knobs.items() if family_of(k) == "TILE"}
+
+    assert 0 < len(tiles(pinned_pool)) < len(tiles(unpinned_pool)), "the pinned offer must be a narrowing of the unpinned one"
     # And back: the unpinned pool is still served intact after the pin lifts.
     assert _resolve(ctx, _matmul_graph()) == unpinned
 
@@ -142,6 +151,7 @@ def test_a_live_context_never_samples() -> None:
     one sees, and a live deploy could be served a pool with most of its candidates missing."""
     from dataclasses import replace
 
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
     from emmy.compiler.pipeline.search.pool import PoolSample
 
     ctx = Context.from_target((12, 0))
@@ -151,13 +161,16 @@ def test_a_live_context_never_samples() -> None:
     with REDUCE.pinned(""):
         drawn = _resolve(sampled, _matmul_graph())
         (drawn_pool,) = ctx.session_cache._store.values()
+        assert 0 < len(drawn_pool.rows) <= 8 < drawn_pool.total, "the sampled Context sees a draw, never the pool"
         before = set(ctx.session_cache._store)
         full = _resolve(ctx, _matmul_graph())
         (full_key,) = set(ctx.session_cache._store) - before
         full_pool = ctx.session_cache._store[full_key]
-        assert 0 < len(drawn_pool.rows) < len(full_pool.rows), "the sampled Context sees a draw, the live one the whole pool"
-        assert drawn_pool.total == full_pool.total
-        assert set(map(canonical_row_key, drawn_pool.rows)) < set(map(canonical_row_key, full_pool.rows))
+        assert not hasattr(full_pool, "rows"), "the live memo is the prescan — no row is ever retained for a live compile"
+        live_rows = enumerate_graph(_matmul_graph(), ctx).rows
+        assert drawn_pool.total == len(live_rows), "the draw reports the exact size of the pool the live walk yields"
+        drawn_keys = {canonical_row_key(dict(row)) for row in drawn_pool.rows}
+        assert drawn_keys < {canonical_row_key(row) for row in live_rows}
         assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
         assert _resolve(ctx, _matmul_graph()) == full
 
@@ -192,7 +205,7 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
     """
     from emmy.compiler.ir.tile.identity import pool_key
     from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     ctx = Context.from_target((12, 0))
     wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
@@ -203,7 +216,7 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
 
     # The consequence: the spaces do not.
     def total(tile) -> int:
-        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+        return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
     pins = schedule_pin_fingerprint()
@@ -225,7 +238,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
     from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
     ctx = Context.from_target((12, 0))
@@ -245,9 +258,96 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
 
     def total(tile) -> int:
-        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+        return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
     assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
     assert deploy_identity(flat) != deploy_identity(split), "so a golden must not join across them"
     pins = schedule_pin_fingerprint()
     assert pool_key(flat, pins=pins) != pool_key(split, pins=pins), "and they must not share a pool"
+
+
+def test_a_split_receipt_never_shares_a_pool_with_its_receipt_free_twin(monkeypatch) -> None:
+    """A kernel that realized a cross-CTA split carries the sliced axis's partition ``Window``
+    receipt, and the walk consumes a live ``REDUCE`` pin's ``g``-half against it — so under
+    ``EMMY_REDUCE=g2k`` the partial piece memoizes its STRIPPED options while a receipt-free twin
+    of the same algebra must RAISE, never hit that memo. The receipt separates the two keys twice
+    over (it is an explicit key term, and ``form``'s field walk happens to serialize the
+    ``compare=False`` ``Axis.window`` into the term digest); this holds whichever layer does it."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.tensor.ir import ReduceOp
+    from emmy.compiler.ir.tile.ir import TileOp
+    from emmy.compiler.ir.tile.ops import carries_partition
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (Dim(4), Dim(512)), dtype="f32"), node_id="x")
+    g.add_node(ReduceOp(axis=1), ["x"], Tensor("s", (Dim(4), Dim(1)), dtype="f32"), node_id="s")
+    g.inputs, g.outputs = ["x"], ["s"]
+
+    ctx = Context.from_target((12, 0))
+    captured: list[TileOp] = []
+
+    def decide(fp):
+        op = fp.root_op
+        if isinstance(op, TileOp) and op.op is not None and not op.place.is_mapped and carries_partition(op.op):
+            if not any(op is seen for seen in captured):
+                captured.append(op)
+        return next(iter_leaves(fp.options))
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(g, decide)
+    assert captured, "the pinned split must have offered its partial piece to the schedule walk"
+    partial = captured[0]
+
+    def strip(ax):
+        return replace(ax, window=None) if ax.window is not None and ax.window.partition else ax
+
+    twin = TileOp(op=partial.op.rewrite(lambda n: n, None, strip), place=partial.place, output_specs=partial.output_specs)
+    twin.knobs, twin.inputs, twin.outputs = dict(partial.knobs), dict(partial.inputs), dict(partial.outputs)
+    assert not carries_partition(twin.op), "the twin differs from the partial in the receipt alone"
+    with pytest.raises(ValueError, match="names a cross-CTA split"):
+        schedule(twin, "t", twin.knobs, ctx)
+    hits = ctx.session_cache.hits
+    assert schedule(partial, "t", partial.knobs, ctx), "the receipt-carrying partial still replays"
+    assert ctx.session_cache.hits > hits, "…and it replays from its own memo entry"
+
+
+def test_an_axis_renamed_twin_enumerates_its_own_spellings() -> None:
+    """The spelled key vocabulary is a pool-key term: tree-path keys spell axis names, so a twin
+    differing only in an axis name must enumerate rows under ITS spellings — replaying the other
+    kernel's memo would hand materialization keys its own tree cannot decode. (Axis names are
+    recognition-canonical identity, so the term digest also separates the twins today; the
+    explicit key term and this test hold if that ever changes.)"""
+    from dataclasses import replace
+
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.ir.tile.ir import TileOp
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+
+    norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
+    code = f"torch.nn.functional.linear({norm}(torch.randn(128, 256, dtype=torch.float16)), torch.randn(256, 256, dtype=torch.float16))"
+    out = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0])
+    node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
+    tile = lift_loop_op(node.op, name=node.op.name)
+    tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+
+    ctx = Context.from_target((12, 0))
+    row = dict(next(iter_leaves(schedule(tile, "t", tile.knobs, ctx))).knobs)
+    spelled = next(k for k in row if "@" in k)
+    old = spelled.split("@", 1)[1]
+    new = old + "x"
+
+    def ren(ax):
+        return replace(ax, name=new) if ax.name == old else ax
+
+    twin_op = tile.op.rewrite(lambda n: n, Sigma({old: Var(new)}), ren)
+    twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs)
+    twin.knobs, twin.inputs, twin.outputs = dict(tile.knobs), dict(tile.inputs), dict(tile.outputs)
+    twin_row = dict(next(iter_leaves(schedule(twin, "t", twin.knobs, ctx))).knobs)
+    family = spelled.split("@", 1)[0]
+    assert f"{family}@{new}" in twin_row, "the twin must enumerate under its own vocabulary"
+    assert spelled not in twin_row, "…and never replay the other kernel's spellings"

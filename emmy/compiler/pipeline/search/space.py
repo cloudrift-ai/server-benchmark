@@ -441,7 +441,7 @@ def map_tile_moves() -> list[TilePlan]:
     return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4)), TilePlan(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
 
 
-def stage_moves(*, warp: bool) -> list[Stage]:
+def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
     double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
     scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
@@ -454,7 +454,9 @@ def stage_moves(*, warp: bool) -> list[Stage]:
 
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the scheduler
     offers it beside these. Emission is resolver-gated: a candidate is offered only when it
-    RESOLVES against the built node, and the row carries the RESOLVED spelling."""
+    RESOLVES against the built node, and the row carries the RESOLVED spelling. ``ctx`` filters the
+    catalog to the copy instruction families the target has (:meth:`Stage.available_on` — the same
+    shape as the atom registry's target filter); ``None`` returns the full catalog."""
     depths = [
         Stage.parse(s)
         for s in (
@@ -468,25 +470,27 @@ def stage_moves(*, warp: bool) -> list[Stage]:
             "d4/smem-tma",
         )
     ]
-    if not warp:
-        return depths
-    smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
-    return [*smems, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
+    if warp:
+        smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
+        depths = [*smems, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
+    return depths if ctx is None else [m for m in depths if m.available_on(ctx)]
 
 
-# Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width
-# must divide K, and the per-CTA remainder must tile the warp K-step — is the scheduler's.
-SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8)
+# Cross-CTA split widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width
+# must divide a static K — is the split fork's (``tile/_split.splitk_width``). The wide 16/32
+# members are the long-K matvec partitions (the deployable ``g32k`` + transposed-band winners —
+# the pieces decide their own bands); a pin may name any dividing width regardless.
+SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32)
 
 
 def splitk_moves() -> list[ReducePlan]:
-    """The cross-CTA split-K ``REDUCE`` candidates, both tiers each: the deferred-kernel finalize
+    """The cross-CTA split ``REDUCE`` candidates, both finalizes each width: the deferred kernel
     (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
     ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
-    packed-pair red). The scheduler's ``atomic_ok`` gate keeps atomic rows
-    off multi-fold / non-distributive-projection nodes. These EXTEND the serial fold the scheduler
-    offers beside them. Both tiers share the catalog — per-node legality lives with the
-    enumeration's gates, not here."""
+    packed-pair red). Consumed by the structural ``035_split_reduce`` fork, which offers the
+    unsplit tree beside them — a split changes the kernel SET, so it is never a schedule row. The
+    fork's ``atomic_finalize`` refusal keeps atomic members off multi-component-carrier /
+    non-distributive-projection nodes; per-node legality lives beside that offer, not here."""
     return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
 
 
@@ -503,16 +507,18 @@ def coop_reduce_moves() -> list[ReducePlan]:
     scheduler's reduce spec gates candidates STRUCTURALLY only (plain contraction, 32-divisible
     inner free axis). Both lane orientations are always enumerated: B's stored layout decides
     which one coalesces, and that is a question for measured evidence, not for the catalog or for
-    any ordering of it."""
+    any ordering of it. NO member carries a cross-CTA ``GRID`` stage: a split changes the kernel
+    SET, so it lives in :func:`splitk_moves` behind the structural ``035_split_reduce`` fork, and
+    the old grid+transposed composites (the long-K matvec winners, ``g32k`` + ``coop-t``) are the
+    split fork's wide widths composed with the pieces' own transposed bands here."""
     return [
         *(ReducePlan.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
         ReducePlan.of(reg=2),
         ReducePlan.of(reg=4),
         ReducePlan.of(coop=4, reg=2),
-        # The transposed band + its grid-split composites: a bare transposed fold is latency-bound
-        # on long-K matvecs (120 CTAs of serial K), so the deployable winners pair it with a
-        # deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on k-major B).
+        # The transposed band: the k-major-B matvec partition. A bare transposed fold is
+        # latency-bound on long-K matvecs (120 CTAs of serial K); the deployable winners pair it
+        # with a deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on
+        # k-major B), which the split fork's partial reaches by picking a band from THIS list.
         *(ReducePlan.of(coop=n, coop_transposed=True) for n in (32, 64, 128, 256)),
-        ReducePlan.of(cta=8, coop=128, coop_transposed=True),
-        *(ReducePlan.of(cta=w, coop=256, coop_transposed=True) for w in (8, 16, 32)),
     ]

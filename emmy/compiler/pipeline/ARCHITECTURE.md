@@ -1372,7 +1372,7 @@ stamps — the same digest `Identity.op_sig` computes for an op, asked of the ke
 structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
 evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
 because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
-`020_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
+`040_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
 schedules cannot be split apart.
 
 Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
@@ -1445,12 +1445,13 @@ complete tree, including maximal pure operand-cone factoring for semiring contra
 orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
 in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
 
-`015_twisted` rewrites the exp-family composition over that canonical tree. `018_cut` offers the maximal tree and
+`020_twisted` rewrites the exp-family composition over that canonical tree. `030_cut` offers the maximal tree and
 every semantically closed stored child-Fold seam through `PLACE`; a selected cut writes the complete child state to
-workspaces and returns fresh unmapped producer and consumer TileOps. `020_schedule` then enumerates schedules over
-each stored Fold tree only. Independent roots stay fused and combine only schedules with matching physical
-output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition by
-slicing the same Fold and folding partial state tuples with its stored combine.
+workspaces and returns fresh unmapped producer and consumer TileOps. `035_split_reduce` offers the unsplit tree
+beside every cross-CTA reduce split the head fold admits; a selected split slices the same Fold and folds partial
+state tuples with its stored combine, its pieces fresh unmapped TileOps too. `040_schedule` then enumerates
+schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
+physical output-axis tile widths and unit counts.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in
@@ -1504,7 +1505,7 @@ a wrong or un-launchable kernel:
 ### Registered knobs
 
 All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the per-rule mechanics.
-The "owning rule" for the schedule codecs is the tile scheduler (the `020_schedule` rule), whose recursive row
+The "owning rule" for the schedule codecs is the tile scheduler (the `040_schedule` rule), whose recursive row
 enumerator spells each family exactly once, site-local, where a row becomes stored state.
 
 **`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
@@ -1540,7 +1541,7 @@ low-precision output, a multi-component twisted carrier, and a multi-channel ⊗
 destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
 carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
-`lowering/tile/030_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
+`lowering/tile/035_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
@@ -1548,8 +1549,8 @@ letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReduceP
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused
-(`NotImplementedError` → pin `g<n>k`, which projects once after the combine). The check is
-`030_split_reduce._projection_distributes`.
+(`ValueError` → pin `g<n>k`, which projects once after the combine). The check is
+`ir/stmt/passes.projection_distributes`, applied by `tile/_split.atomic_finalize`.
 
 Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
 MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;
@@ -1651,7 +1652,7 @@ re-spell deliberately and retires only when symbolic-trace keyed resolution exis
 
 Pass files are numerically prefixed so `sorted()` picks them up deterministically. Pick a fresh prefix when adding a
 rule; the loader ignores the prefix itself — it only makes the ordering readable. Per-pass authoring invariants are in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_lift` → `030_split_reduce`) and the set
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_lift` → `040_schedule`) and the set
 of algebraic rewrites they may apply are documented there too.
 
 | Pass                      | What rules do                                                                                |
@@ -1662,7 +1663,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `015_twisted` rewrites the exp family; `018_cut` offers fused and closed Fold-edge kernel placements; `020_schedule` schedules each stored tree; `030_split_reduce` realizes cross-CTA partitions. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` offers fused and closed Fold-edge kernel placements; `035_split_reduce` offers and realizes cross-CTA reduce splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

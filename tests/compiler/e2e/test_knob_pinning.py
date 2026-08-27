@@ -11,7 +11,7 @@ env-var mechanism (see ``emmy/compiler/pipeline/knob.py`` —
 ``apply_knobs_env`` splats the aggregate into per-knob
 ``EMMY_<K>=V`` vars at import time, and ``Knob.narrow`` overrides
 the schedule's candidate codecs with the pinned value in
-``lowering/tile/020_schedule`` so only the matching variant is built).
+``lowering/tile/040_schedule`` so only the matching variant is built).
 
 The shared failure mode is the "single-CTA + F-replicated" codegen
 class: ``BN·FN = full_N AND BM·FM = full_M`` with ``FM·FN > 1`` (so
@@ -117,7 +117,7 @@ def _assert_match(forced: np.ndarray, ref: np.ndarray) -> None:
 # ``CUDA_ERROR_MISALIGNED_ADDRESS`` → 1 s watchdog hang → bench_fail. The dtype-aware gate now
 # declines TMA for this slab (→ cp.async). The thread ``WORK`` inventory (no warp atom) forces the scalar
 # tier; the depth-2 ``STAGE`` ring double-buffers so the slot offset matters.
-_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/smem-async"}
+_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/smem-async", "PLACE": "fuse"}
 _NORM_DIMS = {"S": 32, "H": 128, "I": 512}
 
 
@@ -132,10 +132,11 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
     ``cp.async.bulk.tensor`` store and hung (``HungKernelError``); this test would
     time out. The numpy reference is the static graph; the forced CUDA run uses
     the mode's graph."""
-    # This pins a scalar cooperative-reduce config for the demoted matmul's CUT producer
-    # kernel (the #244 TMA wedge); SPLIT_CONE=1 forces that GMEM cut (the default is now the
-    # keep(SMEM) fused edge, which has no separate norm-reduce producer to wedge).
-    monkeypatch.setenv("EMMY_SPLIT_CONE", "1")
+    # This pins a scalar cooperative-reduce config (the #244 TMA wedge). ``PLACE=fuse`` keeps the
+    # kernel it decorates the fused edge: the ``d2/smem-async`` ring resolves only there, and with
+    # contraction-operand cuts on offer an unpinned placement can wander onto pieces it names
+    # nothing on. (``EMMY_SPLIT_CONE``, which once forced a GMEM cut producer here, has no reader
+    # any more.)
     static_graph, input_shapes, (out_name, _) = _build_norm_linear_graph(_NORM_DIMS)
     forced_graph, _, _ = _build_norm_linear_graph(_NORM_DIMS, mode=shape_mode)
     rng = np.random.default_rng(0)
@@ -234,22 +235,24 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # The eighth-golden-sweep TMA box regression: a warp register tile with tile_m > 256 (16 mma rows
 # × w4 × f8 = 512) paired with a TMA stage encoded an A box of (512, bk) and crashed at
 # ``cuTensorMapEncodeTiled`` ("TMA box dim 0 extent 512 outside the hardware range 1..256"). The
-# warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
-# has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
-# correct output rather than raise at descriptor-encode time.
+# warp stage resolver gates the box extent, and a pinned stage the resolver declines REFUSES —
+# the pin names a kernel, so silently deploying its gmem-direct sibling would deploy something the
+# user did not ask for (the same contract ``test_scalar_cpasync_pin_refuses_odd_stride`` states).
 _OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/smem-tma"}
 
 
-@requires_cuda
-def test_warp_tma_declines_oversized_box(monkeypatch):
+def test_warp_tma_pin_refuses_oversized_box(monkeypatch):
     """fp16 warp matmul pinned to a 512-row register tile + TMA stage — the box-extent gate must
-    decline TMA (→ gmem-direct) instead of encoding an illegal (512, bk) descriptor box."""
-    M = N = K = 512
-    g, inputs, ref = _build_f16_matmul_graph(M, N, K)
-    forced = _run_with_knobs(g, inputs, "c", _OVERSIZED_BOX_KNOBS, monkeypatch)
-    peak = float(np.max(np.abs(ref.astype(np.float32))))
-    atol = max(5e-1, 0.1 * peak)
-    np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
+    refuse the pin instead of encoding an illegal (512, bk) descriptor box or silently selecting
+    gmem-direct. Compile-only (the refusal is scheduler-side). No CUDA needed."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+
+    g, _inputs, _ref = _build_f16_matmul_graph(512, 512, 512)
+    for k, v in _OVERSIZED_BOX_KNOBS.items():
+        monkeypatch.setenv(f"EMMY_{k}", str(v))
+    with pytest.raises(ValueError, match="does not resolve"):
+        Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
 
 
 # Scalar-FMA fp16 regression (prerequisite for the split-pipe GEMM). On cc>=9.0 the F16 atom is
@@ -392,15 +395,17 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
     assert "mma.sync" not in source
 
 
-def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
-    """A graph-wide warp pin can be inapplicable to a mixed-dtype sibling. The scheduler then
-    leaves that term unmapped; scalar materialization must restore its free-axis grid rather than
-    emit loads and stores that reference coordinates no thread binds.
+@pytest.mark.parametrize("a_dtype", ["f8", "f32"])
+def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkeypatch):
+    """A graph-wide warp pin can name a tier a sibling's operand dtypes do not select. The
+    scheduler then leaves that term unmapped; scalar materialization must restore its free-axis
+    grid rather than emit loads and stores that reference coordinates no thread binds.
 
-    The ``a`` edge is 1-byte here: a 16-bit ``a`` the atom cannot bind directly rides the
-    CONVERTING smem compute fill instead (the fill's slab store converts), so it is realizable and
-    would not exercise the fallback. The fill is 16-bit-only, which leaves the f8 edge with no warp
-    row at all — the drop this guardrail is written against."""
+    Two dtype-choice drops, one per arm: an ``f8`` ``a`` edge over 16-bit channels is a mixed-width
+    byte gather no fp8 atom reads (and the 16-bit converting smem compute fill cannot carry a
+    1-byte A), and an all-``f32`` contraction selects no tensor-core atom on any target. An
+    f16-channel ``f32`` ``a`` would ride the converting fill instead — realizable, so it would not
+    exercise the fallback."""
     from emmy.compiler.context import Context
     from emmy.compiler.dtype import F8E4M3, F16, F32
     from emmy.compiler.graph import Graph, Tensor
@@ -420,8 +425,8 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
         monkeypatch.setenv(f"EMMY_{key}", value)
 
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), F8E4M3), node_id="x")
-    graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16), node_id="w")
+    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), {"f8": F8E4M3, "f32": F32}[a_dtype]), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16 if a_dtype == "f8" else F32), node_id="w")
     graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
     graph.inputs, graph.outputs = ["x", "w"], ["o"]
 

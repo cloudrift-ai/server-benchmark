@@ -25,7 +25,7 @@ from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
+from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
 from tests.compiler.helpers import requires_cuda
 

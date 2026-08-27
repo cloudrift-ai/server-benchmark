@@ -1,0 +1,37 @@
+# A tall-K f16 contraction on the warp mma tier with an f16 accumulator and a cross-CTA
+# split of the 4096-long reduction. M=64 is one warp-tile row, so the split is what fills
+# the card; the f16 accumulator is what makes the atom's C operand two bytes wide.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [64, 4096]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [4096, 512]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f16, [64, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_5b7645.167d5f47efce
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      STAGE: ''
+    identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2

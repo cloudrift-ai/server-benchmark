@@ -451,6 +451,9 @@ require CloudRift organization access.
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))
+  - [compiler/realization/](tests/compiler/realization/) — the realization corpus: checked-in reproducers of pinned
+    schedules, replayed as data (see [ARCHITECTURE.md](tests/compiler/realization/ARCHITECTURE.md))
+  - [perf/](tests/perf/) — GPU perf comparison vs PyTorch (see [ARCHITECTURE.md](tests/perf/ARCHITECTURE.md))
 - [scripts/](scripts/) — Analysis and visualization scripts
 - [utils/](utils/) — Standalone utility scripts
 - [config.yaml](config.yaml) — Benchmark configuration

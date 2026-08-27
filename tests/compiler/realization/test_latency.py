@@ -49,8 +49,6 @@ def test_latency(case, record_property):
 
     samples, tcompile_us = helpers.measure(case)
     best, stored = min(samples), float(recorded["emmy_us"])
-    record_property("latency_us", best)
-    record_property("tcompile_us", tcompile_us)
     if best > stored * (1 + helpers.LATENCY_BAND):
         # A finding, not a failure — see the module docstring.
         print(

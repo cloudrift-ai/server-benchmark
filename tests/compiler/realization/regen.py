@@ -22,7 +22,7 @@ def verdict(case: helpers.Case) -> str:
     return f"offered={helpers.offered(case) is None} realized={helpers.realized(case) is None}"
 
 
-def regenerate_all(*, check: bool = False) -> int:
+def regenerate_all() -> int:
     stale: list[str] = []
     refused: list[str] = []
     for path in helpers.case_files():
@@ -40,16 +40,15 @@ def regenerate_all(*, check: bool = False) -> int:
             refused.append(f"{path.name}: the verdict changed with the derived half ({before} -> {after})")
             continue
         stale.append(path.name)
-        if not check:
-            helpers.write_case(path, fresh)
+        helpers.write_case(path, fresh)
 
     for message in refused:
         print(f"refused: {message}", file=sys.stderr)
     if stale:
-        print(("stale: " if check else "restamped: ") + ", ".join(sorted(stale)))
+        print("restamped: " + ", ".join(sorted(stale)))
     elif not refused:
         print("corpus is current")
-    return 1 if refused or (check and stale) else 0
+    return 1 if refused else 0
 
 
 def _record(document: dict):
@@ -60,9 +59,8 @@ def _record(document: dict):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--check", action="store_true", help="report stale cases without writing (what the test does)")
-    return regenerate_all(check=parser.parse_args(argv).check)
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args(argv)
+    return regenerate_all()
 
 
 if __name__ == "__main__":

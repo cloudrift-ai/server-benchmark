@@ -301,17 +301,34 @@ layer so vLLM can discover the KV-cache requirements, allocate blocks, and run p
 
 `EmmyGenRunner` splits each decoder layer into two compiled programs:
 
-```text
-hidden states
-    │
-    ▼
-Emmy pre program ──► q, k, v
-    │
-    ▼
-vLLM RoPE + paged attention ──► attention output
-    │
-    ▼
-Emmy post program ──► next hidden states
+```mermaid
+sequenceDiagram
+    participant Client
+    participant VLLM as vLLM
+    participant Model as EmmyGenModel
+    participant Runner as EmmyGenRunner
+    participant Attention as vLLM attention and KV cache
+
+    Client->>VLLM: POST /v1/completions
+    VLLM->>VLLM: Tokenize and schedule
+    loop Prefill, then decode steps
+        VLLM->>Model: Scheduled token IDs and positions
+        Model->>Runner: Embed token IDs
+        loop Each decoder layer
+            Model->>Runner: Run pre-attention program
+            Runner-->>Model: q, k, v
+            Model->>Attention: Apply RoPE and paged attention
+            Attention->>Attention: Read and update KV cache
+            Attention-->>Model: Attention output
+            Model->>Runner: Run post-attention program
+            Runner-->>Model: Next hidden states
+        end
+        Model->>Runner: Final normalization
+        Runner-->>Model: Hidden states
+        Model-->>VLLM: Hidden states
+        VLLM->>VLLM: Compute logits and sample
+    end
+    VLLM-->>Client: Completion response
 ```
 
 The pre program includes the projections and normalization that produce unrotated query, key, and value tensors. vLLM

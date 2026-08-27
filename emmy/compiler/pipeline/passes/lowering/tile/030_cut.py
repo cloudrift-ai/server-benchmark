@@ -28,6 +28,13 @@ def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
             return name, value
         site = resolve(tile.op, name, all_sites=all_sites)
         if site is None or id(site.node) not in by_node:
+            # KNOWN GAP: a bare ``PLACE`` resolves through the path codec's primary rule over ALL
+            # PLACE sites, which on a fused norm→linear lands on the contraction's A-cone edge —
+            # a site ``cuttable_seams`` excludes (contraction operands cut at their inner map /
+            # statistic folds, e.g. ``PLACE@map`` / ``PLACE@a1``), so the bare pin raises here
+            # even though the kernel HAS cuttable seams. Red since the maximal-fusion tree shape
+            # (#648, pre-dating the schedule-walk rebuild); the fix is to resolve a bare pin among
+            # the cuttable seams (e.g. the root-most seam), not against every PLACE site.
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
         return by_node[id(site.node)].spelling, value
     return None

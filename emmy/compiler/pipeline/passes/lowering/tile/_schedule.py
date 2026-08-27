@@ -15,14 +15,16 @@ combination is never built. Traversal order is the fork order:
 ``WORK`` leads because the root owns the free axes it is read off, and the site keys follow as the
 walk decides them.
 
-**PROTOTYPE.** It offers the whole reduce-partition catalog, both contraction tiers — the scalar
-output tile and the tensor-core warp tile, the fp8 (k32) family included — and the whole ``STAGE``
-transport family (the smem compute fill, the synchronous copy, cp.async, TMA, and the ``+p``
-producer band riding a resolved TMA stage), and the walk reaches DERIVED sites (flash's synthesized
-PV contraction). The cross-CTA ``GRID`` split is NOT a row here: it changes the kernel SET, so it
-is the structural ``035_split_reduce`` fork's — the walk only CONSUMES a pin's ``g<n>[a|k]`` half
-on a kernel that already realized its split. Not restored: the pointwise register strip and the
-launch-order swizzle.
+It offers the whole reduce-partition catalog — on plain folds AND on the per-cell contraction
+tier, whose K folds cooperatively / across ILP register chains through the same moves — both
+contraction tiers (the scalar output tile and the tensor-core warp tile, the fp8 (k32) family
+included), the whole ``STAGE`` transport family (the smem compute fill, the synchronous copy,
+cp.async, TMA, and the ``+p`` producer band riding a resolved TMA stage), the pointwise register
+strip (a ``TILE`` value on the root map cell, materialized as a term variant), and the
+kernel-global ``RASTER`` launch-order swizzle (decided once per kernel, like ``WORK``), and the
+walk reaches DERIVED sites (flash's synthesized PV contraction). The cross-CTA ``GRID`` split is
+NOT a row here: it changes the kernel SET, so it is the structural ``035_split_reduce`` fork's —
+the walk only CONSUMES a pin's ``g<n>[a|k]`` half on a kernel that already realized its split.
 
 The prescan is memoized in ``ctx.session_cache`` (:class:`_Pool`): the per-node option lists are a
 pure function of the term and the live pins, so N same-shape kernels — and every tune trajectory
@@ -38,11 +40,14 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import (
     Level,
+    Raster,
     ReducePlan,
     Stage,
     TilePlan,
@@ -52,9 +57,10 @@ from emmy.compiler.ir.schedule import (
     plan_workers,
     resolve_site_tile,
 )
-from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
+from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
@@ -69,13 +75,16 @@ from emmy.compiler.pipeline.search.space import (
     MAX_BLOCK_THREADS,
     MAX_REGISTERS_PER_CTA,
     MAX_REGISTERS_PER_THREAD,
+    RASTER,
     REDUCE,
     STAGE,
     TILE,
     WARP_LANES,
     WORK,
     coop_reduce_moves,
+    map_tile_moves,
     precision_pin,
+    raster_moves,
     scalar_tile_moves,
     stage_moves,
     warp_tile_moves,
@@ -171,7 +180,7 @@ def _options(state: _State, node) -> list[_Option]:
     expansion re-asks per node, and re-resolving every stage there multiplied the cost."""
     sched = state.sched
     if not isinstance(node, Fold) or node.axis is None:
-        return [_Option({})]  # a per-cell projection decides nothing, but its children do
+        return _strip_options(state, node)  # the root map cell's register strip; else no decision
     if is_contraction(node):
         return _claimable(state, _contraction_options(state, node))
     key = sched.key("REDUCE", node)
@@ -180,8 +189,9 @@ def _options(state: _State, node) -> list[_Option]:
 
 
 def _contraction_options(state: _State, node) -> list[_Option]:
-    """The contraction's options: the tile × stage legal product, each with the producer-band
-    inventory variants the resolved stage can drive. The transport is RESOLVED here, at option
+    """The contraction's options: the tile × stage × reduce legal product, each with the
+    producer-band inventory variants the resolved stage can drive (the reduce partition rides the
+    per-cell tier — :func:`_contraction_reduces`). The transport is RESOLVED here, at option
     construction — the smem budget is per-site (a slab either fits ``ctx.max_dynamic_smem`` or the
     option is not offered), so an option carries its sized :class:`Stage` and materialization can
     only re-derive the same one. A ``STAGE`` pin that resolves on no tile the site offers raises
@@ -191,11 +201,14 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     facts = state.facts[id(node)]
     key = sched.key("TILE", node)
     stage_key = sched.key("STAGE", node)
+    red_key = sched.key("REDUCE", node)
     stage_pin = _pin(STAGE, stage_key)
     tile_pin = _pin(TILE, key)
+    red_pin = _pin(REDUCE, red_key)
     opts: list[_Option] = []
     refused: list[str] = []
     tile_refused: list[str] = []
+    red_refused: list[str] = []
     for plan in _tile_moves(state, node, key):
         placed = sched.placed(node, plan)  # bound ONCE per plan — every per-plan check below reads this binding
         if plan.is_tiled and (placed is None or placed.axes is None):
@@ -203,6 +216,17 @@ def _contraction_options(state: _State, node) -> list[_Option]:
         why = _plan_node_refusal(state, node, plan, placed)
         if why is not None:
             tile_refused.append(why)
+            continue
+        reduces = _contraction_reduces(state, node, red_key, plan.is_tiled)
+        if not reduces:
+            # A pinned cooperative / ILP partition is the per-cell tier's; this tiled plan offers
+            # nothing under it. Recorded like the tile/stage refusals: REDUCE has no choice of
+            # tier, so a pin every plan drops must RAISE at the empty-offer site, never leave the
+            # term silently unmapped (a multi-channel product has no per-cell tile at all).
+            red_refused.append(
+                f"REDUCE pin {red_pin!r} at {red_key or 'REDUCE'} names a cooperative / ILP partition, which only the "
+                f"per-cell tile realizes — the tiled {plan.spell() or 'scalar'} tile contracts K serially per register cell"
+            )
             continue
         for stage in _stage_options(state, node, plan, placed, stage_pin, refused):
             # The ADDITIVE producer/consumer bound: a compute fill keeps the consuming fragments
@@ -218,16 +242,24 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 knobs[key] = plan.spell()
             if stage_key is not None:
                 knobs[stage_key] = stage.spell() if stage is not None else ""
-            work = plan_workers(plan)
             tile = placed if plan.is_tiled else None
             seam = _seam_entries(state, node, key, plan, placed, stage)
-            opts.append(_Option(knobs, work, tile, seam))
-            opts.extend(
-                _Option(knobs, replace(work, producer=band), tile, seam) for band in _producer_bands(work, stage, plan.block_threads)
-            )
+            for red in reduces:
+                # The K partition claims the kernel's inventory exactly like a plain fold's band —
+                # reconciled through the ONE rule (a coop band IS the t<coop> thread inventory,
+                # only ever offered on the untiled tier, so nothing here can disagree).
+                work = derive_inventory((plan,), coop=red.coop)
+                red_knobs = {**knobs, red_key: red.spell()} if red_key is not None else knobs
+                opts.append(_Option(red_knobs, work, tile, seam))
+                opts.extend(
+                    _Option(red_knobs, replace(work, producer=band), tile, seam)
+                    for band in _producer_bands(work, stage, plan.block_threads)
+                )
     if not opts:
         if tile_pin is not None and tile_refused:
             raise ValueError(f"TILE pin {tile_pin!r} at {key or 'TILE'} names no schedule this site can realize: {tile_refused[-1]}")
+        if red_pin and red_refused:
+            raise ValueError(red_refused[-1])
         if stage_pin and refused:
             key_name = stage_key or "STAGE"
             raise ValueError(f"STAGE pin {stage_pin!r} at {key_name} names no stage this contraction can realize: {refused[-1]}")
@@ -637,6 +669,15 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     pin = _pin(REDUCE, key)
     if pin is None:
         return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
+    return [_parsed_reduce_pin(state, pin, key)]
+
+
+def _parsed_reduce_pin(state: _State, pin: str, key: str | None) -> ReducePlan:
+    """The ONE partition a live ``REDUCE`` pin names, resolved against the kernel's pinned
+    inventory (the ``coop`` token's width lives in ``WORK``) — shared by the plain-fold and
+    contraction pin arms, so the split-receipt consumption and the transposed-band legality are
+    stated once. A malformed pin, a ``g`` half on a kernel that realized no split, and a
+    transposed band this kernel has no geometry for all RAISE the recorded refusal."""
     try:
         plan = ReducePlan.parse(pin, state.work_pin)
     except ValueError as e:
@@ -651,7 +692,32 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     why = _transposed_refusal(plan, state.transposed_ok)
     if why is not None:
         raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} names no partition this fold can realize: {why}")
-    return [plan]
+    return plan
+
+
+def _contraction_reduces(state: _State, node, key: str | None, tiled: bool) -> list[ReducePlan]:
+    """The reduce partitions ONE contraction tile candidate offers — the serial fold, plus (on the
+    PER-CELL tier only) every cooperative / ILP band the static K admits: the coop reduce spec's
+    contract is the non-output-tiled contraction (a tiled output contracts K serially per register
+    cell), and its K partitions through the SAME :func:`coop_reduce_moves` catalog and
+    :func:`_band_refusal` filter as a plain monoid fold — a contraction is a monoid with a ⊗ lift.
+    K stays STATIC here (unlike the plain fold's hint-extent bound): the scalar contraction
+    emitters carry no masked-K band. Under a ``REDUCE`` pin the shared pin arm resolves it
+    (:func:`_parsed_reduce_pin`); a cooperative / ILP pin then reaches only the per-cell tier — a
+    tiled plan offers nothing under it, and the option builder records that per-plan refusal and
+    RAISES when no plan honors the pin (``REDUCE`` has no choice of tier, so there is no drop
+    layer) — while a serial pin keeps every plan on the serial fold."""
+    pin = _pin(REDUCE, key)
+    if pin is not None:
+        pinned = _parsed_reduce_pin(state, pin, key)
+        if pinned.coop > 1 or pinned.reg > 1:
+            return [] if tiled else [pinned]
+        return [ReducePlan()]
+    ext = node.axis.extent
+    if tiled or not ext.is_static:
+        return [ReducePlan()]
+    k = ext.as_static()
+    return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, k, state.transposed_ok) is None)]
 
 
 # ---- the reduce partition: which bands this fold can carry ---------------------------------------- #
@@ -690,6 +756,128 @@ def _inner_free(tile: TileOp):
     the axis the transposed emitter sweeps."""
     free = tile.place.free
     return next((a for a in reversed(free) if not (a.extent.is_static and a.extent.as_static() == 1)), None)
+
+
+# ---- the pointwise cell: the register strip ------------------------------------------------------ #
+
+
+def _strip_extent(tile: TileOp) -> int:
+    """The static inner free extent the pointwise register strip tiles — ``0`` when the cell does
+    not admit the strip: a pure zero-axis root fold with no operands whose body is FLAT elementwise
+    (per-cell ``Load`` / ``Assign`` + boundary root stores, no nested ``Loop`` / carried state),
+    over a static innermost free axis."""
+    op, place = tile.op, tile.place
+    if not (isinstance(op, Fold) and op.axis is None and not op.operands) or not place.free:
+        return 0
+    if not place.free[-1].extent.is_static:
+        return 0
+    if not all(isinstance(s, (Load, Assign, Write)) for s in op.body) or any(st.sweep is not None for st in tile.output_specs):
+        return 0
+    return place.free[-1].extent.as_static()
+
+
+def _strip_width(plan: TilePlan) -> int:
+    """The strip ratio ``r`` a strip row's ``TILE`` names — the inner register width. A warp codec
+    names none (there is no fragment on a pointwise cell), so it reads ``0`` and is dropped. An
+    ``m`` half RAISES: :func:`~…search.space.map_tile_moves` never spells one, so only a pin can
+    carry it, and silently reading ``f<n>x<m>`` as ``f<n>`` would honor a plan nobody offered."""
+    if plan.is_warp:
+        return 0
+    if plan.reg_m > 1:
+        raise ValueError(f"TILE {plan.spell()!r}: a pointwise cell has no m strip (the grid already parallelizes it); spell f<n>")
+    return plan.reg_n
+
+
+def _strip_refusal(extent: int, width: int) -> str | None:
+    """Why one strip width cannot realize on the cell (``None`` when it can): the strip hands each
+    thread ``width`` CONTIGUOUS inner-axis elements, so the width must tile the inner free extent.
+
+    Not an unimplemented mask — MEASURED. The one form that masks the overhang without breaking the
+    strip's flat shape slides the last cell back onto the final full run (``min(cell·width,
+    extent − width)``, idempotent because the cell is a pure map), and that slid base is no longer a
+    provably aligned affine form, so ``050_vectorize_loads`` / ``080_vectorize_stores`` decline —
+    which is the only thing the strip exists to buy. On a V100, gelu over 65536×255 (no width tiles
+    255): the flat per-cell map runs 158.5 µs while the slid ``f2`` / ``f4`` / ``f8`` strips run
+    199.5 / 220.2 / 390.8 µs. The refused rows are strictly worse than the row that remains."""
+    if width <= 1 or (extent and extent % width == 0):
+        return None
+    return f"register strip width {width} does not divide the inner free extent {extent}"
+
+
+def _strip_options(state: _State, node) -> list[_Option]:
+    """The register-strip options of a zero-axis fold — the flat per-cell tile and every ladder
+    width the cell can carry, offered only where the codec keys ``TILE`` on it (the pure pointwise
+    ROOT cell; any other per-cell projection decides nothing, but its children do). ``r`` IS the
+    spelled ``TILE=f<r>`` — the strip is a TERM VARIANT applied at materialization, a function of
+    the ROW. No option claims an inventory: the strip stays on the derived per-cell launch
+    geometry. A ``TILE`` pin follows the family's two-layer rule: it DROPS where the cell has no
+    strip tier for a graph-wide pin to mean (a warp atom, or a cell the strip does not admit at
+    any width — a symbolic / swept / stateful inner), and RAISES where the tier applies and the
+    named plan cannot realize (an indivisible width, an ``m`` half no catalog spells)."""
+    key = state.sched.key("TILE", node) if isinstance(node, Fold) else None
+    if key is None:
+        return [_Option({})]
+    ext = _strip_extent(state.tile)
+    pin = _pin(TILE, key)
+    if pin is None:
+        opts = [_Option({key: ""})]  # the flat per-cell map, 1 elem/thread
+        opts.extend(_Option({key: p.spell()}) for p in map_tile_moves() if _strip_refusal(ext, _strip_width(p)) is None)
+        return opts
+    if _names_warp_atom(pin):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("TILE pin %r at %s dropped: a pointwise cell has no warp tier", pin, key)
+        return [_Option({key: ""})]
+    if ext == 0:
+        # The choice-layer drop: this cell admits no strip at any width, so the pin fans out to a
+        # tier that does not exist here — the flat per-cell map is the one plan the cell has.
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("TILE pin %r at %s dropped: this cell admits no register strip (no static flat inner axis)", pin, key)
+        return [_Option({key: ""})]
+    plan = resolve_site_tile(pin, None)
+    why = _strip_refusal(ext, _strip_width(plan))
+    if why is not None:
+        raise ValueError(f"TILE pin {pin!r} at {key} names no register strip this cell can realize: {why}")
+    return [_Option({key: plan.spell()})]
+
+
+def _strip_variant(state: _State, plan: TilePlan, row: dict) -> TileOp:
+    """The pointwise register-STRIP term variant: hand each thread ``r`` CONTIGUOUS inner-axis
+    elements. The inner free axis shrinks to ``extent/r`` (the grid walks it) and the cell body is
+    unrolled ``r`` times — copy ``i`` reads/writes ``inner·r + i`` with its SSA names suffixed —
+    then regrouped as ``r`` loads · ``r`` computes · ``r`` writes so the unit-stride runs feed
+    ``050_vectorize_loads`` / ``080_vectorize_stores``. A different term, hence a different
+    ``structural_key`` and ``Op.cache_key`` — which is why it is applied HERE and not at
+    recognition."""
+    tile = state.tile
+    inner = tile.place.free[-1]
+    r = plan.reg_n
+    op = tile.op
+    ssa: set[str] = set()
+    for s in op.body:
+        ssa.update(s.defines())
+    loads: list[Stmt] = []
+    computes: list[Stmt] = []
+    stores: list[OutputSpec] = []
+    for i in range(r):
+
+        def rename(n: str, i: int = i) -> str:  # suffix only the body's SSA names; axis vars stay
+            return f"{n}__u{i}" if n in ssa else n
+
+        sigma = Sigma({inner.name: BinaryExpr("+", BinaryExpr("*", Var(inner.name), Literal(r, "int")), Literal(i, "int"))})
+        for s in op.body:
+            s2 = s.rewrite(rename, sigma)
+            (loads if isinstance(s2, Load) else computes).append(s2)
+        stores.extend(OutputSpec(write=st.write.rewrite(rename, sigma)) for st in tile.output_specs)
+    new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
+    new_free = (*tile.place.free[:-1], new_inner)
+    new_place = Placement(free=new_free, grid=new_free)
+    return scheduled(
+        Fold.projection(body=Body((*loads, *computes))),
+        name=state.name,
+        place=new_place,
+        knobs={**state.knobs, **row},
+        output_specs=tuple(stores),
+    )
 
 
 # ---- the warp (tensor-core) tile: which atoms this contraction's fragments can bind ---------------- #
@@ -1043,10 +1231,35 @@ def _off(sched: Sched, root) -> dict:
     for family in SLICE_FAMILIES:
         keys = [key for node in _nodes(root) if (key := sched.key(family, node)) is not None]
         out.update(dict.fromkeys(keys or [family], ""))
-    # Kernel-global like WORK, and decided nowhere (the launch-order swizzle is not restored), so
-    # it is spelled decided-empty for the same vocabulary reason as the site families.
+    # Kernel-global like WORK. The walk decides it once per kernel (:func:`_raster_values` — the
+    # flat order on every kernel the swizzle cannot mean), and the OFF entry keeps the family in
+    # every row's vocabulary for the same reason as the site families.
     out["RASTER"] = ""
     return out
+
+
+def _raster_values(state: _State) -> tuple[str, ...]:
+    """The ``RASTER`` candidates — kernel-global like ``WORK``, so they are decided ONCE per
+    kernel as the walk's LEADING fork level (no ``Ctx`` reconciliation: nothing else can claim
+    the launch order; a one-value level collapses like any other), and CONTRACTION-scoped: only
+    a 2-D-tiled contraction grid decodes the swizzle (the ``grid_tile`` seal applies it where
+    both ``(m, n)`` block axes exist). A symbolic-axis
+    (masked-tile) grid renders through the dynamic decode path, which does not carry it, so
+    offering ``gm8`` there would stamp a launch order the kernel doesn't realize — the flat
+    ``""`` is the one honest value, and a live pin DROPS with the other choice-layer drops."""
+    tile = state.tile
+    eligible = any(isinstance(n, Fold) and is_contraction(n) for n in _nodes(tile.op)) and all(
+        ax.extent.is_static for ax in tile.place.free
+    )
+    if eligible:
+        values = tuple(RASTER.narrow(raster_moves()))
+        for value in values:
+            Raster.parse(value)  # a malformed pin RAISES here, loudly — narrow is authoritative, not a parser
+        return values
+    pin = RASTER.raw()
+    if pin and logger.isEnabledFor(logging.DEBUG):
+        logger.debug("RASTER pin %r dropped: no static 2-D contraction grid decodes the swizzle here", pin)
+    return ("",)
 
 
 def _spelled(knobs: dict, option: _Option, ctx: Ctx) -> dict:
@@ -1144,6 +1357,13 @@ def _materialize(state: _State, row: dict) -> TileOp:
     decode-by-spelling is what makes it replayable."""
     sched, tile = state.sched, state.tile
     work = Workers.parse(row.get(WORK.name) or None)
+    root = tile.op
+    if isinstance(root, Fold) and root.axis is None and not root.operands:
+        # The register strip is a TERM VARIANT: a row whose root ``TILE`` names a width unrolls
+        # the cell rather than decorating it with a slice.
+        plan = resolve_site_tile(row.get(sched.key("TILE", root) or "") or None, work)
+        if _strip_width(plan) > 1:
+            return _strip_variant(state, plan, row)
     slices = []
     for node in _nodes(tile.op):
         if not isinstance(node, Fold) or node.axis is None:
@@ -1158,6 +1378,10 @@ def _materialize(state: _State, row: dict) -> TileOp:
             spec = row.get(sched.key("STAGE", node) or "") or ""
             if spec:
                 slices.append(("STAGE", node, _stage_of(state, node, plan, spec)))
+        else:
+            # The per-cell tier's cooperative / ILP K partition rides a REDUCE slice, exactly as
+            # a plain fold's does (a decided-empty spelling resolves to no slice).
+            slices.append(("REDUCE", node, red if red.stages else None))
     workers = WarpSpec(work.producer) if work is not None and work.producer else None
     return scheduled(
         tile.op,
@@ -1294,7 +1518,17 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # and rides the row PREFIX so fork rows and the materialized op (what ``realized_knobs`` reads)
     # carry the one signature.
     warp = any(f.offered for f in facts.values())
-    forks = _step(state, (tile.op,), Ctx(), {"S_warp_eligible": 1.0} if warp else {})
+    prefix = {"S_warp_eligible": 1.0} if warp else {}
+    # The kernel-global RASTER LEADS the walk as its own fork level: one decision per kernel, no
+    # cross-site agreement to thread through Ctx, so each candidate seeds the row prefix and the
+    # whole site walk is one branch beneath it. A single-value level is collapsed (the walk runs
+    # directly, like any other one-option level), and the site walk's aliveness is value-independent
+    # (RASTER rides only the prefix, never the Ctx) — so probing it once under the first value
+    # keeps the "[] when nothing schedules" guardrail instead of standing up dead branches.
+    values = _raster_values(state)
+    forks = _step(state, (tile.op,), Ctx(), {**prefix, "RASTER": values[0]})
+    if forks and len(values) > 1:
+        forks = [_Branch(state, (tile.op,), Ctx(), {**prefix, "RASTER": value}) for value in values]
     if sample is None:
         return forks
     drawn = sample.take(dict(leaf.knobs) for leaf in iter_leaves(forks))

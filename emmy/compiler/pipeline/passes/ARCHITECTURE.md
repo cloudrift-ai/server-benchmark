@@ -167,6 +167,30 @@ offers band variants (the band arms the box-copy mbarrier ring; cp.async's wait-
 compute fill has no async load half), budgeted against the CTA thread limit. A `+p` pin that no option can drive
 composes with nothing and the term stays unmapped — the band is part of the inventory, not a row key.
 
+**The per-cell contraction tier partitions its K like a plain fold.** A contraction is a monoid with a ⊗ lift, so the
+untiled tile candidate composes with the same `coop_reduce_moves` catalog the plain folds offer — the cooperative
+bands, the ILP register chains, the transposed band — under a static K (the scalar contraction emitters carry no
+masked-K band), while a tiled output contracts K serially per register cell and takes only the serial fold. A
+cooperative band claims the kernel's inventory as the `t<coop>` thread inventory (`derive_inventory`), which is how
+`Ctx.extend` reconciles it with every other site, and a cooperative / ILP `REDUCE` pin reaches only the per-cell
+tier — a tiled plan offers nothing under it, the same per-family fan-out that lets a serial pin keep every plan.
+
+**The pointwise register strip is a `TILE` value materialized as a term variant.** The pure pointwise ROOT cell is the
+one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder offers `f<r>` beside the flat per-cell
+tile wherever `r` divides the static inner free extent (a masked overhang is refused because the slid last cell is no
+longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed — measured,
+see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cell into `r` grouped loads · computes ·
+writes at materialization — a different term, hence a different structural identity and `Op.cache_key`.
+
+**`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
+`Ctx` to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one branch whose
+row prefix carries it and whose subtree is the whole site walk, and a kernel offering one value collapses the level
+exactly as any other one-option level does — the honest parallel to `WORK` *leading* the walk. Contraction-scoped
+and static-grid only — a symbolic (masked-tile) grid renders through the dynamic decode path, which does not carry
+the swizzle, so the flat `""` is the one honest value there and a live pin drops with the other choice-layer drops.
+The row spells the codec value; the kernel materializer's grid_tile seal applies it where the 2-D `(m, n)` block
+grid exists.
+
 Because options are a function of the node and the live pins alone, a node that offers nothing offers it under every
 context: one pass over the tree says whether the term has a schedule at all. Past that check every node still has an
 option that composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise

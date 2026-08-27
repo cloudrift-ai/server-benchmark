@@ -74,6 +74,16 @@ grows with ``S``.
 **Single-pass sweep.** Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
 regression from the single pass back to the two-pass pair is invisible to a numerics assert — which
 is what ``test_fused_sdpa_sweeps_the_score_once`` is for.
+
+**Explicit-mask burners (accepted red, attention cluster's).** The mask variants
+(``test_scalar_flash_matches_torch[mask]``, ``test_scalar_flash_dynamic_matches_torch[mask]``,
+``test_sdpa_explicit_additive_mask``) fail, and the FAILURE is slow: unpinned greedy walks the full
+enumeration before refusing, >100 s CPU per test with the complete schedule-family set (2026-08,
+5090 box). That refusal latency PRE-DATES the schedule-walk rebuild — at the pre-rebuild pipeline
+(bff3e344) the same variant burned >110 s at 14.6 GB RSS, against ~2.2 GB on the rebuilt walk — so
+a wall-time-only reading of "it failed fast at the rebuild's HEAD" reflects the then-missing
+families, not a rebuild regression. Fixing the mask forms (or a fast structural refusal) is the
+attention cluster's.
 """
 
 from __future__ import annotations

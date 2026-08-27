@@ -357,12 +357,15 @@ def _plain_matmul_term() -> TileOp:
 def test_matmul_leaf_set_equals_the_scalar_catalog(monkeypatch):
     """The leaf set the walk emits over a plain f32 matmul equals ``scalar_tile_moves()`` read
     through the stored (site ``TILE`` value, ``WORK``) pair — a missing or extra move is caught
-    structurally, without lowering a kernel. Membership, never position."""
+    structurally, without lowering a kernel. Membership, never position. Restricted to the
+    serial-fold rows: the per-cell tier also offers its cooperative / ILP K partitions, whose
+    ``WORK`` is the reduce band's thread inventory, not a tile move."""
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
     rows = _rows_of(_plain_matmul_term())
     assert rows, "the term enumerated nothing"
-    offered = {(str(family_value(r, "TILE") or ""), str(r.get("WORK", ""))) for r in rows}
+    serial = [r for r in rows if not str(family_value(r, "REDUCE") or "")]
+    offered = {(str(family_value(r, "TILE") or ""), str(r.get("WORK", ""))) for r in serial}
     assert offered == {_stored(p) for p in scalar_tile_moves()}
 
 

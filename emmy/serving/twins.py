@@ -403,9 +403,9 @@ def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
         k, n = logical if transposed else logical[::-1]
         if k % 32:
             raise ValueError(f"MXFP4 expert input {inp!r} has input width {k}, not divisible by 32")
-        specs[inp] = ((n, k // 32, 16), (n, k // 32), transposed)
+        specs[inp] = ((n, k // 32, 16), (n, k // 32))
     spelled = graph.copy()
-    spell_mxfp4_inputs(spelled, specs)
+    spell_mxfp4_inputs(spelled, specs, transposed=transposed)
     return {f"{name}@mxfp4": spelled}
 
 

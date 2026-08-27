@@ -405,6 +405,7 @@ def _compile_split(
     indirect_inputs=None,
     quant_specs=None,
     mxfp4_specs=None,
+    mxfp4_transposed=None,
     trellis_specs=None,
     aux_examples=None,
     weight_inputs=(),
@@ -458,6 +459,8 @@ def _compile_split(
     reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
     if sum(bool(specs) for specs in (quant_specs, mxfp4_specs, trellis_specs)) > 1:
         raise ValueError("expert input formats are mutually exclusive")
+    if mxfp4_specs and mxfp4_transposed is None:
+        raise ValueError("mxfp4_specs needs mxfp4_transposed: the experts module's weight layout decides the decode's orientation")
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -491,7 +494,7 @@ def _compile_split(
         if mxfp4_specs:
             from emmy.compiler.loader.quant import spell_mxfp4_inputs
 
-            spell_mxfp4_inputs(graph, mxfp4_specs)
+            spell_mxfp4_inputs(graph, mxfp4_specs, transposed=mxfp4_transposed)
         if trellis_specs:
             from emmy.compiler.loader.quant import spell_trellis_inputs
 
@@ -1152,9 +1155,7 @@ class EmmyGenRunner:
                 }
                 example_w += [torch.zeros(*einputs[f"{n}_scale"].shape[1:], dtype=torch.float32) for n in ("w_gate_up", "w_down")]
             if expert_fmt == "mxfp4":
-                mxfp4_specs = {
-                    n: (tuple(einputs[n].shape[1:]), tuple(einputs[f"{n}_scale"].shape[1:]), transposed) for n in ("w_gate_up", "w_down")
-                }
+                mxfp4_specs = {n: (tuple(einputs[n].shape[1:]), tuple(einputs[f"{n}_scale"].shape[1:])) for n in ("w_gate_up", "w_down")}
                 aux_examples = {
                     n: torch.zeros(*einputs[n].shape[1:], dtype=torch.uint8)
                     for n in ("w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale")
@@ -1179,6 +1180,7 @@ class EmmyGenRunner:
             expert_kw = {
                 "quant_specs": quant_specs,
                 "mxfp4_specs": mxfp4_specs,
+                "mxfp4_transposed": transposed if mxfp4_specs else None,
                 "trellis_specs": trellis_specs,
                 "aux_examples": aux_examples,
                 "weight_inputs": ind_names,

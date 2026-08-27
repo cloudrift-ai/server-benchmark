@@ -199,7 +199,7 @@ def test_decode_mxfp4_applies_per_group_power_of_two_scales():
 def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
     shape = (64, 8)
     graph = _input_graph(shape)
-    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2), True)}) == {"w": "w_scale"}
+    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}, transposed=True) == {"w": "w_scale"}
     graph.validate()
     assert graph.inputs == ["x", "w", "w_scale"]
     assert graph.nodes["w"].output.dtype.name == "u8"
@@ -235,7 +235,7 @@ def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
     which is why the layout is declared instead of read off the shapes."""
     shape = (8, 64)  # (out, in): the F.linear parameter layout
     graph = _input_graph(shape)
-    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2), False)}) == {"w": "w_scale"}
+    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}, transposed=False) == {"w": "w_scale"}
     graph.validate()
     assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (8, 2, 16)
 
@@ -252,7 +252,7 @@ def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
 
     # A non-f32 weight input takes the closing cast, which an f32 trace never emits.
     half = _input_graph(shape, "f16")
-    spell_mxfp4_inputs(half, {"w": ((8, 2, 16), (8, 2), False)})
+    spell_mxfp4_inputs(half, {"w": ((8, 2, 16), (8, 2))}, transposed=False)
     half.validate()
     assert half.nodes["w_logical"].output.dtype.name == "f16"
 

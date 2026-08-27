@@ -1354,21 +1354,28 @@ def spell_quantized_inputs(
 
 def spell_mxfp4_inputs(
     graph: Graph,
-    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...], bool]],
+    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    *,
+    transposed: bool,
 ) -> dict[str, str]:
     """Spell logical expert inputs as native MXFP4 blocks plus E8M0 scales.
 
-    ``specs[name]`` is ``(blocks_shape, scales_shape, transposed)`` for one expert slice.
-    The re-minted ``name`` input binds ``(out, in/32, 16)`` uint8 blocks and the appended
-    ``<name>_scale`` input binds ``(out, in/32)`` uint8 scales; the nibbles always decode
-    in that stored ``(out, in)`` orientation. ``transposed`` is the experts module's weight
-    layout (:func:`~emmy.compiler.trace.huggingface.moe_expert_layout`): ``True`` when the
-    traced placeholder is the ``(in, out)`` matrix applied as ``x @ W``, so the decode ends
-    in a transpose, and ``False`` for the ``F.linear`` ``(out, in)`` orientation, which the
-    decode already lands in. The layout is declared rather than read off the shapes because
-    a square expert matrix fits both. Generic tensor algebra decodes the nibbles and scale
-    exponents in-graph, so lowering can fuse those operations into the ordinary matrix
-    multiplication instead of materializing a persistent dense expert table.
+    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice. The re-minted
+    ``name`` input binds ``(out, in/32, 16)`` uint8 blocks and the appended ``<name>_scale``
+    input binds ``(out, in/32)`` uint8 scales; the nibbles always decode in that stored
+    ``(out, in)`` orientation.
+
+    ``transposed`` is the experts MODULE's weight layout
+    (:func:`~emmy.compiler.trace.huggingface.moe_expert_layout`), one fact for the whole call
+    rather than per input: ``True`` when the traced placeholder is the ``(in, out)`` matrix
+    applied as ``x @ W``, so the decode ends in a transpose, and ``False`` for the
+    ``F.linear`` ``(out, in)`` orientation the decode already lands in. It is declared rather
+    than read off the shapes because a square expert matrix fits both readings, and the wrong
+    one transposes the weights silently.
+
+    Generic tensor algebra decodes the nibbles and scale exponents in-graph, so lowering can
+    fuse those operations into the ordinary matrix multiplication instead of materializing a
+    persistent dense expert table.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
@@ -1378,7 +1385,7 @@ def spell_mxfp4_inputs(
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     out_map: dict[str, str] = {}
-    for name, (blocks_shape, scales_shape, transposed) in specs.items():
+    for name, (blocks_shape, scales_shape) in specs.items():
         node = graph.nodes.get(name)
         if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
             raise ValueError(f"spell_mxfp4_inputs: {name!r} is not a graph input")

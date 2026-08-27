@@ -8,6 +8,7 @@ are fresh unmapped ``TileOp`` objects and therefore re-enter the normal scheduli
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import islice
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node
@@ -20,6 +21,7 @@ from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile._tree import walk
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -31,28 +33,6 @@ class CutSite:
     node: Fold
     spelling: str
     axes: tuple
-
-
-def _member_occurrences(member, available: tuple):
-    """Stored Fold occurrences under one member, retaining wrapper-bound axes."""
-    if isinstance(member, Fold):
-        yield member, available
-        yield from _occurrences(member, available)
-        return
-    axis = getattr(member, "axis", None)
-    inner = (*available, axis) if axis is not None else available
-    for body in member.nested():
-        for child in body:
-            yield from _member_occurrences(child, inner)
-
-
-def _occurrences(node: Fold, available: tuple):
-    """Stored child occurrences and the axes in scope at each incoming edge."""
-    inner = available + (() if node.axis is None else (node.axis,))
-    for edge in node.operands:
-        yield from _member_occurrences(edge, inner)
-    for member in node.lift.body:
-        yield from _member_occurrences(member, inner)
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -76,7 +56,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     }
     outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
-    for node, available in _occurrences(tile.op, outer):
+    for node, available in islice(walk(tile.op, outer), 1, None):
         occurrence_axes.setdefault(id(node), []).append(available)
     out: list[CutSite] = []
     seen: set[int] = set()

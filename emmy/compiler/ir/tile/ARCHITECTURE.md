@@ -98,7 +98,7 @@ creates one zero-axis root `Fold` over the lifted cell.
 
 ## Algebraic rewrite
 
-`pipeline/passes/lowering/tile/015_twisted.py` runs after construction canonicalization and before scheduling. It
+`pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
 clusters sibling Folds by scoped lambda equivalence and rewrites a maximum plus additive exp-weighted components into
 one exp-family twisted carrier `(maximum, denominator, expectations…)`. Pure softmax is the arity-two case; SDPA adds
 expectation components, and a causal mask is simply part of the shared score lambda. The pass has no operation-family
@@ -138,7 +138,7 @@ while retaining exact values throughout the ordinary extent range.
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and output
 specifications. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
 
-`lowering/tile/018_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
+`lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
 ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s, so they re-enter the same placement

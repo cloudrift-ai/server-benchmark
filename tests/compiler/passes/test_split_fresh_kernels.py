@@ -4,7 +4,7 @@ The split is an ordinary ``REDUCE`` value decided at the ordinary schedule fork;
 structural is that the rewrite returns a different set of nodes. Those nodes are new kernels:
 
 - they carry NO knob, NO placement and NO schedule slice of the kernel they replace;
-- each reaches ``020_schedule`` and decides its own row, exactly like a newly lifted Fold tree;
+- each reaches ``040_schedule`` and decides its own row, exactly like a newly lifted Fold tree;
 - each carries structural features re-derived from its OWN body, so it is separately identifiable
   to the evidence store;
 - the split is CONSUMED by the kernel that realizes it — the sliced axis is a window of its
@@ -151,7 +151,7 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
     assert len(pieces) == 2, "the split must have produced two kernels"
     for piece in pieces:
         # Each SCHEDULED itself — so what it carries is its own row, keyed against its own tree.
-        assert piece.place.is_mapped, "020_schedule must pick each piece up"
+        assert piece.place.is_mapped, "040_schedule must pick each piece up"
         assert not any(str(v).startswith("g") for k, v in piece.knobs.items() if family_of(k) == "REDUCE"), (
             f"a piece must not carry the split it came from: {decision_view(piece.knobs)}"
         )

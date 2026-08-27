@@ -69,7 +69,7 @@ class Family:
     """The exp/LSE family's OP VOCABULARY — the ψ, its pivot, and the base semiring.
 
     The generator below emits this spelling and the Tile-IR recognizer
-    (``lowering/tile/015_twisted``) reads it back. Sharing the table is the point: a recognizer
+    (``lowering/tile/020_twisted``) reads it back. Sharing the table is the point: a recognizer
     with its own copy of ``"exp"`` / ``"subtract"`` / ``"reciprocal"`` drifts from the generator
     the day either is respelled, and the failure is silent — the rewrite simply declines and the
     kernel demotes to the planar fold.

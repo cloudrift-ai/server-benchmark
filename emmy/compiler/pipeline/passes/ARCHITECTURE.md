@@ -71,34 +71,47 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `018_cut` then offers
-the maximal fused tree beside every semantically closed stored Fold-edge cut. `020_schedule` maps the free axes and
-exposes an addressable product over every stored Fold site, composing legal `TILE`, `REDUCE`, `STAGE`, and `RASTER`
-values through generic worker and physical-axis interfaces. Keys use the tree-path codec, and every resolved slice
-lives beside the immutable Fold tree in `TileOp.schedule`. Candidate dictionaries are created only at addressed
-leaves; there is no eager row list or row cap.
+`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `030_cut` then
+offers the maximal fused tree beside every semantically closed stored Fold-edge cut. `040_schedule` maps the free
+axes and enumerates the schedule. Keys use the tree-path codec, and every resolved slice lives beside the immutable
+Fold tree in `TileOp.schedule`.
 
-**The kernel's worker inventory is not chosen before the rows — it is folded out of them.** A site's catalog is a
-function of the site; `derive_inventory` reads each rectangle's claim off its own resolved slices, the row carries
-that claim, and `WORK` is the key the site products JOIN on and the key the space is then partitioned by into one
-segment per inventory. The offered inventories are therefore the claims the rows make, so what a segment is stamped
-with and what its rows can spell cannot drift apart. Asking each site instead what it offers *under* a chosen
-inventory rebuilds every stage and reduce catalog once per member of a list those same catalogs produce — one f16
-matmul enumerated 61 times. `tests/compiler/passes/test_pool_space.py` pins the invariant directly: every catalog
-question is asked once per term.
+**The enumeration is a recursive walk of the stored Fold tree.** A Fold offers its own options; each option extends a
+context of what the kernel has already agreed; the subtree below is walked under that extended context, and siblings
+thread left to right, so a choice anywhere restricts everything enumerated after it:
 
-The inventory restricts which ROWS a pass offers; it never keys the interface a site presents. That distinction is
-what keeps the composition tractable: the product runs over the sites' interface groups, so one extra group per site
-multiplies the whole enumeration, and a whole fused model reaches the scheduler as one term with hundreds of sites.
-The interface-group combinations are still built eagerly, and Python's sequence protocol cannot represent a row
-count beyond `Py_ssize_t`. Whole-model terms large enough to cross either boundary are unsupported until the
-compatibility product itself is factorized; there is no arbitrary cap that silently changes the legal schedule set.
+    S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
 
-The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
-can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
-rows is recovery over Fold-tree structure, not another recognition layer. Child sites join when their tile widths and
-worker units agree on every shared physical axis. A derived contraction with a unit marker axis presents its enclosing
-Fold's sweep as its scheduling reduction domain. Neither rule inspects the operation family.
+There is no product over a flat site list and no join afterwards. The reasons two sites are not one kernel — one
+worker inventory, agreeing tile geometry on a shared physical axis, one decision per Fold however many paths reach it
+— are stated once, in `Ctx.extend`, and applied while descending, so an illegal combination is never built. That
+matters because the join is where nearly all the pruning happens: on flash attention the unconstrained product is
+8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+
+**Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
+Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
+under the CTA thread budget, so no member can exceed it); constraints that are a function of the NODE live beside the
+moves they filter. Nothing may narrow for SPEED — a slow candidate is a fork the evidence decides, never a row
+withheld. A pin narrows the same way: an option the pin does not name is not offered, and a pin that names none is an
+error rather than a silent empty enumeration.
+
+**The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
+prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
+tree carries choices only. Traversal order is the fork order — there is no separate level vocabulary to keep in step
+with the walk. `WORK` leads because the root owns the free axes it is read off, and it is stamped the moment an
+option claims an inventory, which `Ctx.extend` then refuses to change.
+
+Because options are a function of the node alone, a node that offers nothing offers it under every context: one pass
+over the tree says whether the term has a schedule at all. Past that check every node still has an option that
+composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise leaves it
+does not have. A term with no schedule leaves the tile unmapped for the scalar materialization path.
+
+**Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
+alternative's latency. A cut's cost is the minimum sum over the kernels it produces, which is why it is a separate
+decision with a separate scoring rule (`policy/greedy._resolved_price`, memoized per `Op.cache_key` so a piece
+appearing in several partitions is solved once) rather than something the per-row prior can rank.
+
+The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.
 
 ## No shape-specific pattern matching
 
@@ -231,11 +244,11 @@ classify a shape, extract a contraction, pair softmax statistics, hoist a nested
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
 without a placement or value-cut analysis.
 
-`015_twisted` is a separate algebraic rewrite over the canonical tree. It clusters equivalent score lambdas and joins
+`020_twisted` is a separate algebraic rewrite over the canonical tree. It clusters equivalent score lambdas and joins
 a maximum with additive exp-weighted components into the one `(maximum, denominator, expectations…)` twisted monoid.
 It reads both equivalent canonical spellings: sibling planar folds, and the contraction composition produced when
 canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
-in carrier arity and score/value lambdas; there is no operation-family matcher. `020_schedule` enumerates the complete
+in carrier arity and score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
 rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
 parent/child interface. Materialization binds selected sites from their schedule slices; unsupported forms remain
@@ -246,7 +259,7 @@ unmapped.
 Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
 that canonical input:
 
-- **`018_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
+- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. A direct contraction-operand seam is not offered yet: the pure Fold result dtype does not encode the
@@ -254,11 +267,12 @@ that canonical input:
   widths. The new producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same
   ordinary passes.
 
-- **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
-  computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that
-  accumulates in place). Direct atomic finalization is legal only when it does not write each partial into f16/bf16
-  output storage; low-precision output takes the deferred f32 workspace and rounds once after the combine. It runs
-  AFTER its decision — the `g` row was chosen FOR the split form.
+- **The cross-CTA reduce split is not currently realized.** Splitting the reduce axis across CTAs into a partial +
+  finalize is a *structural* alternative — it changes which kernels exist — but it used to be decided as a `REDUCE`
+  spelling inside the schedule and realized by a pass downstream of that decision. Carrying a structural decision at
+  a schedule position is what made it need a consumed-partition check, its own pin-refusal plumbing, and a separate
+  realizer. When it returns it belongs beside `030_cut`, offered before any schedule knob is spelled — unless the
+  partial genuinely needs the pre-split tile, which is the one thing to establish first.
 
 **Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR
 for the partial and, when required, the finalize. The partial keeps the same `Fold(init, combine)` over an axis

@@ -108,7 +108,7 @@ numpy backends in three places:
 
 ### Tile lowering (`passes/lowering/tile/`)
 
-`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
+`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
 sites through the CUDA pipeline. `test_pool_space.py` addresses large spaces by boundary/sample indices and narrows
 paired MMA checks with exact pins; it never exhausts a live catalog. `test_move_catalog.py` checks that independent

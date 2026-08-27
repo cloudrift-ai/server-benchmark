@@ -282,10 +282,10 @@ loop) and marking the inner drain `Loop(seed=False)` so it folds without re-decl
 masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab fill would fault a row-crossing copy.
 Unstaged is byte-identical gmem-direct.
 
-**Split-K composes with staging.** The split-K option resolves a `STAGE` spec against the SLICED inner view
-(the `kslice` extent + the `ksplit`-offset operand indices) and `030_split_reduce` threads the resolved `Stage` onto its
-partial `TileOp`s, so the partial kernel's K-loop stages its slice through the same pipeline (the TMA box origin is
-the operand's own index evaluated at the tile base — an offset operand lands the box at absolute coordinates).
+**Split-K composes with staging.** A split partial is a fresh kernel whose own schedule fork resolves a `STAGE`
+spec against the SLICED view (the `kslice` extent + the `ksplit`-offset operand indices), so the partial kernel's
+K-loop stages its slice through the same pipeline (the TMA box origin is the operand's own index evaluated at the
+tile base — an offset operand lands the box at absolute coordinates).
 
 ## Fold carriers lower at their scheduled residence
 
@@ -302,7 +302,7 @@ assuming that all components share the contraction accumulator's residence.
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
 (a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
-`030_split_reduce` realizes the graph-level partition.
+the structural `tile/035_split_reduce` fork realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

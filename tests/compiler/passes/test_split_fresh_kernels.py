@@ -1,7 +1,8 @@
-"""A cross-CTA split mints BRAND-NEW kernels — the invariant `030_split_reduce` realizes.
+"""A cross-CTA split mints BRAND-NEW kernels — the invariant ``035_split_reduce`` realizes.
 
-The split is an ordinary ``REDUCE`` value decided at the ordinary schedule fork; what makes it
-structural is that the rewrite returns a different set of nodes. Those nodes are new kernels:
+The split is a STRUCTURAL fork beside ``030_cut``, decided BEFORE scheduling (a ``REDUCE`` pin's
+``g<n>[a|k]`` half is authoritative over it); its rewrite returns a different set of nodes, and
+those nodes are new kernels:
 
 - they carry NO knob, NO placement and NO schedule slice of the kernel they replace;
 - each reaches ``040_schedule`` and decides its own row, exactly like a newly lifted Fold tree;

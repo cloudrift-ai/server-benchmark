@@ -136,7 +136,7 @@ def _sweep_start(stmts, axis_name: str) -> int:
 def apply_output_specs(stmts, specs) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
-    materializer's zero-axis ``Fold`` peel and ``030_split_reduce`` share, so the lowered kernels stay
+    materializer's zero-axis ``Fold`` peel and ``035_split_reduce`` share, so the lowered kernels stay
     byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
     ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
     (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
@@ -335,6 +335,9 @@ class TileOp(Op):
     # Whether the graph-level Fold-edge placement fork kept this kernel fused. Cut pieces are
     # fresh TileOps with the default ``False`` and may expose their own smaller seam set.
     placement_decided: bool = False
+    # Whether the structural cross-CTA split fork (``035_split_reduce``) kept this kernel whole.
+    # Split pieces need no flag: their sliced axis's partition ``Window`` is the receipt.
+    split_decided: bool = False
 
     def __post_init__(self) -> None:
         from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp

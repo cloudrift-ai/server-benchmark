@@ -194,7 +194,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
 
     # The outer fold is an ordinary additive reduce — it tiles nothing and has no operand pair, so
     # it derives PLANAR like any other. The reassociation it carries is a STRUCTURAL probe
-    # (``Fold.composed``, what ``030_split_reduce`` consumes), never a role.
+    # (``Fold.composed``, the recognized split-K composition), never a role.
     assert red.role is AxisRole.PLANAR
     assert red.composed is inner
     t = _tile(red)

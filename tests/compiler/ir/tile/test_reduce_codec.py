@@ -3,7 +3,7 @@
 ``ReducePlan.parse`` / ``.spell`` are the schedule's single reduce-partition codec (site-local:
 the cooperative WIDTH lives in the kernel's ``WORK`` inventory, so the value spells a bare
 ``coop`` and parses against a :class:`Workers`). The ``g<n>[a|k]`` finalize letter (atomic vs
-deferred-kernel cross-CTA split) must survive the round-trip so ``030_split_reduce`` can read
+deferred-kernel cross-CTA split) must survive the round-trip so ``035_split_reduce`` can read
 ``ReducePlan.finalize`` — it was historically parsed then dropped (``spell`` never re-emitted it),
 making ``g2a`` and ``g2k`` indistinguishable. The round-trip cases themselves live once, in
 ``test_codec_roundtrip.py``, over the wider corpus this file's list was a subset of; what is

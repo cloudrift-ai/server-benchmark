@@ -72,9 +72,25 @@ post-decomposition Python source file for known format names.
 ## The tile scheduler: one stored tree
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `030_cut` then
-offers the maximal fused tree beside every semantically closed stored Fold-edge cut. `040_schedule` maps the free
-axes and enumerates the schedule. Keys use the tree-path codec, and every resolved slice lives beside the immutable
-Fold tree in `TileOp.schedule`.
+offers the maximal fused tree beside every semantically closed stored Fold-edge cut, and `035_split_reduce` offers
+the unsplit tree beside every cross-CTA reduce split the head fold admits — both STRUCTURAL forks whose chosen side
+replaces the kernel with fresh unmapped pieces. `040_schedule` maps the free axes and enumerates the schedule. Keys
+use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
+
+**The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
+Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
+rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
+row-invariant statistic staying full-row in every partition; any other fold slices through the generic
+`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The split is CONSUMED
+by the kernel that realizes it — the sliced axis's partition `Window` is the receipt, kernel-scoped — so the pieces
+skip the fork, and the walk's pin path strips a `REDUCE` pin's `g<n>[a|k]` half on a kernel that carries the
+receipt (`g2k/coop` on a piece is `coop`). The atomic arm's refusals (one additive state, a distributive
+projection, an output that rounds once) sit beside the offer in `tile/_split.py`; the walk's own catalog carries no
+`GRID` stage at all.
+
+**A one-option fork is still a fork.** Every pass returns its decision as a fork even when nothing competes — the
+lone unsplit arm, a pinned `PLACE` fuse, a fully forced schedule walk — and the engine records a one-option fork as
+a decision, so a fully pinned kernel's row is keyed into the trace and the evidence exactly like a contested one.
 
 **The enumeration is a recursive walk of the stored Fold tree.** A Fold offers its own options; each option extends a
 context of what the kernel has already agreed; the subtree below is walked under that extended context, and siblings
@@ -98,7 +114,10 @@ from its algebra, its operand dtypes and the gmem addressing its fragment loader
 the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_schedule`.
 `tile/_staging.py` is not a legality layer: it holds the three stage RESOLVERS (whose legal answer is a size) plus the
 compute fill's own node refusals, which live there because the fill is the move they filter. Nothing may narrow for
-SPEED — a slow candidate is a fork the evidence decides, never a row withheld.
+SPEED — a slow candidate is a fork the evidence decides, never a row withheld. One acknowledged exception, labeled as
+a bound and not a legality: the reduce catalog drops a band wider than the axis has work for (idle lanes realize
+fine — a pin still gets such a band; the drop only keeps a short axis from enumerating the whole band catalog to no
+effect).
 
 **A pin is authoritative over the VALUE, not over the catalog.** A site's spelling carries no worker widths — they are
 read off `WORK` — so one `TILE` pin names a different plan under each inventory, and it may well name a plan no ladder
@@ -162,9 +181,10 @@ the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot e
 from the rows it does enumerate.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
-alternative's latency. A cut's cost is the minimum sum over the kernels it produces, which is why it is a separate
-decision with a separate scoring rule (`policy/greedy._resolved_price`, memoized per `Op.cache_key` so a piece
-appearing in several partitions is solved once) rather than something the per-row prior can rank.
+alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
+which is why each is a separate structural decision with a separate scoring rule (`policy/greedy._resolved_price`,
+memoized per `Op.cache_key` so a piece appearing in several partitions is solved once) rather than something the
+per-row prior can rank.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.
 
@@ -388,15 +408,14 @@ stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
-edge, 5090) and — single-channel nodes only — the **redundant-statistic split-K** rows: the contraction K slices
-across CTAs while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
-cheap on the small-free decode shapes and is left to evidence to price elsewhere), the per-cell cone σ-reindexed to
-absolute k and the wrapping zero-axis fold's projection folded into the deferred finalize (the split-K option's
-computed-A arm
-→ `030_split_reduce`'s structural path). Multi-channel (gate/up) nodes split too: the synthesized fold loop
+edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
+`035_split_reduce` fork slices the contraction across CTAs BEFORE scheduling, σ-reindexing the per-cell cone to
+absolute k while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
+cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
+projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
-channel's raw C fragment to its `ws[comp, ksplit, *cell]` slice (the per-acc `RegStore` arm — no ⊗-combine in
-the partial), and the deferred finalize folds every component before applying the combine projection once.
+channel's raw state to its `ws[comp, ksplit, *cell]` slice — no ⊗-combine in
+the partial — and the deferred finalize folds every component before applying the combine projection once.
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
 `RoleKind` extension. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡

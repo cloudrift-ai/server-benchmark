@@ -132,7 +132,8 @@ def test_tile_pin_forces_the_named_warp_row(monkeypatch):
 
     def decide(fp):
         leaves = list(iter_leaves(fp.options))
-        rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
+        if "schedule" in fp.match.rule.name:  # the walk's own fork — not the placement / split offers
+            rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         return leaves[0]
 
     resolved, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
@@ -283,13 +284,11 @@ def test_one_fold_reached_twice_is_one_decision():
 
 
 def _rows_of(tile, ctx=None) -> list[dict]:
-    """Every row ``tile`` enumerates — the leaves of the walk's own fork, or the single row a
-    fully forced walk returns as a bare ``TileOp``."""
+    """Every row ``tile`` enumerates — the leaves of the walk's own fork (a fully forced walk is
+    still a one-leaf fork, so the engine records its row as a decision)."""
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     out = schedule(tile, "k", {}, ctx or Context.from_target((12, 0)))
-    if not isinstance(out, list):
-        return [dict(out.knobs)]
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 

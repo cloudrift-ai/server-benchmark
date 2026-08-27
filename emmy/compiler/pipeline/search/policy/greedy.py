@@ -211,9 +211,12 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float 
     """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
 
     Per kernel: the price the resolution's own fork stamped (the winning leaf's µs, which the
-    deploy evidence hierarchy chose), or — when the kernel's schedule had a single option and so
-    never forked — the prior's estimate for the row it realized. ``None`` when any surviving kernel
-    can be priced by neither, which hands the caller back to the ordinary leaf ranking.
+    deploy evidence hierarchy chose), or — where the trace carries no score for it: a decide that
+    stamped none (no prior at that fork), or a kernel resolved without a traced fork at all (an
+    inline structural replay of an already-decided offer site) — the prior's estimate for the row
+    it realized. ``None`` when any surviving kernel can be priced by neither, which hands the
+    caller back to the ordinary leaf ranking. (A one-option fork is still traced — every pass
+    returns even a forced decision as a fork — so "never forked" is no longer a case here.)
 
     A slice that a structural fork changed the kernel SET of (a ``PLACE`` cut, a cross-CTA split)
     ends with several kernels, and this Σ is exactly why that needs no special case: the kernel

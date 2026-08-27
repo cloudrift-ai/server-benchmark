@@ -31,7 +31,7 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select
+from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import resolve, sites, spell
@@ -182,7 +182,7 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
 class Sched:
     """Read/write view of one kernel's schedule slices — the ``TileOp.schedule`` dict (1r:
     ``{codec key → resolved TilePlan / ReducePlan / Stage}``) bound to the op tree the keys spell
-    against. The ONE accessor pair every reader (materializer, ``030_split_reduce``) and stamper
+    against. The ONE accessor pair every reader (the materializer) and stamper
     (the ``_schedule`` option builders) goes through, so a slice has exactly one home and the key
     spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
     A node that is not a site of the family reads ``None`` and refuses writes loudly."""
@@ -304,19 +304,18 @@ def scheduled(
     knobs: dict,
     output_specs: tuple = (),
     slices=(),
-    schedule: dict | None = None,
     workers=None,
 ):
     """Build a SCHEDULED ``TileOp``: the term + placement, its schedule slices written through
     :class:`Sched` (the canonical key spelling), and the ``WORK`` inventory sealed.
 
-    The one constructor every option builder and split realizer shares. Sealing is what makes a
+    The one constructor every row materializer shares (a split PIECE is not built here — it leaves
+    ``035_split_reduce`` unscheduled and reaches this through its own row). Sealing is what makes a
     ``TileOp`` scheduled — an unsealed one carries no ``work`` and stamps no ``WORK`` knob — so
     pairing it with construction here is what stops a new builder forgetting it.
 
-    ``slices`` are ``(family, node, value)`` triples keyed on the way in; ``schedule`` is an
-    ALREADY-KEYED dict (``030_split_reduce`` re-keys against the partial's own tree before it gets
-    here). ``None`` slice values are skipped, so a resolver that declined needs no guard."""
+    ``slices`` are ``(family, node, value)`` triples keyed on the way in. ``None`` slice values
+    are skipped, so a resolver that declined needs no guard."""
     source = Sched(op, {}, place=place)
     out = TileOp(
         op=op,
@@ -324,7 +323,6 @@ def scheduled(
         place=place,
         workers=workers,
         knobs=knobs,
-        schedule=dict(schedule or {}),
         output_specs=tuple(output_specs),
     )
     sched = sched_of(out)
@@ -441,13 +439,42 @@ def head(op):
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
+def carries_partition(op) -> bool:
+    """Whether this kernel's IR already records a realized cross-CTA split — the ``Window``
+    receipt the split offer and the schedule walk's pin path read, KERNEL-scoped because that is
+    the scope of the decision consumed: ``REDUCE`` is one pin and a bare one fans out to every
+    kernel, so reading the receipt per axis would let the same pin split a piece again on a
+    DIFFERENT reduce axis (a fused cone's per-row statistic fold — three kernels from one pinned
+    split), and per-axis alone never terminates on its own axis (a pinned split re-applies to its
+    own partial, halving K every sweep).
+
+    The receipt sits on the sliced axis, and that axis is not always a NODE: a computed-A cone can
+    keep its sliced contraction inside the lift as a plain ``Loop``, so a ``sites``-only scan
+    misses it. Scan the loop bodies too; the receipt is in the IR either way."""
+
+    def loops(stmts):
+        for s in stmts:
+            if isinstance(s, Loop):
+                yield s
+                yield from loops(s.body)
+
+    for site in sites(op):
+        node = site.node
+        ax = getattr(node, "axis", None)
+        if ax is not None and ax.window is not None and ax.window.partition:
+            return True
+        bodies = [node.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
+        if any(lp.axis.window is not None and lp.axis.window.partition for b in bodies for lp in loops(b)):
+            return True
+    return False
+
+
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
     ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
     is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
     per-cell zero-axis ``Fold`` has no partition). An unstamped fold reads the empty plan (the scalar serial
-    fold), matching the node field's default. The single accessor the materializer /
-    ``030_split_reduce`` read."""
+    fold), matching the node field's default. The materializer's single accessor."""
     node = head(tile.op)
     if node is None:
         return None
@@ -463,6 +490,7 @@ def reduce_plan(tile):
 __all__ = [
     "Sched",
     "axis_names",
+    "carries_partition",
     "cone_seam",
     "edge_dtypes",
     "head",

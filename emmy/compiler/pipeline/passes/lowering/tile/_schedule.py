@@ -19,8 +19,10 @@ walk decides them.
 output tile and the tensor-core warp tile, the fp8 (k32) family included — and the whole ``STAGE``
 transport family (the smem compute fill, the synchronous copy, cp.async, TMA, and the ``+p``
 producer band riding a resolved TMA stage), and the walk reaches DERIVED sites (flash's synthesized
-PV contraction). Not restored: the cross-CTA split of a CONTRACTION, the pointwise register strip,
-the launch-order swizzle, and the pool cache — and it enumerates eagerly into a list.
+PV contraction). The cross-CTA ``GRID`` split is NOT a row here: it changes the kernel SET, so it
+is the structural ``035_split_reduce`` fork's — the walk only CONSUMES a pin's ``g<n>[a|k]`` half
+on a kernel that already realized its split. Not restored: the pointwise register strip, the
+launch-order swizzle, and the pool cache — and it enumerates eagerly into a list.
 """
 
 from __future__ import annotations
@@ -32,12 +34,22 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
-from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec, Workers, derive_inventory, plan_workers, resolve_site_tile
+from emmy.compiler.ir.schedule import (
+    Level,
+    ReducePlan,
+    Stage,
+    TilePlan,
+    WarpSpec,
+    Workers,
+    derive_inventory,
+    plan_workers,
+    resolve_site_tile,
+)
 from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.identity import hint_extent
-from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import axis_of
@@ -596,16 +608,32 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
     authoritative over the value; it cannot make a band this node has no geometry for legal, and
     one that names no legal partition raises the refusal instead of silently emptying the
-    enumeration."""
+    enumeration. Two pin exemptions, both restatements of where a decision lives:
+
+    - The cross-CTA ``g<n>[a|k]`` half is the structural ``035_split_reduce`` fork's decision. It
+      was realized by REPLACING the kernel it addressed, and the receipt is the sliced axis's
+      partition window — kernel-scoped, so ONE pinned split means one split however many folds the
+      pieces still carry. What reaches every fold of a piece is the rest of the row (``g2k/coop``
+      on a split kernel is ``coop``); a ``g`` half on a kernel that realized no split raises.
+    - The catalog's width filter (a band wider than the axis has work for) does not bind a pin: a
+      pinned over-wide band idles its extra lanes and still realizes — the split's finalize takes
+      the kernel's pinned inventory over a fold as narrow as the split width."""
     extent = hint_extent(node.axis)
     pin = _pin(REDUCE, key)
     if pin is None:
-        return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(node, p, extent, state.transposed_ok) is None)]
+        return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
     try:
         plan = ReducePlan.parse(pin, state.work_pin)
     except ValueError as e:
         raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} does not resolve: {e}") from None
-    why = _band_refusal(node, plan, extent, state.transposed_ok)
+    if plan.needs_split:
+        if not state.carries_partition:
+            raise ValueError(
+                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a cross-CTA split, which only the structural "
+                f"035_split_reduce fork realizes on a kernel's head fold — this kernel realized none"
+            )
+        plan = ReducePlan(tuple(st for st in plan.stages if st.level is not Level.GRID))
+    why = _transposed_refusal(plan, state.transposed_ok)
     if why is not None:
         raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} names no partition this fold can realize: {why}")
     return [plan]
@@ -614,17 +642,25 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
 # ---- the reduce partition: which bands this fold can carry ---------------------------------------- #
 
 
-def _band_refusal(node, plan: ReducePlan, extent: int, transposed_ok: bool) -> str | None:
-    """Why ``node`` cannot realize one reduce-partition candidate (``None`` when it can). Three
-    facts about the node, and nothing about speed: a band wider than the axis has work for cannot
-    fill its workers; a cross-CTA composite needs an axis it may split; and the TRANSPOSED band
+def _band_refusal(plan: ReducePlan, extent: int, transposed_ok: bool) -> str | None:
+    """Why one CATALOG reduce-partition candidate is not offered (``None`` when it is). Two
+    different kinds of filter, named apart: the TRANSPOSED band's geometry is LEGALITY
+    (:func:`_transposed_refusal` — the swapped lane map does not exist without it), while the
+    width check is a BOUND ON THE ENUMERATED SPACE, not a legality — an over-wide band idles its
+    extra lanes and still realizes, which is why the pin path exempts it and only this catalog arm
+    applies it (a short axis would otherwise enumerate every band in the catalog to no effect).
+    The catalog carries no cross-CTA stage — the ``GRID`` split changes the kernel set, so it is
+    the structural ``035_split_reduce`` fork's catalog, not a row of this walk."""
+    if plan.coop > extent or plan.reg > extent:
+        return f"the band is wider than the {extent}-element reduce axis has work for"
+    return _transposed_refusal(plan, transposed_ok)
+
+
+def _transposed_refusal(plan: ReducePlan, transposed_ok: bool) -> str | None:
+    """Why the TRANSPOSED band cannot realize here (``None`` for any non-transposed plan): it
     swaps the lane mapping so 32 lanes sweep the innermost FREE axis while each lane walks K
     serially — whole warps, an axis to sweep, and a per-cell epilogue for the swapped map to run
     (``transposed_ok``, the per-kernel half, precomputed once on :class:`_State`)."""
-    if plan.coop > extent or plan.reg > extent:
-        return f"the band is wider than the {extent}-element reduce axis has work for"
-    if plan.needs_split and not _splittable(node, plan.cta):
-        return f"the axis cannot carry a cross-CTA split of {plan.cta} (needs a static extent it divides, not already a slice)"
     if not plan.coop_transposed:
         return None
     if plan.coop % WARP_LANES:
@@ -632,17 +668,6 @@ def _band_refusal(node, plan: ReducePlan, extent: int, transposed_ok: bool) -> s
     if not transposed_ok:
         return "the transposed coop band needs an innermost free axis to sweep and a per-cell epilogue"
     return None
-
-
-def _splittable(node, width: int) -> bool:
-    """Whether ``node``'s axis can carry a cross-CTA split of ``width``: the σ-reindex reconstructs
-    an absolute k from ``ksplit·(K/w) + kslice``, a bijection only over a STATIC extent the width
-    divides — and an axis that is ITSELF a partition slice already spent its split, so a second one
-    would halve the same stream again."""
-    ext = node.axis.extent
-    if not ext.is_static or ext.as_static() % width:
-        return False
-    return node.axis.window is None or not node.axis.window.partition
 
 
 def _inner_free(tile: TileOp):
@@ -973,6 +998,10 @@ class _State:
     facts: dict  # id(node) -> :class:`_SiteFacts`, one per contraction node
     frag_producers: frozenset  # TILE keys of fragment-edge producers (the seam's offer side)
     transposed_ok: bool  # the transposed coop band's per-kernel half (an axis to sweep, a per-cell epilogue)
+    #: whether this kernel already realized a cross-CTA split — the sliced axis's partition-window
+    #: receipt, KERNEL-scoped. A ``REDUCE`` pin's ``g<n>[a|k]`` half is consumed against it: one
+    #: pinned split means one split, however many folds the pieces still carry.
+    carries_partition: bool = False
     work_pin: Workers | None = None  # the parsed EMMY_WORK pin — a FACT, read once, compared as Workers
     work_pinned: bool = False
     #: id(node) -> its option list, computed ONCE by :func:`schedule`'s prescan. Options are a pure
@@ -997,6 +1026,9 @@ def _off(sched: Sched, root) -> dict:
     for family in SLICE_FAMILIES:
         keys = [key for node in _nodes(root) if (key := sched.key(family, node)) is not None]
         out.update(dict.fromkeys(keys or [family], ""))
+    # Kernel-global like WORK, and decided nowhere (the launch-order swizzle is not restored), so
+    # it is spelled decided-empty for the same vocabulary reason as the site families.
+    out["RASTER"] = ""
     return out
 
 
@@ -1115,13 +1147,15 @@ def _materialize(state: _State, row: dict) -> TileOp:
     )
 
 
-def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork] | TileOp:
+def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
 
     Returns the siblings at the walk's first real choice — each one lazy, holding a work list and a
-    context rather than any row — a single ``TileOp`` when the whole walk is forced, or ``[]`` when
-    nothing schedules, which is the guardrail contract that leaves the term unmapped. A live SITE
-    pin that names nothing raises out of the prescan instead."""
+    context rather than any row — a single leaf when the whole walk is forced (still a FORK: the
+    engine records a one-option fork as a decision, which is what keys a fully pinned kernel's row
+    into the trace and the evidence), or ``[]`` when nothing schedules, which is the guardrail
+    contract that leaves the term unmapped. A live SITE pin that names nothing raises out of the
+    prescan instead."""
     sched = Sched(tile.op, {}, place=tile.place.on_grid())
     # The per-kernel FACTS, computed once: the projection tail and what it permits (the fragment
     # epilogue, the transposed band's sweep + per-cell conditions), the per-contraction facts
@@ -1142,6 +1176,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork] | TileOp:
         facts,
         frozenset(f.need for f in facts.values() if f.need is not None),
         transposed_ok,
+        carries_partition=carries_partition(tile.op),
         work_pin=Workers.parse(raw) if raw is not None else None,
         work_pinned=raw is not None,
     )
@@ -1162,10 +1197,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork] | TileOp:
     # and rides the row PREFIX so fork rows and the materialized op (what ``realized_knobs`` reads)
     # carry the one signature.
     warp = any(f.offered for f in facts.values())
-    options = _step(state, (tile.op,), Ctx(), {"S_warp_eligible": 1.0} if warp else {})
-    if len(options) == 1 and options[0].is_leaf:
-        return options[0].expand()[0]
-    return options
+    return _step(state, (tile.op,), Ctx(), {"S_warp_eligible": 1.0} if warp else {})
 
 
 __all__ = ["Ctx", "schedule"]

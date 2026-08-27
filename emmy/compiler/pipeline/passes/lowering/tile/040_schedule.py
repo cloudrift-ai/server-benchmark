@@ -51,8 +51,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    rows = schedule(tile, tile.name, tile.knobs, ctx)
-    options = rows if isinstance(rows, list) else [rows]
+    options = schedule(tile, tile.name, tile.knobs, ctx)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

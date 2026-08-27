@@ -77,7 +77,8 @@ determined (an undeterminable seam is not offered — the offer and the realizat
 `035_split_reduce` offers the unsplit tree beside every cross-CTA reduce split the head fold admits — both
 STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped pieces. A bare `PLACE=cut` pin names the
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
-codec's primary rule over every PLACE site (which can land on a contraction operand no cut realizes).
+codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
+whose workspace dtypes stay undetermined).
 `040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 
@@ -397,10 +398,14 @@ that canonical input:
 - **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. A direct contraction-operand seam is not offered yet: the pure Fold result dtype does not encode the
-  materialized slab dtype a selected schedule would store. Guessing it from the root output silently mis-types other
-  widths. The new producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same
-  ordinary passes.
+  are not. A contraction's operand edges are seams of the same class: cutting one materializes the cone feeding that
+  operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
+  decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
+  output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
+  would have stored — never the carrier the cone computed in: only the `a` edge has a converting fill, so an f32
+  workspace on a `b` edge could feed no warp atom. Every seam's per-component dtypes are decided at offer time and
+  ride the seam into realization, so the two cannot disagree. The new producer and consumer are fresh unmapped
+  TileOps, so further legal cuts and schedules use the same ordinary passes.
 
 - **The cross-CTA reduce split is not currently realized.** Splitting the reduce axis across CTAs into a partial +
   finalize is a *structural* alternative — it changes which kernels exist — but it used to be decided as a `REDUCE`

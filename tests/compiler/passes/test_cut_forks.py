@@ -143,7 +143,6 @@ def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
 
 
 @pytest.mark.parametrize("side", ("a", "b"))
-@pytest.mark.xfail(reason="contraction-operand cuts need an explicit materialized workspace dtype", strict=True)
 def test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers(side: str) -> None:
     offered = _offered(_computed_operand_graph(side))
     assert {frozenset(row.items()) for row in offered} == {

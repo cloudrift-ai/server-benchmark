@@ -213,7 +213,7 @@ def _offered_atoms(tile, ctx, node):
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)
-    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail)) is not None:
+    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op))) is not None:
         return ()
     return sched._atom_families(tile, ctx, node, tail)[0]
 

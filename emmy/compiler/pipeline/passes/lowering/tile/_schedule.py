@@ -542,7 +542,7 @@ def _tile_moves(state: _State, node, key: str | None) -> list[TilePlan]:
     if not facts.warp and _names_warp_atom(pin):
         # The choice-layer drop: no warp tier here, whatever the pin says. Explicable, not silent.
         if logger.isEnabledFor(logging.DEBUG):
-            frag = _fragment_epilogue_ok(projection_tail(state.tile))
+            frag = _fragment_epilogue_ok(projection_tail(state.tile), _fold_states(state.tile.op))
             logger.debug("TILE pin %r at %s dropped: %s", pin, key or "TILE", _node_refusal(state.tile, state.ctx, node, frag))
         return []
     if state.work_pinned:
@@ -1014,11 +1014,25 @@ def _split_store_refusal(tail: list, free: tuple, atom_shape: tuple, shapes: dic
     return None
 
 
-def _fragment_epilogue_ok(tail: list) -> bool:
+def _fold_states(op) -> frozenset[str]:
+    """Every state name a Fold of the root term binds into the projection tail: the root's own
+    results when it iterates, else the results of its Fold operands and body members."""
+    if not isinstance(op, Fold):
+        return frozenset()
+    if op.axis is not None:
+        return frozenset(op.defines())
+    return frozenset(name for edge in (*op.operands, *op.body) if isinstance(edge, Fold) for name in edge.defines())
+
+
+def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
     """Whether the kernel's projection epilogue is a per-fragment straight-line program. The mma
     store folds the projection into a fragment epilogue whose leaf ``Load``\\ s are evaluated
     independently per fragment element, so a load whose INDEX reads a name an earlier epilogue stmt
-    defined (an embedding gather) cannot be threaded through it, and neither can an output sweep."""
+    defined (an embedding gather) cannot be threaded through it, and neither can an output sweep.
+    Every ``Write`` must also read some fold state (``states``): the store rides accumulator
+    fragments, so the fragment materializer has no per-cell store loop for an output whose backward
+    cone reads none and fails to lower such a row — the choice layer refuses first, so every
+    offered warp row realizes."""
     defs: set[str] = set()
     for s in tail:
         if isinstance(s, Loop):
@@ -1026,7 +1040,8 @@ def _fragment_epilogue_ok(tail: list) -> bool:
         if isinstance(s, Load) and {v for e in s.index for v in e.free_vars()} & defs:
             return False
         defs.update(s.defines())
-    return True
+    body = Body(tail)
+    return all(body.backward_cone(s.values).external_reads & states for s in tail if isinstance(s, Write))
 
 
 def _warp_refusal(state: _State, node, atom: AtomKind) -> str:
@@ -1464,7 +1479,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # (atom families, reduction domain, seam, producer, fragment edges), and the parsed WORK pin —
     # the ONE read of that env var.
     tail = projection_tail(tile)
-    frag_ok = _fragment_epilogue_ok(tail)
+    frag_ok = _fragment_epilogue_ok(tail, _fold_states(tile.op))
     transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
     facts = _site_facts(tile, ctx, sched, tail, frag_ok)
     raw = WORK.raw()
@@ -1530,11 +1545,18 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # The kernel-global RASTER LEADS the walk as its own fork level: one decision per kernel, no
     # cross-site agreement to thread through Ctx, so each candidate seeds the row prefix and the
     # whole site walk is one branch beneath it. A single-value level is collapsed (the walk runs
-    # directly, like any other one-option level), and the site walk's aliveness is value-independent
-    # (RASTER rides only the prefix, never the Ctx) — so probing it once under the first value
-    # keeps the "[] when nothing schedules" guardrail instead of standing up dead branches.
+    # directly, like any other one-option level). The walk's aliveness is value-independent (RASTER
+    # rides only the prefix, never the Ctx), so ONE probe under the first value states the
+    # "[] when nothing schedules" guardrail for the whole fan-out: the walk must yield a first
+    # branch AND that tree must hold a leaf. The per-node offer check above cannot promise the
+    # latter — its own kernel-global exceptions (a ``WORK`` pin answered at the leaf, a fragment
+    # seam emptying a sibling's offer mid-walk) can kill every leaf, and a fork with no leaf breaks
+    # the guardrail for every consumer. A live probe costs one extra leftmost-spine expansion; a
+    # dead one drains the whole tree before answering — the accepted price of the guardrail.
     values = _raster_values(state)
     forks = _step(state, (tile.op,), Ctx(), {**prefix, "RASTER": values[0]})
+    if forks and next(iter_leaves(forks), None) is None:
+        return []
     if forks and len(values) > 1:
         forks = [_Branch(state, (tile.op,), Ctx(), {**prefix, "RASTER": value}) for value in values]
     if sample is None:

@@ -175,9 +175,10 @@ def _assert_accuracy(emmy, eager, max_threshold=3.0, mean_threshold=0.4):
             marks=(
                 requires_cuda,
                 pytest.mark.skip(
-                    reason="the whole-block maximal-fusion term keeps the attention Q/K/V cones as contraction "
-                    "operands no cut reaches (the wall test_full_self_attn_tinyllama diagnoses): every realizable "
-                    "route recomputes them per scalar cell, and unpinned greedy flattens a research-class pool"
+                    reason="unpinned greedy over the whole block stays research-class: contraction-operand cuts now "
+                    "decompose the attention term (test_full_self_attn_tinyllama pins that route and passes), but the "
+                    "cold policy is still free to keep the maximal fused term — the per-scalar-cell recompute that "
+                    "wedges the CUDA context — and flattening the block's pools costs minutes per compile"
                 ),
             ),
         ),
@@ -191,9 +192,10 @@ def test_tinyllama_block_accuracy(backend_kind, seq_len):
 
 @requires_cuda
 @pytest.mark.skip(
-    reason="the whole-block maximal-fusion term keeps the attention Q/K/V cones as contraction operands no cut "
-    "reaches (the wall test_full_self_attn_tinyllama diagnoses): every realizable route recomputes them per "
-    "scalar cell, and unpinned greedy flattens a research-class pool"
+    reason="unpinned greedy over the whole block stays research-class: contraction-operand cuts now decompose the "
+    "attention term (test_full_self_attn_tinyllama pins that route and passes), but the cold policy is still free "
+    "to keep the maximal fused term — the per-scalar-cell recompute that wedges the CUDA context — and flattening "
+    "the block's pools costs minutes per compile"
 )
 def test_qwen_block_accuracy():
     """Qwen3-Embedding-0.6B block on CUDA: emmy output matches PyTorch eager within tolerance."""

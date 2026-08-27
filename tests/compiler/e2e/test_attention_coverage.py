@@ -85,9 +85,9 @@ passes per compile, ~2.2 GB RSS) — minutes per compile, the known lazify-greed
 mechanism as the EXL3 computed-operand skips). Pre-rebuild (bff3e344) the same compile burned
 >110 s at 14.6 GB RSS, so the rebuild only shrank the memory. The mask cells therefore pin the
 fused scalar row (they protect mask ACCURACY, not the cold policy);
-``test_full_self_attn_tinyllama`` stays skipped — its whole-block maximal-fusion term holds the
-Q/K/V+RoPE cones as contraction operands no cut can reach, so every realizable route recomputes
-them per scalar cell, a de-facto device hang (measured: 2026-08, 5090 box).
+``test_full_self_attn_tinyllama`` pins the bare recursive cut, which contraction-operand cuts
+make sufficient: the Q/K/V+RoPE cones split into their own kernels and the attention kernel reads
+materialized Q/K/V instead of recomputing them per scalar cell.
 """
 
 from __future__ import annotations
@@ -1086,12 +1086,6 @@ def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
 
 
 @requires_cuda
-@pytest.mark.skip(
-    reason="the whole-block maximal-fusion term cannot be decomposed: the Q/K/V+RoPE cones are contraction "
-    "operands (uncuttable until contraction-operand cuts land — the materialized-workspace-dtype xfails), so "
-    "every realizable route recomputes them per scalar output cell (~1e10 iterations/thread — a de-facto "
-    "device hang that wedges the CUDA context past the watchdog)"
-)
 def test_full_self_attn_tinyllama():
     """The real ``LlamaAttention`` from a TinyLlama config — the smallest scope that includes Q/K/V
     Linears, RoPE, masked SDPA, and O Linear. If this fails while the two simpler chains pass, the

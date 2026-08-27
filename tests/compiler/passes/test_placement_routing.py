@@ -1,7 +1,6 @@
 """Placement-routing acceptance tests over complete Fold trees.
 
 A scoped pin that names no cuttable seam fails rather than restoring the unpinned fork.
-Contraction-operand cuts remain xfailed until Tile IR records their materialized workspace dtype.
 """
 
 from __future__ import annotations
@@ -108,7 +107,6 @@ def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
     assert any(node.id == "y" for node in kernels)
 
 
-@pytest.mark.xfail(reason="contraction-operand cuts need an explicit materialized workspace dtype", strict=True)
 def test_scoped_cut_preserves_every_multi_output_parent_port() -> None:
     lowered = _compile(_norm_linear_graph(keep_norm=True), {"PLACE@a": "cut"})
     assert lowered.outputs == ["y", "xn"]
@@ -130,7 +128,6 @@ def test_pin_naming_no_seam_fails_loudly(value: str) -> None:
         _compile(_rms_graph(), {"PLACE@b": value})
 
 
-@pytest.mark.xfail(reason="contraction-operand cuts need an explicit materialized workspace dtype", strict=True)
 def test_contraction_operand_seam_takes_the_output_dtype() -> None:
     """A seam standing in for a contraction OPERAND holds what the fused slab stored — the atom's
     16-bit element — not the f32 its cone computed in.

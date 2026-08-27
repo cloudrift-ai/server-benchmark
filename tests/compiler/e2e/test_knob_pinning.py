@@ -117,7 +117,7 @@ def _assert_match(forced: np.ndarray, ref: np.ndarray) -> None:
 # ``CUDA_ERROR_MISALIGNED_ADDRESS`` → 1 s watchdog hang → bench_fail. The dtype-aware gate now
 # declines TMA for this slab (→ cp.async). The thread ``WORK`` inventory (no warp atom) forces the scalar
 # tier; the depth-2 ``STAGE`` ring double-buffers so the slot offset matters.
-_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/smem-async"}
+_NORM_REDUCE_WEDGE_KNOBS = {"TILE": "", "WORK": "t128", "STAGE": "d2/smem-async", "PLACE": "fuse"}
 _NORM_DIMS = {"S": 32, "H": 128, "I": 512}
 
 
@@ -132,10 +132,11 @@ def test_norm_linear_fp16_scalar_reduce_tma_alignment(shape_mode, monkeypatch):
     ``cp.async.bulk.tensor`` store and hung (``HungKernelError``); this test would
     time out. The numpy reference is the static graph; the forced CUDA run uses
     the mode's graph."""
-    # This pins a scalar cooperative-reduce config for the demoted matmul's CUT producer
-    # kernel (the #244 TMA wedge); SPLIT_CONE=1 forces that GMEM cut (the default is now the
-    # keep(SMEM) fused edge, which has no separate norm-reduce producer to wedge).
-    monkeypatch.setenv("EMMY_SPLIT_CONE", "1")
+    # This pins a scalar cooperative-reduce config (the #244 TMA wedge). ``PLACE=fuse`` keeps the
+    # kernel it decorates the fused edge: the ``d2/smem-async`` ring resolves only there, and with
+    # contraction-operand cuts on offer an unpinned placement can wander onto pieces it names
+    # nothing on. (``EMMY_SPLIT_CONE``, which once forced a GMEM cut producer here, has no reader
+    # any more.)
     static_graph, input_shapes, (out_name, _) = _build_norm_linear_graph(_NORM_DIMS)
     forced_graph, _, _ = _build_norm_linear_graph(_NORM_DIMS, mode=shape_mode)
     rng = np.random.default_rng(0)

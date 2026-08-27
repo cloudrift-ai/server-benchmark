@@ -28,11 +28,14 @@ from emmy.compiler.tensor import Tensor
 
 @dataclass(frozen=True)
 class CutSite:
-    """All stored occurrences of one canonically shared child Fold."""
+    """All stored occurrences of one canonically shared child Fold. ``dtypes`` is the workspace's
+    per-component materialization, decided at offer time so the realization stores exactly what
+    was offered."""
 
     node: Fold
     spelling: str
     axes: tuple
+    dtypes: tuple
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -44,14 +47,51 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
     return deep_reads(list(lowered)) <= defined | available
 
 
-def _workspace_dtypes(node: Fold, inputs) -> tuple | None:
+def _fed_store_dtype(tile: TileOp, consumer: Fold):
+    """The dtype ``consumer`` stores its result at: the output its accumulators transitively feed
+    (a forward closure over the root's lowered stmts covers any epilogue between the two), or
+    ``None`` when the fed dtypes are not a singleton. A multi-output kernel can store siblings at
+    other dtypes (w8a8's fp8 encode beside the f16 linear), so only the contraction's own stores
+    speak for its slabs — and when it feeds outputs at SEVERAL dtypes no one of them does, so the
+    seam stays undetermined and unoffered rather than resolved by list order."""
+    if not tile.output_specs:  # the default store: the root's result to the kernel's one output
+        tensor = next(iter(tile.outputs.values()), None)
+        return None if tensor is None else tensor.dtype
+    dependent = set(_operand_result_names(consumer))
+    stmts = tuple(tile.op.lower())
+    for _ in stmts:
+        grown = False
+        for stmt in stmts:
+            defines = deep_defines(stmt)
+            if not defines <= dependent and deep_reads([stmt]) & dependent:
+                dependent |= defines
+                grown = True
+        if not grown:
+            break
+    fed = {
+        tensor.dtype
+        for store in tile.output_specs
+        if store.write.value in dependent
+        if (tensor := tile.outputs.get(store.write.output)) is not None
+    }
+    return fed.pop() if len(fed) == 1 else None
+
+
+def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
-    typed pure program instead. A seam whose dtypes stay undetermined is not offered: the offer
-    and the realization must agree, and a raise past the offer would kill the compile."""
+    typed pure program instead. A seam standing in for a contraction OPERAND (``consumer`` is the
+    consuming contraction) is the exception: it materializes explicitly at the dtype that
+    contraction's output is stored at — the element the fused slab would have stored — never the
+    carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
+    a ``b`` edge could feed no warp atom). A seam whose dtypes stay undetermined is not offered:
+    the offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = _operand_result_names(node)
-    dtypes = (F32,) * len(names) if node.axis is not None else edge_dtypes(node, inputs)
+    if consumer is not None:
+        dtype = _fed_store_dtype(tile, consumer)
+        return None if dtype is None else (dtype,) * len(names)
+    dtypes = (F32,) * len(names) if node.axis is not None else edge_dtypes(node, tile.inputs)
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
     return dtypes
@@ -59,10 +99,12 @@ def _workspace_dtypes(node: Fold, inputs) -> tuple | None:
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
-    only by object sharing."""
+    only by object sharing. A contraction's operand edges are seams too — cutting one materializes
+    the cone feeding the operand into its own kernel and the contraction reads it back as an
+    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`)."""
     all_sites = sites(tile.op)
     contraction_operands = {
-        id(edge)
+        id(edge): site.node
         for site in all_sites
         if is_contraction(site.node)
         for edge in (site.node.a, *(channel.b for channel in site.node.channels))
@@ -80,15 +122,14 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if (
             not isinstance(node, Fold)
             or id(node) in seen
-            or id(node) in contraction_operands
             or not scopes
             or not all(_closed_at(node, scope) for scope in scopes)
-            or _workspace_dtypes(node, tile.inputs) is None
+            or (dtypes := _workspace_dtypes(node, tile, contraction_operands.get(id(node)))) is None
         ):
             continue
         seen.add(id(node))
         axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
-        out.append(CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes))
+        out.append(CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes, dtypes=dtypes))
     return tuple(out)
 
 
@@ -148,9 +189,6 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     token = digest(tile.structural_key(), seam.spelling)[:10]
     buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-    dtypes = _workspace_dtypes(child, tile.inputs)
-    if dtypes is None:  # the offer filters this seam out (`cuttable_seams`), so reaching it is a pass bug
-        raise ValueError(f"cannot cut {seam.spelling}: workspace result dtypes are not fully determined")
     loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
     parent_fold = _replace_fold(tile.op, child, loads)
 
@@ -169,7 +207,7 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     consumer.knobs = consume_kernel_row(consumer.knobs)
 
     fragment = _input_fragment(match, root)
-    workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, dtypes, strict=True))
+    workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
     fragment.add_node(
         op=producer,
         inputs=_piece_inputs(root, child),

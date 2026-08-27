@@ -1911,10 +1911,11 @@ _MASKED_CASES = {
     # at runtime is a separate gap, so accuracy rides the scalar tier (the structure render
     # reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).
     "batched_mk": ({}, (), [16, 31, 130, 512, 700], _make_batched_mk),
-    # The demoted B-cone / softmax-P@V splits run under GREEDY — the planner's own pick over the
-    # fused computed-operand cone. ``SPLIT_CONE`` forces the demotion split.
-    "demoted_n": ({"SPLIT_CONE": "1"}, (), [31, 130, 512, 700], _make_demoted_n),
-    "demoted_pv": ({"SPLIT_CONE": "1"}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
+    # The demoted B-cone / softmax-P@V shapes run under GREEDY — the planner's own pick over the
+    # fused computed-operand cone. (``SPLIT_CONE``, which once forced the demotion split here, has
+    # no reader any more.)
+    "demoted_n": ({}, (), [31, 130, 512, 700], _make_demoted_n),
+    "demoted_pv": ({}, (), [16, 31, 130, 512, 700], _make_pv_softmax),
     # The same softmax-P@V shape PINNED onto the mma tier: a COMPUTED A over a symbolic K, which
     # only the smem compute fill's K mask makes realizable. The straddling extents are where that
     # mask earns its keep — 16 and 31 are shorter than one whole slab chunk.

@@ -28,8 +28,8 @@ def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
             if value == "fuse":
                 return name, value
             # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
-            # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (a
-            # contraction operand — ``cuttable_seams`` excludes it), so a bare pin resolves among
+            # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
+            # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
             # the CUTTABLE seams instead: the root-most one.
             depth = {id(site.node): site.depth for site in all_sites}
             seam = min(seams, key=lambda s: depth[id(s.node)])

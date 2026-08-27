@@ -467,6 +467,17 @@ emits back to `i`, the symbolic-shape counterpart of the literal-divisor
 Symbolic-extent axes get `[0, sentinel]` ranges (non-negativity for the inner
 `(i*c + …)//c → i` div fold) instead of being dropped.
 
+`_div_mod_decompose` also sees through a division standing in its way (`A / d`
+decomposes by `n` once `A` decomposes by `n·d`), and through a sum whose one
+addend is a clean multiple of the divisor (the partner then owns the whole
+remainder, so restating it as `n·(x/n) + x%n` suffices). Together those separate
+a sub-byte-packed operand address: an NVFP4 weight spells `((row·K + k)/2) %
+(K/2)`, holding the row axis inside a division, and the decomposition puts the
+row on the quotient side where a consumer asking "does this index still mention
+the row outside a div/mod" can see it. The `loop/canonicalize` axis re-fusion is
+that consumer, and its answer decides whether a packed matmul binds a
+contraction at all.
+
 ### `loop/splicer.py` — LoopOp merger
 
 The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to

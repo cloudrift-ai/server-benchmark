@@ -1200,7 +1200,13 @@ class EmmyGenRunner:
                         ["x"],
                         np_dtype,
                         arena=arena,
-                        capacity=max_tokens,
+                        # The one program that can be handed the WHOLE step: pre/post split a
+                        # rider-width step across their static twins, but the routed dispatch
+                        # runs per expert over the step's own rows, and nothing stops every row
+                        # from choosing one expert (vLLM's profiling run, whose dummy rows are
+                        # identical, always does). Size it to the widest step the plugin admits
+                        # — the prefill capacity plus the decode-bucket rider allowance.
+                        capacity=None if max_tokens is None else max_tokens + decode_bucket,
                         **expert_kw,
                     )
                 # Static expert twins — the decode hot path. Same failure contract as

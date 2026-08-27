@@ -118,9 +118,11 @@ Extend the quantized split loader (`load_quantized_split` + `loader/quant.py`) w
    form.
 2. e8m0 scales: `F8_E8M0` reads as f32 `2^(e−127)` (torch's `.float()` on `float8_e8m0fnu` is the conversion).
 3. Routed experts: per-expert `w1/w3` (gate/up) and `w2` (down) stack into the E-leading store the expert programs
-   feed from. Bootstrap route: apply the snapshot's lossless fp4 → fp8+e8m0[128,128] cast per expert AT LOAD (no
-   converted checkpoint copy on disk) into the existing fp8 expert-input lane. Keep the cast byte-exact with the
-   reference `cast_e2m1fn_to_e4m3fn`.
+   feed from. **What landed instead of the planned fp8 cast:** the loader keeps the published MXFP4 bytes and views
+   them onto the uint8 blocks/scales carrier the expert programs already bind (`expert_dtype: fp4` selects it over
+   the fp8 trunk declaration), so serving deploys `@mxfp4` expert programs — half the expert bytes per rank, and no
+   cast to keep byte-exact. Two consequences, both found at the first real boot: the expert spelling had to learn
+   this checkpoint's `F.linear` weight layout, and the twin lane still spells `@f8e4m3` (below).
 4. `expert_range=(lo, hi)` filter so a rank reads only its expert shard (a PP stage's full fp8 expert set is
    ~138 GB of host RAM otherwise), alongside the existing `layer_range`.
 5. Trunk fp8: dequantize to fp16 values at load (existing lane), including the grouped `wo_a`'s [128,128] blocks.
@@ -194,6 +196,32 @@ expert destinations, PP transport, and mixed scheduling — token IDs either agr
   behind the same lock) — it is now scoped per physical device UUID.
 - The remaining gates move to the on-host block beside Stage 4's image work: (c) the TP8×PP2 target-host boot
   serving mixed prefill/decode, and (d) real-checkpoint layer-level numerics plus greedy token-ID agreement.
+
+### Gate (c) findings (2026-08-26, real checkpoint at TP8 × PP2)
+
+Two defects stood between the merged branch and a booting server. Both were invisible to every earlier gate
+because both live on paths only the real checkpoint's geometry reaches, and each killed all 16 workers:
+
+- **Expert spelling assumed one weight layout.** `spell_mxfp4_inputs` was written for gpt-oss, whose experts trace
+  as the `(in, out)` matrix applied with `x @ W`, so it closed the decode with a transpose. DeepSeek's experts are
+  `F.linear` parameters — `(out, in)`, already the stored orientation — and `w_down` failed its shape check before
+  a single weight was read. Each spec now declares its module's layout (`moe_expert_layout`), which is the only
+  sound source: a square expert matrix (gpt-oss `down_proj`, DeepSeek `gate_up_proj`) reads correctly both ways,
+  so a shape-sniffed guess would silently transpose the weights rather than fail.
+- **The rider destination was sized from a q/k/v seam.** A chunk step carrying decode riders splits across two
+  programs into one joint destination, sized from `(num_heads · head_dim, …)`. The fork-attention `pre` returns
+  one hidden-width activation instead — 4096 against the 32768 that sizing computed. vLLM's profiling run executes
+  at exactly the rider top (`max_num_batched_tokens` = prefill capacity + decode bucket = 4112), so this blocked
+  every boot of this seam, not an edge case. The post path already read its widths off the program's output count;
+  the pre path now does too.
+
+**Open, found here, not yet fixed:** the twin lane and the serving lane disagree about this checkpoint's experts.
+`mxfp4_weight_profile` keys on `quant_method == "mxfp4"`, and DeepSeek declares `quant_method: fp8` with
+`expert_dtype: fp4`, so `capture_twin_graphs` records the expert twin as `@f8e4m3` while serving deploys `@mxfp4`.
+Goldens are keyed by strict structural kernel identity, so the shipped `golden/v100_sm70.yaml` covers the
+routed-expert kernels not at all — they resolve from reservoir/prior evidence instead. Correctness is unaffected;
+Stage 4 would otherwise warm, bake and seal unqualified fork picks for the model's dominant kernel. The fix is one
+shared `expert_dtype: fp4` predicate for both lanes plus a golden re-record on the host.
 
 ## Stage 4 — image + release plumbing
 

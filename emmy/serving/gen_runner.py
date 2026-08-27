@@ -1110,7 +1110,7 @@ class EmmyGenRunner:
         expert_groups: dict[tuple, int] = {}  # shape key → group index
         moe_top_k = int(getattr(text_config, "num_experts_per_tok", 0) or 0)
 
-        def _build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, layer):
+        def _build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, layer):
             """Compile one expert SHAPE GROUP's whole program set: the symbolic any-width
             program, the static decode-bucket / M=1 / M=256 twins, and the ``top_k`` fixed-slot
             instances of the indirect M=1 twin. Returns the tier dict every layer of this group
@@ -1152,7 +1152,9 @@ class EmmyGenRunner:
                 }
                 example_w += [torch.zeros(*einputs[f"{n}_scale"].shape[1:], dtype=torch.float32) for n in ("w_gate_up", "w_down")]
             if expert_fmt == "mxfp4":
-                mxfp4_specs = {n: (tuple(einputs[n].shape[1:]), tuple(einputs[f"{n}_scale"].shape[1:])) for n in ("w_gate_up", "w_down")}
+                mxfp4_specs = {
+                    n: (tuple(einputs[n].shape[1:]), tuple(einputs[f"{n}_scale"].shape[1:]), transposed) for n in ("w_gate_up", "w_down")
+                }
                 aux_examples = {
                     n: torch.zeros(*einputs[n].shape[1:], dtype=torch.uint8)
                     for n in ("w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale")
@@ -1383,7 +1385,7 @@ class EmmyGenRunner:
                 g = expert_groups.get(shape_key)
                 if g is None:
                     g = expert_groups[shape_key] = len(expert_tiers)
-                    expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, i))
+                    expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, i))
                 moe_meta[-1]["group"] = g
             else:
                 pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)

@@ -297,7 +297,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   input name, and gate/up de-interleaved once on its physical output axis. FP8 keeps raw bits,
   f32 scales and value-dtype biases; `_compile_split` applies `spell_quantized_inputs`. MXFP4 keeps raw uint8 blocks,
   uint8 E8M0 scales and value-dtype biases; `_compile_split` applies `spell_mxfp4_inputs` and binds the physical feed
-  by name because its shapes differ from the traced logical weights. Native MXFP4 currently requires every routed
+  by name because its shapes differ from the traced logical weights. Stored blocks are always `(out, in/32, 16)`, so
+  the decode lands in the `(out, in)` orientation — the spelling ends in a transpose only for the `x @ W` expert
+  layout, and none for the `F.linear` one the published DeepSeek experts share with their stored blocks. That layout
+  is DECLARED by the experts module (`moe_expert_layout`), never read off the shapes: a square expert matrix fits both
+  readings, and the wrong one silently transposes the weights. Native MXFP4 currently requires every routed
   expert layer to remain compressed; skip patterns that would mix plain and MXFP4 expert formats are rejected before
   twin compilation. Every per-expert input is a per-launch slice of
   the store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot

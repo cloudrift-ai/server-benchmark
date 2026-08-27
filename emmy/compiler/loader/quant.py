@@ -1354,17 +1354,21 @@ def spell_quantized_inputs(
 
 def spell_mxfp4_inputs(
     graph: Graph,
-    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
+    specs: dict[str, tuple[tuple[int, ...], tuple[int, ...], bool]],
 ) -> dict[str, str]:
     """Spell logical expert inputs as native MXFP4 blocks plus E8M0 scales.
 
-    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice.
-    The traced logical input remains the wrapper's ``(in, out)`` value matrix,
-    while the re-minted ``name`` input binds ``(out, in/32, 16)`` uint8 blocks
-    and the appended ``<name>_scale`` input binds ``(out, in/32)`` uint8 scales.
-    Generic tensor algebra decodes the nibbles and scale exponents in-graph, so
-    lowering can fuse those operations into the ordinary matrix multiplication
-    instead of materializing a persistent dense expert table.
+    ``specs[name]`` is ``(blocks_shape, scales_shape, transposed)`` for one expert slice.
+    The re-minted ``name`` input binds ``(out, in/32, 16)`` uint8 blocks and the appended
+    ``<name>_scale`` input binds ``(out, in/32)`` uint8 scales; the nibbles always decode
+    in that stored ``(out, in)`` orientation. ``transposed`` is the experts module's weight
+    layout (:func:`~emmy.compiler.trace.huggingface.moe_expert_layout`): ``True`` when the
+    traced placeholder is the ``(in, out)`` matrix applied as ``x @ W``, so the decode ends
+    in a transpose, and ``False`` for the ``F.linear`` ``(out, in)`` orientation, which the
+    decode already lands in. The layout is declared rather than read off the shapes because
+    a square expert matrix fits both. Generic tensor algebra decodes the nibbles and scale
+    exponents in-graph, so lowering can fuse those operations into the ordinary matrix
+    multiplication instead of materializing a persistent dense expert table.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
@@ -1374,7 +1378,7 @@ def spell_mxfp4_inputs(
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     out_map: dict[str, str] = {}
-    for name, (blocks_shape, scales_shape) in specs.items():
+    for name, (blocks_shape, scales_shape, transposed) in specs.items():
         node = graph.nodes.get(name)
         if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
             raise ValueError(f"spell_mxfp4_inputs: {name!r} is not a graph input")
@@ -1385,7 +1389,7 @@ def spell_mxfp4_inputs(
         blocks_shape, scales_shape = tuple(blocks_shape), tuple(scales_shape)
         if len(logical) != 2:
             raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be rank-2, got {logical}")
-        k, n = logical
+        k, n = logical if transposed else logical[::-1]
         expected_blocks = (n, k // 32, 16) if k % 32 == 0 else None
         expected_scales = (n, k // 32) if k % 32 == 0 else None
         if blocks_shape != expected_blocks or scales_shape != expected_scales:
@@ -1535,11 +1539,12 @@ def spell_mxfp4_inputs(
             inputs=[decoded],
             output=Tensor(f"{name}_stored_orientation", (n, k), "f32"),
         )
-        decoded = graph.add_node(
-            op=TransposeOp(axes=(1, 0)),
-            inputs=[decoded],
-            output=Tensor(f"{name}_logical_f32", logical, "f32"),
-        )
+        if transposed:
+            decoded = graph.add_node(
+                op=TransposeOp(axes=(1, 0)),
+                inputs=[decoded],
+                output=Tensor(f"{name}_logical_f32", logical, "f32"),
+            )
         if out.dtype.name != "f32":
             decoded = graph.add_node(
                 op=ElementwiseOp(op="copy"),

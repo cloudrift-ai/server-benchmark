@@ -552,8 +552,8 @@ def consume_kernel_row(knobs: dict) -> dict:
 
 
 #: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
-#: and ``@``-keyed) plus the precision gates ``_schedule._f16acc_allowed`` / ``_f8_mma_allowed``
-#: read (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
+#: and ``@``-keyed) plus the precision gates the scheduler's catalog arm reads through
+#: ``precision_pin`` (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
 #: they decide whether the f16-accumulate / native-fp8 atom rows are OFFERED, so they change the
 #: pool exactly like a family pin). The pool cache's pin
 #: fingerprint must cover exactly this set; a knob outside it cannot change which rows enumerate.

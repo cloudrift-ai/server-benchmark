@@ -259,12 +259,15 @@ def test_canonical_nest_classifies_as_contraction():
 # --- the warp tier's split-store addressability --------------------------------------------------- #
 
 
-def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16, 8, 16)) -> str | None:
-    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16, 8, 16)) -> bool:
+    """Whether an mma fragment store with output ``atom`` cells can address ``index`` — the
+    scheduler's own gate (``_split_store_refusal``), so the roles mapping under test is the
+    production one."""
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _split_store_refusal
 
     free = tuple(Axis(nm, Dim(4)) for nm in free_names)
     shapes = {"out": Tensor("out", shape)}
-    return legal.warp_split_store([Write(output="out", index=index, value="acc")], free, atom, shapes)
+    return _split_store_refusal([Write(output="out", index=index, value="acc")], free, atom, shapes) is None
 
 
 def _pair(name: str, q: int, op: str):
@@ -278,17 +281,17 @@ def test_warp_split_store_legality():
     ``Q`` a multiple of the atom extent — an aligned atom never straddles a ``Q`` boundary."""
     lit0 = Literal(0, "int")
     # #561's row-major N split: affine recomposition, Q=4 is fine.
-    assert _split_store_ok((lit0, Var("m"), _pair("n", 4, "//"), _pair("n", 4, "%")), (1, 8, 3, 4)) is None
+    assert _split_store_ok((lit0, Var("m"), _pair("n", 4, "//"), _pair("n", 4, "%")), (1, 8, 3, 4))
     # The transposed projection: permuted strides, Q % 8 == 0.
-    assert _split_store_ok((lit0, _pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), (1, 2, 8, 32)) is None
+    assert _split_store_ok((lit0, _pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), (1, 2, 8, 32))
     # Permuted with Q=12: an 8-wide atom straddles a head boundary.
-    assert "Q=12" in _split_store_ok((lit0, _pair("n", 12, "//"), Var("m"), _pair("n", 12, "%")), (1, 4, 8, 12))
+    assert not _split_store_ok((lit0, _pair("n", 12, "//"), Var("m"), _pair("n", 12, "%")), (1, 4, 8, 12))
     # The within-pair transpose (quotient dim inner) never addresses — in either stride regime.
-    assert "quotient" in _split_store_ok((lit0, Var("m"), _pair("n", 32, "%"), _pair("n", 32, "//")), (1, 8, 32, 2))
+    assert not _split_store_ok((lit0, Var("m"), _pair("n", 32, "%"), _pair("n", 32, "//")), (1, 8, 32, 2))
     # An M-side permuted split (a batch dim between the row's pair) needs 16-row atoms inside
     # one ``P`` block.
-    assert _split_store_ok((lit0, _pair("m", 32, "//"), Var("b"), _pair("m", 32, "%"), Var("n")), (1, 2, 3, 32, 16)) is None
-    assert "Q=8" in _split_store_ok((lit0, _pair("m", 8, "//"), Var("b"), _pair("m", 8, "%"), Var("n")), (1, 2, 3, 8, 16))
+    assert _split_store_ok((lit0, _pair("m", 32, "//"), Var("b"), _pair("m", 32, "%"), Var("n")), (1, 2, 3, 32, 16))
+    assert not _split_store_ok((lit0, _pair("m", 8, "//"), Var("b"), _pair("m", 8, "%"), Var("n")), (1, 2, 3, 8, 16))
 
 
 def test_warp_roles_move_only_the_innermost_carrier():
@@ -368,7 +371,7 @@ def test_bilinear_binding_is_independent_of_the_product_argument_order():
     Fusion emits the value load first in the deployed attention cell, so an order-sensitive binder
     would bind one spelling and decline its twin. What the B edge becomes is NOT asserted here: the
     old binder answered slab addressability itself by forcing a computed cone, and that question
-    now belongs to ``_legality``. Order independence is the part that is still this rule's."""
+    now belongs to the scheduler's warp-atom gate. Order independence is the part that is still this rule's."""
     group = BinaryExpr("//", Var("h"), Literal(3, "int"))
     flat = BinaryExpr("+", BinaryExpr("*", group, Literal(D, "int")), Var("n"))
     w_index = (Literal(0, "int"), Var("k"), Literal(0, "int"), flat)

@@ -392,15 +392,17 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
     assert "mma.sync" not in source
 
 
-def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
-    """A graph-wide warp pin can be inapplicable to a mixed-dtype sibling. The scheduler then
-    leaves that term unmapped; scalar materialization must restore its free-axis grid rather than
-    emit loads and stores that reference coordinates no thread binds.
+@pytest.mark.parametrize("a_dtype", ["f8", "f32"])
+def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkeypatch):
+    """A graph-wide warp pin can name a tier a sibling's operand dtypes do not select. The
+    scheduler then leaves that term unmapped; scalar materialization must restore its free-axis
+    grid rather than emit loads and stores that reference coordinates no thread binds.
 
-    The ``a`` edge is 1-byte here: a 16-bit ``a`` the atom cannot bind directly rides the
-    CONVERTING smem compute fill instead (the fill's slab store converts), so it is realizable and
-    would not exercise the fallback. The fill is 16-bit-only, which leaves the f8 edge with no warp
-    row at all — the drop this guardrail is written against."""
+    Two dtype-choice drops, one per arm: an ``f8`` ``a`` edge has no warp tier at all in this
+    prototype (the byte tier is not restored, and the 16-bit-only converting smem compute fill
+    cannot carry it), and an ``f32`` ``a`` selects no tensor-core atom on any target. A 16-bit
+    ``a`` the atom cannot bind directly would ride the converting fill instead — realizable, so it
+    would not exercise the fallback."""
     from emmy.compiler.context import Context
     from emmy.compiler.dtype import F8E4M3, F16, F32
     from emmy.compiler.graph import Graph, Tensor
@@ -420,7 +422,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(monkeypatch):
         monkeypatch.setenv(f"EMMY_{key}", value)
 
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), F8E4M3), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), {"f8": F8E4M3, "f32": F32}[a_dtype]), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16), node_id="w")
     graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
     graph.inputs, graph.outputs = ["x", "w"], ["o"]

@@ -915,25 +915,25 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
 
 
 def test_f16acc_enumeration_policy(monkeypatch):
-    """The precision policy is target-blind: the ``FAST_MATH`` umbrella offers the f16-accumulate
+    """The precision policy is target-blind — the scheduler's catalog arm reads ``precision_pin``
+    alone, with no target in the question: the ``FAST_MATH`` umbrella offers the f16-accumulate
     forks everywhere they are legal (which sibling deploys is evidence's decision per shape and
     card), and the precise ``F16_MMA_F32_ACC`` pin stays authoritative in both directions."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _f16acc_allowed  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
-    def allowed(cc, **env) -> bool:
+    def allowed(**env) -> bool:
         for var in ("EMMY_FAST_MATH", "EMMY_F16_MMA_F32_ACC"):
             monkeypatch.delenv(var, raising=False)
         for var, val in env.items():
             monkeypatch.setenv(var, val)
-        return _f16acc_allowed(Context.from_target(cc))
+        return bool(precision_pin(F16_MMA_F32_ACC))
 
-    assert not allowed((12, 0)), "policy unset: no f16acc forks"
-    assert allowed((12, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks"
-    assert allowed((9, 0), EMMY_FAST_MATH="1"), "FAST_MATH offers the forks on every target — evidence ranks them"
-    assert allowed((9, 0), EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
-    assert not allowed((12, 0), EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
+    assert not allowed(), "policy unset: no f16acc forks"
+    assert allowed(EMMY_FAST_MATH="1"), "FAST_MATH offers the forks — on every target, evidence ranks them"
+    assert allowed(EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
+    assert not allowed(EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
 
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     rows = enumerate_graph(_mma_matmul_graph("static", 128, 128, 128, _F16, False), Context.from_target((12, 0))).rows

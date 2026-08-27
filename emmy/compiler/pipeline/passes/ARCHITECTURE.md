@@ -91,9 +91,22 @@ matters because the join is where nearly all the pruning happens: on flash atten
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
 under the CTA thread budget, so no member can exceed it); constraints that are a function of the NODE live beside the
-moves they filter. Nothing may narrow for SPEED — a slow candidate is a fork the evidence decides, never a row
-withheld. A pin narrows the same way: an option the pin does not name is not offered, and a pin that names none is an
-error rather than a silent empty enumeration.
+moves they filter — the warp tier's eligible atoms are read once per node from its algebra, its operand dtypes and the
+gmem addressing its fragment loaders and fragment store must reach. Nothing may narrow for SPEED — a slow candidate is
+a fork the evidence decides, never a row withheld.
+
+**A pin is authoritative over the VALUE, not over the catalog.** A site's spelling carries no worker widths — they are
+read off `WORK` — so one `TILE` pin names a different plan under each inventory, and it may well name a plan no ladder
+generates: fixing widths no catalog predicts is what a pin is for. A pin therefore REPLACES the site's candidates with
+what it names at each inventory the site can spell it against (the pinned one, when `WORK` is pinned too). An option
+the pin does not name is not offered, and its refusals are TWO-LAYERED: a pin whose named tier the node's algebra and
+operand dtypes do not select drops onto the guardrail (a graph-wide pin fans out to siblings it cannot mean; `REDUCE`
+has no such layer because it has no choice of tier), while a pin whose tier is selected but whose named plan cannot
+realize — an atom these fragments cannot bind, an inventory over the CTA thread budget, a band the fold has no
+geometry for — raises the recorded refusal rather than silently emptying the enumeration. `WORK` is different again:
+it is kernel-global and cannot be narrowed at any one site, so it lives as a parsed fact beside the walk — an option
+claiming a different inventory is refused where it is offered, and a walk that never claimed the pinned inventory is
+refused at the leaf, which leaves the term unmapped.
 
 **The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
 prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
@@ -101,10 +114,19 @@ tree carries choices only. Traversal order is the fork order — there is no sep
 with the walk. `WORK` leads because the root owns the free axes it is read off, and it is stamped the moment an
 option claims an inventory, which `Ctx.extend` then refuses to change.
 
-Because options are a function of the node alone, a node that offers nothing offers it under every context: one pass
-over the tree says whether the term has a schedule at all. Past that check every node still has an option that
-composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise leaves it
-does not have. A term with no schedule leaves the tile unmapped for the scalar materialization path.
+Because options are a function of the node and the live pins alone, a node that offers nothing offers it under every
+context: one pass over the tree says whether the term has a schedule at all. Past that check every node still has an
+option that composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise
+leaves it does not have — a site pin that would empty a selected tier's offer raises there instead. A `WORK` pin can
+only be answered once the walk reaches a leaf, and a bare site pin can still be emptied by a sibling site's geometry
+— unreachable today, and the fragment-seam cluster will make it real. A term with no schedule leaves the tile
+unmapped for the scalar materialization path.
+
+A row is the kernel's WHOLE identity, so a family the walk decided nowhere is spelled at its declared OFF rather than
+left absent — otherwise two rows of one kernel would carry different family vocabularies and the evidence hierarchy
+would not join them. The same reasoning puts the structural `S_warp_eligible` stamp on the row prefix: it is read off
+the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
+from the rows it does enumerate.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's cost is the minimum sum over the kernels it produces, which is why it is a separate
@@ -215,9 +237,10 @@ div/mod residue is present, so a row-major split store keeps its vectorized tran
 stores scalar on the scalar tiers — exact, unvectorized). The warp tier's fragment store evaluates the cell
 base once per atom and adds `col` / `row · ldm` across it, so a split pair is mma-addressable only when the
 row-major flatten recomposes it, or when the `%` dim is the innermost carrier (contiguous for `n`) with `Q` a
-multiple of the atom extent — an aligned atom never straddles a `Q` boundary. That is the `warp_split_store`
-legality predicate: dropped by the unpinned catalog, raised on a pin, like every other tile gate; the scalar
-tiers, which evaluate every element's index, are always exact.
+multiple of the atom extent — an aligned atom never straddles a `Q` boundary. That is `split_addressable`, the
+per-axis address predicate beside `split_pair` in the shared addressing module, asked over the projection tail by the
+scheduler's `_split_store_refusal`: a node whose store fails it binds no warp atom, and a pin naming one raises the
+refusal; the scalar tiers, which evaluate every element's index, are always exact.
 
 ## Total lift at the Loop IR → Tile IR boundary
 

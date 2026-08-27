@@ -1,14 +1,17 @@
 """Structural-coverage test for the permitted-move catalog (``search/space.py``).
 
-The scheduling emit (``010_recognize`` → ``_schedule``) enumerates the catalog into the tile fork; this
-file pins the catalog's **legal product** two ways:
+The tile schedule (``040_schedule`` → ``_schedule``) enumerates the catalog into the tile fork; this
+file pins the catalog's **legal set** three ways:
 
 - the catalog function ``scalar_tile_moves()`` equals the hand-computed ``(par × reg)`` grid plus the
   per-cell tile, legality-guarded (``par_n·par_m ≤ 1024``), read through the SITE spelling each
   move stores as (its site ``TILE`` value + the ``WORK`` inventory it implies). Membership is what
   is pinned, never position — the catalogs rank nothing;
-- the **leaf set** the scheduler actually emits over a matmul fixture equals that product (keyed
-  ``TILE@<k_axis>``) — so a missing / extra move is caught structurally, without lowering a kernel.
+- the **leaf set** the walk actually emits over an f32 matmul / bare-reduce fixture equals that
+  catalog, so a missing / extra move is caught structurally, without lowering a kernel;
+- the cross-site refusals the walk applies while descending — one worker inventory, agreeing tile
+  geometry on a shared physical axis, one decision per Fold — asked of ``Ctx.extend`` directly,
+  which is the one place they live.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers, plan_workers, resolve_site_tile
+from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers, plan_workers, resolve_site_tile
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -107,8 +110,20 @@ def _fp16_matmul_graph() -> Graph:
     return g
 
 
-def test_over_budget_warp_tile_offers_only_gmem_direct(monkeypatch):
-    """The known 128 KiB slot is addressed through a narrow pin and offers no staged sibling."""
+def _tile_scheduled(op) -> bool:
+    """Whether ``op`` is a kernel the tile schedule decided — it carries a ``TILE`` family key."""
+    return bool(getattr(op, "knobs", None)) and any(family_of(k) == "TILE" for k in op.knobs)
+
+
+def test_tile_pin_forces_the_named_warp_row(monkeypatch):
+    """A TILE pin at one inventory forces the walk to exactly the row it names.
+
+    The pin names one tile at one inventory, so the walk is FORCED and there is no fork to read the
+    offer off: the rows it offered are the leaves of whatever fork survived, plus the kernel it
+    actually realized — a forced walk offers exactly the row it built. The STAGE assertion below is
+    vacuously true until the staging cluster restores the family; it then becomes the smem-budget
+    claim this fixture was built for (the known over-budget 128 KiB slot on sm_89 must offer no
+    staged sibling)."""
     ctx = Context.from_target((8, 9))  # the issue's sm_89 cap (101376 B)
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f4x8/k8")
     monkeypatch.setenv("EMMY_WORK", "w4x4")
@@ -120,8 +135,10 @@ def test_over_budget_warp_tile_offers_only_gmem_direct(monkeypatch):
         rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         return leaves[0]
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
+    resolved, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_fp16_matmul_graph(), decide)
+    rows.extend(dict(node.op.knobs) for node in resolved.nodes.values() if _tile_scheduled(node.op))
     assert rows
+    assert all(family_value(row, "TILE") == "mma_m16n8k16_f16_f32/f4x8/k8" for row in rows)
     assert all(family_value(row, "STAGE") == "" for row in rows)
 
 
@@ -227,82 +244,53 @@ def _computed_a_term() -> TileOp:
     )
 
 
-def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
-    """Reversed algebraic m/n readings may share a grid only at equal physical axis widths."""
-    from types import SimpleNamespace
+def test_independent_roots_only_cross_physically_compatible_tiles():
+    """Reversed algebraic m/n readings may share a grid only at equal physical axis widths.
 
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+    ``Ctx.extend`` is the ONE place that rule lives now: an option's placed tile joins the context
+    only when every physical axis it names is already tiled the same way, so a second site reading
+    the same grid as ``(n, m)`` composes at the mirrored register widths and refuses at any other.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
 
-    first = SimpleNamespace(keys={"TILE": "TILE@first"}, site=SimpleNamespace(node="first"))
-    second = SimpleNamespace(keys={"TILE": "TILE@second"}, site=SimpleNamespace(node="second"))
-    first_plan = TilePlan(regs=(1, 2))  # physical m=1, n=2
-    compatible = TilePlan(regs=(2, 1))  # under (n, m): physical n=2, m=1
-    incompatible = TilePlan(regs=(1, 2))  # under (n, m): physical n=1, m=2
-    rows = {
-        "first": [sch._Row(knobs={"TILE@first": first_plan.spell()}, plans={"TILE@first": first_plan})],
-        "second": [
-            sch._Row(knobs={"TILE@second": compatible.spell()}, plans={"TILE@second": compatible}),
-            sch._Row(knobs={"TILE@second": incompatible.spell()}, plans={"TILE@second": incompatible}),
-        ],
-    }
+    m, n = Axis("m", 8), Axis("n", 8)
+    first = TilePlan(regs=(1, 2)).at(m, n)  # physical m 1 wide, n 2 wide
+    compatible = TilePlan(regs=(2, 1)).at(n, m)  # under (n, m): physical n 2 wide, m 1 wide
+    incompatible = TilePlan(regs=(1, 2)).at(n, m)  # under (n, m): physical n 1 wide, m 2 wide
 
-    monkeypatch.setattr(sch, "_site_catalogs", lambda _term, root, *_a, **_k: iter((rows[root.site.node],)))
-    axes = (Axis("m", 8), Axis("n", 8))
-    sched = SimpleNamespace(placed=lambda node, plan: plan.at(*(axes if node == "first" else tuple(reversed(axes)))))
-    term = SimpleNamespace(
-        tree=(first, second),
-        sched=sched,
-        tile_nodes={"TILE@first": "first", "TILE@second": "second"},
-        fragment_edges=(),
-    )
-
-    result = sch._term_rows(term)
-    assert len(result) == 1
-    assert result[0] == sch._Row.union((rows["first"][0], rows["second"][0]))
+    ctx = Ctx().extend(_Option({"TILE@first": first.spell()}, tile=first))
+    assert ctx is not None
+    assert ctx.extend(_Option({"TILE@second": compatible.spell()}, tile=compatible)) is not None
+    assert ctx.extend(_Option({"TILE@second": incompatible.spell()}, tile=incompatible)) is None
 
 
-def test_fragment_consumer_may_inline_an_untiled_producer():
-    """A scalar child has no fragment interface; the tiled consumer may evaluate it into smem."""
-    from types import SimpleNamespace
+def test_one_fold_reached_twice_is_one_decision():
+    """A key several sites spell is ONE decision: the second occurrence may only re-spell the
+    first's value. ``Ctx.decided`` states it, and it is what keeps a shared child (MoE experts
+    under one map, the repeated steps of a nested fold chain) from naming two kernels in one row.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
 
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
-
-    warp = resolve_site_tile("mma_m16n8k16_f16_f32/f1x1", Workers.parse("w1x1"))
-    scalar = TilePlan()
-    term = SimpleNamespace(fragment_edges=(("TILE@consumer", "TILE@producer"),))
-
-    def interface(consumer, producer):
-        plans = tuple(sorted({"TILE@consumer": consumer, "TILE@producer": producer}.items()))
-        stages = (("TILE@consumer", Stage(transport="smem")),)
-        return True, (), plans, stages
-
-    assert sch._merge_interfaces(term, (interface(warp, scalar),)) is not None
-    assert sch._merge_interfaces(term, (interface(scalar, warp),)) is None
-
-
-def test_unaddressable_schedule_product_fails_at_the_sequence_boundary():
-    """A compatibility product larger than Python can index is unsupported until the product is
-    factorized; fail before traversing it instead of imposing a smaller arbitrary row cap."""
-    from types import SimpleNamespace
-
-    import pytest
-
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
-
-    term = SimpleNamespace(tile_nodes={}, sched=None, fragment_edges=(), shared_keys=frozenset())
-    parts = tuple(
-        (
-            sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan()}),
-            sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan(regs=(1, 2))}),
-        )
-        for i in range(64)
-    )
-    with pytest.raises(OverflowError, match="addressable sequence size"):
-        sch._ComboSpace.build(term, parts)
+    ctx = Ctx().extend(_Option({"REDUCE@k": "coop"}, work=Workers.parse("t32")))
+    assert ctx is not None
+    assert ctx.extend(_Option({"REDUCE@k": "coop"}, work=Workers.parse("t32"))) is not None
+    assert ctx.extend(_Option({"REDUCE@k": "r2"})) is None
+    # One kernel, one worker inventory — a second claim that disagrees is the same refusal.
+    assert ctx.extend(_Option({"REDUCE@j": "coop"}, work=Workers.parse("t64"))) is None
 
 
 # --- WORK pin narrowing -------------------------------------------------------------------------- #
+
+
+def _rows_of(tile, ctx=None) -> list[dict]:
+    """Every row ``tile`` enumerates — the leaves of the walk's own fork, or the single row a
+    fully forced walk returns as a bare ``TileOp``."""
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+
+    out = schedule(tile, "k", {}, ctx or Context.from_target((12, 0)))
+    if not isinstance(out, list):
+        return [dict(out.knobs)]
+    return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 
 def test_work_pin_never_widens_a_site_catalog(monkeypatch):
@@ -311,7 +299,6 @@ def test_work_pin_never_widens_a_site_catalog(monkeypatch):
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
     from emmy.compiler.ir.tile import Placement, TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
     ctx = Context.from_target((12, 0))
@@ -324,43 +311,67 @@ def test_work_pin_never_widens_a_site_catalog(monkeypatch):
     )
     tile = TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
 
-    def inventories() -> list[str]:
-        """The inventories the term OFFERS — read off the space's segments, which is now the only
-        place they exist: a segment is stamped with the inventory its own rows claim, so what is
-        offered and what is spellable cannot drift apart."""
-        term = sch._Term(tile, tile.place.on_grid(), ctx)
-        return [segment.knobs["WORK"] for segment in sch._space(term).segments]
+    def inventories() -> set[str]:
+        """The inventories the term OFFERS — read off the rows themselves, which is now the only
+        place they exist: a row spells the inventory its own options claimed, so what is offered
+        and what is spellable cannot drift apart."""
+        return {str(row.get("WORK", "")) for row in _rows_of(tile, ctx)}
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
     offered = inventories()
     assert offered and not any(w.startswith("w") for w in offered), offered  # reduce bands only
 
     # A pin the site DOES offer narrows to it alone.
-    monkeypatch.setenv("EMMY_WORK", offered[-1])
-    assert inventories() == [offered[-1]]
+    def width(w: str) -> int:
+        parsed = Workers.parse(w or None)
+        return parsed.count if parsed is not None else 0
+
+    widest = max(offered, key=width)
+    monkeypatch.setenv("EMMY_WORK", widest)
+    assert inventories() == {widest}
 
     # A pin it cannot offer never manufactures an inventory or restores unpinned siblings.
     monkeypatch.setenv("EMMY_WORK", "w4x1")
-    assert inventories() == []
+    assert inventories() == set()
 
 
 # --- what the enumeration owes: membership, not position ----------------------------------------- #
 
 
-def _rows_of(tile) -> list[dict]:
-    """Every row ``tile`` enumerates."""
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+def _plain_matmul_term() -> TileOp:
+    """A static f32 matmul as an unmapped ``TileOp`` — no warp atoms (f32 has no tensor-core cell),
+    so the scalar catalog is the whole ``TILE`` offer."""
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+    node = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    return TileOp(
+        op=node,
+        place=Placement(free=(m, n)),
+        inputs={"a": Tensor("a", (64, 64), "f32"), "b": Tensor("b", (64, 64), "f32")},
+        outputs={"out": Tensor("out", (64, 64), "f32")},
+    )
 
-    term = sch._Term(tile, tile.place.on_grid(), Context.from_target((12, 0)))
-    rows, _keys, _total = sch._enumerate(term)
+
+def test_matmul_leaf_set_equals_the_scalar_catalog(monkeypatch):
+    """The leaf set the walk emits over a plain f32 matmul equals ``scalar_tile_moves()`` read
+    through the stored (site ``TILE`` value, ``WORK``) pair — a missing or extra move is caught
+    structurally, without lowering a kernel. Membership, never position."""
+    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_REDUCE"):
+        monkeypatch.delenv(var, raising=False)
+    rows = _rows_of(_plain_matmul_term())
     assert rows, "the term enumerated nothing"
-    return rows
+    offered = {(str(family_value(r, "TILE") or ""), str(r.get("WORK", ""))) for r in rows}
+    assert offered == {_stored(p) for p in scalar_tile_moves()}
 
 
 def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
     """Without an f32 MMA atom, computed A must still ride a scalar output tile so one A value can
     be reused across N instead of the per-cell fallback recomputing its entire cone for every output."""
     rows = _rows_of(_computed_a_term())
+    assert rows, "the term enumerated nothing"
 
     def tile_of(row) -> TilePlan:
         work = Workers.parse(str(row.get("WORK", "")))
@@ -402,7 +413,9 @@ def test_the_all_off_row_is_always_offered(monkeypatch):
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
     for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
-        stamped = [stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")}) for row in _rows_of(tile)]
+        rows = _rows_of(tile)
+        assert rows, f"{label}: the term enumerated nothing"
+        stamped = [stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")}) for row in rows]
         assert any(all(is_off_value(family_of(fam), value) for fam, value in row.items()) for row in stamped), (
             f"{label}: no row spells every family's OFF value"
         )
@@ -416,7 +429,9 @@ def test_a_cooperative_row_spells_its_own_inventory(monkeypatch):
     which of them the walk emitted first."""
     monkeypatch.delenv("EMMY_WORK", raising=False)
     for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
-        for row in _rows_of(tile):
+        rows = _rows_of(tile)
+        assert rows, f"{label}: the term enumerated nothing"
+        for row in rows:
             work = str(row.get("WORK", ""))
             coop = [v for k, v in row.items() if family_of(k) == "REDUCE" and isinstance(v, str) and "coop" in v]
             if not coop:

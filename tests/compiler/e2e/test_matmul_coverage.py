@@ -1720,7 +1720,8 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
 def test_batched_symbolic_mk_reaches_warp(monkeypatch):
     """The batched masked-M + masked-K P@V consumer must reach the mma.sync tier (the
     ``classify_matmul_operands`` batch-aware B test), not stay a LoopOp."""
-    for k, v in _CP_KNOBS.items():
+    # Both operands are direct graph inputs, so this case has no computed edge to stage.
+    for k, v in {**_CP_KNOBS, "STAGE": ""}.items():
         monkeypatch.setenv(f"EMMY_{k}", v)
     lowered = Pipeline.build(CUDA_PASSES).run(_batched_symbolic_mk_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op

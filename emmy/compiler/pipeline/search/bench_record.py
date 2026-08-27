@@ -1,11 +1,27 @@
-"""Bench-to-node recording — ``run --bench`` A/B measurements become node-store leaves.
+"""Bench recording — ``run --bench`` A/B measurements become tune-DB rows.
 
-The tune engine was the node table's only writer, so the manual golden/``--ab`` sweeps
+The tune engine was the tune DB's only writer, so the manual golden/``--ab`` sweeps
 that found optima the search missed (the fm-lane story) never became training data — the
 region around each golden stayed censored in every freeze. This module closes that loop:
 a ``run --bench`` invocation that benched pinned rows records each clean measurement as a
 parentless leaf ``NodeRow`` in the canonical tune DB, where the measurement freeze and
 the offline-prior fit pick it up like any tune leaf.
+
+A clean row that was benched under graph capture ALSO becomes a measured ``perf`` row —
+the table an ordinary compile reads to decide a fork (``policy/greedy._db_measured_index``).
+Training data alone could never change a deploy: nothing consults the node table while
+compiling, so a sweep that proved a config fastest still lost every later compile to an
+unmeasured model extrapolation. Two consequences worth knowing before running a sweep:
+
+- **a sweep changes what the next compile picks.** That is the point — measured evidence
+  outranks the model — and it is why the exclusions below are strict. ``--no-record-nodes``
+  opts out of the whole write.
+- **a sweep also fills the tune's bench cache.** ``TerminalBench.prelude`` short-circuits a
+  terminal whose kernels all have a ``perf`` row, so a later ``emmy tune`` of the same
+  kernels takes this run's medians as its reward instead of benching them again. Accepted
+  deliberately: the quality bar below is the tuner's own pinned-bench standard and both
+  sides are whole-graph captured benches with per-launch attribution, so the numbers are
+  the same kind of thing. Re-measure with a fresh DB when that is not what you want.
 
 Recording is **default-on behind a quality bar** (:func:`meets_quality_bar` — the tuner's
 own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
@@ -154,13 +170,32 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
     return leaves
 
 
-def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLeaf], *, run_id: str | None = None) -> int:
-    """Key ``leaves`` with the tune's own recipes and upsert them into the node store
-    at ``db_path`` — parentless ``depth=0`` leaf rows under the live context's regime
-    (``run --bench`` compiles at the deployable flags, so these land in the -O3 lane
-    the store is censored in). Returns the number of rows offered to
-    :meth:`SearchDB.record_nodes` (its plausibility gate and quality-aware leaf
-    replacement still apply per row)."""
+def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLeaf], *, run_id: str | None = None) -> tuple[int, int]:
+    """Key ``leaves`` with the tune's own recipes and upsert them into the tune DB at
+    ``db_path``, under the live context's regime (``run --bench`` compiles at the deployable
+    flags, so these land in the -O3 lane the store is censored in). Returns
+    ``(node rows offered, measured rows written)``.
+
+    Two tables, because they answer different questions:
+
+    - ``node`` takes EVERY leaf — parentless, ``depth=0`` — including the ``bench_fail``
+      negatives. It is training data; :meth:`SearchDB.record_nodes`' plausibility gate and
+      quality-aware leaf replacement still judge each row.
+    - ``perf`` takes only a leaf whose bench SUCCEEDED and ran under graph capture. It is
+      the measured evidence an ordinary compile reads to decide a fork, so an untimed
+      sentinel has no place in it and neither does a wall-semantics number: that table's
+      readers compare medians across configs, and a run benches each pinned row separately,
+      so capture can hold for one config and fall back for the next inside one sweep. A
+      failure is also worse than useless there — the tune's bench cache hits on any stored
+      row, so a drive-by failure would make a later tune report the terminal failed without
+      benching it. :meth:`SearchDB.record_perf`'s keep-best-``ok`` policy arbitrates the
+      rest, exactly as it does between two tune sessions.
+
+    The two tables key the same measurement differently, and deliberately: a ``node`` row is
+    filed under the kernel's BIRTH identity (:func:`~...passes.identity.chain_op_sig`) while
+    a ``perf`` row's signature is read back off the realized op's own stamps, which tile
+    materialization can add to. That is the tune's own spelling — ``TerminalBench._persist``
+    writes ``cuda_op.knobs`` — so the two writers agree row for row."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, node_key  # noqa: PLC0415
 
     if not leaves:
@@ -196,6 +231,15 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     db = SearchDB(Path(db_path))
     try:
         db.record_nodes(rows)
+        measured = 0
+        for leaf in leaves:
+            if leaf.status != "ok" or not leaf.captured or leaf.op_key is None:
+                continue
+            # ``leaf.knobs`` alone, without the ``H_*`` regime the node row carries: the perf
+            # table's writers already disagree about that half and its readers strip it, so the
+            # row keeps the realized op's own knobs and nothing else.
+            db.record_perf(ctx_key, leaf.op_key, backend="cuda", status="ok", stats=leaf.stats, knobs=leaf.knobs, captured=True)
+            measured += 1
     finally:
         db.close()
-    return len(rows)
+    return len(rows), measured

@@ -177,3 +177,97 @@ def test_a_launch_without_samples_keeps_its_median_and_no_sample_count() -> None
 
     assert leaf.stats.median == leaf.stats.min == leaf.stats.mean == 10.0
     assert leaf.stats.n_samples == 0
+
+
+# --- what reaches which table ---------------------------------------------------------------
+#
+# ``node`` is training data and takes every leaf; ``perf`` is the measured evidence an ordinary
+# compile reads to decide a fork, so it takes only a bench that succeeded under graph capture.
+
+
+def _ctx():
+    from emmy.compiler.context import Context
+
+    return Context((8, 9))
+
+
+def _record(tmp_path, *leaves):
+    from emmy.compiler.pipeline.search.bench_record import record_bench_leaves
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    path = tmp_path / "autotune.db"
+    counts = record_bench_leaves(path, _ctx(), list(leaves))
+    return counts, SearchDB.open_readonly(path)
+
+
+def _tuned(name: str, work: str, us: float):
+    """One benched kernel of a two-way fork, distinguished by its ``WORK`` row."""
+    graph = _graph(_kernel(name, {**MAIN, "WORK": work}, MAIN))
+    [leaf] = bench_leaves(graph, _bench((us / 1000.0, [us / 1000.0] * 4)))
+    return leaf
+
+
+def test_a_recorded_bench_row_becomes_evidence_a_later_compile_reads(tmp_path) -> None:
+    """The whole point: a sweep's measurement has to be able to decide a fork, and only the
+    ``perf`` table is consulted while compiling."""
+    from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
+
+    (nodes, measured), db = _record(tmp_path, _tuned("slow", "w1x1", 40.0), _tuned("fast", "w4x2", 10.0))
+
+    assert (nodes, measured) == (2, 2)
+    candidates = [{**MAIN, "WORK": "w1x1"}, {**MAIN, "WORK": "w4x2"}]
+    assert _db_measured_pick(_db_measured_index(db, _ctx()), candidates) == (1, 10.0)
+    db.close()
+
+
+def test_an_uncaptured_measurement_is_training_data_but_not_evidence(tmp_path) -> None:
+    """Each pinned row benches separately, so capture can hold for one config and fall back for
+    the next inside one sweep — and the evidence table compares medians across configs."""
+    graph = _graph(_kernel("main", MAIN, MAIN))
+    [leaf] = bench_leaves(graph, _bench((0.010, None), captured=False))
+
+    (nodes, measured), db = _record(tmp_path, leaf)
+
+    assert (nodes, measured) == (1, 0)
+    assert len(list(db.iter_nodes())) == 1
+    assert list(db.iter_perf(_ctx().structural_key(), backend="cuda")) == []
+    db.close()
+
+
+def test_a_failed_bench_is_training_data_but_not_evidence(tmp_path) -> None:
+    """A stored failure would also make a later tune report the terminal failed without
+    benching it — the tune's bench cache hits on any row it finds."""
+    graph = _graph(_kernel("main", MAIN, MAIN))
+    [leaf] = bench_leaves(graph, None, status="bench_fail")
+
+    (nodes, measured), db = _record(tmp_path, leaf)
+
+    assert (nodes, measured) == (1, 0)
+    assert [row.status for row in db.iter_nodes()] == ["bench_fail"]
+    assert db.lookup_perf(_ctx().structural_key(), leaf.op_key, backend="cuda") is None
+    db.close()
+
+
+def test_a_bench_row_and_a_tune_row_for_one_kernel_meet_on_one_measured_row(tmp_path) -> None:
+    """Both writers key by the kernel's ``cache_key``, so they arbitrate instead of racing:
+    keep-best-``ok`` holds whichever measured it faster."""
+    from emmy.compiler.pipeline.search.bench_record import record_bench_leaves
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+
+    leaf = _tuned("main", "w4x2", 10.0)
+    path = tmp_path / "autotune.db"
+    db = SearchDB(path)
+    db.record_perf(_ctx().structural_key(), leaf.op_key, backend="cuda", status="ok", stats=PerfStats.point(25.0), captured=True)
+    db.close()
+
+    record_bench_leaves(path, _ctx(), [leaf])
+    db = SearchDB.open_readonly(path)
+    assert db.lookup_perf(_ctx().structural_key(), leaf.op_key, backend="cuda").stats.median == 10.0
+    db.close()
+
+    db = SearchDB(path)
+    db.record_perf(_ctx().structural_key(), leaf.op_key, backend="cuda", status="ok", stats=PerfStats.point(90.0), captured=True)
+    db.close()
+    db = SearchDB.open_readonly(path)
+    assert db.lookup_perf(_ctx().structural_key(), leaf.op_key, backend="cuda").stats.median == 10.0, "a slower re-measure loses"
+    db.close()

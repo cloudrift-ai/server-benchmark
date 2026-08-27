@@ -521,10 +521,11 @@ def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
 
 def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     """Default-on bench recording (``--no-record-nodes`` opts out): the pinned
-    A/B rows and the greedy isolated re-bench become node-store leaves — the training
-    data the tune-only write path let every manual sweep evaporate from. Records only
-    at tune-standard measurement quality; ``record_nodes``' plausibility gate and
-    quality-aware leaf replacement still judge every row.
+    A/B rows and the greedy isolated re-bench become tune-DB rows — the training
+    data, and the measured evidence, the tune-only write path let every manual sweep
+    evaporate from. Records only at tune-standard measurement quality; the store's own
+    gates (plausibility, quality-aware leaf replacement, keep-best-``ok``) still judge
+    every row. See ``search/bench_record`` for what reaches which table.
 
     A cross-target run records NOTHING. ``--gpu-arch`` / ``--target`` makes every lowering
     decision as if on another card, but the cubin is assembled for the LIVE device and runs
@@ -553,15 +554,15 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     if not meets_quality_bar(args.warmup, args.iters):
         print(
             f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
-            f"measurements NOT recorded into the node store (raise them or pass --no-record-nodes to silence)"
+            f"measurements NOT recorded (raise them or pass --no-record-nodes to silence)"
         )
         return
     leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
     if not leaves:
         return
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves)
-    print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
+    n, measured = record_bench_leaves(db_path, Context.probe(), leaves)
+    print(f"[record-nodes] {n} bench row(s) recorded into {db_path}, {measured} of them as measured evidence")
 
 
 def _reset_persisting_l2_cache() -> None:

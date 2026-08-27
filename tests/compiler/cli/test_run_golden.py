@@ -234,7 +234,7 @@ def recorded(monkeypatch, tmp_path):
     from emmy.compiler.pipeline.search import bench_record
 
     writes = []
-    monkeypatch.setattr(bench_record, "record_bench_leaves", lambda *a, **k: writes.append((a, k)) or 0)
+    monkeypatch.setattr(bench_record, "record_bench_leaves", lambda *a, **k: writes.append((a, k)) or (0, 0))
     monkeypatch.setattr(compile_mod, "resolve_tune_db", lambda: tmp_path / "autotune.db")
     monkeypatch.setattr(Context, "probe", classmethod(lambda cls: Context((8, 9))))
     monkeypatch.setattr(run_mod, "_recordable_bench_leaves", lambda *_: [object()])

@@ -179,6 +179,12 @@ class TerminalBench:
         # (context, backend), skip the benchmark entirely and rebuild the
         # aggregate stats from the DB. Per-kernel partial caching isn't
         # useful here because ``backend.benchmark`` runs the whole graph.
+        # This cache has a second filler: ``run --bench`` records its clean captured rows
+        # into ``perf`` too (``search/bench_record``), so a terminal whose kernels a manual
+        # sweep already measured is valued from that sweep's medians instead of benched
+        # here. Deliberate — the sweep meets the same pinned-bench standard and both sides
+        # are whole-graph captured benches with per-launch attribution — but it does mean a
+        # tune after a sweep is not a fresh measurement of those kernels.
         cached_rows = []
         for node in self.cuda_nodes:
             key = node.op.cache_key()

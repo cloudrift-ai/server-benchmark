@@ -510,7 +510,9 @@ prior, never a preference written into a pass or into this policy.
    of the same op that was measured at `-O3` (`H_opt=3`);
 3. the tune DB's measured `perf` rows for this compile's own context key — one lane, because a sweep measures in the
    regime a deploy compiles in. A real measurement of this exact op beats the model's extrapolation. Rows from a
-   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted;
+   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted. `emmy tune` is not
+   this tier's only source: `run --bench` records its clean captured rows here too, which is what lets a manual sweep
+   decide a later compile (`search/bench_record`);
 4. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
@@ -1183,14 +1185,14 @@ label is (`SearchNode.visits`, the leaf's `bench_stats` / `bench_status` that `o
 - **`bench_fail` leaves** — leaves only. Their value never contributes to any branch's minimum, so a branch's value
   comes from its working descendants instead, and a branch all of whose leaves failed is not recorded at all.
 
-**Recording benches as node rows** (`search/bench_record.py`) is the node table's second writer. A `run --bench` that
-benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement — plus the greedy
-pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with no parent and `depth=0`. This is on by
-default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes` turns it off. It
-is what stops measurements from a manual sweep evaporating. Both input shapes that lower through the full pipeline
-record: a traced model / `--code` input and a `--golden` replay, which re-lowers an in-memory program through the same
-pass list, so `loop/stamp` stamps every kernel and the rebind knob-merge carries its realized knobs onto the terminal
-op. A direct `--ir` input does not.
+**Recording benches** (`search/bench_record.py`) is the node table's second writer, and the `perf` table's fourth.
+A `run --bench` that benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement —
+plus the greedy pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with no parent and `depth=0`.
+This is on by default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes`
+turns it off. It is what stops measurements from a manual sweep evaporating. Both input shapes that lower through the
+full pipeline record: a traced model / `--code` input and a `--golden` replay, which re-lowers an in-memory program
+through the same pass list, so `loop/stamp` stamps every kernel and the rebind knob-merge carries its realized knobs
+onto the terminal op. A direct `--ir` input does not.
 
 - **The row must be keyed to the same set of candidates the tuner used**, which means recovering each kernel's
   identity from its rewrite chain rather than from the op in hand (`passes/identity.chain_op_sig`, shared with the
@@ -1215,6 +1217,21 @@ op. A direct `--ir` input does not.
   but the cubin is assembled for the LIVE device and runs on it (`backend/cuda/nvcc._launchable_arch`), so the
   measurement is this card's while the row would be keyed under the target's capability, and neither table has a column
   that could later tell the two apart.
+- **A clean captured row also becomes measured evidence.** Training data alone can never change a deploy: nothing reads
+  the node table while compiling, so a sweep that proved a config fastest still lost every later compile to an
+  unmeasured model extrapolation. Such a row is therefore also written to `perf`, keyed by the kernel's `cache_key()` —
+  the same key the tune writes under, so the two arbitrate through `record_perf`'s keep-best-`ok` policy instead of
+  racing. Two rules narrow what gets there. A failed bench does not: `perf` holds no untimed sentinel, and the tune's
+  own bench cache hits on any row it finds, so a drive-by failure would make a later tune report a terminal failed
+  without benching it. An uncaptured bench does not either: `_db_measured_index` compares medians across configs, and a
+  run benches each pinned row separately, so capture can hold for one config and fall back to wall semantics for the
+  next inside one sweep. Consequences to know: a sweep changes what the next compile picks — that is the point — and a
+  sweep also fills the tune's bench cache, so a tune run after one is valued from the sweep's medians rather than
+  re-benching those kernels.
+- **The two tables key one measurement differently, on purpose.** A node row is filed under the kernel's birth identity
+  (`chain_op_sig`); a `perf` row's signature is read back off the realized op's own stamps, which tile materialization
+  can add `S_warp_eligible` to. That is the tune's own spelling — `TerminalBench._persist` writes `cuda_op.knobs` — so
+  the two writers agree row for row, but the node row and the `perf` row for one kernel are not interchangeable.
 - `record_nodes` protects the leaf update by **comparing measurement quality**: a newer measurement that is
   unambiguously worse (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a casual bench
   cannot overwrite tune-grade data. When quality is comparable or unknown, newest simply wins, so an honest

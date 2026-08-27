@@ -1015,6 +1015,53 @@ def _qwen3_5_multimodal_config():
     return Qwen3_5Config(text_config=_QWEN3_5_TINY)
 
 
+def _graph_with_input(name: str, *, consumed: bool):
+    """A one-input graph, with that input either read by a node or left dangling."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("hidden", (4,), "f16"), node_id="hidden")
+    g.add_node(InputOp(), [], Tensor(name, (4,), "f32"), node_id=name)
+    g.inputs = ["hidden", name]
+    src = name if consumed else "hidden"
+    g.add_node(ElementwiseOp(op="copy"), [src], Tensor("out", (4,), "f16"), node_id="out")
+    g.outputs = ["out"]
+    return g
+
+
+def test_a_none_kwarg_placeholder_stops_being_a_graph_input():
+    """``torch.export`` records a ``None`` keyword argument as a scalar placeholder input, while the
+    eager flattener drops the ``None`` — so the graph declares one more input than any caller
+    supplies, and positional binding fails on the arity. Qwen3.5-family layers hit this because
+    their blocks REQUIRE ``attention_mask``, so it cannot simply be omitted at the call."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=False)
+    _drop_none_kwarg_inputs(g, {"attention_mask": None})
+    assert g.inputs == ["hidden"], "the inert placeholder must not stay an input"
+    assert "attention_mask" not in g.nodes
+
+
+def test_a_mask_the_block_actually_reads_is_never_dropped():
+    """The prune keys on having no consumers, not on the name — so a real mask survives."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=True)
+    _drop_none_kwarg_inputs(g, {"attention_mask": None})
+    assert "attention_mask" in g.inputs
+
+
+def test_a_supplied_kwarg_is_never_dropped():
+    """Only ``None`` values name a placeholder; a real tensor argument is left alone."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=False)
+    _drop_none_kwarg_inputs(g, {"attention_mask": object()})
+    assert "attention_mask" in g.inputs
+
+
 def test_checkpoint_key_renamer_bridges_a_multimodal_prefix():
     """The Qwen3.5 releases are vision-language wrappers, so the text decoder's weights sit one
     module deeper in the checkpoint than in a text-only twin. The renamer closes that gap, and the

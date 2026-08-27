@@ -465,6 +465,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
     if ple is not None:
         kwargs["per_layer_input"] = ple
     graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+    _drop_none_kwarg_inputs(graph, kwargs)
     stamp_sliding_windows(
         graph,
         decoder.config,
@@ -472,6 +473,27 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
         sliding_window=deepseek_sliding_window,
     )
     return graph, (block, (x,), kwargs)
+
+
+def _drop_none_kwarg_inputs(graph, kwargs: dict) -> None:
+    """Drop the scalar placeholders ``torch.export`` leaves behind for ``None`` keyword arguments.
+
+    A block whose signature REQUIRES ``attention_mask`` must be called with an explicit ``None``
+    (omitting it is a TypeError), and export then records that ``None`` as a graph input carrying a
+    scalar placeholder. The eager input flattener drops the ``None``, so the graph declares one more
+    input than any caller supplies and every consumer that binds inputs positionally fails on the
+    arity — ``emmy run --layer`` on a Qwen3.5-family layer is the live case, at 4 declared vs 3
+    supplied. The placeholder is inert by construction: it stands for a value the traced code never
+    read, so no node consumes it. Removing an input that nothing consumes changes no computation.
+
+    Deliberately narrow. Only an input NAMED after a ``None``-valued keyword argument is considered,
+    and only when it has no consumers, so a mask that a block genuinely reads is never removed."""
+    for name, value in kwargs.items():
+        if value is not None or name not in graph.inputs:
+            continue
+        if graph.buffer_users(name):
+            continue  # something reads it: not a placeholder, leave it alone
+        graph.remove_node(graph.producer(name).id)
 
 
 def _build_pre_wrapper(block, *, float32_residual: bool = False):

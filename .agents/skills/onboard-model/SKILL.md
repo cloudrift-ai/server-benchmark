@@ -186,7 +186,8 @@ tractable compiler gaps with focused regressions, then retrace before accepting 
 Use `tune-kernels` to run its equal-budget model-proposal-versus-MCTS workflow over every traceable target, followed
 by repeated O3 correctness and finalist checks. For complete coverage, finish one deployable O3 measurement and one
 positive reference-backend measurement for every retained target, and a `torch.compile` measurement beside it —
-without that column nothing tells you a target is losing, and section 3b has nothing to rank. When search finds no acceptable winner, measure a
+without that column nothing tells you a target is losing, and section 3b has nothing to
+rank. When search finds no acceptable winner, measure a
 correct greedy fallback instead of dropping the target. Strip working `ranking` metadata and commit the resulting
 self-contained, fully verified document beside the model's recipe:
 

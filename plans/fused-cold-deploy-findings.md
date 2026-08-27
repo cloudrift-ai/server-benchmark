@@ -37,7 +37,10 @@ close the loop.
 6. **On current main (#648 maximal fusion), per-op golden tuning is impossible**: a fresh layer trace collapses to
    ONE whole-layer kernel (47GB host RAM, >90min at -O3 — uncompilable), and pre-#648 working files fail replay
    with "provenance target no longer resolves after lowering" plus ambiguous `REDUCE@...` knob paths. Upstream
-   report; blocks running this branch's fixes end-to-end until #648 is amended.
+   report; blocks running this branch's fixes end-to-end until #648 is amended. It also breaks evidence
+   portability for the complex fused forms: the rebased lowering emits different `S_*` structural features for the
+   SDPA fusions, so pre-rebase tune rows match zero deploy candidates there (the simpler k_mean signature happens
+   to survive, which is what made the finding-4 replay possible).
 
 7. **The s512 SDPA fusion targets have no good fused realization**: 231 measured candidates, ranking calibration
    +0.96, and every realization keeping the fused SDPA kernel runs ~860ms/launch. The s1 (decode) SDPA variants of

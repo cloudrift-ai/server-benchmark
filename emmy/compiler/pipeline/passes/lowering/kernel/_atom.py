@@ -38,6 +38,8 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     ROW,
+    UNIFORM,
+    BlockScaleLoad,
     EpilogueLoad,
     FragmentApply,
     FragmentPromote,
@@ -67,11 +69,13 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncTransport,
     TmaTransport,
     pick_swizzle_atom,
+    pipelined_kloop,
     software_swizzle,
     staged_kloop,
     sync_stat_fill,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
+from emmy.compiler.pipeline.passes.lowering.tile._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -331,6 +335,7 @@ def _staged_inner_atom_loop(
     byte_slabs=None,
     pads=None,
     frag_ns: str = "",
+    scales=None,
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -368,25 +373,35 @@ def _staged_inner_atom_loop(
     (``LdmatrixLoad(byte_slab=True)`` — the gmem fragment-loader lane map pointed at the slab; a
     16-bit fragment converts per element, an fp8 fragment repacks raw bytes). NONE-swizzle by
     construction; ``pads`` (per-slab row pad in elements, the cp.async byte slabs'
-    ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows."""
+    ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows.
+
+    ``scales`` (per-slab, aligned with ``slabs``): a ``(scale slab, its row stride, the k block)``
+    triple on a PACKED-PAIR byte slab (NVFP4 weights — one stored byte is two logical K elements
+    sharing one block scale). The slab's K columns are then BYTE columns, so the drain halves its
+    K coordinate to address them and reads the block's scale at ``K / block`` of the companion
+    slab; the loader decodes both nibbles and applies the scale. ``None`` on every other slab."""
     (a_slab, *b_slabs), (m, n) = slabs, mn
     offs = offs if offs is not None else (None,) * len(slabs)
     swizzles = swizzles if swizzles is not None else ("NONE",) * len(slabs)
     trans = trans if trans is not None else (False,) * len(slabs)
     byte_slabs = byte_slabs if byte_slabs is not None else (False,) * len(slabs)
     pads = pads if pads is not None else (0,) * len(slabs)
+    scales = scales if scales is not None else (None,) * len(slabs)
     atom_m, atom_n, atom_k = atom.shape
     n_steps = bk_elems // atom_k
     # Per-operand drain spec: (frag base fn, slab, ldm, tile-is-slab-row, reg count, warp-unit var,
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
+    # A packed-pair slab's K columns are BYTE columns — half as many as the chunk's logical K —
+    # on either side; only the W4A16 shape (packed B beside a 16-bit A) leaves A at full width.
+    a_cols = bk_elems // 2 if scales[0] is not None else bk_elems
     specs = [
         (
             lambda x: f"{frag_ns}_a{x}",
             "a",
             a_slab,
-            bk_elems + pads[0],
+            a_cols + pads[0],
             True,
             m.reg,
             m.unit,
@@ -394,21 +409,54 @@ def _staged_inner_atom_loop(
             offs[0],
             swizzles[0],
             byte_slabs[0],
+            scales[0],
         )
     ]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"{frag_ns}_b{x}", ff))(f)
-        tr = trans[1 + f]
-        ldm_b = (bk_elems if tr else n.tile) + pads[1 + f]
-        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f]))
+        tr, sc = trans[1 + f], scales[1 + f]
+        # A packed-pair slab's K columns are BYTE columns — half as many as the chunk's logical K.
+        k_cols = bk_elems // 2 if sc is not None else bk_elems
+        ldm_b = (k_cols if tr else n.tile) + pads[1 + f]
+        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f], sc))
+
+    # The BLOCK-SCALED cell (both multiplicands packed pairs): its scales do not fold into the
+    # fragments — the instruction takes them as two more register operands and applies them
+    # itself. So each side's scale slab feeds a ``BlockScaleLoad`` of its own instead of riding
+    # the data drain, and the data drain is a plain packed-byte gather.
+    block_scaled = block_scaled_atom(atom)
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
         reads: list[Stmt] = []
-        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8 in specs:
+        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc in specs:
             assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
                 prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
                 row, col = (prim, kexpr) if is_row else (kexpr, prim)
+                scale_slab, scale_index, scale_ldm = None, (), 0
+                if sc is not None:
+                    scale_slab, scale_ldm, block = sc
+                    # The W4A16 drain's scale slab is COMPUTE-FILLED and single-buffer, so its row
+                    # is the bare within-tile coord. The block-scaled cell's two scale slabs are
+                    # copies riding the same ring as their codes, so they carry the slot row like
+                    # any other copied operand — one row per slot, the same count, so the data
+                    # slab's own offset serves. Without it the scales are read from slot 0 while
+                    # the codes come from slot s, and a subset of cells is scaled by the wrong
+                    # block (found live: most outputs exact, a minority off by a factor of 2-3).
+                    scale_row = BinaryExpr("+", off, prim) if (block_scaled and off is not None) else prim
+                    scale_index = (scale_row, BinaryExpr("/", kexpr, Literal(block, "int")))
+                    col = BinaryExpr("/", col, Literal(2, "int"))
+                    if block_scaled:
+                        reads.append(
+                            BlockScaleLoad(
+                                frag=f"_sf{role}{x}{suffix}",
+                                src_buffer=scale_slab,
+                                src_index=scale_index,
+                                role=role,
+                                ldm=scale_ldm,
+                            )
+                        )
+                        scale_slab, scale_index, scale_ldm = None, (), 0
                 if off is not None:
                     row = BinaryExpr("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
@@ -423,6 +471,9 @@ def _staged_inner_atom_loop(
                         swizzle=swz,
                         b_trans=role == "b" and is_row,
                         byte_slab=b8,
+                        scale_buffer=scale_slab,
+                        scale_index=scale_index,
+                        scale_ldm=scale_ldm,
                         fragment_layout=atom.fragment_layout,
                     )
                 )
@@ -437,6 +488,8 @@ def _staged_inner_atom_loop(
                 shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
+                sfa_frag=f"_sfa{i}{suffix}" if block_scaled else None,
+                sfb_frag=f"_sfb{j}{suffix}" if block_scaled else None,
             )
             for f in range(len(b_slabs))
             for i in range(m.reg)
@@ -784,6 +837,56 @@ def _child_contraction_block(
     return ops, cells, offset, tile.mn, [*decls, *region], frags
 
 
+def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext):
+    """The A slab's operand, plus any statistic prologue it needs.
+
+    A is COPIED when it is a materialized ``Load`` and COMPUTE-FILLED when it is a producer cone —
+    a fused RMSNorm ahead of the projection, which is what a serving program's linears look like.
+
+    Shared by the ``smem`` compute fill and the packed byte-slab stage. Those two differ in how B
+    moves, never in how A does, and keeping one A side is what lets a packed weight sit behind a
+    fused activation: the bits still copy verbatim while the activation evaluates into its slab.
+
+    Returns ``(operand, copied, prologue)``."""
+    pro, cell, stats = seam
+    m_name, k_name = mn[0].axis.name, c.axis.name
+    if isinstance(c.a, Load):
+        shape = (mn[0].tile, bk_elems)
+        op = Operand(
+            tag="a",
+            buf=c.a.input,
+            shape=shape,
+            # A >2-D operand boxes as rank-N with leading extent-1 dims — the convention
+            # ``_slab_operands`` applies. ``_box_origin`` already yields the FULL-RANK origin, so
+            # a box left at the 2-D shape gives the emitted copy more coordinates than the
+            # descriptor's encoded rank, and TMA treats that as an invalid tensor map (measured
+            # on a leading unit batch axis: UTMALDG.4D over a rank-3 map raises ILLEGAL
+            # INSTRUCTION from the first thread).
+            box=(1,) * (len(c.a.index) - 2) + shape if len(c.a.index) > 2 else None,
+            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
+            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
+            swizzle=swizzle,
+        )
+        return op, True, []
+
+    def a_value(k0, row, col):
+        k = BinaryExpr("+", k0, col)
+        sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
+        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
+        stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
+        return _k_masked(stmts, operand_name(c.a), k, k_ext)
+
+    prologue: list[Stmt] = []
+    if stats:
+        row_axis = Axis(name="_sr", extent=mn[0].tile)
+        sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
+        row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
+        prologue = sync_stat_fill(
+            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
+        )
+    return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
+
+
 def _sync_operands(
     c: Fold,
     bk_elems: int,
@@ -814,9 +917,8 @@ def _sync_operands(
     contract the copy transports follow). A symbolic **K** is the same discipline applied to the
     contraction axis: :func:`_k_masked` clamps the cone's own reads and stores the fold identity
     into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
-    m_name, n_name, k_name = mn[0].axis.name, mn[1].axis.name, c.axis.name
+    n_name, k_name = mn[1].axis.name, c.axis.name
     row_base, col_base = _tile_base(mn)
-    pro, cell, stats = seam
     k_ext = c.axis.extent_expr() if not c.axis.extent.is_static else None
 
     def m_coord(row) -> Expr:
@@ -826,25 +928,22 @@ def _sync_operands(
     def k_coord(k) -> Expr:
         return clamp_last(k, k_ext) if k_ext is not None else k
 
-    def a_value(k0, row, col):
-        k = BinaryExpr("+", k0, col)
-        sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
-        stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
-        return _k_masked(stmts, operand_name(c.a), k, k_ext)
-
     def n_coord(col) -> Expr:
         t = BinaryExpr("+", col_base, col)
         return clamp_last(t, mn[1].ext) if mn[1].mask else t
 
-    prologue: list[Stmt] = []
-    if stats:
-        row_axis = Axis(name="_sr", extent=mn[0].tile)
-        sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
-        row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
-        prologue = sync_stat_fill(
-            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
-        )
+    a_op, a_copied, prologue = _a_slab_operand(
+        c,
+        mn=mn,
+        bk_elems=bk_elems,
+        cta=cta,
+        swizzle=swizzles[0],
+        seam=seam,
+        row_base=row_base,
+        m_coord=m_coord,
+        k_coord=k_coord,
+        k_ext=k_ext,
+    )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -858,19 +957,7 @@ def _sync_operands(
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
 
-    if isinstance(c.a, Load):
-        a_op = Operand(
-            tag="a",
-            buf=c.a.input,
-            shape=(mn[0].tile, bk_elems),
-            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
-            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
-            swizzle=swizzles[0],
-        )
-        async_ops.append(a_op)
-    else:
-        a_op = SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzles[0])
-        sync_ops.append(a_op)
+    (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
     for f, (bl, _) in enumerate(channels):
@@ -905,6 +992,203 @@ def _sync_operands(
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
 
 
+def _packed_operands(
+    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype, *, pad: int, cta: CtaTile, seam: tuple = ((), (), ())
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
+    """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
+
+    Three slabs where the ordinary matmul has two, because the weight arrives as two tensors that
+    are cheapest to move apart and combine at the fragment: the packed BITS copy verbatim (one
+    byte per two K elements, so the slab is half the K width of a 16-bit one and the copy moves
+    half the traffic), and the block SCALES are decoded once per k block into their own small
+    f16 slab. The drain reads both and does the decode-and-scale per fragment element; nothing
+    ever materializes a decoded weight tile.
+
+    A copied edge takes the index its gmem tensor really has, so BITS is addressed canonically —
+    row ``n``, byte column ``k / 2`` over the checkpoint's ``[N, K/2]`` buffer — rather than
+    through the decode cone's flattened reshape arithmetic, which says the same thing in a form no
+    fill can chunk. The SCALES ride the sync compute-fill because decoding them is compute: the
+    checkpoint stores e4m3 codes and one f32 per tensor, and the cone that combines them is
+    :attr:`~...tile._packed.PackedKBlockB.factor`, evaluated at the block's own k. That the cone
+    may be evaluated at ONE k per block — instead of at every k — is exactly the block-invariance
+    the matcher proved.
+
+    ``pad`` is the bits slab's row pad in bytes — ``BYTE_SLAB_PAD`` under cp.async, whose fill
+    wants the bank spread, and zero under TMA, whose box deposits dense. The drain reads it back
+    off ``Operand.pad_cols``, so the two cannot disagree.
+
+    Returns ``(drain-ordered operands, sync operands, async operands)``. The scale slab is absent
+    from the drain order: it is not a fragment source of its own, it is the bits drain's second
+    input (``Operand.scale``).
+    """
+    m, n = mn
+    row_base, col_base = _tile_base(mn)
+    k_axis, block = c.axis, packed.block
+    two = Literal(2, "int")
+
+    def n_coord(row) -> Expr:
+        t = BinaryExpr("+", col_base, row)
+        return clamp_last(t, n.ext) if n.mask else t
+
+    def m_coord(row) -> Expr:
+        t = BinaryExpr("+", row_base, row)
+        return clamp_last(t, m.ext) if m.mask else t
+
+    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+
+    def k_coord(k) -> Expr:
+        return clamp_last(k, k_ext) if k_ext is not None else k
+
+    # A rides the SAME side the compute fill gives it: copied when materialized, compute-filled
+    # when it is a cone. Only B differs here, and that is the whole point of the packed reading.
+    a_op, a_copied, a_prologue = _a_slab_operand(
+        c,
+        mn=mn,
+        bk_elems=bk_elems,
+        cta=cta,
+        swizzle=a_swizzle,
+        seam=seam,
+        row_base=row_base,
+        m_coord=m_coord,
+        k_coord=k_coord,
+        k_ext=k_ext,
+    )
+
+    # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so the
+    # compute fill evaluates only what feeds the factor.
+    factor_cone = list(Body(tuple(operand_body(c.b))).backward_cone([packed.factor]).members)
+
+    def scale_value(k0, row, col):
+        k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
+        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
+        return [s.rewrite(lambda nm: nm, sigma) for s in factor_cone], packed.factor
+
+    scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
+
+    # The bits address through the ORIGINAL ``Load``'s own index, σ-evaluated — never a fresh
+    # spelling built from the chunk offset. That index carries whatever BASE the contraction axis
+    # picked up: a split-K partition shrinks the axis and hangs the slice's absolute base on it
+    # (``ksplit·(K/w) + k``), so a hand-built ``k0 / 2`` drops the base and every partition re-reads
+    # the FIRST slice's bytes. The block scales never had the bug because they are evaluated by
+    # rewriting the decode cone's own body, which carries the same index — this puts the bits on
+    # that footing too, which is also what ``_box_origin`` / ``_slab_index`` do for every other
+    # staged operand.
+    #
+    # One column of this slab is one BYTE, so a column step is TWO logical k: the σ substitutes
+    # ``k0 + 2·col`` and the index's own ``k / 2`` turns that back into the byte offset.
+    def _bits_at(k_expr: Expr, n_expr: Expr) -> tuple:
+        sig = Sigma({n.axis.name: n_expr, k_axis.name: k_expr, **_sibling_sigma(m)})
+        return tuple(sig.apply(e) for e in packed.bits.index)
+
+    def bits_index(k0):
+        def gmem(row, col):
+            return _bits_at(BinaryExpr("+", k0, BinaryExpr("*", col, two)), n_coord(row))
+
+        return gmem
+
+    bits_op = Operand(
+        tag="b",
+        buf=packed.bits.input,
+        shape=(n.tile, bk_elems // 2),
+        coords=lambda k0: _bits_at(k0, col_base),
+        index=bits_index,
+        trans=True,
+        pad_cols=pad,
+        dtype=cuda_name(bits_dtype),
+        elem_bytes=bits_dtype.nbytes,
+        scale=(scale_op.slab, block),
+    )
+    # The scale slab is always compute-filled; A joins it there when it is a cone.
+    filled = (scale_op,) if a_copied else (a_op, scale_op)
+    copied = (a_op, bits_op) if a_copied else (bits_op,)
+    return (a_op, bits_op), filled, copied, a_prologue
+
+
+def _block_scaled_operands(
+    c: Fold, pair, bk_elems: int, mn: tuple[Side, Side], bits_dtype, scale_dtype, *, pad: int
+) -> tuple[tuple, tuple[Operand, ...], tuple[SyncOperand, ...]]:
+    """The staged operands of a BLOCK-SCALED packed pair — the native fp4 cell's four slabs.
+
+    Four where the packed byte-slab stage next door has two-and-a-fill, and all four are verbatim
+    copies: both operands' codes and both operands' raw e4m3 block scales are stored bytes. The
+    instruction applies the scales itself, so the fill that stage needs to evaluate a fused scale
+    has nothing left to compute, and the drain never materializes a decoded value on either side.
+
+    Every slab addresses through its own ``Load``'s index, σ-evaluated — never a fresh spelling
+    built from the chunk offset. That index carries whatever BASE the contraction axis picked up:
+    a split-K partition shrinks the axis and hangs the slice's absolute base on it, so a
+    hand-built ``k0 / 2`` would drop the base and every partition would re-read the first slice's
+    bytes (the defect that cost this branch a week on the W4A16 side).
+
+    A codes column is one BYTE — two logical k — so its column step is 2 and the index's own
+    ``k / 2`` turns that back into the byte offset. A scales column is one BLOCK, so its step is
+    the block extent. Returns ``(drain-ordered operands, every copied operand)``; the two scale
+    slabs are absent from the drain order because they are not fragment sources of their own —
+    they reach the drain as each data operand's ``scale``.
+    """
+    m, n = mn
+    row_base, col_base = _tile_base(mn)
+    k_axis, block = c.axis, pair.block
+    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+
+    def filled(side: Side, sibling: Side, base, codes, cone, tag: str, *, scale):
+        """A compute-FILLED codes slab: this matmul's own kernel produces the byte, so there is no
+        buffer to copy and the fill evaluates the cone at each slab cell instead. One cell is one
+        byte — two logical k — and the cone derives both nibbles from a single k coordinate, so
+        the σ substitutes the same ``k0 + 2·col`` the copied form's index arithmetic consumes."""
+
+        def value(k0, row, col):
+            k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
+            t = BinaryExpr("+", base, row)
+            sigma = Sigma({side.axis.name: clamp_last(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
+            return [st.rewrite(lambda nm: nm, sigma) for st in cone], codes
+
+        return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
+
+    def build(side: Side, sibling: Side, base, load, tag: str, *, cols: int, step: int, dtype, trans: bool, scale=None, pad=pad):
+        def at(k_expr, row_expr):
+            sig = Sigma({side.axis.name: row_expr, k_axis.name: k_expr, **_sibling_sigma(sibling)})
+            return tuple(sig.apply(e) for e in load.index)
+
+        def coord(row):
+            t = BinaryExpr("+", base, row)
+            return clamp_last(t, side.ext) if side.mask else t
+
+        def index(k0):
+            def gmem(row, col):
+                k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(step, "int")))
+                return at(clamp_last(k, k_ext) if k_ext is not None else k, coord(row))
+
+            return gmem
+
+        return Operand(
+            tag=tag,
+            buf=load.input,
+            shape=(side.tile, cols),
+            coords=lambda k0: at(k0, base),
+            index=index,
+            trans=trans,
+            pad_cols=pad,
+            dtype=cuda_name(dtype),
+            elem_bytes=dtype.nbytes,
+            scale=scale,
+        )
+
+    # The scale slabs are built first: each data operand names its own as the drain's second
+    # source, exactly as the packed byte-slab drain names its compute-filled one.
+    a_scale = build(m, n, row_base, pair.a.scale, "as", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=False, pad=0)
+    b_scale = build(n, m, col_base, pair.b.scale, "bs", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=True, pad=0)
+    a_bits = (
+        filled(m, n, row_base, pair.a.codes, pair.a.cone, "a", scale=(a_scale.slab, block))
+        if pair.a.bits is None
+        else build(m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block))
+    )
+    b_bits = build(n, m, col_base, pair.b.bits, "b", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=True, scale=(b_scale.slab, block))
+    copies = tuple(op for op in (a_bits, b_bits, a_scale, b_scale) if isinstance(op, Operand))
+    fills = tuple(op for op in (a_bits,) if isinstance(op, SyncOperand))
+    return (a_bits, b_bits), copies, fills
+
+
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     """The **one** STAGED K-loop driver, atom-agnostic — build the ``(A, B)`` operand pair, the
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
@@ -927,7 +1211,97 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     n_chunks = K // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", K.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    if stage.transport == "smem":
+    finalize: list[Stmt] = []
+    # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
+    # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
+    # four-descriptor TMA box copy is not built.
+    native = stage.transport == "smem-async" and block_scaled_atom(tile.atom)
+    bs_pair = match_packed_pair_node(c, ops.inputs) if native else None
+    copy_transport = stage.transport in ("smem-async", "smem-tma")
+    packed = None if bs_pair is not None else (match_packed_b_node(c, ops.inputs) if copy_transport else None)
+    if bs_pair is not None:
+        assert len(ops.channels) == 1, "the block-scaled cell reads one channel (match_packed_pair_node enforces it)"
+        operands, copies, fills = _block_scaled_operands(
+            c,
+            bs_pair,
+            stage.bk_elems,
+            mn,
+            ops.inputs[bs_pair.b.bits.input].dtype,
+            ops.inputs[bs_pair.a.scale.input].dtype,
+            pad=BYTE_SLAB_PAD,
+        )
+        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        # Pure copies when both operands' codes are stored; a fill underneath them when this
+        # matmul computes its own A codes, which is the same two-group shape the packed
+        # byte-slab stage takes for its scale fill.
+        transport = (
+            CpAsyncTransport(operands=copies, **common) if not fills else SyncTransport(operands=fills, copy_operands=copies, **common)
+        )
+        # The per-tensor scale levels, applied once per output element after the K-loop. The cell
+        # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
+        # second level, so a factor that the operand's own chain applies per element has to land
+        # here instead. It is synthesized rather than read off the term: the term spells that
+        # factor INSIDE a rounding to the fragment dtype, which nothing can hoist out of, so no
+        # epilogue at the tile layer names it. The emitted cell is therefore not a
+        # rounding-for-rounding account of the declared program, and its parity is a tolerance
+        # rather than the exact oracle.
+        alpha_stmts: list[Stmt] = []
+        alpha = ""
+        for i, ld in enumerate((*bs_pair.a.alpha, *bs_pair.b.alpha)):
+            leaf = f"_bs_alpha_l{i}"
+            alpha_stmts.append(Load(name=leaf, input=ld.input, index=ld.index, dtype=ld.dtype))
+            step = f"_bs_alpha{i}"
+            alpha_stmts.append(
+                Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
+            )
+            alpha = step
+        finalize = [
+            *alpha_stmts,
+            *(
+                FragmentApply(out=cf, op=ElementwiseImpl("multiply"), args=(cf, alpha), kinds=(FRAG, UNIFORM), in_place=True)
+                for f in range(len(ops.channels))
+                for i in range(mn[0].reg)
+                for j in range(mn[1].reg)
+                for cf in (_fold_frag(ops.frag(f"_c{i}_{j}"), f),)
+            ),
+        ]
+    elif packed is not None:
+        # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
+        # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
+        tma = stage.transport == "smem-tma"
+        operands, sync_ops, async_ops, packed_pro = _packed_operands(
+            c,
+            packed,
+            stage.bk_elems,
+            mn,
+            ops.slab_swizzles(mn, elem.nbytes)[0],
+            ops.inputs[packed.bits.input].dtype,
+            pad=0 if tma else BYTE_SLAB_PAD,
+            cta=cta,
+            seam=ops.cone,
+        )
+        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        if tma:
+            # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
+            # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
+            # mbarrier by one elected thread and waited on by parity, which no compute fill can be
+            # folded into. The K-loop skeleton already schedules a LIST of groups, so the copies
+            # and the scale fill are simply two of them over one drain segment: the box copies ring
+            # at the stage's depth, the compute fill stays single-buffer as it always is.
+            copies = TmaTransport(operands=async_ops, **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(packed_pro), **common)
+            slabs = frozenset(op.slab for op in (*async_ops, *sync_ops))
+            return pipelined_kloop(
+                operands=((copies, stage.depth), (fill, 1)),
+                build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
+                bk_elems=stage.bk_elems,
+                n_chunks=K // stage.bk_elems,
+                k_extent=K,
+            )
+        # cp.async: one ``sync`` producer whose copied peers are the two copied slabs — the
+        # same shape the fused norm→linear edge takes.
+        transport = SyncTransport(operands=sync_ops, copy_operands=async_ops, prologue_stmts=tuple(packed_pro), **common)
+    elif stage.transport == "smem":
         # The synchronous fill: every inline edge is evaluated into its canonical slab (converting
         # on the store when dtypes differ); every materialized counterpart is COPIED underneath
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
@@ -984,7 +1358,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         workers=ops.workers,
         block_threads=tile.launch_threads,
     )
-    return pre, region
+    # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
+    # the K-loop, before the sink.
+    return pre, [*region, *finalize]
 
 
 def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
@@ -1259,7 +1635,8 @@ class _MmaOps(_AtomOps):
         ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
         sync transport's :class:`SyncOperand`, which has no swizzle field); a 1-byte operand slab
         (``Operand.elem_bytes == 1`` — staged fp8) drains through the cooperative byte gather
-        instead of ldmatrix, its row pad riding the drain ``ldm``. An f16-accumulate
+        instead of ldmatrix, its row pad riding the drain ``ldm``; a PACKED-PAIR operand
+        (``Operand.scale``) additionally hands the drain its block-scale slab. An f16-accumulate
         atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
         bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
         stmts = _staged_inner_atom_loop(
@@ -1275,10 +1652,17 @@ class _MmaOps(_AtomOps):
             byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
             pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
             frag_ns=self.frag_ns,
+            scales=tuple(self._drain_scale(op) for op in operands),
         )
         if _f16acc(self.tile.atom):
             stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
         return stmts
+
+    def _drain_scale(self, op):
+        """The drain's ``(scale slab, its row stride, the k block)`` for a PACKED-PAIR operand, or
+        ``None``. The stride is the chunk's block count — the scale slab is ``tile × bk/block``."""
+        scale = getattr(op, "scale", None)
+        return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row

@@ -405,6 +405,7 @@ def _compile_split(
     indirect_inputs=None,
     quant_specs=None,
     mxfp4_specs=None,
+    mxfp4_transposed=None,
     trellis_specs=None,
     aux_examples=None,
     weight_inputs=(),
@@ -458,6 +459,8 @@ def _compile_split(
     reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
     if sum(bool(specs) for specs in (quant_specs, mxfp4_specs, trellis_specs)) > 1:
         raise ValueError("expert input formats are mutually exclusive")
+    if mxfp4_specs and mxfp4_transposed is None:
+        raise ValueError("mxfp4_specs needs mxfp4_transposed: the experts module's weight layout decides the decode's orientation")
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -491,7 +494,7 @@ def _compile_split(
         if mxfp4_specs:
             from emmy.compiler.loader.quant import spell_mxfp4_inputs
 
-            spell_mxfp4_inputs(graph, mxfp4_specs)
+            spell_mxfp4_inputs(graph, mxfp4_specs, transposed=mxfp4_transposed)
         if trellis_specs:
             from emmy.compiler.loader.quant import spell_trellis_inputs
 
@@ -1110,7 +1113,7 @@ class EmmyGenRunner:
         expert_groups: dict[tuple, int] = {}  # shape key → group index
         moe_top_k = int(getattr(text_config, "num_experts_per_tok", 0) or 0)
 
-        def _build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, layer):
+        def _build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, layer):
             """Compile one expert SHAPE GROUP's whole program set: the symbolic any-width
             program, the static decode-bucket / M=1 / M=256 twins, and the ``top_k`` fixed-slot
             instances of the indirect M=1 twin. Returns the tier dict every layer of this group
@@ -1177,6 +1180,7 @@ class EmmyGenRunner:
             expert_kw = {
                 "quant_specs": quant_specs,
                 "mxfp4_specs": mxfp4_specs,
+                "mxfp4_transposed": transposed if mxfp4_specs else None,
                 "trellis_specs": trellis_specs,
                 "aux_examples": aux_examples,
                 "weight_inputs": ind_names,
@@ -1198,7 +1202,13 @@ class EmmyGenRunner:
                         ["x"],
                         np_dtype,
                         arena=arena,
-                        capacity=max_tokens,
+                        # The one program that can be handed the WHOLE step: pre/post split a
+                        # rider-width step across their static twins, but the routed dispatch
+                        # runs per expert over the step's own rows, and nothing stops every row
+                        # from choosing one expert (vLLM's profiling run, whose dummy rows are
+                        # identical, always does). Size it to the widest step the plugin admits
+                        # — the prefill capacity plus the decode-bucket rider allowance.
+                        capacity=None if max_tokens is None else max_tokens + decode_bucket,
                         **expert_kw,
                     )
                 # Static expert twins — the decode hot path. Same failure contract as
@@ -1383,7 +1393,7 @@ class EmmyGenRunner:
                 g = expert_groups.get(shape_key)
                 if g is None:
                     g = expert_groups[shape_key] = len(expert_tiers)
-                    expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, i))
+                    expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, i))
                 moe_meta[-1]["group"] = g
             else:
                 pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)
@@ -1978,7 +1988,8 @@ class EmmyGenRunner:
 
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
-        ``(q, k, v)`` CUDA tensors. ``T <= decode_bucket`` rides the static decode twin
+        ``(q, k, v)`` CUDA tensors, or the single hidden-width activation the fork-attention
+        seam hands its own sublayer. ``T <= decode_bucket`` rides the static decode twin
         (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
         width the twin was built for — rides the static chunk twin's exact grids;
         ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
@@ -2004,11 +2015,14 @@ class EmmyGenRunner:
             # rider step). Under a whole-step capture the copies are recorded (run_device's
             # out= contract); the destinations are persistent, minted on the warmup step.
             pb = self._prefill_bucket
-            hd, nh, nkv, _ = self._attn_meta[layer]
-            widths = (nh * hd, nkv * hd, nkv * hd)
-            dests = [
-                self._rider_dest(nm, t, w, hidden, dtype=self._activation_dtype) for nm, w in zip(("q", "k", "v"), widths, strict=True)
-            ]
+            if len(self._pre_prefill[layer].output_names) == 1:
+                # The fork-attention seam hands back ONE hidden-width activation: the engine's
+                # attention sublayer owns the projections, so there is no q/k/v split to size.
+                specs = (("x", self._hidden_size),)
+            else:
+                hd, nh, nkv, _ = self._attn_meta[layer]
+                specs = (("q", nh * hd), ("k", nkv * hd), ("v", nkv * hd))
+            dests = [self._rider_dest(nm, t, w, hidden, dtype=self._activation_dtype) for nm, w in specs]
             self._pre_prefill[layer].run_device([hidden[:pb]], out=[d[:pb] for d in dests])
             self._pre_decode[layer].run_device([hidden[pb:]], out=[d[pb:] for d in dests])
             return tuple(dests)

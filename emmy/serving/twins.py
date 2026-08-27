@@ -107,6 +107,7 @@ def capture_twin_graphs(
         build_moe_split_wrapper,
         hyper_connection_seam,
         moe_block_parts,
+        moe_expert_layout,
     )
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
@@ -206,7 +207,7 @@ def capture_twin_graphs(
                 elif fp8 is not None:
                     graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
                 elif mxfp4 is not None:
-                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members))
+                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
                 else:
                     graphs[expert_name] = graph
     return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes) if storage else graphs
@@ -382,8 +383,12 @@ def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) 
     return out
 
 
-def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int]) -> dict[str, Graph]:
-    """The native MXFP4 routed-expert twin derived from logical input shapes."""
+def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int], transposed: bool) -> dict[str, Graph]:
+    """The native MXFP4 routed-expert twin derived from logical input shapes.
+
+    ``transposed`` is the experts module's weight layout: the stored blocks are always
+    ``(out, in/32, 16)``, but the traced placeholder is ``(in, out)`` only for the ``x @ W``
+    layout — the ``F.linear`` orientation traces the stored one."""
     from emmy.compiler.loader.quant import _is_skipped, spell_mxfp4_inputs  # noqa: PLC0415
 
     coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.gate_up_proj_blocks", patterns)}
@@ -394,12 +399,13 @@ def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
         )
     specs = {}
     for inp in ("w_gate_up", "w_down"):
-        k, n = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+        logical = tuple(int(d.as_static()) for d in graph.nodes[inp].output.shape)
+        k, n = logical if transposed else logical[::-1]
         if k % 32:
             raise ValueError(f"MXFP4 expert input {inp!r} has input width {k}, not divisible by 32")
         specs[inp] = ((n, k // 32, 16), (n, k // 32))
     spelled = graph.copy()
-    spell_mxfp4_inputs(spelled, specs)
+    spell_mxfp4_inputs(spelled, specs, transposed=transposed)
     return {f"{name}@mxfp4": spelled}
 
 

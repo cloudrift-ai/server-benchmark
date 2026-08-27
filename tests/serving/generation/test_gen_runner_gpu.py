@@ -301,6 +301,60 @@ def test_gen_runner_moe_stitch_matches_eager():
     assert int(np.argmax(logits[-1])) == int(np.argmax(eager[-1]))
 
 
+def test_moe_expert_program_takes_the_widest_admitted_step():
+    """Every row of a step can route to ONE expert, and the widest step the plugin admits is the
+    prefill capacity PLUS the decode-bucket rider allowance — which is exactly the width vLLM's
+    profiling run uses. The pre/post twins split that step row-wise, but the routed dispatch does
+    not: it hands one expert program all the rows that chose it. Sizing that program at the
+    capacity alone makes every rider-width step die in ``set_sym_values``."""
+    pytest.importorskip("cupy")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
+
+    from emmy.serving.gen_runner import _EXPERT_PREFILL_M, EmmyGenRunner
+
+    config = transformers.OlmoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
+        max_position_embeddings=128,
+    )
+    torch.manual_seed(0)
+    model = OlmoeForCausalLM(config).eval()
+    # A router that scores every expert alike routes every token to the same one — the degenerate
+    # case the profiling run's identical dummy rows produce whatever the weights are.
+    for layer in model.model.layers:
+        layer.mlp.gate.weight.data.zero_()
+
+    capacity, bucket = 512, 16
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=bucket, max_tokens=capacity, prefill_bucket=capacity)
+    assert runner.rider_width == bucket, "the rider split must exist for this to be the widest step"
+
+    t = capacity + bucket
+    # The launch has to land on the SYMBOLIC expert program: the static M=256 twin serves every
+    # row set up to _EXPERT_PREFILL_M, and a step inside that range never reaches — so never pins
+    # — the capacity this test is about.
+    assert t > _EXPERT_PREFILL_M
+    hd, nh = runner.head_dim, runner.num_heads
+    residual = torch.randn(t, config.hidden_size, dtype=torch.float32).cuda()
+    attn_out = torch.randn(t, nh * hd, dtype=torch.float32).cuda()
+
+    out = runner.forward_layer_post_device(0, attn_out, residual)
+
+    assert out.shape == (t, config.hidden_size)
+
+
 def test_moe_fixed_slot_combine_matches_routed_oracle():
     """The fixed-slot combine (``_moe_combine_slots`` — selector write → k indirect slot
     replays → score matmul) must match ``combine_routed_experts`` (the routed parity oracle)

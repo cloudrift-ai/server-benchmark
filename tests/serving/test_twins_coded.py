@@ -519,7 +519,7 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
     )
     config = type("Cfg", (), {"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}})()
     profile = mxfp4_weight_profile(config)
-    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1})
+    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1}, True)
     assert set(twins) == {"expert1@mxfp4"}
     spelled = twins["expert1@mxfp4"]
     spelled.validate()
@@ -530,4 +530,4 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
     assert profile == ["lm_head"]
 
     with pytest.raises(NotImplementedError, match=r"requires every routed-expert layer.*layer\(s\) \[1\]"):
-        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1})
+        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1}, True)

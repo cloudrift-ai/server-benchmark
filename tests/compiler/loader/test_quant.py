@@ -199,7 +199,7 @@ def test_decode_mxfp4_applies_per_group_power_of_two_scales():
 def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
     shape = (64, 8)
     graph = _input_graph(shape)
-    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}) == {"w": "w_scale"}
+    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}, transposed=True) == {"w": "w_scale"}
     graph.validate()
     assert graph.inputs == ["x", "w", "w_scale"]
     assert graph.nodes["w"].output.dtype.name == "u8"
@@ -226,6 +226,35 @@ def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
         {"x": torch.from_numpy(x), "w": torch.from_numpy(blocks), "w_scale": torch.from_numpy(scales)},
     )
     np.testing.assert_array_equal(fn(*inputs).numpy(), expected)
+
+
+def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
+    """Experts stored as ``(out, in)`` and applied through ``F.linear`` (DeepSeek, OLMoE) trace
+    the STORED orientation, so the decode must land there — no transpose. The same blocks under
+    the ``x @ W`` layout yield the transpose of this, and a square expert matrix admits both,
+    which is why the layout is declared instead of read off the shapes."""
+    shape = (8, 64)  # (out, in): the F.linear parameter layout
+    graph = _input_graph(shape)
+    assert spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}, transposed=False) == {"w": "w_scale"}
+    graph.validate()
+    assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (8, 2, 16)
+
+    codes = (np.arange(8 * 64, dtype=np.uint16).reshape(8, 64) * 7 % 16).astype(np.uint8)
+    blocks = _pack_mxfp4(codes)
+    scales = np.full((8, 2), 127, dtype=np.uint8)
+    x = np.linspace(-1, 1, np.prod(shape), dtype=np.float32).reshape(shape)
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={"x": x, "w": blocks, "w_scale": scales})
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], x * decode_mxfp4(blocks, scales).T)
+
+    # A non-f32 weight input takes the closing cast, which an f32 trace never emits.
+    half = _input_graph(shape, "f16")
+    spell_mxfp4_inputs(half, {"w": ((8, 2, 16), (8, 2))}, transposed=False)
+    half.validate()
+    assert half.nodes["w_logical"].output.dtype.name == "f16"
 
 
 def test_quantized_checkpoint_dir_detects_mxfp4(tmp_path):

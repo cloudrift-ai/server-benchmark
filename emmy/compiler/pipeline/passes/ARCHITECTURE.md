@@ -403,9 +403,21 @@ that canonical input:
   decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
   output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
   would have stored — never the carrier the cone computed in: only the `a` edge has a converting fill, so an f32
-  workspace on a `b` edge could feed no warp atom. Every seam's per-component dtypes are decided at offer time and
-  ride the seam into realization, so the two cannot disagree. The new producer and consumer are fresh unmapped
-  TileOps, so further legal cuts and schedules use the same ordinary passes.
+  workspace on a `b` edge could feed no warp atom. One refinement overrides that rule: an operand cone that passes
+  through a STORAGE FRONTIER — a decode (the `ElementwiseImpl.decodes` trait) of a value the cone itself computes —
+  cuts at the frontier instead (`_cut.storage_frontier`): the producer piece is the encode prefix, the workspace holds
+  the raw storage bits (exact — the element the graph's own quantize produced), and the consumer keeps the
+  decode-plus-factors residue, which normalization then re-binds as a raw storage-dtype load with the factors hoisted
+  onto the accumulator epilogue (W8A8's route to the fp8 mma tier). The frontier REPLACES the fed-store realization at
+  that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+  re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
+  seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
+  disagree. The new producer and consumer are fresh
+  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
+  exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
+  apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first — when a pinned schedule REFUSES
+  there and the kernel's placement is undecided with a cuttable seam remaining, the schedule pass defers instead of
+  raising, and the next sweep's cut decomposes the kernel (each terminal piece answers the pin itself).
 
 - **The cross-CTA reduce split is not currently realized.** Splitting the reduce axis across CTAs into a partial +
   finalize is a *structural* alternative — it changes which kernels exist — but it used to be decided as a `REDUCE`

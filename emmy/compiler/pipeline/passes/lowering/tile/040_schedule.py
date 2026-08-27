@@ -32,7 +32,8 @@ from emmy.compiler.pipeline.fork import Fork
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._schedule import PinRefused, schedule
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -51,7 +52,19 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    options = schedule(tile, tile.name, tile.knobs, ctx)
+    try:
+        options = schedule(tile, tile.name, tile.knobs, ctx)
+    except PinRefused:
+        # A KERNEL-DEPENDENT pin refusal (``PinRefused`` — a different kernel set may realize the
+        # pin) on a kernel whose PLACEMENT is still undecided is premature: a piece minted by a
+        # structural apply joins the sweep after ``030_cut``'s batch, so it reaches this rule
+        # before the cut pass has seen it. When a cuttable seam remains, defer — the next sweep's
+        # cut decomposes the kernel and each terminal piece answers the pin itself. The raise
+        # stays loud wherever no seam is left to change the answer, and a malformed /
+        # nowhere-realizable pin is a plain ``ValueError`` that raises immediately.
+        if not tile.placement_decided and cuttable_seams(tile):
+            raise RuleSkipped("pinned schedule refused and cuttable seams remain — the placement fork decides first") from None
+        raise
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

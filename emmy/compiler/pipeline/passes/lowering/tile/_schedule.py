@@ -128,6 +128,14 @@ class _Option:
 # ---- what one Fold can spell ---------------------------------------------------------------------- #
 
 
+class PinRefused(ValueError):
+    """A live pin names nothing THIS kernel can realize — a different kernel set may. The class
+    is the distinction ``040_schedule``'s defer keys on: a kernel-dependent refusal defers to the
+    placement fork while a cuttable seam remains, whereas a malformed / nowhere-realizable pin (a
+    codec parse failure, an ``m``-strip no catalog spells) stays a plain ``ValueError`` and raises
+    immediately — deferring it would waste a cut and repeat an already-correct message per piece."""
+
+
 def _pin(knob, key: str | None) -> str | None:
     """The live env pin addressing ``key`` — ``EMMY_KNOBS``'s ``FAMILY@<element>`` entry, falling
     back to the bare ``EMMY_<FAMILY>``. Unset reads ``None``, which is the distinction the
@@ -235,7 +243,9 @@ def _contraction_options(state: _State, node) -> list[_Option]:
             if why is not None:
                 refused.append(why)
                 if tile_pin is not None:
-                    raise ValueError(why)
+                    # PinRefused: the bound exists because the PAIR's registers sum — cutting the
+                    # producer into its own kernel removes the pairing, so another set may realize.
+                    raise PinRefused(why)
                 continue
             knobs = {}
             if key is not None:
@@ -257,12 +267,14 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 )
     if not opts:
         if tile_pin is not None and tile_refused:
-            raise ValueError(f"TILE pin {tile_pin!r} at {key or 'TILE'} names no schedule this site can realize: {tile_refused[-1]}")
+            raise PinRefused(f"TILE pin {tile_pin!r} at {key or 'TILE'} names no schedule this site can realize: {tile_refused[-1]}")
         if red_pin and red_refused:
-            raise ValueError(red_refused[-1])
+            # PinRefused: the coop/ILP partition rides the per-cell tier, which turns on the plans
+            # THIS node offers — a cut that leaves a single-channel contraction restores it.
+            raise PinRefused(red_refused[-1])
         if stage_pin and refused:
             key_name = stage_key or "STAGE"
-            raise ValueError(f"STAGE pin {stage_pin!r} at {key_name} names no stage this contraction can realize: {refused[-1]}")
+            raise PinRefused(f"STAGE pin {stage_pin!r} at {key_name} names no stage this contraction can realize: {refused[-1]}")
     return opts
 
 
@@ -571,7 +583,7 @@ def _tile_moves(state: _State, node, key: str | None) -> list[TilePlan]:
         out.append(plan)
     if not out:
         detail = refused[-1] if refused else "no inventory this site can spell resolves it"
-        raise ValueError(f"TILE pin {pin!r} at {key or 'TILE'} names no schedule this site can realize: {detail}")
+        raise PinRefused(f"TILE pin {pin!r} at {key or 'TILE'} names no schedule this site can realize: {detail}")
     return out
 
 
@@ -681,9 +693,11 @@ def _parsed_reduce_pin(state: _State, pin: str, key: str | None) -> ReducePlan:
     try:
         plan = ReducePlan.parse(pin, state.work_pin)
     except ValueError as e:
+        # plain: a malformed spelling is wrong everywhere — no cut can change what the codec reads
         raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} does not resolve: {e}") from None
     if plan.needs_split:
         if not state.carries_partition:
+            # plain: only a SPLIT mints the receipt this pin names; a cut never does
             raise ValueError(
                 f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a cross-CTA split, which only the structural "
                 f"035_split_reduce fork realizes on a kernel's head fold — this kernel realized none"
@@ -691,7 +705,7 @@ def _parsed_reduce_pin(state: _State, pin: str, key: str | None) -> ReducePlan:
         plan = ReducePlan(tuple(st for st in plan.stages if st.level is not Level.GRID))
     why = _transposed_refusal(plan, state.transposed_ok)
     if why is not None:
-        raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} names no partition this fold can realize: {why}")
+        raise PinRefused(f"REDUCE pin {pin!r} at {key or 'REDUCE'} names no partition this fold can realize: {why}")
     return plan
 
 

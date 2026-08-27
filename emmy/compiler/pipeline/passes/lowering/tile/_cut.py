@@ -3,6 +3,9 @@
 The cut is structural: the child Fold keeps its algebra, writes every state component to a
 workspace, and the parent reads those components through ordinary ``Load`` edges.  Both pieces
 are fresh unmapped ``TileOp`` objects and therefore re-enter the normal scheduling pipeline.
+A contraction-operand seam whose cone passes through a storage waypoint cuts THERE instead
+(:func:`storage_frontier`): the workspace holds the raw storage bits and the consumer keeps the
+decode-plus-factors residue.
 """
 
 from __future__ import annotations
@@ -11,11 +14,12 @@ from dataclasses import dataclass, replace
 from itertools import islice
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction, refs_axis
-from emmy.compiler.ir.stmt import Body, Load, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
@@ -30,12 +34,89 @@ from emmy.compiler.tensor import Tensor
 class CutSite:
     """All stored occurrences of one canonically shared child Fold. ``dtypes`` is the workspace's
     per-component materialization, decided at offer time so the realization stores exactly what
-    was offered."""
+    was offered. ``frontier`` (contraction-operand seams only) moves the cut to the cone's storage
+    waypoint — see :class:`Frontier`."""
 
     node: Fold
     spelling: str
     axes: tuple
     dtypes: tuple
+    frontier: Frontier | None = None
+
+
+@dataclass(frozen=True)
+class Frontier:
+    """A contraction-operand cone's STORAGE waypoint: a decode (the ``ElementwiseImpl.decodes``
+    trait) of a value the cone itself computes. The seam materializes there instead of at the
+    cone's result — the workspace holds the raw storage bits (exact, the element the graph's own
+    quantize produced), the producer piece computes ``producer`` (the encode prefix), and the
+    consumer keeps ``residue`` (the decode plus the factor chain), which the normalize-time
+    decode hoist then absorbs into a raw storage-dtype load with the factors on the accumulator
+    epilogue — the same ``sum_k a*(s*w) = s*sum_k a*w`` reassociation as the materialized case."""
+
+    name: str  # the encoded value the workspace holds
+    producer: tuple  # the prefix stmts computing ``name`` (spliceable operand bodies inlined)
+    residue: tuple  # the decode + factor stmts the consumer keeps
+    dtype: object  # the storage DataType the decode op names
+
+
+def _spliceable(edge) -> tuple | None:
+    """A zero-axis operand's flat stmt list, or ``None`` when it cannot splice inline (an
+    iterating fold, nested operands, or non-scalar members)."""
+    if not isinstance(edge, Fold) or edge.axis is not None or edge.operands:
+        return None
+    members = tuple(edge.lift.body)
+    return members if all(isinstance(stmt, (Load, Assign)) for stmt in members) else None
+
+
+def storage_frontier(node: Fold) -> Frontier | None:
+    """``node``'s storage frontier, or ``None`` when it has none the cut can separate.
+
+    The shape is semantic, not an op list: exactly one decode of a value DEFINED by the cone's own
+    body (a decode of a materialized load was already absorbed by normalization), whose backward
+    cone separates cleanly — only the decode reads a prefix-computed name, so the residue's value
+    is a pure function of the stored bits and its own leaves. Every operand must splice inline
+    (each side takes the operand bodies it reads), keeping both pieces free of nested edges."""
+    if not isinstance(node, Fold) or node.axis is not None or len(node.lift.results) != 1:
+        return None
+    body = node.lift.body
+    if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
+        return None
+    computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
+    decodes = [
+        stmt
+        for stmt in body
+        if isinstance(stmt, Assign) and stmt.op.decodes is not None and len(stmt.args) == 1 and stmt.args[0] in computed
+    ]
+    if len(decodes) != 1:
+        return None
+    decode = decodes[0]
+    frontier = decode.args[0]
+    spliced = [_spliceable(edge) for edge in node.operands]
+    if any(members is None for members in spliced):
+        return None
+    prefix = tuple(body.backward_cone((frontier,)).members)
+    prefix_ids = {id(stmt) for stmt in prefix}
+    prefix_defs = {name for stmt in prefix for name in stmt.defines()}
+    residue = tuple(stmt for stmt in body if id(stmt) not in prefix_ids)
+    for stmt in residue:
+        crossing = deep_reads([stmt]) & prefix_defs
+        if crossing and (stmt is not decode or crossing != {frontier}):
+            return None  # a residue stmt reads past the frontier — the waypoint does not separate
+    if node.lift.results[0] in prefix_defs:
+        return None
+    result = get_dtype(decode.op.decodes)
+
+    def side(stmts: tuple) -> tuple:
+        reads = deep_reads(list(stmts))
+        inlined: list = []
+        for edge, members in zip(node.operands, spliced, strict=True):
+            needed = set(_operand_result_names(edge)) & reads
+            if needed:  # only the cone the side reads — a dead spliced def would decline the decode hoist
+                inlined.extend(Body(members).backward_cone(tuple(sorted(needed))).members)
+        return (*inlined, *stmts)
+
+    return Frontier(name=frontier, producer=side(prefix), residue=side(residue), dtype=result)
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -119,17 +200,22 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if (
-            not isinstance(node, Fold)
-            or id(node) in seen
-            or not scopes
-            or not all(_closed_at(node, scope) for scope in scopes)
-            or (dtypes := _workspace_dtypes(node, tile, contraction_operands.get(id(node)))) is None
-        ):
+        if not isinstance(node, Fold) or id(node) in seen or not scopes or not all(_closed_at(node, scope) for scope in scopes):
+            continue
+        consumer = contraction_operands.get(id(node))
+        # A frontier REPLACES the fed-store realization at this seam rather than joining the
+        # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+        # re-rounded) and footprint (storage width vs store width), so there is no trade for the
+        # evidence to decide — one site stays one decision.
+        frontier = storage_frontier(node) if consumer is not None else None
+        dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer)
+        if dtypes is None:
             continue
         seen.add(id(node))
         axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
-        out.append(CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes, dtypes=dtypes))
+        out.append(
+            CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes, dtypes=dtypes, frontier=frontier)
+        )
     return tuple(out)
 
 
@@ -154,10 +240,11 @@ def _replace_fold(node: Fold, target: Fold, loads: tuple[Load, ...]) -> Fold:
     return replace(node, operands=operands, lift=replace(node.lift, body=Body(body)))
 
 
-def _workspace_axes(seam: CutSite) -> tuple:
-    child = seam.node
-    bound = {site.node.axis.name for site in sites(child) if isinstance(site.node, Fold) and site.node.axis is not None}
-    lowered = tuple(child.lower())
+def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
+    """The seam axes the PRODUCED piece actually sweeps — its workspace dimensions. ``produced``
+    is the seam node, or the frontier prefix when the seam materializes at a storage waypoint."""
+    bound = {site.node.axis.name for site in sites(produced) if isinstance(site.node, Fold) and site.node.axis is not None}
+    lowered = tuple(produced.lower())
     return tuple(axis for axis in seam.axes if axis.name not in bound and any(refs_axis(stmt, axis.name) for stmt in lowered))
 
 
@@ -179,22 +266,37 @@ def output_map(root: Node) -> dict[str, str]:
 
 
 def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, str]) -> Graph:
-    """Build the two-kernel fragment for ``seam``."""
+    """Build the two-kernel fragment for ``seam``. A frontier seam cuts at the cone's storage
+    waypoint: the producer computes the encode prefix, the workspace holds the raw bits, and the
+    consumer keeps the decode + factor residue as its operand cone (which normalization then binds
+    as a raw storage-dtype load with the factors hoisted onto the accumulator epilogue)."""
     tile: TileOp = root.op
     child = seam.node
-    names = _operand_result_names(child)
-    axes = _workspace_axes(seam)
+    front = seam.frontier
+    if front is not None:
+        names = (front.name,)
+        produced = Fold.projection(body=Body(front.producer), results=names)
+    else:
+        names = _operand_result_names(child)
+        produced = child
+    axes = _workspace_axes(seam, produced)
     shape = tuple(axis.extent for axis in axes)
     index = tuple(Var(axis.name) for axis in axes)
     token = digest(tile.structural_key(), seam.spelling)[:10]
     buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
     loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
+    if front is not None:
+        raw = replace(loads[0], dtype=front.dtype)
+        loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
     parent_fold = _replace_fold(tile.op, child, loads)
 
     producer = TileOp(
-        op=child,
-        name=f"{tile.name}__place_producer",
+        op=produced,
+        # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
+        # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
+        # different cut levels would launch one kernel twice.
+        name=f"{tile.name}__place_{token}",
         place=Placement(free=axes),
         output_specs=tuple(OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)),
     )
@@ -210,7 +312,7 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
     fragment.add_node(
         op=producer,
-        inputs=_piece_inputs(root, child),
+        inputs=_piece_inputs(root, produced),
         outputs=workspace_tensors,
         node_id=buffers[0],
     )
@@ -228,4 +330,4 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     return fragment
 
 
-__all__ = ["CutSite", "cuttable_seams", "output_map", "realize"]
+__all__ = ["CutSite", "Frontier", "cuttable_seams", "output_map", "realize", "storage_frontier"]

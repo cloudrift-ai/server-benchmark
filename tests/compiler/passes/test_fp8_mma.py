@@ -368,13 +368,16 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(reason="static W8A8 still routes an f8 operand through the 16-bit shared-memory fill", strict=True)
 def test_w8a8_static_act_quant_e2e_cuda():
-    """The W8A8 e2e (M3 priority 4): the encode kernel materializes ``x_f8`` via the
-    <cuda_fp8.h> constructor, the linear's double decode cone binds BOTH raw f8 operands onto the
-    k32 mma, and the epilogue composes ``act_scale ⊗ weight_scale`` on the f32 accumulator.
-    Compared against (a) the f32 reference of the SAME quantized computation (tight) and (b) the
-    unquantized reference (the activation-quantization error, loose documented gate)."""
+    """The W8A8 e2e (M3 priority 4): under the bare recursive cut, the fused MIMO kernel (whose
+    independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)
+    decomposes until the contraction stands alone — the A cone cuts at its STORAGE FRONTIER
+    (``storage_frontier``: the encode prefix becomes its own kernel, the raw f8 bytes the
+    workspace), normalization re-binds the residue as the raw f8 load with ``act_scale`` hoisted,
+    and the bare contraction piece feeds the k32 mma raw bytes on both operands with the scale
+    product composed per element downstream. Compared against (a) the f32 reference of the SAME
+    quantized computation (tight) and (b) the unquantized reference (the activation-quantization
+    error, loose documented gate)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -389,7 +392,7 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"}):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
@@ -457,14 +460,22 @@ def _dyn_w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(reason="dynamic W8A8 effects are not yet representable as Tile IR output specifications", strict=True)
+@pytest.mark.xfail(
+    reason="dynamic W8A8 never reaches Tile IR: the fused kernel's swept output region interleaves two "
+    "independent output cones (the x_f8 encode beside the y contraction), the region's Lambda stores its "
+    "body in normalized order, and extract_output_specs' byte-identical reconstitution gate refuses the "
+    "reordered round trip — the term stays a Loop-IR fallback. Closing it means fissioning a swept "
+    "multi-output region into per-output-cone regions under an order-insensitive reconstitution contract, "
+    "then a storage-frontier cut whose producer carries the amax statistic cone as a real operand",
+    strict=True,
+)
 def test_w8a8_dynamic_per_token_amax_cuda():
-    """Dynamic per-token amax (M3 priority 5): the composition falls out of the existing
-    machinery — the amax statistic + encode ride their own kernels, the k32 mma consumes the
-    materialized bits, and the m-indexed per-token scale hoists like any k-invariant factor.
-    Verified against the DEVICE's own encoded bits (tight — isolates the mma path from host/device
-    encode boundary-tie divergence at x/s values landing exactly between e4m3 codes) and the host
-    quantized reference (loose)."""
+    """Dynamic per-token amax (M3 priority 5): the intended composition — the amax statistic +
+    encode ride their own kernels, the k32 mma consumes the materialized bits, and the m-indexed
+    per-token scale hoists like any k-invariant factor (m-indexed is K-FREE, so the same
+    ``_decode_split`` reassociation applies). Verified against the DEVICE's own encoded bits
+    (tight — isolates the mma path from host/device encode boundary-tie divergence at x/s values
+    landing exactly between e4m3 codes) and the host quantized reference (loose)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.pipeline.search.pins import pinned_knobs

@@ -304,19 +304,31 @@ def correct(case: Case, compiled) -> None:
         greedy = CudaBackend()
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
     for name in program.outputs:
-        tolerance = _tolerance(program.buffer(name).dtype)
-        np.testing.assert_allclose(np.asarray(result.outputs[name]), np.asarray(want.outputs[name]), **tolerance)
+        reference = np.asarray(want.outputs[name])
+        np.testing.assert_allclose(
+            np.asarray(result.outputs[name]),
+            reference,
+            err_msg=f"{case.id}: output {name}",
+            **_tolerance(program.buffer(name).dtype, reference),
+        )
 
 
 def seeded_inputs(program) -> dict[str, np.ndarray]:
     """Deterministic inputs for the target's declared shapes, scaled so an fp16 reduction of a
-    model-sized K does not saturate."""
+    model-sized K does not saturate.
+
+    A symbolic axis resolves to its own ``Dim`` hint — the size ``emmy run`` already resolves a
+    symbolic reproducer to. The corpus therefore exercises a symbolic kernel at its hint; it has no
+    spelling for "compile at the hint, run at some other size", because binding a symbol in a case
+    file SPECIALIZES the program rather than sizing a run of it.
+    """
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
     feed: dict[str, np.ndarray] = {}
     for name in program.inputs:
-        shape = tuple(dim.as_static() for dim in program.nodes[name].output.shape)
+        shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in program.nodes[name].output.shape)
         feed[name] = (rng.standard_normal(shape) * 0.05).astype(np.float32)
     for node_id, node in program.nodes.items():
         if isinstance(node.op, ConstantOp) and node_id not in feed and node.op.value is not None:
@@ -324,5 +336,15 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     return feed
 
 
-def _tolerance(dtype) -> dict[str, float]:
-    return {"rtol": 5e-3, "atol": 5e-3} if dtype.name == "f16" else {"rtol": 1e-4, "atol": 1e-5}
+def _tolerance(dtype, reference: np.ndarray) -> dict[str, float]:
+    """Comparison bounds, scaled by the reference's own peak for f16.
+
+    A fixed absolute bound cannot serve both a 128-long f16 reduction and a 4096-long one: the
+    drift bound is roughly K times the peak times the f16 epsilon, so a constant either fails the
+    long case or stops asserting anything about the short one. This is the same peak-relative form
+    the e2e coverage matrices this corpus replaces already use.
+    """
+    if dtype.name != "f16":
+        return {"rtol": 1e-4, "atol": 1e-5}
+    peak = float(np.max(np.abs(reference))) if reference.size else 0.0
+    return {"rtol": 0.05, "atol": max(5e-3, 0.05 * peak)}

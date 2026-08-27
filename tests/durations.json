@@ -253,6 +253,7 @@
  "tests/compiler/passes/test_split_fresh_kernels.py::test_finalize_keeps_projection_input_edges": 1.4,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_no_piece_inherits_the_kernel_it_replaces": 0.16,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_split_preserves_every_fused_output": 6.4,
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_split_reductions_remain_fold_trees[graph0]": 5.1,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_the_split_is_consumed_by_the_kernel_that_realizes_it[g2a]": 0.22,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_the_split_is_consumed_by_the_kernel_that_realizes_it[g2k]": 0.21,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_the_split_is_consumed_by_the_kernel_that_realizes_it[g4k]": 1.31,

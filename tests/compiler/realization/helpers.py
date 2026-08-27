@@ -348,3 +348,92 @@ def _tolerance(dtype, reference: np.ndarray) -> dict[str, float]:
         return {"rtol": 1e-4, "atol": 1e-5}
     peak = float(np.max(np.abs(reference))) if reference.size else 0.0
     return {"rtol": 0.05, "atol": max(5e-3, 0.05 * peak)}
+
+
+# --- stage 5: latency ---------------------------------------------------------------------------
+#
+# Stages 1 to 4 answer "can this schedule be realized and is it correct". This answers "and is it
+# still as fast as it was" — the failure a lockout leaves behind when the compiler quietly stops
+# selecting a schedule and falls back to a slower tier.
+#
+# It cannot ride the correctness walker. `make test` compiles at `-Xcicc -O1`, which by the
+# glossary's own definition is not a measurement lane, so a latency assertion there would measure
+# the wrong regime entirely.
+
+#: Where a stored latency stops being a match. Ten percent is a starting bound, not a measurement:
+#: `run --json` already documents a ~7% gap between two timing semantics for the same kernel, and
+#: isolated microsecond benches in this repository have been found launch-bound rather than
+#: measuring the kernel at all. Best-of-three inside this band will miss percent-level drift; it
+#: catches cliffs, which is what a schedule that stops being realized actually looks like.
+LATENCY_BAND = 0.10
+
+#: Interference is one-sided — a busy machine makes a kernel slower, never faster than the hardware
+#: can go — so the minimum of several runs is the honest estimator, and requiring every run to be
+#: slow is what keeps a developer box that is also compiling something from crying wolf.
+LATENCY_REPEATS = 3
+
+
+def live_hardware_id() -> str:
+    return Context.probe().hardware_id()
+
+
+def recorded_latency(case: Case, hardware_id: str) -> dict | None:
+    return (case.record.latency or {}).get(hardware_id)
+
+
+def bench_command(case: Case, output: Path) -> list[str]:
+    """The one way to bench a case: `emmy run`, pinned to the schedule the case authors.
+
+    A corpus case is deliberately not `VERIFIED` — filling `measurements` would auto-pin it in
+    `emmy run --golden` and fold test data into the replay tooling's trusted evidence — so the
+    authored row is pinned with `--ab`, which is exactly "bench this row beside the greedy pick".
+    """
+    import sys  # noqa: PLC0415
+
+    row = ",".join(f"{name}={value}" for name, value in case.record.knobs.items())
+    return [
+        sys.executable,
+        "-m",
+        "emmy.emmy",
+        "run",
+        "--golden-file",
+        str(case.path),
+        "--golden",
+        case.record.name,
+        "--bench",
+        "--bench-backends",
+        "eager,tcompile,emmy",
+        "--ab",
+        row,
+        "--json",
+        str(output),
+    ]
+
+
+def measure(case: Case) -> tuple[list[float], float]:
+    """Best-of-N emmy microseconds for the case's own schedule, and the torch.compile number.
+
+    Deployable optimization is forced: the correctness lane's `-O1` changes runtime performance,
+    and a timing measured there is not one a deploy would ever see.
+    """
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    environment = {**os.environ, "EMMY_NVCC_FLAGS": ""}
+    samples: list[float] = []
+    tcompile = 0.0
+    with tempfile.TemporaryDirectory(prefix="emmy_corpus_bench_") as directory:
+        for repeat in range(LATENCY_REPEATS):
+            output = Path(directory) / f"{repeat}.json"
+            result = subprocess.run(bench_command(case, output), capture_output=True, text=True, env=environment, timeout=1800)
+            if result.returncode != 0 or not output.exists():
+                raise AssertionError(f"{case.id}: bench failed (exit {result.returncode})\n{result.stderr[-2000:]}")
+            record = json.loads(output.read_text())
+            rows = [row for row in record.get("pinned", []) if row.get("status") == "ok" and row.get("total_us")]
+            if not rows:
+                raise AssertionError(f"{case.id}: the pinned row measured nothing — {record.get('pinned')}")
+            samples.append(float(rows[0]["total_us"]))
+            tcompile = float(record["backends"].get("torch.compile", {}).get("latency_us") or tcompile)
+    return samples, tcompile

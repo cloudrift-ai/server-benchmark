@@ -1,6 +1,6 @@
 # A split reduce whose carrier carries a projection epilogue — a degenerate Accum carrier with a
-# constant-scale projection (the 1/N divisor) — under the ATOMIC finalize — one kernel, each CTA's
-# partition folded in by atomicAdd.
+# constant-scale projection (the 1/N divisor) — finalized atomically, each CTA's partition folded in
+# by an atomicAdd.
 #
 # The atomic finalize projects each CTA's partition BEFORE the add, so it is correct only when the
 # projection distributes over the add: mean's constant scale does, l2's sqrt does not. The deferred

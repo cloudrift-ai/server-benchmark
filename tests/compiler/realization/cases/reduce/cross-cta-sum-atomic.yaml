@@ -1,10 +1,9 @@
 # The carrier-generic cross-CTA split and finalize, one cell of its matrix. Carrier: an additive
-# Accum split-reduce. Finalize: the ATOMIC finalize — one kernel, each CTA's partition folded in by
-# atomicAdd.
+# Accum split-reduce. Finalize: ATOMIC — one kernel, each CTA's partition folded in by atomicAdd.
 #
 # One REDUCE letter owns both halves — the split across 2 CTAs and which finalize folds them — so
 # matmul, a plain reduce and flash all reach it through the same fork. The twisted carrier admits
-# only the deferred kernel: its e^dm rescale is not an atomicAdd.
+# only the deferred kernel: its exp(Δm) rescale is not an atomicAdd.
 #
 # The split is realized by REPLACING the kernel, so no piece stamps the g2 it came from; the pin is
 # read structurally. PLACE=fuse is an input pin, not part of the schedule row.

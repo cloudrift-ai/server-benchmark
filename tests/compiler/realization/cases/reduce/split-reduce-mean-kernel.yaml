@@ -1,6 +1,6 @@
 # A split reduce whose carrier carries a projection epilogue — a degenerate Accum carrier with a
-# constant-scale projection (the 1/N divisor) — under the DEFERRED finalize — the producer writes a
-# partial workspace and a.
+# constant-scale projection (the 1/N divisor) — finalized by the deferred kernel, which reads back
+# the producer's partial workspace.
 #
 # The atomic finalize projects each CTA's partition BEFORE the add, so it is correct only when the
 # projection distributes over the add: mean's constant scale does, l2's sqrt does not. The deferred

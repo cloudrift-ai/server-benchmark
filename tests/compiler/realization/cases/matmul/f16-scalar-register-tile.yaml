@@ -1,7 +1,3 @@
-# f16 operands forced onto the scalar register-tile FMA path. At 512 cubed the atom is
-# eligible and greedy prefers it, so the scalar codec is load-bearing here: this guards
-# both the pin's authority and the f16 scalar render (half-to-float multiply, float-to-
-# half store).
 compute_cap:
 - 12
 - 0

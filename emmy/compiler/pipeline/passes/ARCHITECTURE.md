@@ -90,9 +90,9 @@ question is asked once per term.
 The inventory restricts which ROWS a pass offers; it never keys the interface a site presents. That distinction is
 what keeps the composition tractable: the product runs over the sites' interface groups, so one extra group per site
 multiplies the whole enumeration, and a whole fused model reaches the scheduler as one term with hundreds of sites.
-Past `MAX_COMBINATIONS` the composition is refused rather than truncated — a truncated one reads as "these are the
-compatible schedules" while dropping whichever the walk reached last. The bound is on the COMPOSITION; how many
-candidates the composed product addresses stays unbounded, because addressing costs nothing until a row is read.
+The interface-group combinations are still built eagerly, and Python's sequence protocol cannot represent a row
+count beyond `Py_ssize_t`. Whole-model terms large enough to cross either boundary are unsupported until the
+compatibility product itself is factorized; there is no arbitrary cap that silently changes the legal schedule set.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster
@@ -249,9 +249,10 @@ that canonical input:
 - **`018_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. A cut that materializes a contraction operand preserves the operand slab's storage dtype rather than the
-  f32 accumulator dtype of a surrounding normalization Fold. The new producer and consumer are fresh unmapped
-  TileOps, so further legal cuts and schedules use the same ordinary passes.
+  are not. A direct contraction-operand seam is not offered yet: the pure Fold result dtype does not encode the
+  materialized slab dtype a selected schedule would store. Guessing it from the root output silently mis-types other
+  widths. The new producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same
+  ordinary passes.
 
 - **`030_split_reduce`** splits the **reduce axis** (the REDUCE codec's `g<w>` cross-CTA shard): the SAME
   computation, its K partitioned across CTAs into a partial + finalize (or, on the atomic arm, one kernel that

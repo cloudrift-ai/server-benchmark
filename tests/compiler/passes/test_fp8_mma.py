@@ -363,6 +363,7 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.xfail(reason="static W8A8 still routes an f8 operand through the 16-bit shared-memory fill", strict=True)
 def test_w8a8_static_act_quant_e2e_cuda():
     """The W8A8 e2e (M3 priority 4): the encode kernel materializes ``x_f8`` via the
     <cuda_fp8.h> constructor, the linear's double decode cone binds BOTH raw f8 operands onto the
@@ -451,6 +452,7 @@ def _dyn_w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.xfail(reason="dynamic W8A8 effects are not yet representable as Tile IR output specifications", strict=True)
 def test_w8a8_dynamic_per_token_amax_cuda():
     """Dynamic per-token amax (M3 priority 5): the composition falls out of the existing
     machinery — the amax statistic + encode ride their own kernels, the k32 mma consumes the

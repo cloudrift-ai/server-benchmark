@@ -195,10 +195,10 @@ smem→register fragment pipeline. The Volta m8n8k4 atom enables only the synchr
 f16 A/B edges and keeps computed edges and newer instruction families disabled. The **`smem-tma`** transport
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
-are never offered and a `smem-tma` pin declines to `smem-async` / gmem-direct — Ada/Ampere have no
-`cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the schedule fork enumerates the
-resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves; a `EMMY_STAGE` pin stays
-authoritative.
+are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
+`cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
+schedule fork enumerates the resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves;
+an `EMMY_STAGE` pin stays authoritative.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a

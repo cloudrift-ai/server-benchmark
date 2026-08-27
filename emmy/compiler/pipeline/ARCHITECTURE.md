@@ -109,16 +109,14 @@ rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
 2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
-   it lazily compares one complete representative beneath each sibling and opens only the chosen branch; no kernel
-   is built yet (Part 4).
+   it ranks the complete offered rows; no kernel is built until the choice is made (Part 4).
 3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
    an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
 4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
    every knob the leaf has decided has the same value in the row. (The example starts here because this card records
    no golden for the op; the **verified** tier would otherwise decide first. Part 3 numbers the full list.)
 5. **The `perf` tier.** Otherwise: measured rows for this exact op, under this compile's own context key.
-6. **The prior.** Otherwise: at each level, the `mean_scores` argmin over one complete representative per sibling,
-   followed by the winning branch.
+6. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -717,14 +715,12 @@ tune winner is an automatic exact pin; verified rows remain automatic pins as be
 only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
 observations come from independent command invocations, not a second orchestration layer inside `run`.
 
-**Greedy compares complete branch representatives lazily.** A branch carries only a partial tile, so each sibling is
-represented by one complete descendant before featurization. The prior sees the full
-`{H_*, S_*, complete-knob-row}` vector, chooses one sibling, and repeats inside that subtree. This is a deliberately
-hierarchical greedy policy, not the global argmin of an eagerly flattened Cartesian product. Verified and measured
-rows already spell complete schedules, so those tiers descend to the exact offered row without model approximation.
-Structural forks remain small and use `flatten_leaves`. With no online prior the `OfflinePrior` ranks (including a
-positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing
-entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
+**Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Verified
+and measured rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
+and selects the global argmin. This preserves the fitted model's semantics, at the cost of traversing the row space
+until schedule composition and scoring are factorized end to end. With no online prior the `OfflinePrior` ranks
+(including a positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns
+nothing entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
 **And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one

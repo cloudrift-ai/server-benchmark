@@ -24,12 +24,11 @@ def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
     for name, value in pins:
         if value not in {"fuse", "cut"}:
             raise ValueError(f"bad PLACE value {value!r}; expected 'fuse' or 'cut'")
-        try:
-            site = resolve(tile.op, name, all_sites=all_sites)
-        except ValueError:
-            continue
+        if value == "fuse" and name == "PLACE":
+            return name, value
+        site = resolve(tile.op, name, all_sites=all_sites)
         if site is None or id(site.node) not in by_node:
-            continue  # a graph-wide pin may address a different kernel
+            raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
         return by_node[id(site.node)].spelling, value
     return None
 

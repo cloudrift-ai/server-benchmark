@@ -14,10 +14,10 @@ enumeration answers for every inventory: ``_ComboSpace`` joins the sites on the 
 each site what it offers under each candidate inventory — rebuilds every stage and reduce catalog
 once per member of a list those same catalogs produce.
 
-The product, compatible joins, worker segments, and launch-order product are all addressable
-sequences. A live compile retains that space through the fork and creates a candidate dictionary
-only when search visits its index. There is no flat candidate list or row-count budget. Offline
-sampling uses the same index path.
+The product rows, worker segments, and launch-order product are addressable sequences. A live
+compile retains that space through the fork and creates a candidate dictionary only when search
+visits its index. Compatible interface groups are still composed eagerly; very large fused terms
+therefore remain unsupported. Offline sampling uses the same row-index path.
 
 Catalogs contain choices only; legality filters them, and the evidence hierarchy ranks them.
 Materialization re-resolves the selected spellings against the same stored Fold nodes. An empty
@@ -26,11 +26,11 @@ space leaves the term unmapped.
 
 from __future__ import annotations
 
-import logging
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import accumulate, product
+from sys import maxsize
 from types import MappingProxyType
 
 from emmy.compiler.dim import Dim
@@ -78,8 +78,6 @@ from emmy.compiler.pipeline.search.space import (
 )
 from emmy.compiler.structural import digest
 
-logger = logging.getLogger(__name__)
-
 #: The per-site schedule families this enumeration decides, IN THE ORDER their keys lead the fork
 #: levels. ``WORK`` and ``RASTER`` are kernel-global and bracket them; ``PLACE`` is the seam
 #: family — resolved from ``PLACE`` pins, never enumerated here.
@@ -91,18 +89,6 @@ FAMILIES = ("TILE", "STAGE", "REDUCE")
 
 #: The ``Knob`` each family pins through.
 _KNOBS = {"TILE": TILE, "STAGE": STAGE, "REDUCE": REDUCE}
-
-#: The most compatible interface combinations one inventory's pass may enumerate
-#: (:meth:`_ComboSpace.build`). The product runs over the SITES, so it is exponential in their
-#: number: a term whose sites each offer two compatible geometries has 2^sites of them, and terms
-#: with hundreds of sites exist — a whole fused model reaches here as one term. Exceeding this is a
-#: LOUD refusal, never a truncation: a truncated product reads as "these are the compatible
-#: schedules" while dropping whichever the walk reached last. Measured headroom: the widest live
-#: term (a fused flash pair, every tier) composes ~24k.
-#:
-#: This bounds the COMPOSITION, not the space. How many candidates the composed product addresses
-#: is a prefix sum over it, and unbounded by design.
-MAX_COMBINATIONS = 1 << 20
 
 # ---- structural reads over the stored term ----------------------------------------------------- #
 
@@ -638,25 +624,17 @@ def _strip_blocks(term: _Term, node) -> list[Block]:
     function of the ROW, not a member of a pre-enumerated variant set."""
     pin = term.pin("TILE", node)
     ext = term.place.free[-1].extent.as_static() if _strippable(term) else 0
-    try:
-        plans = [resolve_site_tile(pin, None)] if pin is not None else [TilePlan(), *map_tile_moves()]
-    except ValueError as e:
-        # A pin the strip site cannot SPELL — a warp atom, which needs an inventory a pointwise
-        # cell never has. Same rule as everywhere: the candidate is simply not in
-        # ``values(site, work)``, so the cell degrades to the flat per-cell tile. This is PIN BLEED
-        # (one env pin, several kernels in the graph, and this is not the one it was written for),
-        # which is why it degrades rather than emptying the fork; ``_enumerate`` still raises the
-        # recorded error if NOTHING in the term could spell it.
-        term.pin_error = e
-        plans = []
+    if pin is not None:
+        plan = resolve_site_tile(pin, None)
+        legal.enforce(legal.strip_width(ext, _strip_width(plan)), pinned=True)
+        return [Block({"TILE": plan}, (None,))]
     out = []
-    for plan in plans:
+    for plan in (TilePlan(), *map_tile_moves()):
         # A strip WIDTH the cell cannot carry (a stateful / sweep body, a symbolic or indivisible
-        # inner extent, a warp codec on a pointwise cell) drops the row; the flat per-cell base
-        # below is always offered, so a narrowing pin degrades to it.
+        # inner extent) drops the row. The unpinned flat per-cell base is always legal.
         if legal.enforce(legal.strip_width(ext, _strip_width(plan)), pinned=False):
             out.append(Block({"TILE": plan}, (None,)))
-    return out or [Block({"TILE": TilePlan()}, (None,))]
+    return out
 
 
 # --- the reduce partition ---
@@ -915,8 +893,8 @@ def _fill_values(
 def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
     """The RESOLVED operand stages for one tile candidate — gmem-direct ``None`` first, then every
     catalog move that RESOLVES against the node with this ``plan``, so the leaf identity, the
-    stamped knobs and the kernel agree. A pinned ``STAGE`` is authoritative: the resolved pin alone,
-    or gmem-direct when it declines."""
+    stamped knobs and the kernel agree. A pinned ``STAGE`` is authoritative: it resolves exactly
+    or refuses rather than silently selecting gmem-direct."""
     if not plan.is_tiled:
         return [None]  # per-cell / unbindable — no operand slab to stage
     if not plan.is_warp and _has_computed_operand(node):
@@ -937,11 +915,11 @@ def _stage_values(term: _Term, node, plan: TilePlan) -> list[Stage | None]:
         if not pinned:
             return [None]
         wanted = Stage.parse(pinned)
-        # SM70 pins are strict: do not silently turn a newer copy instruction into the
-        # gmem-direct sibling.
-        if term.ctx.compute_capability < (8, 0):
-            legal.enforce(legal.stage_target(wanted, term.ctx), pinned=True)
-        return [resolve(wanted)]
+        resolved = resolve(wanted)
+        if resolved is None:
+            reason = legal.stage_target(wanted, term.ctx) or f"pinned STAGE {pinned!r} does not resolve for this contraction"
+            legal.enforce(reason, pinned=True)
+        return [resolved]
     return _resolved(stage_moves(warp=plan.is_warp), resolve)
 
 
@@ -1288,7 +1266,6 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
             buckets.append(bucket)
         order = tuple(values)
         assignments = [dict(zip(order, combo, strict=True)) for combo in product(*(tuple(values[key]) for key in order))]
-        _enforce_pass_budget(term, parts, len(claims) + 1, len(assignments))
         products = []
         product_interfaces = []
         # ``None`` leads: the per-cell / pure-reduce geometry is the inventory a term always has.
@@ -1306,7 +1283,11 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
                     grouped.append(tuple(offered.items()))
                 if len(grouped) != len(buckets):
                     continue
-                _enforce_combination_budget(term, parts, claim, grouped)
+                if _product_size(grouped) > maxsize:
+                    raise OverflowError(
+                        "schedule interface combinations exceed Python's addressable sequence size; "
+                        "factorized compatibility composition is required for this term"
+                    )
                 carried = tuple(sorted(assignment.items()))
                 for choices in product(*grouped):
                     interfaces, indices = zip(*choices, strict=True)
@@ -1316,6 +1297,10 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
                     products.append(indices)
                     product_interfaces.append((claim, *interface[1:], carried))
         sizes = [_product_size(group) for group in products]
+        if any(size > maxsize for size in sizes) or sum(sizes) > maxsize:
+            raise OverflowError(
+                "schedule rows exceed Python's addressable sequence size; factorized row cardinality is required for this term"
+            )
         return cls(tuple(products), tuple(product_interfaces), (0, *accumulate(sizes)))
 
     def __len__(self) -> int:
@@ -1337,32 +1322,6 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
             local, digit = divmod(local, len(group[i]))
             result[i] = group[i][digit]
         return tuple(result)
-
-
-def _enforce_pass_budget(term: _Term, parts, inventories: int, assignments: int) -> None:
-    """Refuse a term whose GLOBAL decisions alone do not fit — the joint space of its worker
-    inventories and its shared keys, one pass each."""
-    if inventories * assignments > MAX_COMBINATIONS:
-        raise ValueError(
-            f"schedule enumeration is intractable: this term's {len(parts)} sites share "
-            f"{len(term.shared_keys)} schedule key(s) whose joint assignments, crossed with "
-            f"{inventories} worker inventories, exceed {MAX_COMBINATIONS} passes"
-        )
-
-
-def _enforce_combination_budget(term: _Term, parts, claim, grouped) -> None:
-    """Refuse a pass whose sites compose past the limit. The composition is exponential in the
-    number of INDEPENDENTLY scheduled sites, and refusing is deliberate: a truncated product reads
-    as "these are the compatible schedules" while dropping whichever the walk reached last."""
-    size = 1
-    for groups in grouped:
-        size *= len(groups)
-        if size > MAX_COMBINATIONS:
-            raise ValueError(
-                f"schedule enumeration is intractable: this term's {len(parts)} sites compose more than "
-                f"{MAX_COMBINATIONS} compatible interface combinations at WORK={_spell(claim)!r} — the "
-                f"composition is exponential in the number of independently scheduled sites"
-            )
 
 
 def _product_size(parts) -> int:
@@ -1535,16 +1494,9 @@ def _work_groups(term: _Term, rows: _RowProduct) -> list[tuple[str, Sequence[_Ro
     The offered inventories are not scanned for and then enumerated against — they ARE the claims
     the rows make, so what a segment is stamped with and what its rows spell cannot disagree.
 
-    A live ``WORK`` pin narrows to the matching group, and a ``+p`` pin whose BASE inventory the
-    term does claim narrows to no group at all — the band is part of the inventory, so a term with
-    no row that can drive it stays unmapped rather than deploying without it.
-
-    THE ONE PLACE A PIN DOES NOT NARROW is the PIN-BLEED rule: one env pin, several kernels in the
-    graph, and this is not the one it was written for (a recognition fork's reduce sibling seeing a
-    matmul's warp pin). The pinned inventory then LEADS, carrying the rows that claim nothing — the
-    only rows any inventory can spell — and the term's own groups stay as siblings, so it still
-    maps rather than being left unmapped over a pin that was never about it. Both halves of that
-    are pinned by ``test_work_pin_widens_only_where_the_site_offers_no_warp_inventory``."""
+    A live ``WORK`` pin narrows to the matching group. If no row spells it, the term stays unmapped
+    through the scheduler's ordinary empty-enumeration contract; the pin never widens the catalog
+    or stamps a claims-nothing row with an inventory it did not derive."""
     groups = rows.work_groups()
     raw = WORK.raw()
     if raw is None:
@@ -1552,20 +1504,7 @@ def _work_groups(term: _Term, rows: _RowProduct) -> list[tuple[str, Sequence[_Ro
     kept = [group for group in groups if values_equal(WORK.name, raw, group[0])]
     if kept:
         return kept
-    pinned = Workers.parse(raw)
-    if pinned is not None and pinned.producer and any(spell == _spell(replace(pinned, producer=0)) for spell, _ in groups):
-        # The term CAN spell the pinned inventory; it is the BAND no row of it can drive. A band is
-        # PART of the inventory, so this is a pin the term simply has no row at — it stays unmapped
-        # rather than quietly deploying without the band the pin asked for. Not pin bleed: bleed is
-        # for a pin that is not about this kernel at all, which is the branch below.
-        return []
-    logger.warning(
-        "WORK pin %r matches no candidate's worker inventory (%s offered); offering it beside the full fork",
-        raw,
-        ", ".join(repr(spell) for spell, _ in groups) or "none",
-    )
-    unclaimed = [sub for spell, sub in groups if spell == ""]
-    return [(_spell(pinned), unclaimed[0]), *groups] if unclaimed else groups
+    return []
 
 
 def _level_keys(term: _Term) -> list[str]:

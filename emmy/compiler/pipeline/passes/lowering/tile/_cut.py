@@ -67,6 +67,13 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge, grouped only by object sharing."""
     all_sites = sites(tile.op)
+    contraction_operands = {
+        id(edge)
+        for site in all_sites
+        if is_contraction(site.node)
+        for edge in (site.node.a, *(channel.b for channel in site.node.channels))
+        if isinstance(edge, Fold)
+    }
     outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
     for node, available in _occurrences(tile.op, outer):
@@ -76,7 +83,13 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or id(node) in seen or not scopes or not all(_closed_at(node, scope) for scope in scopes):
+        if (
+            not isinstance(node, Fold)
+            or id(node) in seen
+            or id(node) in contraction_operands
+            or not scopes
+            or not all(_closed_at(node, scope) for scope in scopes)
+        ):
             continue
         seen.add(id(node))
         axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
@@ -140,18 +153,12 @@ def realize(match: Match, root: Node, seam: CutSite, renamed_outputs: dict[str, 
     token = digest(tile.structural_key(), seam.spelling)[:10]
     buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-    inferred = (F32,) * len(names) if child.axis is not None else edge_dtypes(child, tile.inputs)
-    contraction_operand = any(
-        is_contraction(site.node) and (site.node.a is child or any(channel.b is child for channel in site.node.channels))
-        for site in sites(tile.op)
-    )
-    if contraction_operand and root.output.dtype.nbytes == 2:
-        # A materialized contraction operand holds the element type the fused slab stored.  The
-        # f32 accumulator type of a normalize cone is not the B slab's storage type.
-        inferred = (root.output.dtype,) * len(names)
-    if len(inferred) != len(names):
-        inferred = (F32,) * len(names)
-    dtypes = tuple(dtype or F32 for dtype in inferred)
+    # Reduction carrier precision is a Kernel IR policy: every Fold state is f32 until lowering
+    # stamps the concrete Accum/Init pair. A zero-axis value has no carrier and is inferred from
+    # its typed pure program instead.
+    dtypes = (F32,) * len(names) if child.axis is not None else edge_dtypes(child, tile.inputs)
+    if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
+        raise ValueError(f"cannot cut {seam.spelling}: workspace result dtypes are not fully determined")
     loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
     parent_fold = _replace_fold(tile.op, child, loads)
 

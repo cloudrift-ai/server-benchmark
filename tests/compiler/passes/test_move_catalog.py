@@ -281,49 +281,32 @@ def test_fragment_consumer_may_inline_an_untiled_producer():
     assert sch._merge_interfaces(term, (interface(scalar, warp),)) is None
 
 
-def test_an_unenumerable_site_count_refuses_loudly():
-    """The sites COMPOSE, so the enumeration is exponential in how many of them schedule
-    independently — a whole fused model reaches the scheduler as ONE term, and hundreds of sites
-    are ordinary there. Past the limit the composition is refused, never truncated: a truncated one
-    reads as "these are the compatible schedules" while dropping whichever the walk reached last.
-
-    The old row budget guarded the same class of blow-up one level down, at materialization. This
-    guards the COMPOSITION, which is what actually runs away; how many candidates the composed
-    product addresses stays unbounded, because addressing them costs nothing until one is read."""
+def test_unaddressable_schedule_product_fails_at_the_sequence_boundary():
+    """A compatibility product larger than Python can index is unsupported until the product is
+    factorized; fail before traversing it instead of imposing a smaller arbitrary row cap."""
     from types import SimpleNamespace
 
     import pytest
 
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
 
-    term = SimpleNamespace(tile_nodes={}, sched=None, fragment_edges=())
-    # Each site offers two register widths and nothing constrains them against each other, so N
-    # sites compose 2^N ways — 2^25 here, well past the limit and reached in 25 multiplications.
+    term = SimpleNamespace(tile_nodes={}, sched=None, fragment_edges=(), shared_keys=frozenset())
     parts = tuple(
         (
             sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan()}),
             sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan(regs=(1, 2))}),
         )
-        for i in range(25)
+        for i in range(64)
     )
-    with pytest.raises(ValueError, match="intractable"):
+    with pytest.raises(OverflowError, match="addressable sequence size"):
         sch._ComboSpace.build(term, parts)
 
 
-# --- the WORK pin's one non-narrowing branch ----------------------------------------------------- #
+# --- WORK pin narrowing -------------------------------------------------------------------------- #
 
 
-def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatch):
-    """A pin NARROWS — except in ``_work_groups``' one fallback, where a ``WORK`` pin that matches
-    no candidate is offered BESIDE the catalog's own inventories instead of replacing them.
-
-    That branch is the PIN-BLEED rule: one env pin, several kernels in the graph, and this term is
-    not the one it was written for. A pin the site DOES offer narrows to exactly that inventory; a
-    pin it cannot offer leads and the catalog's own stay as siblings, so the term still maps rather
-    than being left unmapped over a pin that was never about it. The fixture below is a pure reduce
-    — a term with no warp geometry of any kind — which is what makes the second half a statement
-    about pin bleed and not about coverage: the twisted streaming site enumerates its own warp
-    inventories now, so a ``w<M>x<N>`` pin narrows there like anywhere else."""
+def test_work_pin_never_widens_a_site_catalog(monkeypatch):
+    """A matching pin narrows to one inventory; an unmatched pin offers no schedule row."""
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
@@ -356,10 +339,9 @@ def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatc
     monkeypatch.setenv("EMMY_WORK", offered[-1])
     assert inventories() == [offered[-1]]
 
-    # A pin it cannot offer LEADS, and the catalog's own stay as siblings rather than being emptied.
+    # A pin it cannot offer never manufactures an inventory or restores unpinned siblings.
     monkeypatch.setenv("EMMY_WORK", "w4x1")
-    widened = inventories()
-    assert widened == ["w4x1", *offered], widened
+    assert inventories() == []
 
 
 # --- what the enumeration owes: membership, not position ----------------------------------------- #

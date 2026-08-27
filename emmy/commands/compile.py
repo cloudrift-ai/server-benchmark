@@ -242,9 +242,12 @@ def resolve_golden_arg(args) -> None:
     if document is not None:
         verified = [record for record in matches if record.measurements is not None]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
+        # ``source`` records where the winning row ORIGINATED (a searched row vs a working-file
+        # proposal the tune measured and confirmed); the ``tune_winner`` stamp is what marks it as
+        # the directly searched winner, so both origins replay.
         valid_winner = (
             len(winners) == 1
-            and winners[0].ranking.get("source") == "tune"
+            and winners[0].ranking.get("source") in ("tune", "proposal")
             and winners[0].ranking.get("status") == "ok"
             and winners[0].ranking.get("measured_knobs") == winners[0].knobs
             and bool(winners[0].knobs)

@@ -193,6 +193,24 @@ def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
 
 
+def test_working_proposal_sourced_tune_winner_is_pinned(tmp_path):
+    # ``persist_tune_winner`` keeps ``source: proposal`` when the searched winner lands on a
+    # measured working-file proposal row; the ``tune_winner`` stamp still marks it as the direct
+    # winner, so replay must pin it rather than reject the file.
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path, state="tuned")
+    document["configs"][0]["realizations"][0]["ranking"]["source"] = "proposal"
+    dump_golden_file(document, path, overwrite=True)
+
+    args = _args(path)
+    resolve_golden_arg(args)
+
+    assert len(args.golden_configs) == 1
+    assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
+
+
 def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
 

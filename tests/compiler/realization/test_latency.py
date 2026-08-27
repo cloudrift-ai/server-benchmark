@@ -46,15 +46,16 @@ def test_latency(case, record_property):
         record_property("missing_latency", hardware_id)
         pytest.skip(f"no recorded latency for {hardware_id}")
 
-    samples, tcompile_us = helpers.measure(case)
-    best, stored = min(samples), float(recorded["emmy_us"])
+    stored = float(recorded["emmy_us"])
+    samples, tcompile_us = helpers.measure(case, within=stored * (1 + helpers.LATENCY_BAND))
+    best = min(samples)
     if best > stored * (1 + helpers.LATENCY_BAND):
         # A finding, not a failure — see the module docstring.
         print(
             f"\nSLOWER {case.id} on {hardware_id}: {best:.2f} us against a recorded {stored:.2f} us "
             f"(+{100 * (best / stored - 1):.1f}%, band {100 * helpers.LATENCY_BAND:.0f}%); "
             f"samples {', '.join(f'{sample:.2f}' for sample in samples)}. "
-            f"torch.compile {tcompile_us:.2f} us. "
+            f"{f'torch.compile {tcompile_us:.2f} us. ' if tcompile_us else ''}"
             f"Accept the new baseline with `emmy run --golden-file {case.path} --golden {case.record.name} "
             "--bench --bench-backends eager,tcompile,emmy --record`."
         )

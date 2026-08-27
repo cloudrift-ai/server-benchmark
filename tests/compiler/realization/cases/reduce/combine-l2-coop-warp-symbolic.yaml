@@ -1,14 +1,3 @@
-# The same combine cell over a SYMBOLIC reduce axis: an Accum carrier under both a pre-map (square)
-# and a projection epilogue (sqrt), partitioned as a single-warp __shfl_xor_sync butterfly (coop at
-# a 32-thread block).
-#
-# The kernel carries the runtime extent as an argument and each lane strides to it, so the strided
-# bound IS the masked tail — a lane starting past the extent folds the carrier identity. mean's
-# divisor is the runtime extent too, resolved at launch.
-#
-# The case runs at the axis hint, 512. The test this replaces also ran the same kernel at 700 to
-# straddle the tile; a case file cannot spell 'compile symbolic, run at some other size', so the
-# off-hint sweep stays in Python.
 compute_cap:
 - 12
 - 0
@@ -50,3 +39,7 @@ configs:
       REDUCE: coop
       WORK: t32
     identity: 3708b63cced34fdcddce1117dcbf280891334d1fd858454859728c914b1d75df
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.010850192564219
+        tcompile_us: 2.0491574672942465

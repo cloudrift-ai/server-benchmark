@@ -1,10 +1,3 @@
-# One geometry of the scalar contraction's free-axis output tile (the TILE codec) on the
-# file's square f32 base shape. The static column only: a symbolic M would run at its 512
-# hint, which is an exact cover of every one of these tiles and so asserts nothing the
-# static row does not already assert.
-#
-# The full 2x2 register block — both operands reused across the cells, the smallest tile
-# that exercises replication on BOTH axes at once.
 compute_cap:
 - 12
 - 0
@@ -37,3 +30,7 @@ configs:
       TILE: f2x2
       WORK: ''
     identity: beca40c263c7e0ebf2c698b3ace7089a496f27a755437a46a861021e103c9f5b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 3.105093233333611
+        tcompile_us: 2.9615930148533414

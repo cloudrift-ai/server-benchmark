@@ -1,9 +1,3 @@
-# The transposed cooperative band on a k-major matvec: 32 lanes sweep the OUTPUT axis over a
-# ceil(N/32) grid, here N=500.
-#
-# 32 does not divide the swept extent, so the last block's upper lanes overhang: they clamp-read the
-# last valid column (an in-bounds duplicate sweep) and their store is guarded off. Without that
-# contract the band is unreachable on this shape at all.
 compute_cap:
 - 12
 - 0
@@ -36,3 +30,7 @@ configs:
       WORK: t128
       REDUCE: coop-t
     identity: 3e3e5d7b1e904f1d35d2953b51bcaa65a80bacccd241213b305aa592cf61caf2
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.784688995215311
+        tcompile_us: 2.0489744268930874

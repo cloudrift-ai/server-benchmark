@@ -1,6 +1,3 @@
-# Two contraction channels sharing one A value — the ordinary gate/up pair, SiLU-gated. The
-# warp tier realizes here, which is what makes the distinct-A sibling's refusal a lockout
-# rather than a shape the compiler simply cannot schedule.
 compute_cap:
 - 12
 - 0
@@ -55,3 +52,6 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
     identity: 8ede64c06e50b998a4d924aaa6d23520d7df4e476e9f1a4e7f5b46259cdb624d
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 9.945600032806396

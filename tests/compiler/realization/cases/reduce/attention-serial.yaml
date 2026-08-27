@@ -1,9 +1,3 @@
-# The flash (m, l, O) twisted-monoid carrier through the carrier-generic combine, as one thread per
-# cell — no cross-thread or register fold at all.
-#
-# A multi-component carrier must fold EVERY component through the same butterfly; folding only the
-# accumulator leaves the max and the denominator behind and the answer is quietly wrong. KV is 64
-# here, within a warp's reach.
 compute_cap:
 - 12
 - 0
@@ -38,3 +32,7 @@ configs:
     knobs:
       REDUCE: ''
     identity: f29920a0cff12bea23a410738ab9df989d8b2efeb999de582a7cb8601fbeefef
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 30.74599988758564
+        tcompile_us: 8.244000375270844

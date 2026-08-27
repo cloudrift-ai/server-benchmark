@@ -1,11 +1,3 @@
-# The transposed band sweeping a SYMBOLIC output axis. A symbolic extent always overhangs, so the
-# guard bounds against the runtime extent and the upper lanes' stores are discarded at any size; the
-# band used to need a static extent for want of that guard. Compiled and run at the axis hint — the
-# on-and-off-block sweep over one kernel stays in Python.
-#
-# The row sum keeps its reduced axis here. Spelled without keepdim the target picks up the trailing
-# squeeze, and the numpy reference cannot run a reshape whose output shape is symbolic — a limit of
-# the reference, not of the band, which realizes identically either way.
 compute_cap:
 - 12
 - 0
@@ -35,3 +27,7 @@ configs:
       WORK: t128
       REDUCE: coop-t
     identity: 29e4ece1799476d029c3bfb260fd01b93d8005d253164d41f3d6c77ba80cc991
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.5054840825801525
+        tcompile_us: 2.050385924807766

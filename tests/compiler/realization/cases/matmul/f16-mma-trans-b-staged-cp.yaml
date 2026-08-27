@@ -1,13 +1,3 @@
-# A transposed-B (serving F.linear layout) warp matmul that STAGES its B operand, keeping
-# the operand's own N-major orientation so K stays stride-1 in gmem and smem alike and the
-# fill's chunks stay contiguous. The slab drains through the plain ldmatrix, not the
-# transposing one. This is the transport the gmem-direct-only enumeration used to leave
-# behind on every serving .lin fork.
-#
-# The ring here is cp.async.
-#
-# Frontend linear stands in for the source test's hand-built LoopOp; see the mma coverage
-# cases for why the wire cannot hold one.
 compute_cap:
 - 12
 - 0
@@ -42,3 +32,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-async
     identity: fa2f6987c8a381b45962791e96fe0158207729686cc215ae0d59ed645c1a1d87
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 6.074926838642213
+        tcompile_us: 4.088605151456945

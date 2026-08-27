@@ -1,18 +1,3 @@
-# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
-# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
-# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
-# One cached kernel serves every runtime size.
-#
-# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
-# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
-# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
-# the schedule claim — that this masked row is still offered, realized, built and correct —
-# with the off-hint extents left to the sweep that owns them.
-#
-# The same P@V shape with BOTH operands materialized in memory, batched over heads, and with
-# the query AND key axes both symbolic — so the masked-M row guard and the masked-K zero fill
-# are live together on the gmem-direct fragment path. STAGE is left free, as in the source
-# test: a symbolic K has no staged transport to pick.
 compute_cap:
 - 12
 - 0
@@ -46,3 +31,7 @@ configs:
       WORK: w2x2
       REDUCE: ''
     identity: d2c54f0b31e3da0baf50a37c359735399592b7638d3fe19ca2d8e4cf1cb3aaf5
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 34.69351653395028
+        tcompile_us: 10.225230684647194

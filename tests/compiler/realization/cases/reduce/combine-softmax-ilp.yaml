@@ -1,10 +1,3 @@
-# The carrier-generic cooperative combine at one cell of its matrix: the twisted full-row (m, d)
-# online-softmax carrier, partitioned as standalone ILP — 4 register accumulators folded by a
-# register tree, no cross-thread stage.
-#
-# Every carrier folds through the SAME combine and differs only in its state, so one partition kind
-# breaking on a carrier it was not tuned on is exactly what the matrix catches. The reduce axis is
-# 1024 so the 128-thread row reaches the cross-warp tree.
 compute_cap:
 - 12
 - 0
@@ -46,3 +39,7 @@ configs:
     knobs:
       REDUCE: r4
     identity: 4ca26ca32fa63a6e295bf1ae47702fbe88078e0d69af88f569dc40b5533250f7
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 63.8900026679039
+        tcompile_us: 2.0496634268524625

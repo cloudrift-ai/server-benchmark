@@ -1,10 +1,3 @@
-# A projection Map over the contraction (project after contract): the pointwise tail folds
-# into the contraction kernel and is replicated per register cell. PLACE=fuse rides the
-# input pins rather than the schedule row — the golden loader refuses a realization that
-# mixes routing knobs with schedule knobs, and PLACE is consumed by a splice rather than
-# stamped on a kernel either way.
-#
-# A broadcast scalar multiply — one value shared by every cell of the tile.
 compute_cap:
 - 12
 - 0
@@ -48,3 +41,7 @@ configs:
       WORK: t16x16
       REDUCE: ''
     identity: 1328efd5a3114280df072124a2aa8668528916ba947f1bc1870d5de899e47a9e
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.0921681107593186
+        tcompile_us: 4.084869571354078

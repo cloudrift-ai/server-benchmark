@@ -1,12 +1,3 @@
-# A scalar cooperative norm-reduce over the fused norm-to-linear edge, kept on the
-# fused placement so the reduce and the contraction stay one kernel.
-#
-# The test this case replaces additionally pinned STAGE=d2/smem-async here, but that pin
-# has not been realizable for some time and was silently declined: at these dims the
-# smem compute fill's slabs need 135232 B, over the budget, and a byte transport has no
-# sibling at all because the fused edge's A operand is COMPUTED. The kernel it asserted
-# on was gmem-direct. The staging claim is dropped rather than recorded as a gap: a
-# slab that does not fit is a correct refusal, not a lockout.
 compute_cap:
 - 12
 - 0
@@ -49,3 +40,6 @@ configs:
       TILE: ''
       WORK: t128
     identity: 553b4d18697c2e63412b4d4a4c77b5aa71fef69b6fd3c0d9c4fb58dcfa3c9eba
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 80.04266520341237

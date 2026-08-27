@@ -1,18 +1,3 @@
-# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
-# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
-# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
-# One cached kernel serves every runtime size.
-#
-# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
-# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
-# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
-# the schedule claim — that this masked row is still offered, realized, built and correct —
-# with the off-hint extents left to the sweep that owns them.
-#
-# A softmax feeding the A operand of a matmul whose reduce axis is symbolic — a COMPUTED A
-# over a masked K, which only the smem COMPUTE fill's K mask makes realizable at all. The
-# transport pinned here is the compute fill (d1/smem), not a byte copy: there is no byte
-# transport for an operand that does not exist in memory.
 compute_cap:
 - 12
 - 0
@@ -53,3 +38,7 @@ configs:
       STAGE: d1/smem
       REDUCE: ''
     identity: 616f258c3746972783926208ae1b043caa819aba3a7d40efbd97126dddb5c24d
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 36.90192655280784
+        tcompile_us: 14.433882692280937

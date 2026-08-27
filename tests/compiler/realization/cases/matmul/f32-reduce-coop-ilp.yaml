@@ -1,11 +1,3 @@
-# The contraction's reduce-axis partition (the REDUCE codec) on a per-cell output. A
-# contraction is a monoid with a multiply lift, so its K axis folds through the same
-# materializer a plain reduce does; a non-cross-CTA REDUCE pin was silently ignored here
-# before. TILE is deliberately ABSENT rather than pinned off — the source test unsets it, so
-# the output tier stays the schedule's own decision and only the partition is claimed.
-#
-# Both stages composed: 2 ILP chains inside each of 4 cooperating threads. The codec
-# canonicalizes the pin to coop/r2 (outermost stage first), which is the spelling stored.
 compute_cap:
 - 12
 - 0
@@ -38,3 +30,7 @@ configs:
       REDUCE: coop/r2
       WORK: t4
     identity: beca40c263c7e0ebf2c698b3ace7089a496f27a755437a46a861021e103c9f5b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 3.65878395981841
+        tcompile_us: 4.0810667806201515

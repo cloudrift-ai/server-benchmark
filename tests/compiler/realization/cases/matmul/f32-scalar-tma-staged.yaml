@@ -1,5 +1,3 @@
-# The scalar tier under the TMA transport: the staged operands ride a cp.async.bulk.tensor
-# double-buffer ring, deposited unswizzled for a plain-load consumer.
 compute_cap:
 - 12
 - 0
@@ -33,3 +31,7 @@ configs:
       WORK: t32x8
       STAGE: d2/smem-tma
     identity: fe3edc49cbd972e835987f471e9e1c66852afe54073783541b5a0f45bf98fb5e
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 426.1760115623474
+        tcompile_us: 274.31466182072955

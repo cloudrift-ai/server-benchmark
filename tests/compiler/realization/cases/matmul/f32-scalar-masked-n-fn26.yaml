@@ -1,6 +1,3 @@
-# The symmetric masked-N case: 26 columns over 512 leaves a 320-column overhang, so the
-# boundary guard is on N. Kept small — the masked scalar kernel is slow enough that the
-# article shape would crowd the per-launch watchdog.
 compute_cap:
 - 12
 - 0
@@ -33,3 +30,7 @@ configs:
       TILE: f26x4
       WORK: t32x8
     identity: c29482da5ac4a78836e6d5e29813a09ae8076d1d2fb0b9958af8d7a1ba244c05
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 75.39446078813992
+        tcompile_us: 12.28123100904318

@@ -1,7 +1,3 @@
-# The transposed cooperative band on a k-major matvec: 32 lanes sweep the OUTPUT axis over a
-# ceil(N/32) grid, here N=512.
-#
-# 32 divides the swept extent, so the sweep tiles exactly and no overhang guard is emitted.
 compute_cap:
 - 12
 - 0
@@ -34,3 +30,7 @@ configs:
       WORK: t128
       REDUCE: coop-t
     identity: 2217b7f5011b3b4d08b1e2250e30ec5c6a3ff8325fa553369ea4603e22f3fb15
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.774124428415982
+        tcompile_us: 2.0490272469926225

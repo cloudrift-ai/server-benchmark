@@ -1,6 +1,3 @@
-# The same split finalized ATOMICALLY: ONE kernel, each partition's C fragment atomically
-# adding into a per-launch zero-initialized f32 output, with no workspace and no finalize
-# node. The output dtype is what admits this arm.
 compute_cap:
 - 12
 - 0
@@ -34,3 +31,7 @@ configs:
       WORK: w2x2
       REDUCE: g2a
     identity: e187945ba6e6fd0a9b6e17b2fe805d6bffac56546b6b9d05a539b0467dfbc8c4
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 5.143587736739326
+        tcompile_us: 6.131775593489744

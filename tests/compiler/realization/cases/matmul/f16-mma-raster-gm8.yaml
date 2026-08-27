@@ -1,10 +1,3 @@
-# The CTA launch-order codec: consecutive CTAs are remapped into grouped stripes so they
-# share the streamed operand in L2 instead of re-streaming it from DRAM once per output row.
-# The claim under test is exactly-once coverage — every output tile produced by one CTA and
-# no other under the remapped order, which a wrong sub-id decode breaks silently.
-#
-# M block-tiles iterate fastest, in groups of 8. The M extent is 20 tiles, RAGGED against
-# the group, so the decode carries the clamped tail-group size (8 / 8 / 4).
 compute_cap:
 - 12
 - 0
@@ -39,3 +32,7 @@ configs:
       STAGE: d2/smem-async
       RASTER: gm8
     identity: 52a81f05b1221830f36d07de684624bf0fc42c25313c7ecd4626c5a03416ed21
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.975598062103118
+        tcompile_us: 6.1277632642849325

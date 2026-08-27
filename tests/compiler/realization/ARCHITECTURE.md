@@ -134,6 +134,30 @@ all would read as satisfied. Membership is asked per row *through* the flag, so 
 (a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read; and
 `realized` closes the flag's hole with an explicit stamping check over the authored knobs.
 
+## Stage 5 — latency
+
+`perf`-marked, `-O3`, and skipped unless the live card's capability matches the case's. It compares
+the best of three runs against the case's stored latency for this card, and a slower case
+**reports** rather than fails: enforcement belongs in a human reviewing the timing-refresh pull
+request, not in a red test a legitimate correctness fix could pin red forever. Nothing auto-updates
+a stored number — an automatic ratchet ends up pinned to the luckiest noise excursion ever
+observed. `emmy run --golden-file FILE --bench --record` is the only writer.
+
+The band is 5%, measured rather than guessed: ten cases spanning 1.5 us to 579 us, four estimates
+each on an idle RTX 5090, put the best-of-three estimator's own spread at a median of 0.17% and a
+maximum of 0.74%.
+
+Latency lives in an optional per-card block keyed by `Context.hardware_id` — the identity that
+already separates same-die SKUs like H100 from H200, which a free-text card name does not. Both
+numbers are stored, because the block answers two questions and only one of them is a ratchet:
+`emmy_us` against its own stored value says *did we regress*, and `tcompile_us` beside it says *are
+we ahead of or behind torch*, per case, per card. That ratio, sorted, is the optimization worklist.
+
+A closed case with no timing for the live card is reported once at session end, on a card that can
+answer it and nowhere else. That asymmetry is deliberate: the derived-half check is GPU-free so it
+fires everywhere and its fix works everywhere, while a timing can only be produced on the machine
+holding the card.
+
 ## Staleness: regeneration, not stamps
 
 Kernel identity and schedule codec spellings change often, so a stored case rots. The failure mode that matters is

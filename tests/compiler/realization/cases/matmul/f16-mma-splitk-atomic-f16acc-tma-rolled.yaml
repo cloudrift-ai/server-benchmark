@@ -1,8 +1,3 @@
-# The f16-accumulate atom's ARRAY-fragment (rolled store) form under an atomic split-K over a
-# TMA ring. The rolled store is rewritten statement-by-statement on its way down, and dropping
-# the atomic flag in that reconstruction silently degrades the store to racing plain assigns:
-# the partitions clobber instead of accumulate, which is numerically wrong with no loud
-# failure. A deep K and a one-row-tall M are what make the split worth taking here.
 compute_cap:
 - 12
 - 0
@@ -37,3 +32,6 @@ configs:
       REDUCE: g2a
       STAGE: d2/smem-tma
     identity: 873ed57d9a26b610e589ef548c3dcc8add0b4a3fe31b00d1fe911f597dd691ab
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 5.942476292451222

@@ -1,11 +1,3 @@
-# One half of the contraction reuse the warp-flash materializer rides: a bilinear fold placed
-# under LEADING batch grid axes, tiled onto mma.sync by the shared contraction codegen rather
-# than by anything attention-specific.
-#
-# The output contraction: the reduce runs over the key axis and V is stored [kv, d], so B is
-# canonical and drains through the non-transposing gmem fragment helper.
-#
-# Two batches, three heads, and a key axis twice the query axis.
 compute_cap:
 - 12
 - 0
@@ -38,3 +30,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       WORK: w2x2
     identity: aacd5660f1be6d7e60fdfcd8940ce661ada14935b880d2999c0b276898b5e75f
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 6.024727315613718
+        tcompile_us: 4.099620519763362

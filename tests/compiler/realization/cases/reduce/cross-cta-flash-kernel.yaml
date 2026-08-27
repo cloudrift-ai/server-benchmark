@@ -1,13 +1,3 @@
-# The carrier-generic cross-CTA split and finalize, one cell of its matrix. Carrier: the N-component
-# twisted (m, l, O) split-KV — Flash-Decoding. Finalize: DEFERRED — the producer writes a partial
-# workspace and a second __global__ combine kernel reads it back, with no atomicAdd.
-#
-# One REDUCE letter owns both halves — the split across 2 CTAs and which finalize folds them — so
-# matmul, a plain reduce and flash all reach it through the same fork. The twisted carrier admits
-# only the deferred kernel: its exp(Δm) rescale is not an atomicAdd.
-#
-# The split is realized by REPLACING the kernel, so no piece stamps the g2 it came from; the pin is
-# read structurally. PLACE=fuse is an input pin, not part of the schedule row.
 compute_cap:
 - 12
 - 0
@@ -43,3 +33,7 @@ configs:
     knobs:
       REDUCE: g2k
     identity: f29920a0cff12bea23a410738ab9df989d8b2efeb999de582a7cb8601fbeefef
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 22.498559951782227
+        tcompile_us: 8.232000283896923

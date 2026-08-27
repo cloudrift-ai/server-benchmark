@@ -1,10 +1,3 @@
-# One geometry of the scalar contraction's free-axis output tile (the TILE codec) on the
-# file's square f32 base shape. The static column only: a symbolic M would run at its 512
-# hint, which is an exact cover of every one of these tiles and so asserts nothing the
-# static row does not already assert.
-#
-# parallel times register covers the whole 64x64 output, so the launch is ONE 512-thread
-# CTA. The thread inventory is pinned here because the tile alone does not fix it.
 compute_cap:
 - 12
 - 0
@@ -37,3 +30,7 @@ configs:
       TILE: f2x4
       WORK: t32x16
     identity: beca40c263c7e0ebf2c698b3ace7089a496f27a755437a46a861021e103c9f5b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.8779711091209217
+        tcompile_us: 2.8995087272242497

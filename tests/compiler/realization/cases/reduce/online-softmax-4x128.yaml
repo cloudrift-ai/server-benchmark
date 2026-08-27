@@ -1,9 +1,3 @@
-# The two-pass softmax (row max, then the exp sum, then normalize) rewritten into ONE streaming pass
-# over the (m, d) monoid — three reads of the row collapse to two.
-#
-# The schedule here is the one greedy picks; the test this replaces pinned nothing at all, and a
-# case must author the row it expects, so the greedy row is written out. Its signature in the
-# emitted kernel is the dissolved merge's rescale temps.
 compute_cap:
 - 12
 - 0
@@ -47,3 +41,7 @@ configs:
       REDUCE: coop
       WORK: t128
     identity: d0278cc08c9dfe5e0f77c36289b1563266095237d806c18370c07e4084d7fba6
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.044631128899107
+        tcompile_us: 2.048936258911962

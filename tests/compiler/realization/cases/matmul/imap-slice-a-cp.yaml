@@ -1,11 +1,3 @@
-# A layout op between an activation and its matmul is absorbed into the operand's load index,
-# so the operand is no longer a plain window of its buffer — but every tiled loader reads one
-# anyway. Taking the operand's DECLARED trailing extent as the row stride was the miscompile:
-# a reshape that re-strides the rows reads a rectangle of the wrong buffer, silently, on plain
-# f16 with no quantization in sight. The contract now is that the row stride is DERIVED from
-# the index, the columns must be gmem-contiguous, and a form no loader can read falls back.
-#
-# The canonical index under a cp.async fill.
 compute_cap:
 - 12
 - 0
@@ -43,3 +35,7 @@ configs:
     knobs:
       STAGE: d2/smem-async
     identity: e828e5662f2a76263aff614697d61a37a5c860678edf611f11bb8408581dc116
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.8456087781054509
+        tcompile_us: 4.086399891159751

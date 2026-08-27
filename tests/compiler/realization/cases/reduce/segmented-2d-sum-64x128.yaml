@@ -1,9 +1,3 @@
-# A 2D cooperative reduce: free-axis threads alongside cooperative lanes, so the cross-thread
-# combine is a SEGMENTED warp shuffle folding each row independently.
-#
-# The test this replaces set EMMY_BN / EMMY_BR / EMMY_FN / EMMY_FK / EMMY_BK, none of which is a
-# registered knob or read anywhere, so it pinned nothing and ran fully greedy. The schedule written
-# here is the one greedy actually realizes.
 compute_cap:
 - 12
 - 0
@@ -34,3 +28,7 @@ configs:
       REDUCE: coop
       WORK: t64
     identity: 05d748c14c3f8d63cb56efc77af14a85fa2185e3bf94c6a656085cb21bac07db
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.1071716564174243
+        tcompile_us: 2.0514462238703017

@@ -376,16 +376,26 @@ def _tolerance(narrow: bool, reference: np.ndarray) -> dict[str, float]:
 # glossary's own definition is not a measurement lane, so a latency assertion there would measure
 # the wrong regime entirely.
 
-#: Where a stored latency stops being a match. Ten percent is a starting bound, not a measurement:
-#: `run --json` already documents a ~7% gap between two timing semantics for the same kernel, and
-#: isolated microsecond benches in this repository have been found launch-bound rather than
-#: measuring the kernel at all. Best-of-three inside this band will miss percent-level drift; it
-#: catches cliffs, which is what a schedule that stops being realized actually looks like.
-LATENCY_BAND = 0.10
+#: Where a stored latency stops being a match. MEASURED, not guessed: ten estimates per case over
+#: four repeats on an idle RTX 5090, spanning 1.5 us to 579 us, put the best-of-three estimator's
+#: own run-to-run spread at a median of 0.17% and a maximum of 0.74%. Five percent is roughly seven
+#: times that worst case — enough headroom for a card that throttles under a sustained sweep, and
+#: still tight enough to see a five-percent regression rather than only a cliff.
+#:
+#: The ~7% gap `run --json` documents between two timing semantics does not apply here: a stored
+#: latency and a fresh one are the same measurement of the same pinned row, compared like with
+#: like. And a case outside the band only REPORTS, so a false positive costs a line of output
+#: rather than a red build — which is itself an argument for the tighter bound.
+LATENCY_BAND = 0.05
 
 #: Interference is one-sided — a busy machine makes a kernel slower, never faster than the hardware
 #: can go — so the minimum of several runs is the honest estimator, and requiring every run to be
 #: slow is what keeps a developer box that is also compiling something from crying wolf.
+#:
+#: Taken lazily: a run inside the band ends the case, because the minimum can only fall and no
+#: later run could lift it back out. Only a case that looks slow pays for the extra runs, which is
+#: exactly the case where interference is the question. On an idle card, where the measured spread
+#: is under 1%, that makes the lane three times cheaper at identical strength.
 LATENCY_REPEATS = 3
 
 
@@ -426,8 +436,11 @@ def bench_command(case: Case, output: Path) -> list[str]:
     ]
 
 
-def measure(case: Case) -> tuple[list[float], float]:
+def measure(case: Case, *, within: float | None = None) -> tuple[list[float], float]:
     """Best-of-N emmy microseconds for the case's own schedule, and the torch.compile number.
+
+    Stops early once a sample lands at or below ``within``: the minimum can only fall, so a run
+    already inside the band settles the case and the remaining runs would change nothing.
 
     Deployable optimization is forced: the correctness lane's `-O1` changes runtime performance,
     and a timing measured there is not one a deploy would ever see.
@@ -452,4 +465,6 @@ def measure(case: Case) -> tuple[list[float], float]:
                 raise AssertionError(f"{case.id}: the pinned row measured nothing — {record.get('pinned')}")
             samples.append(float(rows[0]["total_us"]))
             tcompile = float(record["backends"].get("torch.compile", {}).get("latency_us") or tcompile)
+            if within is not None and samples[-1] <= within:
+                break
     return samples, tcompile

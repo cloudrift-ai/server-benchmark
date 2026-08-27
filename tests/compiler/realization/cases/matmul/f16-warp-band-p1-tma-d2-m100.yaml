@@ -1,11 +1,3 @@
-# A warp-SPECIALIZED staged matmul: the +p<n> producer band rides the WORK inventory (never a
-# row key of its own), the launch widens past the compute band's threads, the grid decode
-# wraps the aux warps onto the CTA's cells, the TMA fill moves to the producer's elected
-# thread, and the compute band drains through the data / empty mbarrier handshake. Bit
-# identity with the uniform pipeline is NOT expected — the split changes scheduling, not the
-# mma math — so accuracy against numpy is the whole claim.
-#
-# A masked M: the producer's box zero-fills past the last row and the store guards it.
 compute_cap:
 - 12
 - 0
@@ -40,3 +32,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
     identity: 06c2375ca92cec0c02bbfb61d4b940107dd25d6bc94c28e9a95b58696bfc13f3
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.9079765952818577
+        tcompile_us: 4.089142861110823

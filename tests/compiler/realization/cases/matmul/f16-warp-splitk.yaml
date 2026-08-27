@@ -1,6 +1,3 @@
-# A tall-K f16 contraction on the warp mma tier with an f16 accumulator and a cross-CTA
-# split of the 4096-long reduction. M=64 is one warp-tile row, so the split is what fills
-# the card; the f16 accumulator is what makes the atom's C operand two bytes wide.
 compute_cap:
 - 12
 - 0
@@ -35,3 +32,7 @@ configs:
       REDUCE: g2k
       STAGE: ''
     identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 122.52400070428848
+        tcompile_us: 8.175304402475772

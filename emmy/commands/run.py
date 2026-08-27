@@ -503,9 +503,12 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us = results.get("torch.compile")
-    if not emmy_us or not tcompile_us:
-        logger.error("--record needs both an Emmy and a torch.compile timing; pass --bench-backends eager,tcompile,emmy")
+    if not emmy_us:
+        logger.error("--record measured no Emmy timing for %s", args.golden)
         sys.exit(2)
+    if not tcompile_us:
+        # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
+        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.golden)
     document = getattr(args, "_golden_document", None)
     if document is None:
         from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
@@ -520,11 +523,11 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         tcompile_us=tcompile_us,
     )
     logger.info(
-        "recorded %s: emmy %.2f us (%s), torch.compile %.2f us",
+        "recorded %s: emmy %.2f us (%s)%s",
         args.golden,
         emmy_us,
         "pinned row" if measured else "greedy pick",
-        tcompile_us,
+        f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
     )
 
 

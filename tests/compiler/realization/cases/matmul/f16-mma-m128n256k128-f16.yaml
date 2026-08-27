@@ -1,14 +1,3 @@
-# The tensor-core (mma.sync m16n8k16) materializer for the same contraction algebra the
-# scalar TILE tier realizes, at the file's 128-row warp tile.
-#
-# The source test hand-builds this contraction as a LoopOp. Torch IR — the wire a case file
-# stores its program in — has no encoding for LoopOp, so the program here is the frontend op
-# whose lowering IS that loop nest: matmul for a canonical B, linear for a transposed one
-# (linear is x @ w.T with w stored [n, k], which is exactly the test's b_index swap). That
-# also buys a stronger oracle: a frontend program compares against numpy rather than against
-# a greedy run of itself.
-#
-# A rectangular output (N twice M) with the f16 downconvert store.
 compute_cap:
 - 12
 - 0
@@ -42,3 +31,7 @@ configs:
       WORK: w2x2
       REDUCE: ''
     identity: caabd22c23893b1ed24cb8632ee26b08cca10cd2b47cea3411f2d0adabca9ac1
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 6.651733318964641
+        tcompile_us: 4.086461491309679

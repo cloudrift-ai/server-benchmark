@@ -1,5 +1,3 @@
-# An out-of-hint thread width. The tuner's axis choices exclude 8, so a non-authoritative
-# narrow would drop the pin and re-enumerate the default geometry.
 compute_cap:
 - 12
 - 0
@@ -32,3 +30,7 @@ configs:
       TILE: ''
       WORK: t32x8
     identity: fe3edc49cbd972e835987f471e9e1c66852afe54073783541b5a0f45bf98fb5e
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1596.4800119400024
+        tcompile_us: 272.2666660944621

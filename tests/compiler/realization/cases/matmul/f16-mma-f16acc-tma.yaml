@@ -1,12 +1,3 @@
-# The f16-accumulate atom: the mma chain accumulates into PACKED f16 fragments at the full
-# HMMA rate and a periodic promote folds them into the f32 shadows the store reads. The
-# precision policy gates the fork, so FAST_MATH rides the input pins as the umbrella that
-# offers it — without it the atom is enumerated nowhere and the pin names no row.
-#
-# REDUCE is deliberately ABSENT, as in the source test: the subject is the accumulator and
-# its promote cadence, and the reduce partition stays the schedule's own decision.
-#
-# Over a four-deep TMA ring — the deepest staging this atom is asked for.
 compute_cap:
 - 12
 - 0
@@ -40,3 +31,7 @@ configs:
       WORK: w2x2
       STAGE: d4/smem-tma
     identity: 657e2039c8aabc82ffeecc2e80d5ebfc772c4614d47b595f3b8cf57a1535e2cb
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.535272717475891
+        tcompile_us: 4.052922989313419

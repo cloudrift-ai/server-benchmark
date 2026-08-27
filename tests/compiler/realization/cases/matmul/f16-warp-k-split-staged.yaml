@@ -1,7 +1,3 @@
-# An asymmetric-enough shape that the schedule takes an outer K split, putting a serial
-# K_o tile between the atom tile and the stage bundle. The bundle's source origin
-# references the K_o coordinate, so a lowering that hoists the bundle above K_o emits a
-# kernel referencing an out-of-scope coordinate and nvcc rejects it.
 compute_cap:
 - 12
 - 0
@@ -34,3 +30,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
     identity: 624fae5af5e59e68574c7a25f71a21bcf43d39f309a63e47dd008cab36aaed89
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 166.12266500790915
+        tcompile_us: 112.87771803992135

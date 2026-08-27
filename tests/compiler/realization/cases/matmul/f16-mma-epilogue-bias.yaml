@@ -1,12 +1,3 @@
-# A projection Map folded into the mma kernel's per-fragment-element register store, so the
-# whole thing stays ONE launch. PLACE=fuse rides the input pins for the same reason the
-# scalar epilogue cases give.
-#
-# The source test's fourth epilogue — a causal coordinate Select — is not converted: it is
-# spelled as a hand-built LoopOp with a Select statement, and Torch IR has no encoding for
-# either, so the corpus cannot store that program at all.
-#
-# A per-column bias add.
 compute_cap:
 - 12
 - 0
@@ -50,3 +41,7 @@ configs:
       WORK: w2x2
       REDUCE: ''
     identity: 46577e0f2e5a3bf767f1a1a7e9b8425893981b157bb0b68bb51dd37530000c3f
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 9.5024613233713
+        tcompile_us: 4.087192749758379

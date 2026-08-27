@@ -1,13 +1,3 @@
-# One half of the contraction reuse the warp-flash materializer rides: a bilinear fold placed
-# under LEADING batch grid axes, tiled onto mma.sync by the shared contraction codegen rather
-# than by anything attention-specific.
-#
-# The score contraction: the reduced axis is last in BOTH operands, so B is transposed. The
-# source test spells that by hand in a LoopOp; the wire has no LoopOp, so the transpose is
-# spelled as a frontend op on K and absorbed into the operand's index map, which lands on
-# the same transposing gmem fragment helper.
-#
-# One batch, four heads, head dim 64.
 compute_cap:
 - 12
 - 0
@@ -46,3 +36,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       WORK: w2x2
     identity: ff6f9b13f11ca1e2889daa7c442381431c503ed04adc0cead798169645d9b0dd
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 5.915266169598822
+        tcompile_us: 2.0502913145371426

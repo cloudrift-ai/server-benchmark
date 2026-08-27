@@ -1,6 +1,3 @@
-# The recognized fused edge as ONE mma kernel whose statistic prologue rides the A cone —
-# no separate norm-reduce producer. S=32 overhangs the 64-row warp tile, so this also
-# exercises the masked static-M compute-fill: clamped A / statistic and a guarded store.
 compute_cap:
 - 12
 - 0
@@ -42,3 +39,6 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
     identity: 553b4d18697c2e63412b4d4a4c77b5aa71fef69b6fd3c0d9c4fb58dcfa3c9eba
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 11.583255473957506

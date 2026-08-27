@@ -1,5 +1,3 @@
-# A symbolic row axis under the cp.async ring: one masked kernel, ceil-div grid and
-# boundary-guarded store, tiled at the seq hint.
 compute_cap:
 - 12
 - 0
@@ -34,3 +32,7 @@ configs:
       STAGE: d2/smem-async
       REDUCE: ''
     identity: aee74c234221ee8cb1cd1f8df0d59bbad9dc10ccb2d8d5a147e7c199250ba97b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 6.195521954470461
+        tcompile_us: 6.183384702755855

@@ -1,5 +1,3 @@
-# One scalar-tier staging depth: gmem-direct, a single cp.async slab, and the
-# double-buffered ring must all lower to a kernel that matches the reference.
 compute_cap:
 - 12
 - 0
@@ -33,3 +31,7 @@ configs:
       WORK: t64x8
       STAGE: ''
     identity: 923b88cdd5e946ac3fb750b422b5cc97a5a7d9920cb2f57674611399adf3479f
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 3.240519529813296
+        tcompile_us: 4.0980334265973655

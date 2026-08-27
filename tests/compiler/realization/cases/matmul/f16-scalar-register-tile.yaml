@@ -30,3 +30,7 @@ configs:
       TILE: f4x26
       WORK: t32x8
     identity: e681966fd19068a501d742302b8875a119de8949e2f2fdcc4b40734565f09a90
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 97.23520278930664
+        tcompile_us: 6.135883970537048

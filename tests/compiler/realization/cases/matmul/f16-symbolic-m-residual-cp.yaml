@@ -1,16 +1,3 @@
-# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
-# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
-# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
-# One cached kernel serves every runtime size.
-#
-# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
-# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
-# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
-# the schedule claim — that this masked row is still offered, realized, built and correct —
-# with the off-hint extents left to the sweep that owns them.
-#
-# A residual add fused onto the masked symbolic-M contraction, so the guarded store also
-# carries a second symbolically-shaped operand read.
 compute_cap:
 - 12
 - 0
@@ -54,3 +41,7 @@ configs:
       STAGE: d2/smem-async
       REDUCE: ''
     identity: 8ec205cc1806162cf7f6297b3e762539c210de0fa35c1c73fa5775ac5451dee3
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 7.623816719491973
+        tcompile_us: 8.16436382857236

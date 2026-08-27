@@ -1,10 +1,3 @@
-# The contraction's reduce-axis partition (the REDUCE codec) on a per-cell output. A
-# contraction is a monoid with a multiply lift, so its K axis folds through the same
-# materializer a plain reduce does; a non-cross-CTA REDUCE pin was silently ignored here
-# before. TILE is deliberately ABSENT rather than pinned off — the source test unsets it, so
-# the output tier stays the schedule's own decision and only the partition is claimed.
-#
-# Four independent register accumulator chains in ONE thread — the ILP arm, no shuffle.
 compute_cap:
 - 12
 - 0
@@ -36,3 +29,7 @@ configs:
     knobs:
       REDUCE: r4
     identity: beca40c263c7e0ebf2c698b3ace7089a496f27a755437a46a861021e103c9f5b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.06713461389347
+        tcompile_us: 3.1524156079147803

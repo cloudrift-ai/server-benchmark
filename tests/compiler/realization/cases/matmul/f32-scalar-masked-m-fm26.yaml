@@ -1,5 +1,3 @@
-# A non-divisor register tile on M: 26 rows over 2048 is a 208-row masked tile — ceil-div
-# grid plus a per-row boundary guard on the store. The matmul articles' hero tile.
 compute_cap:
 - 12
 - 0
@@ -32,3 +30,7 @@ configs:
       TILE: f1x26
       WORK: t32x8
     identity: fe3edc49cbd972e835987f471e9e1c66852afe54073783541b5a0f45bf98fb5e
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 659.8079800605774
+        tcompile_us: 274.30399258931476

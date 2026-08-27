@@ -1,10 +1,3 @@
-# The carrier-generic cooperative combine at one cell of its matrix: an Accum carrier under a
-# pre-map (the squaring tensor-product partial), partitioned as ILP composed with coop — 2 register
-# accumulators, a register tree, then the warp butterfly.
-#
-# Every carrier folds through the SAME combine and differs only in its state, so one partition kind
-# breaking on a carrier it was not tuned on is exactly what the matrix catches. The reduce axis is
-# 1024 so the 128-thread row reaches the cross-warp tree.
 compute_cap:
 - 12
 - 0
@@ -40,3 +33,7 @@ configs:
       REDUCE: coop/r2
       WORK: t32
     identity: 5250c0074f2d8a15c6987af262569ecbdb040c8904ac32a0fbc295cf0a9e32e8
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 3.0948853714178224
+        tcompile_us: 2.0509027507856135

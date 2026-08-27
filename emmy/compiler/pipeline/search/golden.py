@@ -340,10 +340,13 @@ def _positive_number(value, where: str) -> None:
         raise ValueError(f"{where} must be a positive number")
 
 
-#: What one card's ``latency`` entry records. Both numbers, because the block answers two
-#: questions: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
-#: beside it says *are we ahead of or behind torch*, per case, per card.
+#: What one card's ``latency`` entry records. ``emmy_us`` is required — it is the ratchet, and a
+#: case without it stores nothing. ``tcompile_us`` is the "are we ahead of or behind torch" half
+#: and is OPTIONAL, because some targets have no torch twin to compile: a provenance-reconstructed
+#: frontend program benches against eager and Emmy only. Refusing to store the ratchet because the
+#: comparison is unavailable would discard the more important number of the two.
 LATENCY_FIELDS = ("emmy_us", "tcompile_us")
+_REQUIRED_LATENCY_FIELDS = ("emmy_us",)
 
 
 def _validate_latency(latency: object, where: str) -> None:
@@ -355,10 +358,12 @@ def _validate_latency(latency: object, where: str) -> None:
         if not isinstance(timings, Mapping):
             raise ValueError(f"{where}.{card} must be a mapping")
         _require_keys(timings, set(LATENCY_FIELDS), f"{where}.{card}")
-        for field in LATENCY_FIELDS:
+        for field in _REQUIRED_LATENCY_FIELDS:
             if field not in timings:
                 raise ValueError(f"{where}.{card} missing {field}")
-            _positive_number(timings[field], f"{where}.{card}.{field}")
+        for field in LATENCY_FIELDS:
+            if field in timings:
+                _positive_number(timings[field], f"{where}.{card}.{field}")
 
 
 def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:

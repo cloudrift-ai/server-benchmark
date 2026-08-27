@@ -1,11 +1,3 @@
-# A symbolic-reduce softmax folded by 4 register accumulators. Two things ride on this row.
-#
-# The tail copies' STREAMED value must be clamped to the pivot identity, not merely masked per
-# accumulator: the merge's shared intermediates read the raw wrapped duplicate otherwise and
-# silently down-scale the denominator whenever the duplicate beats the running max. And the ILP
-# rename must leave the symbolic extent alone — suffixing it inside a buffer stride is an nvcc
-# failure. The case compiles and runs at the 512 hint, which the 4-wide stride divides; the
-# off-stride sizes that actually exercise the tail stay in Python.
 compute_cap:
 - 12
 - 0
@@ -47,3 +39,7 @@ configs:
     knobs:
       REDUCE: r4
     identity: 859dc608cd4669f41524fa8cc4c61ae9442274b517831a206527d8fc7ae72814
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 37.27644461172598
+        tcompile_us: 2.0501621671625085

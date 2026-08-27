@@ -1,4 +1,3 @@
-# The composite register tile on BOTH axes.
 compute_cap:
 - 12
 - 0
@@ -31,3 +30,7 @@ configs:
       TILE: f4x4
       WORK: t32x8
     identity: fe3edc49cbd972e835987f471e9e1c66852afe54073783541b5a0f45bf98fb5e
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 530.4960012435913
+        tcompile_us: 272.2666660944621

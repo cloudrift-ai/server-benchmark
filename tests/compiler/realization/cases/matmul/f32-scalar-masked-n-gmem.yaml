@@ -1,5 +1,3 @@
-# A non-divisor output axis: 47 columns over a 64-wide tile, so the store carries a
-# boundary guard. Gmem-direct — see the staged sibling for why this shape cannot stage.
 compute_cap:
 - 12
 - 0
@@ -33,3 +31,7 @@ configs:
       WORK: t16x8
       STAGE: ''
     identity: a1bbc1798a0bc1c314a22c6f210347547b96965a0c1d06dc4ac2f88fdfd6b0ea
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.838818187063391
+        tcompile_us: 4.090268665285253

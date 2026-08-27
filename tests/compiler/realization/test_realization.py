@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.compiler.helpers import device_compute_capability, skip_if_no_cuda
+from tests.compiler.helpers import device_compute_capability, requires_cuda
 from tests.compiler.realization import helpers
 from tests.compiler.realization.helpers import STAGES, CaseError
 
@@ -40,7 +40,10 @@ def _parameters():
             parameters.append(pytest.param(str(exc), "unusable", id=f"{case_id}-unusable"))
             continue
         for stage in STAGES:
-            marks = []
+            # `built` and `correct` issue in-process CUDA work, so they must carry the marker the
+            # root conftest routes on: without it they scatter across xdist workers, each opening
+            # its own context, which is the OOM-and-cascade the serial chain exists to prevent.
+            marks = [requires_cuda] if stage in ("built", "correct") else []
             if case.xfail_stage == stage:
                 marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(path)}"))
             elif case.xfail_stage is not None and STAGES.index(stage) > STAGES.index(case.xfail_stage):
@@ -61,7 +64,6 @@ def test_realization(case, stage):
     if stage == "realized":
         assert (reason := helpers.realized(case)) is None, reason
         return
-    skip_if_no_cuda()
     live = device_compute_capability()
     if live != case.compute_cap:
         pytest.skip(f"case declares sm_{_spell(case.compute_cap)}; this card is sm_{_spell(live)}")

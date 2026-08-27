@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import pytest
 
-from tests.compiler.helpers import device_compute_capability, skip_if_no_cuda
+from tests.compiler.helpers import device_compute_capability, requires_cuda
 from tests.compiler.realization import helpers
 
-pytestmark = pytest.mark.perf
+pytestmark = [pytest.mark.perf, requires_cuda]
 
 
 def _closed_cases():
@@ -36,7 +36,6 @@ def _closed_cases():
 @pytest.mark.parametrize("case", _closed_cases())
 def test_latency(case, record_property):
     """Compare the best of three runs against this card's recorded latency."""
-    skip_if_no_cuda()
     if device_compute_capability() != case.compute_cap:
         pytest.skip(f"case declares sm_{''.join(map(str, case.compute_cap))}")
     hardware_id = helpers.live_hardware_id()

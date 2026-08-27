@@ -120,7 +120,7 @@ def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
     return None
 
 
-def producer_transport(stage: Stage | None) -> str | None:
+def producer_transport(stage: Stage | None, *, packed_byte_slab: bool = False) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
     mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
     async load half).
@@ -131,6 +131,16 @@ def producer_transport(stage: Stage | None) -> str | None:
     its own fork like any other kernel."""
     if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
+    if packed_byte_slab:
+        # The packed byte-slab operand takes its own TMA lowering, which returns the plain staged
+        # K-loop rather than the band-splitting one — it never receives the warp inventory, so no
+        # band is emitted. The block still WIDENS to hold one, because the thread budget is set
+        # from the inventory alone. The extra warps then fall into the compute body, where the TMA
+        # transport elects its single arming thread on a linear thread id that wraps: thread 0 and the
+        # band's first thread both match, so the box-copy barrier takes two arrivals against an
+        # arrival count of one and its phase parity desynchronizes, hanging the kernel. Refuse the
+        # combination here rather than emit a kernel that cannot complete.
+        return "a packed byte-slab operand under TMA has no band-splitting lowering"
     return None
 
 

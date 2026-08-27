@@ -1184,12 +1184,18 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
         plans = grouped.get(base.spell() if base is not None else "", []) + (grouped.get("", []) if base is not None else [])
     out = []
     for plan in plans:
+        # A single-sided packed reading means ``resolve_warp_stage`` sent this row through
+        # ``_packed_warp_stage``, whose TMA lowering cannot carry a producer band. The block-scaled
+        # cell needs no exception here: its stage resolver takes ``smem-async`` only, so it never
+        # reaches a TMA stage for the band rule to ask about.
+        byte_slab = term.packed_readings(node)[0] is not None
         for red in _contraction_reduces(term, node, plan):
             pinned = pin is not None
             stages = tuple(
                 stage
                 for stage in _stage_values(term, node, plan)
-                if not (work is not None and work.producer) or legal.enforce(legal.producer_transport(stage), pinned=False)
+                if not (work is not None and work.producer)
+                or legal.enforce(legal.producer_transport(stage, packed_byte_slab=byte_slab), pinned=False)
                 if red.needs_split or legal.enforce(legal.paired_fragment_register_budget(node, plan, stage), pinned=pinned)
             )
             if stages:

@@ -845,7 +845,12 @@ contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; a
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
-(an ineligible spec degrades to uniform). A computed-A (fused-cone) contraction or a product contraction over one
+(an ineligible spec degrades to uniform). A **packed byte-slab** operand declines it too: that reading's TMA
+lowering returns the plain staged K-loop, which takes no warp inventory and emits no split, while the block still
+widens to hold the band — so its warps land in the compute body, where the box copy's arming thread is elected on a
+linear thread id that wraps, and two threads arm one barrier. The block-scaled cell needs no rule of its own: its
+stage resolver takes `smem-async` only, so it never reaches the TMA stage the band
+requires. A computed-A (fused-cone) contraction or a product contraction over one
 materialized A enumerates its own warp-only rows (the mandatory resolved `sync` compute-fill stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes

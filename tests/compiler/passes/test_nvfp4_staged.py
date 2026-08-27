@@ -702,3 +702,25 @@ def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
     assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, inputs) is None
     narrow = _tile(K64, "f1x4/k2", "w1x4", axes)
     assert resolve_warp_stage(node, narrow, Stage.parse("d2/smem-async"), 200 * 1024, inputs) is None
+
+
+# --- the producer band's one illegal partner ---------------------------------------------------
+# A producer band splits a block into warps that only fetch and warps that only compute. The
+# packed byte slab's TMA lowering returns the plain staged K-loop, which never receives the warp
+# inventory and so emits no split — while the block still widens to hold the band. The unsplit
+# warps then land in the compute body, where the box copy's elected arming thread is chosen on a
+# wrapping lane index, so two threads arm one barrier and its phase parity desynchronizes. That is
+# a hang, not a slow kernel: an autotune sweep hit it on 107 rows, every one a packed NVFP4 matmul
+# under a band, against 556 identically pinned non-packed rows that all passed.
+
+
+def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
+    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
+    from emmy.compiler.pipeline.search.space import Stage
+
+    tma = Stage(depth=1, transport="smem-tma", bk_elems=64)
+    assert legal.producer_transport(tma, packed_byte_slab=True) is not None, "the combination hangs; it must decline"
+    assert legal.producer_transport(tma, packed_byte_slab=False) is None, "a band over an unpacked TMA operand stays legal"
+    # Only the BAND is refused, never the staging: the caller asks this at all only for a row whose
+    # worker inventory declares producer warps, so the packed byte slab's own TMA transport — which
+    # carries the weight's 4-bit traffic — keeps every stage it resolved.

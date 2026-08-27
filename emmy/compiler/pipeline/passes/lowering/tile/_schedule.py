@@ -1,15 +1,23 @@
 r"""Schedule a lifted ``TileOp`` as a lazy product over its complete Fold tree.
 
 Every Fold remains an addressable site. Each site contributes a small local catalog, and
-``_RowProduct`` recursively composes those catalogs through generic interfaces: one worker inventory
-and equal tile geometry on shared physical axes. A derived contraction with a unit marker axis
-inherits its enclosing Fold's reduction domain; this is a parent/child interface fact, not an
-operation-family match.
+``_RowProduct`` composes those catalogs through generic interfaces: one worker inventory and equal
+tile geometry on shared physical axes. A derived contraction with a unit marker axis inherits its
+enclosing Fold's reduction domain; this is a parent/child interface fact, not an operation-family
+match.
 
-The recursive products, compatible joins, worker segments, and launch-order product are all
-addressable sequences. A live compile retains that space through the fork and creates a candidate
-dictionary only when search visits its index. There is no flat candidate list or row-count budget.
-Offline sampling uses the same index path.
+**A site's catalog is a function of the site.** ``WORK`` is not an input to it — it is FOLDED OUT
+of a row's own slices (:func:`derive_inventory`) and carried on the row as its claim, so the
+kernel-global inventory is a JOIN KEY over the catalogs rather than a loop around them. One
+enumeration answers for every inventory: ``_ComboSpace`` joins the sites on the claim, and
+``_space`` partitions the single product into one segment per inventory. The alternative — asking
+each site what it offers under each candidate inventory — rebuilds every stage and reduce catalog
+once per member of a list those same catalogs produce.
+
+The product, compatible joins, worker segments, and launch-order product are all addressable
+sequences. A live compile retains that space through the fork and creates a candidate dictionary
+only when search visits its index. There is no flat candidate list or row-count budget. Offline
+sampling uses the same index path.
 
 Catalogs contain choices only; legality filters them, and the evidence hierarchy ranks them.
 Materialization re-resolves the selected spellings against the same stored Fold nodes. An empty
@@ -20,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import accumulate, product
 from types import MappingProxyType
@@ -83,6 +91,18 @@ FAMILIES = ("TILE", "STAGE", "REDUCE")
 
 #: The ``Knob`` each family pins through.
 _KNOBS = {"TILE": TILE, "STAGE": STAGE, "REDUCE": REDUCE}
+
+#: The most compatible interface combinations one inventory's pass may enumerate
+#: (:meth:`_ComboSpace.build`). The product runs over the SITES, so it is exponential in their
+#: number: a term whose sites each offer two compatible geometries has 2^sites of them, and terms
+#: with hundreds of sites exist — a whole fused model reaches here as one term. Exceeding this is a
+#: LOUD refusal, never a truncation: a truncated product reads as "these are the compatible
+#: schedules" while dropping whichever the walk reached last. Measured headroom: the widest live
+#: term (a fused flash pair, every tier) composes ~24k.
+#:
+#: This bounds the COMPOSITION, not the space. How many candidates the composed product addresses
+#: is a prefix sum over it, and unbounded by design.
+MAX_COMBINATIONS = 1 << 20
 
 # ---- structural reads over the stored term ----------------------------------------------------- #
 
@@ -408,8 +428,8 @@ class _Term:
             grouped.setdefault(w.spell() if w is not None else "", []).append(plan)
         # A ``TILE`` pin is authoritative over the VALUES but not over the inventories: its unit
         # widths are read OFF ``WORK``, so the pin names a different plan under each one and is
-        # re-resolved per inventory in :func:`_contraction_values`. The catalog still answers
-        # "which inventories can this site spell against".
+        # re-resolved against each in :func:`_pinned_tiles`. The catalog still answers "which
+        # inventories can this site spell against", pinned or not.
         return grouped
 
 
@@ -753,19 +773,14 @@ def _reduce_blocks(term: _Term, node) -> list[Block]:
     shared-row ``STAGE`` a cooperative band can drive (a resolver, not a choice — see
     :func:`_row_stage`). Each block is a rectangle ONE stage deep: the transport here is a function
     of the partition, never a free axis beside it. Which of them SPELL against the kernel's chosen
-    inventory is the row's question, not this site's (:func:`_work_holds`) — a serial fold claims
-    no workers at all, so at a NESTED site it composes with any parent inventory."""
+    inventory is the ROW's question, not this site's (:func:`_block_rows` reads the claim off the
+    block) — a serial fold claims no workers at all, so at a NESTED site it composes with any
+    parent inventory."""
     out = []
     for plan in _reduce_specs(term, node):
         shared = _row_stage(term, node) if plan.coop > 1 else None
         out.append(Block({"REDUCE": plan}, (None, shared) if shared is not None else (None,)))
     return out
-
-
-def _band_of(plan: ReducePlan) -> Workers | None:
-    """The inventory a reduce partition implies — the 1-D cooperative band, or ``None`` (a serial /
-    register-ILP fold keeps the derived per-cell launch geometry)."""
-    return Workers(kind="thread", units=(plan.coop, 1)) if plan.coop > 1 else None
 
 
 # --- the contraction: tile x stage x reduce ---
@@ -979,10 +994,87 @@ def _contraction_reduces(term: _Term, node, plan: TilePlan) -> list[ReducePlan]:
     return out
 
 
-def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
-    """The contraction's values at ``work``: the tile × stage × reduce legal product, over EITHER
-    inhabitant of the ``a`` edge — a materialized ``Load`` (both tiers, every transport) or a
-    COMPUTED cone (inline on scalar register tiles, or over the mandatory warp compute fill).
+def _pinned_tile_legal(term: _Term, node, plan: TilePlan) -> bool:
+    """Whether the pinned ``TILE`` resolved to ``plan`` may stand — the same predicates the unpinned
+    catalog drops on, RAISED here because a pin names a kernel the user asked for."""
+    if plan.is_warp:
+        # A PIN with an indivisible K-step or a gather epilogue RAISES — the same predicates
+        # the unpinned catalog drops on, one home each.
+        legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=True)
+        conv = _converting_a(node, plan.atom, term.tile.inputs)
+        if not conv:
+            legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)
+        legal.enforce(legal.warp_k_step(node, plan), pinned=True)
+        legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
+        shapes = {**term.tile.inputs, **term.tile.outputs}
+        legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=True)
+        if _requires_sync_fill(node) or conv:
+            placed = _placed(term, node, plan)
+            legal.enforce(legal.computed_operand_cover(node, placed, converting_a=conv), pinned=True)
+            legal.enforce(legal.computed_operand_copy_dtype(node, placed, term.tile.inputs, converting_a=conv), pinned=True)
+            return True
+        # Fully materialized contractions use the ordinary operand-dtype rule. Inline-edge
+        # contractions were checked above by the sync copy-dtype rule, which also tolerates
+        # scheduler-only fixtures that carry no Tensor metadata.
+        return legal.enforce(legal.warp_operand_dtype(node, plan, _a_dtype(term, node)), pinned=False)
+    if not _supports_scalar(node):
+        return False  # the scalar emitter carries one accumulator channel
+    # The CTA thread budget, raised HERE rather than left to materialization: a pinned tile the
+    # hardware cannot launch is a user error, and `Pipeline.run`'s validity retry would otherwise
+    # catch the materializer's raise and quietly deploy the next leaf — the pin says yes, the
+    # deploy says something else.
+    legal.enforce(legal.scalar_block_threads(plan), pinned=True)
+    return True
+
+
+def _pinned_tiles(term: _Term, node, pin: str) -> list[TilePlan]:
+    """The pinned ``TILE`` resolved against every inventory this SITE can spell it against.
+
+    A ``TILE`` value's unit widths are read OFF ``WORK`` (:meth:`TilePlan.parse`), so one pin names
+    a different plan under each inventory: the pin is authoritative over the VALUE, never over the
+    inventory. A pinned ``WORK`` therefore leaves exactly ONE candidate, and it is authoritative
+    whether or not a catalog implies it — the widths it fixes are what no catalog can predict, and
+    resolving the tile pin against inventories the user excluded would make "this pin is illegal" a
+    statement about a kernel nobody asked for. Unpinned, the candidates are the site's own."""
+    raw = WORK.raw()
+    # The site's catalog is asked whether or not the pin narrows the candidates: it is what answers
+    # "were tensor cores on offer here" (``_Term.warp_eligible``), a structural fact about the
+    # KERNEL that a pin must not be able to erase from the rows it does enumerate.
+    catalog = term.tiles(node)
+    spells = [raw] if raw is not None else [*catalog]
+    reduce_pin = term.pin("REDUCE", node) or ""
+    out: list[TilePlan] = []
+    for spell in spells:
+        work = Workers.parse(spell) if spell else None
+        try:
+            plan = resolve_site_tile(pin, work, ReducePlan.parse(reduce_pin, work).coop)
+            if plan in out:
+                continue
+            spellable = _pinned_tile_legal(term, node, plan)
+        except ValueError as e:
+            # The pin does not reach a kernel at THIS inventory — a warp atom needs a warp
+            # ``WORK``, and a plan that resolves here can still be illegal here and legal at a
+            # sibling. Either way the candidate is simply not in the site's catalog at this
+            # inventory, the same rule every other value follows. A pin that reaches NO inventory
+            # is a different failure: :func:`_enumerate` raises the recorded refusal rather than
+            # quietly emptying the fork, so the message survives whichever inventory drew it.
+            term.pin_error = e
+            continue
+        if spellable:
+            term.pin_spelled = True
+            out.append(plan)
+    return out
+
+
+def _contraction_blocks(term: _Term, node) -> list[Block]:
+    """The contraction's values: the tile × stage × reduce legal product, over EITHER inhabitant of
+    the ``a`` edge — a materialized ``Load`` (both tiers, every transport) or a COMPUTED cone
+    (inline on scalar register tiles, or over the mandatory warp compute fill).
+
+    The catalog is a function of the SITE alone. Which kernel inventory a rectangle can inhabit is
+    the rectangle's OWN claim (:func:`_block_rows`), not an input here — ``_Term.tiles`` already
+    groups the tile candidates by the inventory each implies, so asking per inventory would only
+    re-resolve the same stages and reduces once per member of a list this catalog produces.
 
     The product is emitted as one BLOCK per ``(TILE, REDUCE)`` pair rather than one value per
     ``(TILE, REDUCE, STAGE)`` triple. Same catalog calls, same legality calls, same order — only
@@ -990,63 +1082,18 @@ def _contraction_blocks(term: _Term, node, work: Workers | None) -> list[Block]:
     transport is a free axis over the pair, not a third coupled dimension. A pair whose every stage
     was refused is no block at all, exactly as it used to be no rows at all."""
     pin = term.pin("TILE", node)
-    if pin is not None:
-        try:
-            plans = [resolve_site_tile(pin, work, ReducePlan.parse(term.pin("REDUCE", node) or "", work).coop)]
-        except ValueError as e:
-            # The pin cannot SPELL against this inventory (a warp atom needs a warp ``WORK``), so
-            # the candidate is simply not in ``values(site, work)`` — the same rule every other
-            # value follows. A pin that spells against NO inventory is a different failure and
-            # :func:`_enumerate` raises it rather than quietly emptying the fork.
-            term.pin_error = e
-            return []
-        term.pin_spelled = True
-        for plan in plans:
-            if plan.is_warp:
-                # A PIN with an indivisible K-step or a gather epilogue RAISES — the same predicates
-                # the unpinned catalog above drops on, one home each.
-                legal.enforce(legal.warp_atom_target(plan.atom, term.ctx), pinned=True)
-                conv = _converting_a(node, plan.atom, term.tile.inputs)
-                if not conv:
-                    legal.enforce(legal.warp_a_columns(node, plan, term.tile.inputs), pinned=True)
-                legal.enforce(legal.warp_k_step(node, plan), pinned=True)
-                legal.enforce(legal.fragment_epilogue(term.proj), pinned=True)
-                shapes = {**term.tile.inputs, **term.tile.outputs}
-                legal.enforce(legal.warp_split_store(projection_tail(term.tile), term.place.free, plan.atom.shape, shapes), pinned=True)
-                if _requires_sync_fill(node) or conv:
-                    placed = _placed(term, node, plan)
-                    legal.enforce(legal.computed_operand_cover(node, placed, converting_a=conv), pinned=True)
-                    legal.enforce(
-                        legal.computed_operand_copy_dtype(node, placed, term.tile.inputs, converting_a=conv),
-                        pinned=True,
-                    )
-                # Fully materialized contractions use the ordinary operand-dtype rule. Inline-edge
-                # contractions were checked above by the sync copy-dtype rule, which also tolerates
-                # scheduler-only fixtures that carry no Tensor metadata.
-                elif not legal.enforce(legal.warp_operand_dtype(node, plan, _a_dtype(term, node)), pinned=False):
-                    return []
-            elif not _supports_scalar(node):
-                return []  # the scalar emitter carries one accumulator channel
-            else:
-                # The CTA thread budget, raised HERE rather than left to materialization: a pinned
-                # tile the hardware cannot launch is a user error, and `Pipeline.run`'s validity
-                # retry would otherwise catch the materializer's raise and quietly deploy the next
-                # leaf — the pin says yes, the deploy says something else.
-                legal.enforce(legal.scalar_block_threads(plan), pinned=True)
-    else:
-        base = replace(work, producer=0) if work is not None else None
-        grouped = term.tiles(node)
-        plans = grouped.get(base.spell() if base is not None else "", []) + (grouped.get("", []) if base is not None else [])
+    plans = _pinned_tiles(term, node, pin) if pin is not None else [p for group in term.tiles(node).values() for p in group]
     out = []
     for plan in plans:
+        # The transport catalog is a function of ``(node, plan)`` — hoisted out of the reduce loop
+        # it does not depend on, as the reduce catalog is out of the inventory it never took.
+        values = _stage_values(term, node, plan)
         for red in _contraction_reduces(term, node, plan):
-            pinned = pin is not None
             stages = tuple(
                 stage
-                for stage in _stage_values(term, node, plan)
-                if not (work is not None and work.producer) or legal.enforce(legal.producer_transport(stage), pinned=False)
+                for stage in values
                 if red.needs_split
-                or legal.enforce(legal.paired_fragment_register_budget(node, term.producer(node), plan, stage), pinned=pinned)
+                or legal.enforce(legal.paired_fragment_register_budget(node, term.producer(node), plan, stage), pinned=pin is not None)
             )
             if stages:
                 out.append(Block({"TILE": plan, "REDUCE": red}, stages))
@@ -1065,44 +1112,19 @@ def _raster_values(term: _Term) -> list[str]:
     return list(RASTER.narrow(raster_moves()))
 
 
-def _site_blocks(
-    term: _Term,
-    current: _Node,
-    work: Workers | None,
-    parent: _Node | None = None,
-) -> list[Block]:
-    """The values ``site`` offers under the chosen inventory, as :class:`Block` rectangles — TYPED
-    schedule slices, keyed by family. Dispatch is the two stored-param predicates on the node,
-    never the ``AxisRole``.
+def _site_blocks(term: _Term, current: _Node, parent: _Node | None = None) -> list[Block]:
+    """The values ``site`` offers, as :class:`Block` rectangles — TYPED schedule slices, keyed by
+    family. Dispatch is the two stored-param predicates on the node, never the ``AxisRole``.
 
     The site-tree context travels with it: ``parent`` selects the reduction domain a derived child
-    presents to its enclosing Fold."""
+    presents to its enclosing Fold. The kernel inventory does NOT travel with it — a site offers
+    what it can spell, and :func:`_block_rows` reads each rectangle's claim off its own slices."""
     node = current.site.node
-    scheduled_node = term.scheduled_node(current, parent)
     if node.axis is None:
-        blocks = _strip_blocks(term, node)
-    elif is_contraction(node):
-        blocks = _contraction_blocks(term, scheduled_node, work)
-    else:
-        blocks = _reduce_blocks(term, node)
-    return [block for block in blocks if _block_compatible(block, work)]
-
-
-def _block_compatible(block: Block, work: Workers | None) -> bool:
-    """Whether one site's worker claim can inhabit the kernel inventory.
-
-    A serial site claims no workers and composes with any parent. A tiled or cooperative site must
-    claim the same base inventory; the producer band is kernel-global and therefore ignored by an
-    individual site.
-    """
-    tile = block.values.get("TILE")
-    red = block.values.get("REDUCE")
-    try:
-        claim = derive_inventory((tile,) if tile is not None else (), coop=red.coop if red is not None else 1)
-    except ValueError:
-        return False
-    base = replace(work, producer=0) if work is not None and work.producer else work
-    return claim is None or claim == base
+        return _strip_blocks(term, node)
+    if is_contraction(node):
+        return _contraction_blocks(term, term.scheduled_node(current, parent))
+    return _reduce_blocks(term, node)
 
 
 # ---- the recursion: one row is a joint assignment across the site tree --------------------------- #
@@ -1126,7 +1148,11 @@ class _Row:
     knobs: dict
     plans: dict = field(default_factory=dict)
     stages: dict = field(default_factory=dict)
-    coop: int = 1
+    #: The worker inventory THIS row's own slices claim — :func:`derive_inventory` folded over them
+    #: once, where the row is built. ``None`` claims nothing and composes with any inventory, which
+    #: is what lets a serial fold sit under a warp parent. The claim is what makes ``WORK`` a JOIN
+    #: KEY over the catalogs rather than an input to them: no row is enumerated per inventory.
+    work: Workers | None = None
 
     @property
     def width(self) -> int:
@@ -1137,52 +1163,68 @@ class _Row:
     def union(cls, parts: Iterable[_Row]) -> _Row | None:
         """Several rows as one, or ``None`` when their worker claims conflict.
 
-        The claim is a CONSISTENCY, not a maximum. Since step 7 a ``REDUCE`` value spells no coop
-        width — the width lives once in ``WORK`` — so two sites claiming DIFFERENT cooperative
-        bands spell identically while naming kernels the wire format cannot tell apart. Folding
-        them with ``max`` admitted all of them: on the two-site fixture four child widths rode one
-        ``t32`` parent as four byte-identical rows. A serial part claims nothing (``coop == 1``)
-        and still composes with any other, which is what lets a nested serial fold sit under a warp
-        inventory at all.
-
-        Used at BOTH levels a row is assembled — a site with its children (:func:`_merge`) and the
-        forest of a term's root sites (:func:`_term_rows`). They stated the rule differently until
-        this existed, and the looser of the two was the one that ran on multi-root terms."""
+        The claim is a CONSISTENCY, not a maximum: two sites claiming DIFFERENT inventories name
+        kernels the wire format cannot tell apart, so they are not one row. A part claiming
+        ``None`` composes with any other. This is the SAME rule :func:`_merge_interfaces` applies
+        to the interface, one level up — it is stated once, in :func:`derive_inventory`, and
+        applied here to the already-derived claims."""
         knobs: dict = {}
         plans: dict = {}
         stages: dict = {}
-        coop = 1
+        work: Workers | None = None
         for part in parts:
             knobs.update(part.knobs)
             plans.update(part.plans)
             stages.update(part.stages)
-            if part.coop > 1:
-                if coop > 1 and part.coop != coop:
-                    return None  # two sites, two widths, one WORK entry to spell them in
-                coop = part.coop
-        return cls(knobs=knobs, plans=plans, stages=stages, coop=coop)
+            if part.work is not None:
+                if work is not None and part.work != work:
+                    return None  # two sites, two inventories, one WORK entry to spell them in
+                work = part.work
+        return cls(knobs=knobs, plans=plans, stages=stages, work=work)
+
+
+def _producer_bands(work: Workers | None, stage: Stage | None) -> tuple[Workers, ...]:
+    """The producer-band inventories a row ALSO claims.
+
+    The band is kernel-global, but every condition on it is a fact about the ROW: it drives a
+    resolved TMA stage (:func:`legal.producer_transport`) and needs a warp inventory wide enough to
+    spare it (:func:`legal.producer_band`). Claiming it here is what lets the join build the band's
+    segment out of the rows that can inhabit it, instead of re-enumerating the whole term once per
+    band — and it makes the old term-wide "no band beside a synchronous compute fill" gate fall
+    out: a fill stage is not TMA, so a fill site claims no band and the join finds no partner."""
+    if work is None or work.kind != "warp" or legal.producer_transport(stage) is not None:
+        return ()
+    return tuple(
+        replace(work, producer=band) for band in (1, 2) if legal.enforce(legal.producer_band(WarpSpec(band), work.count * 32), pinned=False)
+    )
 
 
 def _block_rows(node: _Node, block: Block) -> list[_Row]:
-    """Spell one local block into complete per-stage rows at its canonical site keys."""
+    """Spell one local block into complete per-stage rows at its canonical site keys, each carrying
+    the worker inventory its own slices claim."""
     red = block.values.get("REDUCE")
     tile = block.values.get("TILE")
+    try:
+        work = derive_inventory((tile,) if tile is not None else (), coop=red.coop if red is not None else 1)
+    except ValueError:
+        return []  # this block's own TILE and REDUCE name two inventories — no kernel spells it
     key = node.keys.get("STAGE")
-    stamps = tuple({key: _spell(stage)} if key is not None else {} for stage in block.stages)
-    row = _Row(
-        knobs={k: _spell(block.values.get(family)) for family, k in node.keys.items() if family != "STAGE"},
-        plans={node.keys["TILE"]: tile} if tile is not None and "TILE" in node.keys else {},
-        coop=red.coop if red is not None else 1,
-    )
     tile_key = node.keys.get("TILE")
-    return [
-        replace(
-            row,
-            knobs={**row.knobs, **stamp},
+    base = _Row(
+        knobs={k: _spell(block.values.get(family)) for family, k in node.keys.items() if family != "STAGE"},
+        plans={tile_key: tile} if tile is not None and tile_key is not None else {},
+        work=work,
+    )
+    out: list[_Row] = []
+    for stage in block.stages:
+        row = replace(
+            base,
+            knobs={**base.knobs, **({key: _spell(stage)} if key is not None else {})},
             stages={tile_key: stage} if tile_key is not None else {},
         )
-        for stamp, stage in zip(stamps, block.stages, strict=True)
-    ]
+        out.append(row)
+        out.extend(replace(row, work=band) for band in _producer_bands(work, stage))
+    return out
 
 
 @dataclass(frozen=True)
@@ -1194,23 +1236,64 @@ class _ComboSpace(Sequence[tuple[int, ...]]):
     offsets: tuple[int, ...]
 
     @classmethod
-    def build(
-        cls,
-        term: _Term,
-        parts: tuple[Sequence[_Row], ...],
-        require_claim: bool | None = None,
-    ) -> _ComboSpace:
+    def build(cls, term: _Term, parts: tuple[Sequence[_Row], ...]) -> _ComboSpace:
+        """The compatible products of the sites' interfaces, one pass per worker inventory.
+
+        The inventory RESTRICTS THE ROWS, it does not key the interface. That distinction is the
+        whole tractability of this product: a term can carry hundreds of sites, and the product
+        runs over each site's interface GROUPS, so one extra group per site multiplies the whole
+        enumeration. Under a chosen inventory a site offers the rows claiming it plus the rows
+        claiming nothing, which collapse to the few interfaces they always did; keying the group by
+        the claim instead would split every site's catalog once per inventory it can spell and turn
+        a 491-site term into an unenumerable product.
+
+        A pass keeps a combination when the merged interface CLAIMS workers exactly when the pass's
+        inventory does — which is what keeps the all-claims-nothing combination out of every
+        concrete inventory's pass and in its own. The combination is then recorded against that
+        inventory: the pass knows the claim, so nothing has to re-derive it."""
         if not parts:
-            return cls(((),), ((False, (), (), ()),), (0, 1))
-        grouped = [_interface_groups(term, rows) for rows in parts]
+            return cls(((),), ((None, (), (), ()),), (0, 1))
+        buckets, claims = [], {}
+        for rows in parts:
+            per_claim: dict = {}
+            for index in range(len(rows)):
+                row = rows[index]
+                per_claim.setdefault(row.work, {}).setdefault(_row_interface(term, row), []).append(index)
+            buckets.append(per_claim)
+            claims.update(dict.fromkeys(claim for claim in per_claim if claim is not None))
         products = []
         product_interfaces = []
-        for choices in product(*grouped):
-            interfaces, indices = zip(*choices, strict=True)
-            interface = _merge_interfaces(term, interfaces)
-            if interface is not None and (require_claim is None or interface[0] == require_claim):
+        # ``None`` leads: the per-cell / pure-reduce geometry is the inventory a term always has.
+        for claim in (None, *claims):
+            grouped = []
+            for per_claim in buckets:
+                # Claiming rows lead, then the rows that claim nothing — the order the site's own
+                # catalog puts them in, and the order the walk below reads a branch's first row in.
+                # The two halves cannot collide: an interface records WHETHER its row claims
+                # workers, so a claiming group and a claims-nothing group are never the same key.
+                unclaimed = per_claim.get(None, {})
+                offered = {**per_claim.get(claim, {}), **unclaimed} if claim is not None else unclaimed
+                if not offered:
+                    break  # this site cannot inhabit the inventory at all, so no row of it can
+                grouped.append(tuple(offered.items()))
+            if len(grouped) != len(buckets):
+                continue
+            size = 1
+            for groups in grouped:
+                size *= len(groups)
+                if size > MAX_COMBINATIONS:
+                    raise ValueError(
+                        f"schedule enumeration is intractable: this term's {len(parts)} sites compose more than "
+                        f"{MAX_COMBINATIONS} compatible interface combinations at WORK={_spell(claim)!r} — the "
+                        f"composition is exponential in the number of independently scheduled sites"
+                    )
+            for choices in product(*grouped):
+                interfaces, indices = zip(*choices, strict=True)
+                interface = _merge_interfaces(term, interfaces)
+                if interface is None or interface[0] != (claim is not None):
+                    continue
                 products.append(indices)
-                product_interfaces.append(interface)
+                product_interfaces.append((claim, *interface[1:]))
         sizes = [_product_size(group) for group in products]
         return cls(tuple(products), tuple(product_interfaces), (0, *accumulate(sizes)))
 
@@ -1251,11 +1334,20 @@ def _row_interface(term: _Term, row: _Row) -> tuple:
         placed = term.sched.placed(node, plan)
         if placed.axes is not None:
             axes.update((side.axis.name, (side.tile, side.units)) for side in placed.mn)
-    claims_workers = row.coop > 1 or any(plan_workers(plan) is not None for plan in row.plans.values())
-    return claims_workers, tuple(sorted(axes.items())), tuple(sorted(row.plans.items())), tuple(sorted(row.stages.items()))
+    # WHETHER the row claims workers, never WHICH inventory: the inventory restricts which rows a
+    # pass offers (:meth:`_ComboSpace.build`), and keying it here would split every site's catalog
+    # once per inventory it can spell — one more group per site, multiplied over every site.
+    return row.work is not None, tuple(sorted(axes.items())), tuple(sorted(row.plans.items())), tuple(sorted(row.stages.items()))
 
 
 def _merge_interfaces(term: _Term, interfaces) -> tuple | None:
+    """The one interface several sites present together, or ``None`` when they cannot compose.
+
+    Two agreements are checked here — the physical tile axes and the fragment seam. The third, the
+    worker inventory, is structural: :meth:`_ComboSpace.build` offers a pass only the rows that
+    claim its inventory or claim nothing, so no combination reaching here can name two. What comes
+    out is whether the combination claims workers AT ALL, which is what tells the pass whether the
+    combination belongs to it."""
     axes = {}
     plans = {}
     stages = {}
@@ -1291,15 +1383,6 @@ def _merge_interfaces(term: _Term, interfaces) -> tuple | None:
     return claims_workers, tuple(sorted(axes.items())), tuple(sorted(plans.items())), tuple(sorted(stages.items()))
 
 
-def _interface_groups(term: _Term, rows: Sequence[_Row]):
-    if isinstance(rows, _RowProduct):
-        return rows.interface_groups()
-    by_interface: dict[tuple, list[int]] = {}
-    for index in range(len(rows)):
-        by_interface.setdefault(_row_interface(term, rows[index]), []).append(index)
-    return tuple((interface, tuple(indices)) for interface, indices in by_interface.items())
-
-
 @dataclass(frozen=True)
 class _RowProduct(Sequence[_Row]):
     """A mixed-radix compatible product of schedule row spaces."""
@@ -1309,25 +1392,33 @@ class _RowProduct(Sequence[_Row]):
     closed = True
 
     @classmethod
-    def build(
-        cls,
-        term: _Term,
-        parts: tuple[Sequence[_Row], ...],
-        require_claim: bool | None = None,
-    ) -> _RowProduct:
-        expanded = tuple(part.parts if isinstance(part, _RowProduct) else (part,) for part in parts)
-        leaves = tuple(leaf for group in expanded for leaf in group)
-        return cls(leaves, _ComboSpace.build(term, leaves, require_claim))
+    def build(cls, term: _Term, parts: tuple[Sequence[_Row], ...]) -> _RowProduct:
+        return cls(tuple(parts), _ComboSpace.build(term, tuple(parts)))
 
     def __len__(self) -> int:
         return len(self.combos)
 
-    def interface_groups(self):
-        """This product's row interfaces and their contiguous address spans."""
-        return tuple(
-            (interface, range(self.combos.offsets[index], self.combos.offsets[index + 1]))
-            for index, interface in enumerate(self.combos.interfaces)
-        )
+    def _regrouped(self, groups: dict[str, list[tuple]]) -> list[tuple[str, _RowProduct]]:
+        """One ``{value: [(combo, interface)]}`` grouping rebuilt as addressable sub-products — the
+        tail both partitions below share. A group keeps the PARTS and narrows only the combos, so
+        the sub-product addresses a subset of this one without a row being visited."""
+        out = []
+        for value, entries in groups.items():
+            combos, interfaces = zip(*entries, strict=True)
+            sizes = [_product_size(group) for group in combos]
+            out.append((value, _RowProduct(self.parts, _ComboSpace(tuple(combos), tuple(interfaces), (0, *accumulate(sizes))))))
+        return out
+
+    def work_groups(self) -> list[tuple[str, _RowProduct]]:
+        """This product's rows grouped by the inventory they claim — the ``WORK`` segments.
+
+        A regroup of the combo interfaces, which already carry the claim, so no Cartesian row is
+        visited and no catalog is read again. This is the whole of what the per-inventory
+        enumeration loop used to produce, one enumeration later."""
+        groups: dict[str, list[tuple]] = {}
+        for combo, interface in zip(self.combos.groups, self.combos.interfaces, strict=True):
+            groups.setdefault(_spell(interface[0]), []).append((combo, interface))
+        return self._regrouped(groups)
 
     def partition(self, key: str):
         """Partition this compatible product by one site-local schedule key.
@@ -1350,12 +1441,7 @@ class _RowProduct(Sequence[_Row]):
             for value, indices in by_value.items():
                 narrowed = (*combo[:owner], tuple(indices), *combo[owner + 1 :])
                 groups.setdefault(value, []).append((narrowed, interface))
-        out = []
-        for value, entries in groups.items():
-            combos, interfaces = zip(*entries, strict=True)
-            sizes = [_product_size(group) for group in combos]
-            out.append((value, _RowProduct(self.parts, _ComboSpace(tuple(combos), tuple(interfaces), (0, *accumulate(sizes))))))
-        return tuple(out)
+        return tuple(self._regrouped(groups))
 
     def __getitem__(self, index: int | slice):
         if isinstance(index, slice):
@@ -1372,11 +1458,15 @@ class _RowProduct(Sequence[_Row]):
         return row
 
 
-def _rows_at(term: _Term, node: _Node, work: Workers | None, parent: _Node | None = None) -> Sequence[_Row]:
-    """The recursively addressable schedule product rooted at ``node``."""
-    children = tuple(_rows_at(term, child, work, node) for child in _kids(node))
-    own = tuple(row for block in _site_blocks(term, node, work, parent) for row in _block_rows(node, block))
-    return _RowProduct.build(term, (*children, own))
+def _site_catalogs(term: _Term, node: _Node, parent: _Node | None = None) -> Iterator[Sequence[_Row]]:
+    """Every site's own row catalog in the subtree rooted at ``node``, children first.
+
+    One catalog per SITE — not one per site per inventory, and not one product per subtree. A
+    subtree product would only be flattened away by its parent's, so the sites are collected here
+    and :func:`_term_rows` forms the one product over them."""
+    for child in _kids(node):
+        yield from _site_catalogs(term, child, node)
+    yield tuple(row for block in _site_blocks(term, node, parent) for row in _block_rows(node, block))
 
 
 def _walk_nodes(node: _Node):
@@ -1385,72 +1475,43 @@ def _walk_nodes(node: _Node):
         yield from _walk_nodes(child)
 
 
-def _site_inventories(term: _Term, node: _Node, parent: _Node | None = None) -> list[Workers | None]:
-    """Every inventory the subtree rooted at ``node`` can spell a value against. The list is a SET
-    of legal candidates; the position an entry lands in carries no meaning."""
-    site = node.site
-    scheduled_node = term.scheduled_node(node, parent)
-    out: list[Workers | None] = []
-    if site.node.axis is None:
-        out.append(None)
-    elif is_contraction(site.node):
-        out.append(None)  # the derived per-cell geometry — the per-cell tile beside a serial fold
-        out.extend(Workers.parse(spell) for spell in term.tiles(scheduled_node) if spell)
-        # The non-output-tiled tier folds K across a cooperative band, so a contraction claims
-        # those inventories too — at the per-cell tile, where the coop moves are offered.
-        out.extend(_band_of(p) for p in _contraction_reduces(term, scheduled_node, TilePlan()))
-    else:
-        out.extend(_band_of(p) for p in _reduce_specs(term, site.node))
-    for child in _kids(node):
-        out.extend(_site_inventories(term, child, node))
-    return out
+def _work_groups(term: _Term, rows: _RowProduct) -> list[tuple[str, Sequence[_Row]]]:
+    """The kernel's ``WORK`` segments: the row product partitioned by the inventory its rows claim.
 
+    The offered inventories are not scanned for and then enumerated against — they ARE the claims
+    the rows make, so what a segment is stamped with and what its rows spell cannot disagree.
 
-def _inventories(term: _Term) -> list[Workers | None]:
-    """The kernel's ``WORK`` candidates from every site in the stored tree, with ``None`` as the
-    per-cell / pure-reduce geometry and producer bands derived from warp inventories."""
-    out: list[Workers | None] = []
-    seen: set[str] = set()
-    for node in term.tree:
-        for w in _site_inventories(term, node):
-            if (spell := w.spell() if w is not None else "") not in seen:
-                seen.add(spell)
-                out.append(w)
-    if "" not in seen:
-        out.append(None)  # a term with no site still maps its placement — one all-empty row
-    computed_fill = any(is_contraction(site.node) and _requires_sync_fill(site.node) for site in term.sched._all_sites())
-    for w in list(out):
-        if w is None or w.kind != "warp":
-            continue
-        if computed_fill:
-            continue  # the kernel-global producer band cannot drive a synchronous compute fill
-        for band in (1, 2):
-            spec = WarpSpec(band)
-            if legal.enforce(legal.producer_band(spec, w.count * 32), pinned=False):
-                out.append(replace(w, producer=band))
-    # The live ``WORK`` pin is AUTHORITATIVE, so the pinned inventory is offered whether or not a
-    # catalog implies it — the unit widths a ``TILE`` pin reads off it are exactly what no catalog
-    # can predict.
+    A live ``WORK`` pin narrows to the matching group, and a ``+p`` pin whose BASE inventory the
+    term does claim narrows to no group at all — the band is part of the inventory, so a term with
+    no row that can drive it stays unmapped rather than deploying without it.
+
+    THE ONE PLACE A PIN DOES NOT NARROW is the PIN-BLEED rule: one env pin, several kernels in the
+    graph, and this is not the one it was written for (a recognition fork's reduce sibling seeing a
+    matmul's warp pin). The pinned inventory then LEADS, carrying the rows that claim nothing — the
+    only rows any inventory can spell — and the term's own groups stay as siblings, so it still
+    maps rather than being left unmapped over a pin that was never about it. Both halves of that
+    are pinned by ``test_work_pin_widens_only_where_the_site_offers_no_warp_inventory``."""
+    groups = rows.work_groups()
     raw = WORK.raw()
     if raw is None:
-        return out
-    kept = [w for w in out if values_equal(WORK.name, raw, w.spell() if w is not None else "")]
+        return groups
+    kept = [group for group in groups if values_equal(WORK.name, raw, group[0])]
     if kept:
         return kept
-    # THE ONE PLACE A PIN DOES NOT NARROW, and it is the PIN-BLEED rule: one env pin, several
-    # kernels in the graph, and this is not the one it was written for (a recognition fork's reduce
-    # sibling seeing a matmul's warp pin). The catalog's own inventories stay as siblings so the
-    # term still maps — emptying the fork would leave a term unmapped over a pin that was never
-    # about it, which is the same degrade the strip site applies to a warp ``TILE`` pin it cannot
-    # spell. A composed Fold enumerates its own warp geometry, so a ``w<M>x<N>`` pin narrows there
-    # like anywhere else.
-    # ``test_work_pin_widens_only_where_the_site_offers_no_warp_inventory`` pins both halves.
+    pinned = Workers.parse(raw)
+    if pinned is not None and pinned.producer and any(spell == _spell(replace(pinned, producer=0)) for spell, _ in groups):
+        # The term CAN spell the pinned inventory; it is the BAND no row of it can drive. A band is
+        # PART of the inventory, so this is a pin the term simply has no row at — it stays unmapped
+        # rather than quietly deploying without the band the pin asked for. Not pin bleed: bleed is
+        # for a pin that is not about this kernel at all, which is the branch below.
+        return []
     logger.warning(
         "WORK pin %r matches no candidate's worker inventory (%s offered); offering it beside the full fork",
         raw,
-        ", ".join(repr(w.spell() if w is not None else "") for w in out) or "none",
+        ", ".join(repr(spell) for spell, _ in groups) or "none",
     )
-    return [Workers.parse(raw), *out]
+    unclaimed = [sub for spell, sub in groups if spell == ""]
+    return [(_spell(pinned), unclaimed[0]), *groups] if unclaimed else groups
 
 
 def _level_keys(term: _Term) -> list[str]:
@@ -1479,38 +1540,37 @@ def _keys(term: _Term) -> list[str]:
     return [k for family in FAMILIES for k in (seen[family] or [family])]
 
 
-def _term_rows(term: _Term, work: Workers | None) -> Sequence[_Row]:
-    """The lazy compatible product over all root sites at one worker inventory.
+def _term_rows(term: _Term) -> _RowProduct:
+    """The lazy compatible product over EVERY site of the term.
 
-    ``_RowProduct`` joins the same physical-axis interface used within each subtree and retains
-    only products whose rows collectively claim ``work``. Independent roots therefore use the
-    same composition rule as parent and child sites; no separate root product is materialized."""
-    roots = term.tree
-    if not roots:
-        return [_Row(knobs={})] if work is None else []
-    return _RowProduct.build(term, tuple(_rows_at(term, node, work) for node in roots), require_claim=work is not None)
+    ``_RowProduct`` joins the sites on the interface they present one another: the physical tile
+    axes, the fragment seam, and the worker inventory each row claims. Parent and child, and the
+    independent roots of a forest, therefore compose by one rule — and no inventory is chosen
+    before the rows exist, so no catalog is built twice. A term with no site still has one row,
+    which is the empty product."""
+    return _RowProduct.build(term, tuple(catalog for root in term.tree for catalog in _site_catalogs(term, root)))
 
 
 def _space(term: _Term) -> PoolSpace:
     """Every legal schedule candidate for the stored term, as an addressable space with one
-    segment per worker inventory."""
+    segment per worker inventory.
+
+    ONE product over the sites, partitioned by the inventory its rows claim through the same
+    combo regrouping (:meth:`_RowProduct._regrouped`) that opens a fork level, so the segment
+    layout and the fork levels narrow the space the same way."""
     keys = _keys(term)
-    works = _inventories(term)
+    rows = _term_rows(term)
     #: Every key the tree spells, decided-empty until a row supplies it.
     base = {k: "" for k in keys}
     if term.warp_eligible:
         # ``S_``-prefixed - not a schedule family, so tile identity and prefix-consistency are
         # untouched (``canonical_row_key`` reads the tuning-knob view); it prices "a scalar tile
         # where tensor cores were on offer". It rides the BASE dict rather than a closing pass over
-        # the rows: :func:`_inventories` above already asked every site for its tile catalog, which
-        # is the one thing that sets the flag, so the answer is known before the first row exists.
+        # the rows: the walk above already asked every site for its tile catalog, which is the one
+        # thing that sets the flag, so the answer is known before the first candidate exists.
         base["S_warp_eligible"] = 1.0
-    segments: list[Segment] = []
-    for work in works:
-        spelled = {WORK.name: work.spell() if work is not None else ""}
-        rows = _term_rows(term, work)
-        if rows:
-            segments.append(Segment.build(rows, spelled, [{RASTER.name: r} for r in _raster_values(term)]))
+    rasters = [{RASTER.name: r} for r in _raster_values(term)]
+    segments = [Segment.build(sub, {WORK.name: spell}, rasters) for spell, sub in _work_groups(term, rows)]
     return PoolSpace.build(keys, base, segments)
 
 
@@ -1740,12 +1800,12 @@ def _materialize(term: _Term, row: dict, name: str, knobs: dict) -> TileOp:
 
 def _nested_slices(term: _Term, node: _Node, row: dict, work: Workers | None) -> list[tuple]:
     """Every NESTED site's resolved slices, as the ``(family, node, value)`` triples ``scheduled``
-    keys — materialization's half of the recursion :func:`_rows_at` already does.
+    keys — materialization's half of the recursion :func:`_site_catalogs` already does.
 
     The enumeration walks the whole site tree, so a row DECIDES every site; stamping the root alone
     left a nested key as a knob no kernel realized — the row said ``REDUCE@j=r2`` and the op's
     schedule came back empty. The walk descends through :func:`_kids`, the same accessor
-    ``_rows_at`` uses, so what materializes is what was enumerated. A site whose value is the decided empty resolves
+    ``_site_catalogs`` uses, so what materializes is what was enumerated. A site whose value is the decided empty resolves
     to ``None`` and ``scheduled`` skips it, which is why the corpus terms — whose one nested site is
     the cone statistic the parent fill realizes — stamp nothing new."""
     out: list[tuple] = []

@@ -247,7 +247,7 @@ def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
         ],
     }
 
-    monkeypatch.setattr(sch, "_rows_at", lambda _term, root, _work, **_kwargs: rows[root.site.node])
+    monkeypatch.setattr(sch, "_site_catalogs", lambda _term, root, *_a, **_k: iter((rows[root.site.node],)))
     axes = (Axis("m", 8), Axis("n", 8))
     sched = SimpleNamespace(placed=lambda node, plan: plan.at(*(axes if node == "first" else tuple(reversed(axes)))))
     term = SimpleNamespace(
@@ -257,7 +257,7 @@ def test_independent_roots_only_cross_physically_compatible_tiles(monkeypatch):
         fragment_edges=(),
     )
 
-    result = sch._term_rows(term, None)
+    result = sch._term_rows(term)
     assert len(result) == 1
     assert result[0] == sch._Row.union((rows["first"][0], rows["second"][0]))
 
@@ -281,11 +281,40 @@ def test_fragment_consumer_may_inline_an_untiled_producer():
     assert sch._merge_interfaces(term, (interface(scalar, warp),)) is None
 
 
+def test_an_unenumerable_site_count_refuses_loudly():
+    """The sites COMPOSE, so the enumeration is exponential in how many of them schedule
+    independently — a whole fused model reaches the scheduler as ONE term, and hundreds of sites
+    are ordinary there. Past the limit the composition is refused, never truncated: a truncated one
+    reads as "these are the compatible schedules" while dropping whichever the walk reached last.
+
+    The old row budget guarded the same class of blow-up one level down, at materialization. This
+    guards the COMPOSITION, which is what actually runs away; how many candidates the composed
+    product addresses stays unbounded, because addressing them costs nothing until one is read."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sch
+
+    term = SimpleNamespace(tile_nodes={}, sched=None, fragment_edges=())
+    # Each site offers two register widths and nothing constrains them against each other, so N
+    # sites compose 2^N ways — 2^25 here, well past the limit and reached in 25 multiplications.
+    parts = tuple(
+        (
+            sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan()}),
+            sch._Row(knobs={}, plans={f"TILE@s{i}": TilePlan(regs=(1, 2))}),
+        )
+        for i in range(25)
+    )
+    with pytest.raises(ValueError, match="intractable"):
+        sch._ComboSpace.build(term, parts)
+
+
 # --- the WORK pin's one non-narrowing branch ----------------------------------------------------- #
 
 
 def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatch):
-    """A pin NARROWS — except in ``_inventories``' one fallback, where a ``WORK`` pin that matches
+    """A pin NARROWS — except in ``_work_groups``' one fallback, where a ``WORK`` pin that matches
     no candidate is offered BESIDE the catalog's own inventories instead of replacing them.
 
     That branch is the PIN-BLEED rule: one env pin, several kernels in the graph, and this term is
@@ -313,8 +342,11 @@ def test_work_pin_widens_only_where_the_site_offers_no_warp_inventory(monkeypatc
     tile = TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
 
     def inventories() -> list[str]:
+        """The inventories the term OFFERS — read off the space's segments, which is now the only
+        place they exist: a segment is stamped with the inventory its own rows claim, so what is
+        offered and what is spellable cannot drift apart."""
         term = sch._Term(tile, tile.place.on_grid(), ctx)
-        return [w.spell() if w is not None else "" for w in sch._inventories(term)]
+        return [segment.knobs["WORK"] for segment in sch._space(term).segments]
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
     offered = inventories()

@@ -73,10 +73,26 @@ post-decomposition Python source file for known format names.
 
 `015_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `018_cut` then offers
 the maximal fused tree beside every semantically closed stored Fold-edge cut. `020_schedule` maps the free axes and
-exposes a recursive, addressable product over every stored Fold site. It chooses the kernel's worker inventory, then
-composes legal `TILE`, `REDUCE`, `STAGE`, and `RASTER` values through generic worker and physical-axis interfaces.
-Keys use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
-Candidate dictionaries are created only at addressed leaves; there is no eager row list or row cap.
+exposes an addressable product over every stored Fold site, composing legal `TILE`, `REDUCE`, `STAGE`, and `RASTER`
+values through generic worker and physical-axis interfaces. Keys use the tree-path codec, and every resolved slice
+lives beside the immutable Fold tree in `TileOp.schedule`. Candidate dictionaries are created only at addressed
+leaves; there is no eager row list or row cap.
+
+**The kernel's worker inventory is not chosen before the rows — it is folded out of them.** A site's catalog is a
+function of the site; `derive_inventory` reads each rectangle's claim off its own resolved slices, the row carries
+that claim, and `WORK` is the key the site products JOIN on and the key the space is then partitioned by into one
+segment per inventory. The offered inventories are therefore the claims the rows make, so what a segment is stamped
+with and what its rows can spell cannot drift apart. Asking each site instead what it offers *under* a chosen
+inventory rebuilds every stage and reduce catalog once per member of a list those same catalogs produce — one f16
+matmul enumerated 61 times. `tests/compiler/passes/test_pool_space.py` pins the invariant directly: every catalog
+question is asked once per term.
+
+The inventory restricts which ROWS a pass offers; it never keys the interface a site presents. That distinction is
+what keeps the composition tractable: the product runs over the sites' interface groups, so one extra group per site
+multiplies the whole enumeration, and a whole fused model reaches the scheduler as one term with hundreds of sites.
+Past `MAX_COMBINATIONS` the composition is refused rather than truncated — a truncated one reads as "these are the
+compatible schedules" while dropping whichever the walk reached last. The bound is on the COMPOSITION; how many
+candidates the composed product addresses stays unbounded, because addressing costs nothing until a row is read.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree. If no row
 can realize the stored shape, it leaves the tile unmapped for the scalar materialization path. Reintroducing faster

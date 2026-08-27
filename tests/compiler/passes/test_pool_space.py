@@ -97,6 +97,39 @@ def test_real_spaces_are_addressable_without_exhaustion(case, unpinned, monkeypa
             assert space[index] == space[index]
 
 
+@pytest.mark.parametrize("case", sorted(FIXTURES))
+def test_each_site_catalog_is_built_once(case, unpinned, monkeypatch) -> None:
+    """Every catalog question is asked ONCE per term. This is the property the addressable space
+    rests on, and the one a row budget could never state.
+
+    ``WORK`` is not an input to a site's catalog: a row carries the inventory its own slices claim
+    and the product joins on it. Asking each site what it offers *under* each candidate inventory
+    instead re-resolves every stage and reduce once per member of a list those same catalogs
+    produce — on one f16 matmul that was 61 passes, and it cost seconds per lowered kernel while
+    the fork above it read a single row. A reintroduced loop shows up here as a repeated question,
+    not as a slow test somebody eventually notices."""
+    asked: dict[str, list] = {}
+
+    def counted(name, key):
+        original = getattr(_schedule, name)
+
+        def wrapper(*args, **kwargs):
+            asked.setdefault(name, []).append(key(*args, **kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(_schedule, name, wrapper)
+
+    counted("_site_blocks", lambda term, current, parent=None: (id(term), id(current), id(parent)))
+    counted("_stage_values", lambda term, node, plan: (id(term), id(node), plan))
+    counted("_contraction_reduces", lambda term, node, plan: (id(term), id(node), plan))
+
+    assert _spaces(FIXTURES[case](), monkeypatch)
+    assert asked, "the fixture built no catalog at all"
+    for name, keys in asked.items():
+        repeats = len(keys) - len(set(keys))
+        assert not repeats, f"{name} was asked the same question {repeats} time(s) over ({len(keys)} calls)"
+
+
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
 def test_computed_fold_sites_remain_addressable(case, tile_sites, reduce_sites, unpinned, monkeypatch) -> None:
     space = _spaces(FIXTURES[case](), monkeypatch)[0]

@@ -43,6 +43,15 @@
         # whatever ``/usr/local/cuda`` happens to be, which on NixOS is nothing.
         CUDA_HOME = "${cudaPkgs.cudatoolkit}";
 
+        # NOT covered here: the loop backend JIT-compiles kernels in-process through cppyy, whose
+        # bundled ``rootcling`` is a generic-linux executable. NixOS stubs the loader such
+        # binaries need, so Cling fails to build its precompiled header and then FAULTS — the
+        # symptom is a segfault during pytest collection ("node down: Not properly terminated"),
+        # which reads like a broken checkout rather than a missing setting. ``programs.nix-ld.enable``
+        # in the HOST configuration supplies a real loader and fixes it (verified: cppyy imports and
+        # ``tests/compiler/ir/loop/`` passes). A devShell cannot set it for its user, which is why
+        # it is named here rather than solved here.
+        #
         # venv-installed wheels (numpy, torch, ...) dlopen these at run time;
         # makeLibraryPath picks each package's lib output, so plain `zlib` is
         # correct here (no `.out` footgun).

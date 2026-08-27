@@ -879,6 +879,8 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     pure strength-reduction, and sees through a division already standing
     in the way — the shape a sub-byte-packed operand address arrives in.
 
+    Every arm proves its operands non-negative, so a successful return
+    carries that as an invariant; :func:`_split_addend` rests on it.
     """
     if isinstance(expr, Literal) and expr.dtype == "int" and isinstance(expr.value, int) and expr.value >= 0:
         return (_make_int_literal(expr.value // n), _make_int_literal(expr.value % n))

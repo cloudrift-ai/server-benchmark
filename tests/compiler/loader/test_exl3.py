@@ -819,8 +819,8 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
 
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
-    ``kslice`` = K/2 columns, so the computed B cone's reads must sit at the ``<partition> · 64``
-    base; together the two partitions cover K exactly, which IS the reassociation the split
+    ``kslice`` = K/2 columns, so the computed B cone's reads must sit at their partition's own
+    offset; together the two partitions cover K exactly, which IS the reassociation the split
     performs. The base is READ OFF the source rather than spelled: a piece is a brand-new kernel,
     so its axes carry canonical names and the pre-split axis name never reaches codegen.
 

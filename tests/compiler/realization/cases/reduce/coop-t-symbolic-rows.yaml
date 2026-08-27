@@ -1,7 +1,11 @@
-# The transposed band sweeping a SYMBOLIC output axis. A symbolic extent always overhangs, so
-# the guard bounds against the runtime extent and the upper lanes' stores are discarded at any
-# size; the band used to need a static extent for want of that guard. Compiled and run at the
-# axis hint — the on-and-off-block sweep over one kernel stays in Python.
+# The transposed band sweeping a SYMBOLIC output axis. A symbolic extent always overhangs, so the
+# guard bounds against the runtime extent and the upper lanes' stores are discarded at any size; the
+# band used to need a static extent for want of that guard. Compiled and run at the axis hint — the
+# on-and-off-block sweep over one kernel stays in Python.
+#
+# The row sum keeps its reduced axis here. Spelled without keepdim the target picks up the trailing
+# squeeze, and the numpy reference cannot run a reshape whose output shape is symbolic — a limit of
+# the reference, not of the band, which realizes identically either way.
 compute_cap:
 - 12
 - 0
@@ -12,32 +16,22 @@ programs:
   - id: x
     op: input
     outputs: [[x, f32, [{sym: rows, hint: 512}, 256]]]
-  - id: sum_1_keepdim
+  - id: sum_1
     op: tensor.reduce
     attrs: {op: {__elementwise__: sum}, axis: 1}
     inputs: [x]
-    outputs: [[sum_1_keepdim, f32, [{sym: rows, hint: 512}, 1]]]
-  - id: sum_1
-    op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: {sym: rows, hint: 512}}]}
-      sources:
-        __tuple__:
-        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
-    inputs: [sum_1_keepdim]
-    outputs: [[sum_1, f32, [{sym: rows, hint: 512}]]]
+    outputs: [[sum_1, f32, [{sym: rows, hint: 512}, 1]]]
 configs:
 - program: 0
   target:
     origins:
     - sum_1
-    - sum_1_keepdim
   realizations:
-  - name: k_sum_1_reduce.0e2b52ff29af
+  - name: k_sum_1_reduce.a6b26fb98eeb
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: t128
       REDUCE: coop-t
-    identity: 0d0c5a1ffa750814e488b47034eba7eea97cb139c38e26d39c0f79673cc96437
+    identity: 29e4ece1799476d029c3bfb260fd01b93d8005d253164d41f3d6c77ba80cc991

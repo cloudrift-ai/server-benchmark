@@ -1,9 +1,9 @@
-# The two-pass softmax (row max, then the exp sum, then normalize) rewritten into ONE
-# streaming pass over the (m, d) monoid — three reads of the row collapse to two.
+# The two-pass softmax (row max, then the exp sum, then normalize) rewritten into ONE streaming pass
+# over the (m, d) monoid — three reads of the row collapse to two.
 #
-# The schedule here is the one greedy picks; the test this replaces pinned nothing at all,
-# and a case must author the row it expects, so the greedy row is written out. Its
-# signature in the emitted kernel is the dissolved merge's rescale temps.
+# The schedule here is the one greedy picks; the test this replaces pinned nothing at all, and a
+# case must author the row it expects, so the greedy row is written out. Its signature in the
+# emitted kernel is the dissolved merge's rescale temps.
 compute_cap:
 - 12
 - 0

@@ -1,5 +1,5 @@
-# The transposed cooperative band on a k-major matvec: 32 lanes sweep the OUTPUT axis over
-# a ceil(N/32) grid, here N=512.
+# The transposed cooperative band on a k-major matvec: 32 lanes sweep the OUTPUT axis over a
+# ceil(N/32) grid, here N=512.
 #
 # 32 divides the swept extent, so the sweep tiles exactly and no overhang guard is emitted.
 compute_cap:

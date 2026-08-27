@@ -1,9 +1,10 @@
-# The carrier-generic cooperative combine at one cell of its matrix: an Accum carrier under both a pre-map (square) and a projection epilogue (sqrt),
-# partitioned as standalone ILP — 4 register accumulators folded by a register tree, no cross-thread stage.
+# The carrier-generic cooperative combine at one cell of its matrix: an Accum carrier under both a
+# pre-map (square) and a projection epilogue (sqrt), partitioned as standalone ILP — 4 register
+# accumulators folded by a register tree, no cross-thread stage.
 #
-# Every carrier folds through the SAME combine and differs only in its state, so one
-# partition kind breaking on a carrier it was not tuned on is exactly what the matrix
-# catches. The reduce axis is 1024 so the 128-thread row reaches the cross-warp tree.
+# Every carrier folds through the SAME combine and differs only in its state, so one partition kind
+# breaking on a carrier it was not tuned on is exactly what the matrix catches. The reduce axis is
+# 1024 so the 128-thread row reaches the cross-warp tree.
 compute_cap:
 - 12
 - 0

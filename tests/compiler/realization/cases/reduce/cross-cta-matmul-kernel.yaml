@@ -1,13 +1,14 @@
-# The carrier-generic cross-CTA split and finalize, one cell: the 1-component SEMIRING instantiation — a split-K matmul,
-# under the DEFERRED finalize: the producer writes a partial workspace and a second
-# __global__ combine kernel reads it back — no atomicAdd.
+# The carrier-generic cross-CTA split and finalize, one cell of its matrix. Carrier: a split-K
+# matmul, the 1-component SEMIRING instantiation. Finalize: the DEFERRED finalize — the producer
+# writes a partial workspace and a second __global__ combine kernel reads it back, with no
+# atomicAdd.
 #
-# One REDUCE letter owns both halves — the split across 2 CTAs and which finalize folds
-# them — so matmul, a plain reduce and flash all reach it through the same fork. The
-# twisted carrier admits only the deferred kernel: its e^dm rescale is not an atomicAdd.
+# One REDUCE letter owns both halves — the split across 2 CTAs and which finalize folds them — so
+# matmul, a plain reduce and flash all reach it through the same fork. The twisted carrier admits
+# only the deferred kernel: its e^dm rescale is not an atomicAdd.
 #
-# The split is realized by REPLACING the kernel, so no piece stamps the g2 it came from;
-# the pin is read structurally. PLACE=fuse is an input pin, not part of the schedule row.
+# The split is realized by REPLACING the kernel, so no piece stamps the g2 it came from; the pin is
+# read structurally. PLACE=fuse is an input pin, not part of the schedule row.
 compute_cap:
 - 12
 - 0

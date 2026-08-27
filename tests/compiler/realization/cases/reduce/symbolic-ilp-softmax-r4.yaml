@@ -2,10 +2,10 @@
 #
 # The tail copies' STREAMED value must be clamped to the pivot identity, not merely masked per
 # accumulator: the merge's shared intermediates read the raw wrapped duplicate otherwise and
-# silently down-scale the denominator whenever the duplicate beats the running max. And the
-# ILP rename must leave the symbolic extent alone — suffixing it inside a buffer stride is an
-# nvcc failure. The case compiles and runs at the 512 hint, which the 4-wide stride divides;
-# the off-stride sizes that actually exercise the tail stay in Python.
+# silently down-scale the denominator whenever the duplicate beats the running max. And the ILP
+# rename must leave the symbolic extent alone — suffixing it inside a buffer stride is an nvcc
+# failure. The case compiles and runs at the 512 hint, which the 4-wide stride divides; the
+# off-stride sizes that actually exercise the tail stay in Python.
 compute_cap:
 - 12
 - 0

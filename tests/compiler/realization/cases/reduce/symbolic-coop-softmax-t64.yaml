@@ -2,9 +2,9 @@
 # symbolic extent across 64 lanes (a 2-warp block), each striding to the runtime extent.
 #
 # The strided bound is the whole masking story — no ceil-div tiling, no gmem clamp, no explicit
-# per-element mask — so an idle lane must fold the reduce identity rather than garbage. The
-# case pins the kernel at the 512 hint; the sweep that runs this one kernel at 1, 31, 513 and
-# 700 stays in Python, since a case cannot size a run apart from the program it compiles.
+# per-element mask — so an idle lane must fold the reduce identity rather than garbage. The case
+# pins the kernel at the 512 hint; the sweep that runs this one kernel at 1, 31, 513 and 700 stays
+# in Python, since a case cannot size a run apart from the program it compiles.
 compute_cap:
 - 12
 - 0

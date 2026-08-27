@@ -1,9 +1,9 @@
 # A 2D cooperative reduce: free-axis threads alongside cooperative lanes, so the cross-thread
 # combine is a SEGMENTED warp shuffle folding each row independently.
 #
-# The test this replaces set EMMY_BN / EMMY_BR / EMMY_FN / EMMY_FK / EMMY_BK, none of which is
-# a registered knob or read anywhere, so it pinned nothing and ran fully greedy. The schedule
-# written here is the one greedy actually realizes.
+# The test this replaces set EMMY_BN / EMMY_BR / EMMY_FN / EMMY_FK / EMMY_BK, none of which is a
+# registered knob or read anywhere, so it pinned nothing and ran fully greedy. The schedule written
+# here is the one greedy actually realizes.
 compute_cap:
 - 12
 - 0

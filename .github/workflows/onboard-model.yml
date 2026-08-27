@@ -477,6 +477,7 @@ jobs:
             --file "$WORKFLOW_SOURCE/prompts/onboard-model/benchmark.md" \
             --file "$WORKFLOW_SOURCE/prompts/onboard-model/investigate.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md" \
+            --file "$WORKFLOW_SOURCE/tests/compiler/realization/ARCHITECTURE.md" \
             --file "$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md" \
             --file "$AGENT_TASK" > "$AGENT_EVENTS"
           agent_status=$?

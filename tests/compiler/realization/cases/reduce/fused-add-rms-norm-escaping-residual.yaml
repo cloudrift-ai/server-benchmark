@@ -1,8 +1,8 @@
-# The same chain with the add's result ALSO a graph output — the decode residual stream, where
-# the updated residual is both the norm's input and the carry.
+# The same chain with the add's result ALSO a graph output — the decode residual stream, where the
+# updated residual is both the norm's input and the carry.
 #
-# Fusion must not consume it: the splice used to drop the second output from the compiled graph
-# and callers got only the normed value. Both outputs are compared, so a dropped one fails.
+# Fusion must not consume it: the splice used to drop the second output from the compiled graph and
+# callers got only the normed value. Both outputs are compared, so a dropped one fails.
 compute_cap:
 - 12
 - 0

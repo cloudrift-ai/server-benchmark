@@ -1,11 +1,12 @@
-# A split reduce whose carrier carries a projection epilogue (an Accum carrier under both a pre-map (square) and a projection epilogue (sqrt)), finalized by
-# the DEFERRED finalize: the producer writes a partial workspace and a second.
+# A split reduce whose carrier carries a projection epilogue — an Accum carrier under both a pre-map
+# (square) and a projection epilogue (sqrt) — under the DEFERRED finalize — the producer writes a
+# partial workspace and a.
 #
-# The atomic finalize projects each CTA's partition BEFORE the add, so it is correct only
-# when the projection distributes over the add: mean's constant scale does, l2's sqrt does
-# not. The deferred kernel projects once after the combine and is correct for either. The
-# (l2, atomic) cell is refused outright with a message naming g<n>k, which is the right
-# answer rather than a gap, so it stays a pytest.raises in Python.
+# The atomic finalize projects each CTA's partition BEFORE the add, so it is correct only when the
+# projection distributes over the add: mean's constant scale does, l2's sqrt does not. The deferred
+# kernel projects once after the combine and is correct for either. The (l2, atomic) cell is refused
+# outright with a message naming g<n>k, which is the right answer rather than a gap, so it stays a
+# pytest.raises in Python.
 compute_cap:
 - 12
 - 0

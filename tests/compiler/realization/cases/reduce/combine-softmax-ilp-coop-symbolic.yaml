@@ -1,13 +1,14 @@
-# The same combine cell over a SYMBOLIC reduce axis: the twisted full-row (m, d) online-softmax carrier,
-# partitioned as ILP composed with coop — 2 register accumulators, a register tree, then the warp butterfly.
+# The same combine cell over a SYMBOLIC reduce axis: the twisted full-row (m, d) online-softmax
+# carrier, partitioned as ILP composed with coop — 2 register accumulators, a register tree, then
+# the warp butterfly.
 #
-# The kernel carries the runtime extent as an argument and each lane strides to it, so
-# the strided bound IS the masked tail — a lane starting past the extent folds the
-# carrier identity. mean's divisor is the runtime extent too, resolved at launch.
+# The kernel carries the runtime extent as an argument and each lane strides to it, so the strided
+# bound IS the masked tail — a lane starting past the extent folds the carrier identity. mean's
+# divisor is the runtime extent too, resolved at launch.
 #
-# The case runs at the axis hint, 512. The test this replaces also ran the same kernel
-# at 700 to straddle the tile; a case file cannot spell 'compile symbolic, run at some
-# other size', so the off-hint sweep stays in Python.
+# The case runs at the axis hint, 512. The test this replaces also ran the same kernel at 700 to
+# straddle the tile; a case file cannot spell 'compile symbolic, run at some other size', so the
+# off-hint sweep stays in Python.
 compute_cap:
 - 12
 - 0

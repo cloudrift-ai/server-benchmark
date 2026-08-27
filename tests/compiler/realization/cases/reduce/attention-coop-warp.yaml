@@ -1,9 +1,9 @@
-# The flash (m, l, O) twisted-monoid carrier through the carrier-generic combine, as
-# a single-warp __shfl_xor_sync butterfly (coop at a 32-thread block).
+# The flash (m, l, O) twisted-monoid carrier through the carrier-generic combine, as a single-warp
+# __shfl_xor_sync butterfly (coop at a 32-thread block).
 #
-# A multi-component carrier must fold EVERY component through the same butterfly; folding
-# only the accumulator leaves the max and the denominator behind and the answer is quietly
-# wrong. KV is 64 here, within a warp's reach.
+# A multi-component carrier must fold EVERY component through the same butterfly; folding only the
+# accumulator leaves the max and the denominator behind and the answer is quietly wrong. KV is 64
+# here, within a warp's reach.
 compute_cap:
 - 12
 - 0

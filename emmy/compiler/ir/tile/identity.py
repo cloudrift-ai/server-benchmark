@@ -244,13 +244,14 @@ def deploy_identity(tile: TileOp) -> str:
     )
 
 
-def pool_key(tile: TileOp, *, pins: str) -> str:
+def pool_key(tile: TileOp, *, pins: tuple[tuple[str, str], ...]) -> str:
     """The schedule-space key — would this enumerate the same candidates?
 
     ``tile.cache_key()`` covers the term and the knobs; every OTHER input the enumeration reads is
     folded in explicitly, because ``structural_key`` excludes it by design — the operand/output
     dtypes (atom eligibility), the per-axis extents, and the symbolic-axis hints. ``pins`` is the
-    live env-pin fingerprint (``knob.schedule_pin_fingerprint``), passed in rather than read here
+    live env-pin fingerprint (``knob.schedule_pin_fingerprint``'s sorted ``(env var, raw value)``
+    pairs), passed in rather than read here
     so this module stays a pure function of a ``TileOp`` and below the pipeline layer.
 
     Target facts (smem cap, TMA, the f16acc gate) need no part: the pool cache lives ON the

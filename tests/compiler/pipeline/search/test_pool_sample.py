@@ -1,16 +1,17 @@
-"""The candidate-pool draw — determinism, exact membership, and the sizes it declines to touch.
+"""The candidate-pool draw — determinism, exact membership, and the exact count beside the rows.
 
 Three properties, and each is load-bearing somewhere else:
 
-- the index set is a pure function of ``(pool size, sample size, seed)``, so two byte-identical
-  pools draw byte-identical samples. That is what keeps ``emmy fit`` reproducible and what keeps two
-  goldens over one pool merging into one training case rather than two;
-- a signature in ``keep`` survives the draw wherever it sits in the pool. The fit locates a golden
+- the draw is a pure function of the stream and ``(sample size, seed)`` — the reservoir never reads
+  a row, and the schedule walk's leaf order is deterministic — so two byte-identical pools draw
+  byte-identical samples. That is what keeps ``emmy fit`` reproducible and what keeps two goldens
+  over one pool merging into one training case rather than two;
+- a signature in ``keep`` survives the draw wherever it sits in the stream. The fit locates a golden
   by scanning its pool for that signature and DROPS the golden on a miss, and ``eval golden`` reads
   the same miss as a pin or dtype mismatch — a draw that could lose the row would turn a real defect
   signal into noise;
 - a pool no larger than the draw is taken whole, so the sampled and unsampled paths agree wherever
-  sampling has nothing to do.
+  sampling has nothing to do — and the exact count comes back beside the rows either way.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.pool import PoolSample, _indices
+from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
 
 
 @pytest.fixture
@@ -32,15 +33,18 @@ def _space(n: int) -> list[dict]:
     return [{"id": i} for i in range(n)]
 
 
-def test_the_draw_reads_only_its_size_its_seed_and_the_pool_size() -> None:
-    assert list(_indices(500, 10, 0)) == list(_indices(500, 10, 0))
-    assert list(_indices(500, 10, 0)) != list(_indices(500, 10, 1)), "the seed must move the draw"
-    assert sorted(_indices(500, 10, 0)) == list(_indices(500, 10, 0)), "indices come back ascending"
-    assert len(set(_indices(500, 10, 0))) == 10, "a draw is without replacement"
-    assert all(0 <= i < 500 for i in _indices(500, 10, 0))
+def test_the_draw_reads_only_the_stream_its_size_and_its_seed() -> None:
+    drawn = PoolSample(rows=10, seed=0).take(_space(500))
+    assert drawn == PoolSample(rows=10, seed=0).take(iter(_space(500))), "a list and its stream are one pool"
+    assert drawn != PoolSample(rows=10, seed=1).take(_space(500)), "the seed must move the draw"
+    ids = [row["id"] for row in drawn.rows]
+    assert len(ids) == len(set(ids)) == 10, "a draw is without replacement"
+    assert sorted(ids) == ids, "retained in stream order"
+    assert all(0 <= i < 500 for i in ids)
+    assert drawn.total == 500, "the exact count rides beside the rows — the reservoir knows it when the stream ends"
 
 
-def test_the_same_space_twice_draws_the_same_rows() -> None:
+def test_the_same_stream_twice_draws_the_same_rows() -> None:
     sample = PoolSample(rows=10, seed=7)
     assert sample.take(_space(500)) == sample.take(_space(500))
     assert PoolSample(rows=10, seed=7).take(_space(500)) == sample.take(_space(500)), "and so does an equal sample"
@@ -50,10 +54,10 @@ def test_a_kept_signature_survives_wherever_it_sits(by_id) -> None:
     """Row 0 and row N-1 — the two positions a draw is least likely to reach by accident."""
     space = _space(500)
     sample = PoolSample(rows=10, seed=0, keep=frozenset({0, 499}))
-    ids = [row["id"] for row in sample.take(space)]
+    ids = [row["id"] for row in sample.take(space).rows]
     assert 0 in ids and 499 in ids
-    assert sorted(ids) == ids, "retained in index order, drawn and kept alike"
-    unkept = [row["id"] for row in PoolSample(rows=10, seed=0).take(space)]
+    assert sorted(ids) == ids, "retained in stream order, drawn and kept alike"
+    unkept = [row["id"] for row in PoolSample(rows=10, seed=0).take(space).rows]
     assert set(unkept) <= set(ids), "the keep-set ADDS to the draw; it never replaces it"
 
 
@@ -66,9 +70,9 @@ def test_every_candidate_is_visited_even_though_most_are_dropped(by_id) -> None:
 
 def test_a_pool_no_larger_than_the_draw_is_taken_whole() -> None:
     space = _space(10)
-    assert PoolSample(rows=10).take(space) == space
-    assert PoolSample(rows=99).take(space) == space
-    assert PoolSample(rows=0).take(space) == space, "0 is 'enumerate everything', the live and unsampled default"
+    assert PoolSample(rows=10).take(space) == Candidates(space, 10)
+    assert PoolSample(rows=99).take(space) == Candidates(space, 10)
+    assert PoolSample(rows=0).take(space) == Candidates(space, 10), "0 is 'enumerate everything', the live and unsampled default"
 
 
 def test_the_cache_identity_ignores_the_size_sink_and_the_keep_set_order() -> None:

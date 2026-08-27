@@ -176,9 +176,32 @@ only be answered once the walk reaches a leaf, and a bare site pin can still be 
 
 A row is the kernel's WHOLE identity, so a family the walk decided nowhere is spelled at its declared OFF rather than
 left absent — otherwise two rows of one kernel would carry different family vocabularies and the evidence hierarchy
-would not join them. The same reasoning puts the structural `S_warp_eligible` stamp on the row prefix: it is read off
+would not join them. A schedule row also ALWAYS spells the kernel-global `WORK` (the leaf writes it unconditionally,
+empty when nothing claimed an inventory), and a structural arm's knob delta — a cut, the cross-CTA split's `g`-half
+or its unsplit receipt — never does: that is the one stated marker consumers use to tell a complete schedule row
+from a kernel-set decision (`search/golden_eval` filters on it). The same reasoning puts the structural
+`S_warp_eligible` stamp on the row prefix: it is read off
 the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
 from the rows it does enumerate.
+
+**The pool memo and the sampled draw.** The prescan — each node's option list — is memoized in the Context's
+session cache, keyed by the scheduler's own `pool_key` (the term and its knobs plus every enumeration input the
+term omits: operand/output dtypes, per-axis extents, buffer shapes, stores, symbolic hints) folded with the live
+env-pin fingerprint, two facts the walk consumes directly and therefore keys explicitly — the split receipt
+(`carries_partition`, which strips a `REDUCE` pin's `g`-half where a receipt-free twin must raise) and the spelled
+key vocabulary (the decided-empty OFF map the rows decode under) — so that soundness never rides on how the term
+digest happens to serialize the `compare=False` `Axis.window` or the recognition-canonical axis names, which do
+cover both today — and, when sampling, the sample's identity; target facts need no key
+part because the cache lives ON the Context and one instance never spans two fact sets. What is shared is
+immutable and op-independent — frozen options over read-only knob mappings; options are a function of the node
+and the live pins — so a hit replays the walk over the memo, and every leaf row is a fresh dict the CURRENT
+kernel's own materialization decodes. The memo sits below the search policies — greedy and MCTS hit it alike —
+and holds no ranking and consults no evidence; a prescan that raises (a pin naming nothing) is never memoized.
+Offline sampling (`emmy fit`, via `ctx.pool_sample`) is the one path that does not return the lazy fork: the
+walk's leaf stream is sampled by single-pass reservoir sampling (`search/pool.py` — nothing proportional to the
+pool is ever retained, and the exact pool size is known when the stream ends), and the drawn complete rows ride
+the memo beside that exact total, keyed apart by the sample's identity, so a sampled Context sharing a session
+cache with a live one can never serve it a draw.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,

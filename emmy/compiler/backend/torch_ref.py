@@ -353,9 +353,8 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)
     # No tensor-valued source (every source is a scalar constant) → fall back to the device the
-    # RUN is on, threaded down from ``build_callable``. Guessing from ``torch.cuda.is_available()``
-    # instead put an all-constant map on the GPU while the graph's own inputs sat on the CPU, so
-    # the two could not combine — invisible on a CPU-only host, a hard error anywhere with a GPU.
+    # RUN is on, threaded down from ``build_callable``. Guessing from CUDA availability can put an
+    # all-constant map on the GPU while the graph's own inputs sit on the CPU.
     dev = base.device if base is not None else (device or torch.device("cpu"))
     dtype = base.dtype if base is not None else torch.float32
     # Coord / select exprs may reference symbolic extents (e.g. ``coord < seq_len``)
@@ -442,10 +441,9 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
     # to fp16) into the declared dtype, and the CUDA backend honors it via typed
     # buffers — the torch ref must cast too, or torch's promotion silently runs
     # everything downstream of a mixed-dtype op at fp32.
-    # ONE device for the whole reference run: whatever the graph's own input tensors are on,
-    # CPU when a graph has none. Every step that has to invent a tensor (a range, an all-constant
-    # index map) uses this, so the pieces can always combine.
-    run_device = next((t.device for t in input_tensors.values() if torch.is_tensor(t)), torch.device("cpu"))
+    # One device for the whole reference run. Every step that invents a tensor (a range or an
+    # all-constant index map) uses the device of the graph's inputs, or CPU when there are none.
+    run_device = next((tensor.device for tensor in input_tensors.values() if torch.is_tensor(tensor)), torch.device("cpu"))
     compute_steps: list[tuple[str, Callable, list[str], torch.dtype | None]] = []
     for nid in order:
         node = graph.nodes[nid]

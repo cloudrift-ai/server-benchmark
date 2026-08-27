@@ -71,18 +71,23 @@ static inline To emmy_bitcast(From value) {
 """
 
 
-def render_loopop_cpp(loop: LoopOp, fn_name: str, input_shapes: dict[str, tuple[int, ...]], output_shape: tuple[int, ...]) -> str:
+def render_loopop_cpp(
+    loop: LoopOp,
+    fn_name: str,
+    input_shapes: dict[str, tuple[int, ...]],
+    output_shapes: dict[str, tuple[int, ...]],
+) -> str:
     """Emit a complete ``extern "C" void <fn_name>(...)`` definition.
 
-    Inputs become ``const float*`` params in ``loop.inputs`` order; the
-    sole output (first ``loop.outputs`` key) becomes a trailing ``float*`` param.
+    Inputs become ``const float*`` params in ``loop.inputs`` order; outputs
+    become trailing ``float*`` params in ``loop.outputs`` order.
     """
-    output_name = next(iter(loop.outputs))
-    shapes: dict[str, tuple[int, ...]] = {**input_shapes, output_name: output_shape}
+    output_names = tuple(loop.outputs)
+    shapes: dict[str, tuple[int, ...]] = {**input_shapes, **output_shapes}
     ctx = RenderCtx(target=LoopRenderTarget(), shapes=shapes, indent=1, intrinsics=_INTRINSICS_CPP)
 
     sig_parts = [f"const float* {n}" for n in loop.inputs]
-    sig_parts.append(f"float* {output_name}")
+    sig_parts.extend(f"float* {name}" for name in output_names)
     params_text = ", ".join(sig_parts)
 
     body_text = "\n".join(render_body(loop.body, ctx))
@@ -112,11 +117,12 @@ def _ensure_prelude() -> None:
 def execute_loop_op_cpp(
     loop: LoopOp,
     input_arrays: dict[str, np.ndarray],
-    out_shape: tuple[int, ...],
-) -> np.ndarray:
+    out_shapes: dict[str, tuple[int, ...]],
+) -> np.ndarray | tuple[np.ndarray, ...]:
     """JIT-compile ``loop`` to C++ if needed, then run it on ``input_arrays``.
 
-    Returns a fresh ``np.ndarray`` of shape ``out_shape``. ``input_arrays``
+    Returns one fresh array per output (a bare array for one output, a tuple
+    for MIMO). ``input_arrays``
     is keyed by the ``Load.input`` strings; the ordered list comes from
     ``loop.inputs`` (matcher-populated when run from the pipeline;
     body-derived placeholders otherwise).
@@ -126,6 +132,7 @@ def execute_loop_op_cpp(
     _ensure_prelude()
 
     bufs = tuple(loop.inputs)
+    output_names = tuple(loop.outputs)
     input_shapes = {name: tuple(int(d) for d in input_arrays[name].shape) for name in bufs}
     # Key on the rendered source, NOT ``id(loop)``: a LoopOp plus its runtime
     # shapes uniquely determine the C++ string (see module docstring), and the
@@ -134,27 +141,27 @@ def execute_loop_op_cpp(
     # ``id`` and be served the stale kernel. Render with a fixed placeholder
     # name so the key is stable across calls; the JIT'd symbol gets its unique
     # ``_FN_COUNTER`` name only on a miss.
-    cache_key = render_loopop_cpp(loop, "loopop_kern", input_shapes, out_shape)
+    cache_key = render_loopop_cpp(loop, "loopop_kern", input_shapes, out_shapes)
 
     fn = _FN_CACHE.get(cache_key)
     if fn is None:
         global _FN_COUNTER
         _FN_COUNTER += 1
         fn_name = f"loopop_kern_{_FN_COUNTER}"
-        src = render_loopop_cpp(loop, fn_name, input_shapes, out_shape)
+        src = render_loopop_cpp(loop, fn_name, input_shapes, out_shapes)
         logger.debug("JIT-compiling LoopOp kernel %s:\n%s", fn_name, src)
         cppyy.cppdef(src)
         fn = getattr(cppyy.gbl, fn_name)
         _FN_CACHE[cache_key] = fn
 
-    output = np.zeros(out_shape, dtype=np.float32)
+    outputs = tuple(np.zeros(out_shapes[name], dtype=np.float32) for name in output_names)
 
     # cppyy accepts numpy arrays of matching dtype as ``const float*`` /
     # ``float*`` parameters via the buffer protocol. Ensure C-contiguous
     # float32 so the buffer matches the parameter type.
     coerced = [np.ascontiguousarray(input_arrays[n], dtype=np.float32) for n in bufs]
-    fn(*coerced, output)
-    return output
+    fn(*coerced, *outputs)
+    return outputs[0] if len(outputs) == 1 else outputs
 
 
 __all__ = ["execute_loop_op_cpp", "render_loopop_cpp", "PRELUDE"]

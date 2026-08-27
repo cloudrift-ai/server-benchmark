@@ -39,8 +39,8 @@ from emmy.compiler.ir.expr import BinaryExpr
 from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile.ops import chain_edge, cone_seam
+from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
+from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
 from emmy.compiler.pipeline.search.space import (
     MAX_BLOCK_THREADS,
@@ -75,7 +75,7 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     return False
 
 
-def direct_atomic_output(outputs) -> str | None:
+def _direct_atomic_output(outputs) -> str | None:
     """Whether direct cross-CTA partials avoid another low-precision rounding step.
 
     F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
@@ -88,6 +88,44 @@ def direct_atomic_output(outputs) -> str | None:
         f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
         "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
     )
+
+
+def atomic_finalize(states: tuple[str, ...], tail, outputs) -> str | None:
+    """Whether the cross-CTA split may take its DIRECT ``atomicAdd`` arm — every condition, once.
+
+    The deferred workspace finalize (``REDUCE=g<n>k``) carries any carrier and any projection, so
+    each refusal here names it as the alternative. Three things must hold, and they are stated
+    together because the enumeration, the pin, and ``030_split_reduce``'s realization all have to
+    agree: a pin that reaches the rewrite past a gate the enumeration applied would crash the
+    emitter instead of refusing.
+
+    - ONE additive state component. ``atomicAdd`` folds a scalar; a twisted carrier's
+      ``(maximum, denominator, …)`` tuple has no atomic instruction at all.
+    - An output the partials can round into once per CTA (:func:`_direct_atomic_output`).
+    - A projection that DISTRIBUTES over the add. The atomic arm applies the epilogue per
+      partition, before the combine, so anything but a linear-homogeneous map mis-scales each
+      CTA's contribution.
+
+    Storage is asked BEFORE the projection: a narrowing store spells its rounding as a conversion
+    in that same epilogue (``loop/lifting/090_spell_store_rounding``), which no linear-homogeneous
+    reading admits — so both refuse a low-precision output and the storage reason is the one that
+    names why.
+    """
+    if len(states) != 1:
+        return (
+            f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
+            f"({', '.join(states)}) — use the deferred f32 workspace finalize (REDUCE=g<n>k)"
+        )
+    storage = _direct_atomic_output(outputs)
+    if storage is not None:
+        return storage
+    if tail and not projection_distributes(tuple(tail), states):
+        return (
+            "atomic REDUCE applies the projection epilogue per partition, so it must distribute "
+            "over the add; this one does not (a fused bias / activation) — use the deferred "
+            "workspace finalize (REDUCE=g<n>k), which projects once after the combine"
+        )
+    return None
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #
@@ -258,21 +296,20 @@ def _fragment_registers(atom, role: str) -> int:
     return m * n // (64 if dtype.nbytes == 2 else 32)
 
 
-def paired_fragment_registers(node: Fold, tile: TilePlan, stage: Stage | None) -> tuple[int, int] | None:
-    """Return ``(required, available)`` peak live registers/lane for a paired score + value contraction.
+def paired_fragment_registers(node: Fold, producer: Fold | None, tile: TilePlan, stage: Stage | None) -> tuple[int, int] | None:
+    """Return ``(required, available)`` peak registers/lane for two composed contractions.
 
-    A chained computed-A fill keeps the enclosing output fragments live while it builds one score
+    A computed fill keeps the consuming fragments live while it builds one scheduled producer
     block through the same mma atom. Count the exact ``RegFragment`` families emitted by
     ``_MmaOps.state`` for both contractions. This is a lower bound: scalar carrier state and
     address temporaries are intentionally absent, so the check rejects only rows whose fragments
     alone cannot fit the CTA register file.
     """
-    score_node = chain_edge(node.a, node.axis.name)
-    if not (tile.is_warp and stage is not None and score_node is not None):
+    if not (tile.is_warp and stage is not None and producer is not None):
         return None
     atom = tile.atom
     if stage.bk_elems % atom.atom_n:
-        return None  # the fragment score block does not realize this geometry
+        return None  # the producer fragment block does not realize this geometry
     a_regs = _fragment_registers(atom, "a")
     b_regs = _fragment_registers(atom, "b")
     c_regs = _fragment_registers(atom, "c")
@@ -283,18 +320,18 @@ def paired_fragment_registers(node: Fold, tile: TilePlan, stage: Stage | None) -
     channels = len(node.channels)
     outer_c = channels * tile.reg_m * tile.reg_n * c_regs
     outer = tile.reg_m * depth * a_regs + channels * (tile.reg_n * depth * b_regs + tile.reg_m * tile.reg_n * c_regs)
-    score_n = stage.bk_elems // atom.atom_n
-    score_channels = len(score_node.channels)
-    score = tile.reg_m * a_regs + score_channels * (score_n * b_regs + tile.reg_m * score_n * c_regs)
+    producer_n = stage.bk_elems // atom.atom_n
+    producer_channels = len(producer.channels)
+    producer_regs = tile.reg_m * a_regs + producer_channels * (producer_n * b_regs + tile.reg_m * producer_n * c_regs)
     available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // tile.block_threads)
-    # Outer A/B are first loaded in the drain after the score block. Only the initialized outer C
+    # Consumer A/B are first loaded in the drain after the producer block. Only the initialized consumer C
     # fragments span both regions; the two A/B families may reuse registers.
-    return max(outer, outer_c + score), available
+    return max(outer, outer_c + producer_regs), available
 
 
-def paired_fragment_register_budget(node: Fold, tile: TilePlan, stage: Stage | None) -> str | None:
-    """Whether coexisting score/output mma fragments fit the CTA register-file envelope."""
-    counts = paired_fragment_registers(node, tile, stage)
+def paired_fragment_register_budget(node: Fold, producer: Fold | None, tile: TilePlan, stage: Stage | None) -> str | None:
+    """Whether coexisting producer/consumer mma fragments fit the CTA register-file envelope."""
+    counts = paired_fragment_registers(node, producer, tile, stage)
     if counts is None or counts[0] <= counts[1]:
         return None
     required, available = counts
@@ -304,30 +341,13 @@ def paired_fragment_register_budget(node: Fold, tile: TilePlan, stage: Stage | N
     )
 
 
-def splitk_computed_b_site(node: Fold) -> str | None:
-    """Whether a COMPUTED B cone survives the split's σ-reindex with its schedule intact.
-
-    The split rewrites every edge to absolute k. A materialized edge rewrites its gmem index in
-    place; a computed cone is rewritten BODY AND ALL, which replaces the nodes inside it — and a
-    schedule slice is keyed by NODE IDENTITY, so a cone carrying a scheduling site of its own (a
-    fold over its own axis) would lose the value the row decided for it and stamp a knob no kernel
-    realizes. The ordinary decode / map cone carries no such fold and rewrites cleanly. A computed
-    ``a``'s sites are the compute fill's own statistic prologue, which the fill realizes itself,
-    so they hold no slice to lose."""
-    for ch in node.channels:
-        if isinstance(ch.b, Load):
-            continue
-        if ch.b.axis is not None or ch.b.body.iter_of_type(Fold):
-            return (
-                "split-K rewrites a computed B cone's coordinates, which would drop the schedule slice of a "
-                "fold nested in it; pin the serial fold on this edge"
-            )
-    return None
-
-
 def splitk_width(k_axis: Axis, width: int) -> str | None:
-    """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
-    absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
+    """A cross-CTA split needs a STATIC reduce axis its width divides evenly — the σ-reindex
+    reconstructs an absolute k from ``ksplit·(K/w) + kslice``, which is a bijection only when the
+    extent is known and ``w`` divides it. Total over a symbolic axis rather than raising out of
+    ``as_static``, so the enumeration drops the row and a pin reports the reason."""
+    if not k_axis.extent.is_static:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is not built"
     big_k = k_axis.extent.as_static()
     if big_k % width == 0:
         return None
@@ -624,7 +644,15 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting_a
 
 
 def resolve_fill_stage(
-    c: Fold, tile: TilePlan, budget: int, want_depth: int = 1, inputs=None, why: list[str] | None = None
+    c: Fold,
+    tile: TilePlan,
+    budget: int,
+    want_depth: int = 1,
+    inputs=None,
+    why: list[str] | None = None,
+    seam: tuple | None = None,
+    k_axis: Axis | None = None,
+    producer: Fold | None = None,
 ) -> Stage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
     — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
@@ -641,25 +669,28 @@ def resolve_fill_stage(
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
     so both depths are enumerated as fork siblings and measured per shape.
 
-    ``why`` collects the decline reason when the tier refuses, so a PINNED caller reports the gate it
-    actually hit instead of one catch-all sentence."""
+    ``k_axis`` overrides the stored contraction axis when the contraction is a derived singleton
+    marker whose enclosing Fold owns the actual K sweep. ``why`` collects the decline reason when
+    the tier refuses, so a PINNED caller reports the gate it actually hit instead of one catch-all
+    sentence."""
     atom = tile.atom
+    k_axis = k_axis or c.axis
     if atom.operand_dtype("a").nbytes < 2:
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
         return None
     bk_elems = tile.bk * atom.atom_k
-    if c.axis.extent.is_static and c.axis.extent.as_static() % bk_elems:
+    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
         decline(
             why,
             f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
-            f"does not divide the contraction K={c.axis.extent.as_static()}",
+            f"does not divide the contraction K={k_axis.extent.as_static()}",
         )
         return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
-    _, _, stats = cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
+    _, _, stats = seam if seam is not None else cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
     a_bytes = tile.m.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * tile.m.tile * 4
     sync_bytes = stat_bytes
@@ -677,20 +708,15 @@ def resolve_fill_stage(
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
-    # A cone that COMPOSES a score contraction (attention) fills its slab from a NESTED
-    # contraction, and that contraction's OWN operands stage beside the others: a
-    # ``bk × <score K>`` key slab per chunk (so the chunk crosses L1 once per CTA instead of once
-    # per warp) and one loop-invariant ``tile_m × <score K>`` query slab. Neither rings — the keys
-    # die inside the chunk and the queries never advance — and both are reserved whenever the cone
-    # composes a score: the materializer stages them wherever the fill can, and over-reserving is
-    # cheaper than a schedule that fits the budget only until it is realized.
-    score = chain_edge(c.a, c.axis.name) if not isinstance(c.a, Load) else None
-    score_k = score.axis.extent.as_static() if score is not None and score.axis.extent.is_static else 0
-    score_bytes = score_k * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
-    if sync_bytes + async_bytes + score_bytes > budget:
-        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes + score_bytes} B, over the {budget} B smem budget")
+    # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
+    # They do not ring: the streamed slab dies inside the block and the invariant slab does not
+    # advance. Reserve both from the producer interface supplied by the scheduler.
+    producer_k = producer.axis.extent.as_static() if producer is not None and producer.axis.extent.is_static else 0
+    producer_bytes = producer_k * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
+    if sync_bytes + async_bytes + producer_bytes > budget:
+        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes + producer_bytes} B, over the {budget} B smem budget")
         return None
-    fixed = sync_bytes + score_bytes  # the score's own slabs never ring (see above)
+    fixed = sync_bytes + producer_bytes
     depth = want_depth if want_depth >= 2 and async_bytes and fixed + want_depth * async_bytes <= budget else 1
     computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
@@ -757,7 +783,6 @@ __all__ = [
     "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
-    "splitk_computed_b_site",
     "splitk_width",
     "stage_target",
     "strip_width",

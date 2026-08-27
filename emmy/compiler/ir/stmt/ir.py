@@ -125,14 +125,16 @@ class BodyOp(Op):
         foreign = [n for n in body_out if n not in own and n not in delegated and graph.producer(n) is not None]
         if foreign:
             raise ValueError(f"{type(self).__name__}: body writes buffer(s) {foreign} produced by another node — declare them as outputs")
-        for name in self.inputs:
-            t = _tensor_for_buffer(graph, name)
-            if t is not None:
-                self.inputs[name] = t
-        for name in self.outputs:
-            t = _tensor_for_buffer(graph, name)
-            if t is not None:
-                self.outputs[name] = t
+        # ABI order is graph order. Body normalization may reorder independent
+        # sibling nests, so retaining body first-use/write order would swap MIMO
+        # arguments even though the buffer keys still match.
+        refreshed_inputs = {name: tensor for name in node.inputs if (tensor := _tensor_for_buffer(graph, name)) is not None}
+        refreshed_outputs = {name: tensor for name in node.buffer_names() if (tensor := _tensor_for_buffer(graph, name)) is not None}
+        # Keep matcher-known external/delegated buffers that are not graph ports.
+        refreshed_inputs.update((name, tensor) for name, tensor in self.inputs.items() if name not in refreshed_inputs)
+        refreshed_outputs.update((name, tensor) for name, tensor in self.outputs.items() if name not in refreshed_outputs)
+        self.inputs = refreshed_inputs
+        self.outputs = refreshed_outputs
 
     def pretty_body(self) -> str:
         """Indented body listing — one stmt per line via per-stmt

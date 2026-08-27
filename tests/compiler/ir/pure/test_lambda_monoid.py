@@ -24,7 +24,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, M
 from emmy.compiler.ir.pure.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
-from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -71,6 +71,17 @@ def test_lambda_accepts_pure_stmts_and_defines_results() -> None:
     )
     assert lam.results == ("x2",)
     assert lam.free_names() == frozenset()
+
+
+def test_lambda_post_init_canonicalizes_body_order() -> None:
+    left = Load(name="left", input="x", index=(Var("m"), Var("k")))
+    right = Load(name="right", input="w", index=(Var("n"), Var("k")))
+    product = Assign(name="product", op="multiply", args=("left", "right"))
+
+    first = Lambda(params=("k",), body=Body((left, right, product)), results=("product",))
+    second = Lambda(params=("k",), body=Body((right, left, product)), results=("product",))
+
+    assert first == second
 
 
 @pytest.mark.parametrize(
@@ -284,9 +295,20 @@ def test_agreement_online_softmax() -> None:
     rng = np.random.default_rng(4)
     x = rng.normal(size=20) * 2.0
     axis = Axis("k", 20)
-    step = Body((Load(name="x0", input="x", index=(Var("k"),)), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))
-    fold = fold_from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
-    assert fold is not None
+    names = ("m_i", "l_i")
+    other = tuple(f"{name}__o" for name in names)
+    init = (float("-inf"), 0.0)
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    fold = Fold(
+        axis=axis,
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="x0", input="x", index=(Var("k"),)),)),
+            results=("x0", 1.0),
+        ),
+        init=init,
+        combine=combine,
+    )
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0}, {"x": x})
     lift = Lambda(params=("k", "x0"), body=Body(()), results=("x0", 1.0))
     spec = foldmap_eval(*_lse_monoid(0), lift, [(k, x[k]) for k in range(20)])
@@ -301,15 +323,25 @@ def test_agreement_flash_arity3() -> None:
     rng = np.random.default_rng(5)
     s, v = rng.normal(size=10) * 2.0, rng.normal(size=10)
     axis = Axis("j", 10)
-    step = Body(
-        (
-            Load(name="s0", input="s", index=(Var("j"),)),
-            Load(name="v0", input="v", index=(Var("j"),)),
-            *exp_merge(("m_i", "l_i", "O_i"), ("s0", 1.0, "v0"), key="m_i"),
-        )
+    names = ("m_i", "l_i", "O_i")
+    other = tuple(f"{name}__o" for name in names)
+    init = (float("-inf"), 0.0, 0.0)
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    fold = Fold(
+        axis=axis,
+        lift=Lambda(
+            params=("j",),
+            body=Body(
+                (
+                    Load(name="s0", input="s", index=(Var("j"),)),
+                    Load(name="v0", input="v", index=(Var("j"),)),
+                )
+            ),
+            results=("s0", 1.0, "v0"),
+        ),
+        init=init,
+        combine=combine,
     )
-    fold = fold_from_loop(Loop(axis=axis, body=step, role=AxisRole.TWISTED))
-    assert fold is not None
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0, "O_i": 0.0}, {"s": s, "v": v})
     lift = Lambda(params=("j", "s0", "v0"), body=Body(()), results=("s0", 1.0, "v0"))
     spec = foldmap_eval(*_lse_monoid(1), lift, [(j, s[j], v[j]) for j in range(10)])

@@ -100,6 +100,15 @@ def test_b_operand_varying_along_m_is_read_per_cell() -> None:
     assert {s.args[0] for s in _muls(tile)} == {f"b__bc{i}_{j}" for i, j in _cells(mn)}
 
 
+def test_computed_a_shared_along_n_is_read_once_per_register_row() -> None:
+    """The f32 fallback's useful case: A is computed but independent of n, so the scalar tile
+    evaluates it once per register row and every column contracts with that same value."""
+    tile, mn = _tile(_cone("a", "A", (Var("m"), Var("k"))), _b_load())
+    assert _unbound(tile) == set()
+    assert len(_loads_of(tile, "A")) == mn[0].reg
+    assert {s.args[1] for s in _muls(tile)} == {f"a__ar{i}" for i in range(mn[0].reg)}
+
+
 def test_materialized_operands_keep_the_row_and_column_reuse() -> None:
     """The common matmul emission is untouched: one A read per register row, one B read per column —
     the arithmetic-intensity reuse the register tile exists for."""

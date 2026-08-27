@@ -19,7 +19,9 @@ Stamping rules:
   them in the running ``ssa_dtypes`` so downstream Assigns / Writes pick up
   the right arg dtype.
 
-Idempotent: ``None``-stamped fields are filled, already-stamped ones kept.
+Idempotent: ``None``-stamped fields are filled and existing stamps are kept, except integer algebra whose result dtype
+is recovered from typed operands. This repairs stale float stamps retained by structurally cloned, previously untyped
+bodies.
 """
 
 from __future__ import annotations
@@ -49,11 +51,38 @@ class _StampCtx:
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
     buf_dtypes = {n: t.dtype for n, t in {**op.inputs, **op.outputs}.items()}
-    ctx = _StampCtx(buf_dtypes=buf_dtypes)
-    new_body = _stamp_body(op.body, ctx)
+    new_body = op.body
+    while True:
+        ctx = _StampCtx(buf_dtypes=buf_dtypes)
+        _seed_explicit_dtypes(new_body, ctx)
+        stamped = _stamp_body(new_body, ctx)
+        if stamped == new_body:
+            break
+        new_body = stamped
     if new_body == op.body:
         raise RuleSkipped("every Load/Assign/Write already stamped")
     return KernelOp(body=new_body, name=op.name, knobs=dict(op.knobs))
+
+
+def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
+    """Register explicit SSA types before inference.
+
+    Materialization can place a typed definition in a sibling body visited after one of its uses. Each inference walk
+    still performs promotion in execution order, but no longer mistakes that known integer input for f32. The caller
+    repeats the walk until inferred upstream types have propagated through every consumer.
+    """
+    for s in body:
+        if isinstance(s, Load) and s.dtype is not None:
+            ctx.ssa_dtypes.update((name, s.dtype) for name in s.names)
+        elif isinstance(s, (Assign, Accum, Init)) and s.dtype is not None:
+            ctx.ssa_dtypes[s.name] = s.dtype
+        elif isinstance(s, Pack):
+            ctx.ssa_dtypes[s.name] = s.dtype
+        elif isinstance(s, Unpack):
+            ctx.ssa_dtypes[s.low_name] = s.lane_dtype
+            ctx.ssa_dtypes[s.high_name] = s.lane_dtype
+        for nested in s.nested():
+            _seed_explicit_dtypes(nested, ctx)
 
 
 def _stamp_body(body: Body, ctx: _StampCtx) -> Body:
@@ -116,11 +145,15 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
 
 
 def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
-    if s.dtype is not None:
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
     arg_dtypes = [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]
     result_dt = dtype_get(dtype_promote(s.op.name, arg_dtypes))
+    if s.dtype is not None and result_dt.np.kind not in "iu":
+        ctx.ssa_dtypes[s.name] = s.dtype
+        return s
+    # Integer algebra is determined by its operands. Structural lowering can carry an old f32
+    # stamp from a once-untyped body; keeping it would turn shifts into unsupported float ops.
+    # Explicit casts use ``copy`` / ``bitcast``, whose inferred result is not integer and therefore
+    # retain their declared dtype above.
     # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
     # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
@@ -129,7 +162,7 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     if result_dt == F16 and _is_overflow_prone(s):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt)
+    return replace(s, dtype=result_dt) if s.dtype != result_dt else s
 
 
 def _is_overflow_prone(s: Assign) -> bool:

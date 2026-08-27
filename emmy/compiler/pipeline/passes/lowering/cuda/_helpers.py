@@ -2,7 +2,7 @@
 
 Lives in a ``_``-prefixed module so the pass loader skips it (only ``NNN_<name>.py`` files load
 as rules); ``005_delegate_zero_init`` and ``010_lower_kernelop`` both need the atomic-output
-walk, so it is defined once here (the ``loop/fusion/_helpers`` precedent).
+walk, so it is defined once here.
 """
 
 from __future__ import annotations

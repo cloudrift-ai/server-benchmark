@@ -77,10 +77,48 @@ def test_float_precision_boundaries_use_host_cpp_spelling():
     backend = LoopBackend()
     compiled = backend.compile(graph)
     loop = next(node.op for node in compiled.nodes.values() if isinstance(node.op, LoopOp))
-    source = render_loopop_cpp(loop, "precision_copy", {"x": (8,)}, (8,))
+    source = render_loopop_cpp(loop, "precision_copy", {"x": (8,)}, {"wide": (8,)})
     assert "__half" not in source
     assert "__float2half" not in source
 
     x = np.linspace(-1.0, 1.0, 8, dtype=np.float32)
     actual = backend.run(compiled, input_data={"x": x})[0].outputs["wide"]
     np.testing.assert_array_equal(actual, x)
+
+
+def test_multi_output_runner_uses_each_write_scope():
+    from emmy.compiler.backend.loop import LoopBackend
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Write
+
+    loop = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 3),
+                body=(
+                    Load(name="xv", input="x", index=(Var("i"),)),
+                    Assign(name="neg", op="negative", args=("xv",)),
+                    Write(output="small", index=(Var("i"),), value="neg"),
+                ),
+            ),
+            Loop(
+                axis=Axis("j", 5),
+                body=(
+                    Load(name="yv", input="y", index=(Var("j"),)),
+                    Assign(name="mag", op="abs", args=("yv",)),
+                    Write(output="large", index=(Var("j"),), value="mag"),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (3,)), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("y", (5,)), node_id="y")
+    graph.add_node(loop, ["x", "y"], outputs=(Tensor("small", (3,)), Tensor("large", (5,))), node_id="small")
+    graph.inputs, graph.outputs = ["x", "y"], ["small", "large"]
+
+    x = np.array([1.0, -2.0, 3.0], dtype=np.float32)
+    y = np.array([-1.0, 2.0, -3.0, 4.0, -5.0], dtype=np.float32)
+    outputs = LoopBackend().run(graph, input_data={"x": x, "y": y})[0].outputs
+    np.testing.assert_array_equal(outputs["small"], -x)
+    np.testing.assert_array_equal(outputs["large"], np.abs(y))

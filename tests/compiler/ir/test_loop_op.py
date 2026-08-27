@@ -486,6 +486,32 @@ def test_loop_stmt_basic():
     assert loop.body[0].axis.name == "a0"
 
 
+def test_loop_op_orders_free_axes_by_output_storage() -> None:
+    op = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("d", 16),
+                body=(
+                    Loop(
+                        axis=Axis("h", 4),
+                        body=(
+                            Loop(
+                                axis=Axis("m", 8),
+                                body=(
+                                    Load(name="value", input="x", index=(Var("h"), Var("m"), Var("d"))),
+                                    Write(output="out", index=(Var("h"), Var("m"), Var("d")), value="value"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert op.writes[0].index == tuple(Var(axis.name) for axis in op.axes)
+
+
 def test_loop_axis_sibling_same_name_allowed():
     """Sibling Loops with the same axis name are fine — that's softmax's two K-loops."""
     from emmy.compiler.ir.loop import Loop

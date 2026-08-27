@@ -1,7 +1,7 @@
-"""The tree-path knob codec (phase 2) — ONE walker + resolver over the recognized tile tree.
+"""The tree-path knob codec (phase 2) — ONE walker + resolver over the stored Fold tree.
 
 Grammar: ``FAMILY@<node-path>[.<axis>][<n>] = value``. A schedule key addresses the node (or edge)
-it decorates by POSITION in the recognized term tree — no parallel namespace of hand-invented site
+it decorates by POSITION in the Fold tree — no parallel namespace of hand-invented site
 names. The walker (:func:`sites`) enumerates every ``(path, node, schedule-bearing axis)`` triple
 once; the resolver (:func:`resolve`) and the canonical speller (:func:`spell`) are total over the
 sugar forms and shared by the pin layer, the stampers (phase 3) and the seam enumerator (phase 4).
@@ -26,9 +26,9 @@ already canonical and the corpus needs zero migration):
 - the ordinal ``<n>`` (1-based, canonicalized traversal order) exists ONLY for true same-path
   collisions — two sites with identical full path AND axis; current kernels never need it.
 
-RESERVED (reject cleanly, never reuse): the graph-level placement grammar — the ``in.<operand>``
-path prefix and the leading-``=`` value-name pin form. Whoever restores graph-level placement owns
-that namespace; this parser only refuses to let a tile key squat on it.
+RESERVED (reject cleanly, never reuse): the retired placement spellings — the ``in.<operand>`` path
+prefix and the leading-``=`` value-name pin form. Current ``PLACE`` keys address stored Fold edges
+through the same tree paths as schedule keys.
 
 Ambiguity failures are LOUD by design: a stored short key broken by a future structural change must
 fail and be re-spelled by hand (``test_golden_spelling_canonical`` is the tripwire) — never
@@ -39,32 +39,24 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from itertools import combinations
 
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 
-#: The knob families whose keys address a tree site (``WORK`` / ``RASTER`` / ``LOOPIFY`` stay
-#: root-global and bare). ``PLACE`` (phase 4) is the per-seam edge property: its sites are every
-#: NON-ROOT node — each in-tree child names its parent↔child seam — and its values are
-#: ``cut | fuse``, resolved from ROUTING golden entries / pins, never a schedule slice.
 #: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
 SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
-#: What a tree path may address: the slice families plus ``PLACE``, the placement seam, which keys
-#: no slice of its own.
+#: What a tree path may address. ``PLACE`` addresses a non-root Fold's incoming edge; it is a
+#: kernel-boundary decision rather than a schedule slice.
 PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 
-#: A SEGMENT token carrying an ordinal (``a2``) — strict, because :func:`parse_key` only splits one
-#: off when the head is a known segment token. Anything else on the final component is an axis NAME.
-_SEGMENT_ORDINAL_RE = re.compile(r"^([a-z]+)(\d+)$")
-
-#: The same split, LOOSER, for :func:`resolve`'s retry: any prefix plus a trailing number. The two
-#: are deliberately different strictnesses of one question, and the difference IS the rule — a key
-#: is read as a literal axis name FIRST (so an axis genuinely called ``k2`` wins), and only when
-#: that matches no site is the trailing number reconsidered as an ordinal.
+#: Split a final component into a literal prefix plus trailing digits. :func:`resolve` tries the
+#: unsplit literal first, then moves the split left one digit at a time. Thus ``a22`` can resolve as
+#: axis ``a2`` ordinal 2 without stealing an axis literally named ``a22``.
 _AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
@@ -74,19 +66,14 @@ class Site:
     pointwise zero-axis fold), the FULL segment path from the root (this node's own segment last), and the
     1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
     the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
-    living in a λ-spelled fold's DERIVED evaluation (flash's synthesized PV contraction) — a real
-    schedule site (``TILE@pj``) but combine material BELOW the seam lattice, never a ``PLACE``
-    target. ``inline`` is the mirror: a node the enclosing cell EVALUATES INLINE (a cone's
-    per-cell producer edge — the attention score contraction the compute fill evaluates per slab
-    cell, from lowered loop IR), so no schedule slice can address it, but it is still a ``PLACE``
-    seam — cutting it materializes the value into its own kernel."""
+    living in a λ-spelled fold's derived evaluation (flash's synthesized PV contraction). Every
+    Fold remains a site; residence choices on an enclosing edge never hide its algebra."""
 
     node: object
     axis: str | None
     segments: tuple[str, ...]
     ordinal: int = 1
     derived: bool = False
-    inline: bool = False
 
     @property
     def depth(self) -> int:
@@ -100,8 +87,8 @@ def _seg(node) -> str:
     return "map" if node.axis is None else "fold"
 
 
-#: One ``_walk`` visit: the node, its segment path, and the two carried flags (derived / inline).
-_Visit = tuple[object, tuple[str, ...], bool, bool]
+#: One ``_walk`` visit: the node, its segment path, and whether it is in derived evaluation.
+_Visit = tuple[object, tuple[str, ...], bool]
 
 
 def _stmt_children(stmt):
@@ -115,40 +102,38 @@ def _stmt_children(stmt):
                 yield from _stmt_children(child)
 
 
-def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = False, inline: bool = False, k_name: str | None = None) -> None:
-    out.append((node, prefix, derived, inline))
+def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = False) -> None:
+    out.append((node, prefix, derived))
     if not isinstance(node, Fold):
         return
     if is_contraction(node):
         # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
         # rides the stored operand order, so the labels are as stable as the term. This branch
-        # must precede the generic operand walk: the stored corpus keys ``PLACE@a`` against it,
-        # and a contraction falling through to ``_seg`` would silently re-spell those rows.
-        # The K axis travels one level down: a computed edge is a CONE, and which of the cone's
-        # own edges the fill evaluates per cell is that same K-seam question (``ops.cone_seam``).
+        # must precede the generic operand walk so a contraction cannot silently re-spell its schedule keys.
         for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
             if isinstance(edge, Fold):
-                _walk(edge, (*prefix, label), out, derived, inline, node.axis.name)
+                _walk(edge, (*prefix, label), out, derived)
         return
     if node.axis is None:
-        # A cone's per-cell producer edge — and everything under it — is evaluated INLINE by the
-        # enclosing fill, from lowered loop IR, so no schedule slice reaches it. The row-invariant
-        # prologue edge is not inline: it runs once per tile row and carries its own families.
         for src in node.operands:
             if isinstance(src, Fold):
-                _walk(src, (*prefix, _seg(src)), out, derived, inline or (k_name is not None and edge_refs_axis(src, k_name)))
+                _walk(src, (*prefix, _seg(src)), out, derived)
         for s in node.body:
             for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
-                _walk(child, (*prefix, _seg(child)), out, derived, inline or k_name is not None)
+                _walk(child, (*prefix, _seg(child)), out, derived)
         return
     for edge in node.operands:
         if isinstance(edge, Fold):
-            _walk(edge, (*prefix, _seg(edge)), out, derived, inline)
+            _walk(edge, (*prefix, _seg(edge)), out, derived)
+    # A Fold stored literally in the lift is a materializable child, just like an operand edge.
+    # Walk it before the derived program so it is not confused with synthesized combine material.
+    stored = {id(s) for s in node.lift.body if isinstance(s, Fold)}
+    for child in (s for s in node.lift.body if isinstance(s, Fold)):
+        _walk(child, (*prefix, _seg(child)), out, derived)
     # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the fold)
-    # are real schedule sites, marked ``derived`` (combine material below the seam lattice; a
-    # lift-body inline node — the demoted cone — likewise: un-realizable as a seam). Operand
-    # edges embedded at their derived head position were walked above.
-    edge_ids = {id(e) for e in node.operands}
+    # are real schedule sites, marked ``derived`` (combine material below the seam lattice).
+    # Operand edges and literal lift-body Fold children were walked above.
+    edge_ids = {id(e) for e in node.operands} | stored
     for s in node.step_stmts():
         if id(s) in edge_ids:
             continue
@@ -158,10 +143,9 @@ def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = Fals
 
 def sites(root) -> tuple[Site, ...]:
     """Every structural node in ``root``'s tree as a :class:`Site`, root first — the ONE node walk
-    in the layer, shared by the resolver, the stampers, the seam enumerator and every plain
-    "walk the nodes" reader (``.node`` off each site; ``_cut``'s axis scan). An inline operand
-    subtree has exactly one home (its edge), so the tree stays a tree and no visited set is
-    needed. Ordinals are assigned in traversal order among sites with identical
+    in the layer, shared by the resolver, the stampers and every plain "walk the nodes" reader.
+    An operand subtree has exactly one home (its edge), so the tree stays a tree and no visited set
+    is needed. Ordinals are assigned in traversal order among sites with identical
     ``(segments, axis)``."""
     if root is None:
         return ()
@@ -169,23 +153,12 @@ def sites(root) -> tuple[Site, ...]:
     _walk(root, (_seg(root),), nodes)
     counts: dict[tuple, int] = {}
     result: list[Site] = []
-    for node, segments, derived, inline in nodes:
+    for node, segments, derived in nodes:
         axis = node.axis.name if isinstance(node, Fold) and node.axis is not None else None
         key = (segments, axis)
         counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived, inline=inline))
+        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
     return tuple(result)
-
-
-def _is_escape(node) -> bool:
-    """Whether an operandless zero-axis fold is a RAW-LOOP-IR ESCAPE — an un-recognized cell,
-    ``030``'s finalize, the coop fused-tail sibling — rather than a pointwise strip target. The
-    discriminator is STRUCTURAL, not a role: its body carries a recognition-stamped reduce ``Loop``,
-    so the cell is a reduction whose algebra was never lifted, and tiling its "pointwise" cell would
-    strip a body that is not one."""
-    from emmy.compiler.ir.stmt import Loop, StridedLoop  # noqa: PLC0415 — stmt imports ir; keep path light
-
-    return any(isinstance(s, (Loop, StridedLoop)) and s.role.is_reduce for s in node.body)
 
 
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
@@ -193,27 +166,24 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     CONTRACTION folds (:func:`~emmy.compiler.ir.pure.fold.is_contraction` — the same question
     :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
     the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
-    zero-axis fold, e.g. a one-load demoted cone, is not a strip target, and neither is a raw-loop-IR
-    escape); ``PLACE`` every NON-ROOT node (the child names its parent↔child seam — cut legality is
-    structural, edge-iff-closed by construction).
+    zero-axis fold is not a strip target).
 
-    An ``inline`` site carries NO slice: the enclosing cell evaluates it from lowered loop IR, so a
-    ``TILE`` / ``REDUCE`` / ``STAGE`` value there could never be realized, and offering one would
-    widen the row product with rows that emit the identical kernel. It stays a ``PLACE`` seam — the
-    cut is exactly how such a value becomes a kernel of its own, with a schedule of its own."""
+    Residence is an edge decision made by scheduling; it does not remove the producer Fold's own
+    schedule site. ``PLACE`` addresses every stored non-root Fold, excluding synthesized derived
+    evaluation nodes that have no replaceable edge in the term."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
     if family == "PLACE":
         return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
     if family in ("REDUCE", "STAGE"):
-        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None and not s.inline)
+        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None)
     out = []
     for s in all_sites:
-        if not isinstance(s.node, Fold) or s.inline:
+        if not isinstance(s.node, Fold):
             continue
         if s.node.axis is not None and is_contraction(s.node):
             out.append(s)
-        elif s.node.axis is None and not s.node.operands and s.depth == 1 and not _is_escape(s.node):
+        elif s.node.axis is None and not s.node.operands and s.depth == 1:
             out.append(s)
     return tuple(out)
 
@@ -266,12 +236,10 @@ def parse_key(key: str) -> _Key:
                 raise ValueError(f"knob key {key!r}: path segment {comp!r} after the axis")
             segments.append(comp)
         elif last:
-            m = _SEGMENT_ORDINAL_RE.match(comp)
-            if m and m.group(1) in _SEGMENT_TOKENS:
-                segments.append(m.group(1))
-                ordinal = int(m.group(2))
-            else:
-                axis = comp
+            # Keep the final component literal. ``resolve`` only reinterprets a trailing digit run
+            # after the literal axis reading fails, which is what lets an axis named ``k2`` win
+            # over the old ``k`` + ordinal-2 spelling.
+            axis = comp
         else:
             raise ValueError(f"knob key {key!r}: unknown path segment {comp!r} (expect {sorted(_SEGMENT_TOKENS)} or a final axis)")
     return _Key(family=family, segments=tuple(segments), axis=axis, ordinal=ordinal)
@@ -310,6 +278,11 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
     axis_part = f".{site.axis}" if site.axis is not None else ""
     if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
         return f"{family}@{site.axis}"
+    identical = [s for s in fam_sites if s.segments == site.segments and s.axis == site.axis]
+    if len(identical) > 1:
+        # No subsequence can distinguish identical full paths.  Skip the exponential search and
+        # use the ordinal arm directly; this is precisely the arm ordinals exist for.
+        return f"{family}@{'.'.join(site.segments)}{axis_part}{site.ordinal}"
     # Path forms: shortest anchored subsequence unique among the family's sites; among equal-length
     # candidates prefer EDGE LABELS, then the deepest anchors (``a.fold`` over ``fold.fold`` /
     # ``map.fold`` for the cone stat — the label names the seam a reader recognizes).
@@ -333,8 +306,6 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
 def _subsequences(n: int, k: int):
     """All strictly-increasing index tuples of length ``k`` into ``range(n)`` (tiny trees — brute
     force is fine)."""
-    from itertools import combinations  # noqa: PLC0415
-
     yield from combinations(range(n), k)
 
 
@@ -379,21 +350,33 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in fam_sites))
         raise ValueError(f"{parsed.family} is ambiguous: use {cands}")
     matches = _match(parsed, fam_sites)
-    if not matches and parsed.axis is None and parsed.ordinal is not None and parsed.segments and parsed.segments[-1] in ("a", "b"):
-        # The strict parse read ``a2`` as the second ``a`` edge; an axis the loop stamp named
-        # ``a2`` is the other reading, and the literal axis name comes first.
-        as_axis = _Key(family=parsed.family, segments=parsed.segments[:-1], axis=f"{parsed.segments[-1]}{parsed.ordinal}", ordinal=None)
-        matches = _match(as_axis, fam_sites)
-    if not matches and parsed.axis is not None and parsed.ordinal is None:
+    if not matches and parsed.axis is not None:
         m = _AXIS_ORDINAL_RE.match(parsed.axis)
         if m and m.group(1):
-            retry = _Key(family=parsed.family, segments=parsed.segments, axis=m.group(1), ordinal=int(m.group(2)))
-            matches = _match(retry, fam_sites)
+            digit_start = len(m.group(1))
+            # Preserve as many trailing digits as possible in the axis first: ``a22`` reads
+            # ``a2`` + ordinal 2 before ``a`` + ordinal 22.
+            for split in range(len(parsed.axis) - 1, digit_start - 1, -1):
+                prefix, suffix = parsed.axis[:split], parsed.axis[split:]
+                readings = [_Key(parsed.family, parsed.segments, prefix, int(suffix))]
+                if prefix in _SEGMENT_TOKENS:
+                    readings.append(_Key(parsed.family, (*parsed.segments, prefix), None, int(suffix)))
+                for retry in readings:
+                    matches = _match(retry, fam_sites)
+                    if matches:
+                        break
+                if matches:
+                    break
     if not matches:
         raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
-    if len(matches) > 1:
+    if len({id(s.node) for s in matches}) > 1:
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
         raise ValueError(f"knob key {key!r} is ambiguous: use {cands}")
+    # Several matches that are ONE node are not ambiguous: a shared subtree is a site at each path
+    # it appears under (MoE experts under one ``Map``, a repeated fold step), and one node carries
+    # one schedule, so the key names one decision however many paths reach it. :func:`spell` keys
+    # by node identity and already gives them a single spelling; refusing it here would make that
+    # spelling unresolvable.
     return matches[0]
 
 

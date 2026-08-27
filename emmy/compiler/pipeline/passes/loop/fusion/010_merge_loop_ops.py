@@ -1,61 +1,114 @@
-"""Merge adjacent ``LoopOp``s via graph splicing.
+"""Greedily fuse maximal downstream ``LoopOp`` regions to a fixed point.
 
-Every match is represented as a producer-to-sink region: one consumer is
-the degenerate two-node case, while a fan-out uses its nearest owned
-reconvergence. The complete region goes to the N-way splicer. Shared
-internal definitions remain SSA and are emitted once per equal
-scope/coordinate demand; no frontend treeification is needed. The splicer also
-handles multiple consumer loads and shared external inputs uniformly
-(first-seen slot assignment + splice-edge routing).
+Separate consumers become output ports of one kernel. All roots enter the
+same worklist, so shared upstream statements remain one SSA definition.
 
-Fusion is greedy-maximal and algebra-only: every legal merge is taken. Which form of a region is
-worth deploying — fused, or split into smaller kernels — is decided by the deploy evidence
-hierarchy (tuned goldens, measurements, the prior); this rule never weighs shapes, hardware, or
-downstream pattern knowledge. Its refusals are semantic — structural region ownership, a real
-splicer rejection, the fence around an already-realized ``__cut_`` workspace (which keeps a
-placement decision from being re-fused), and two readable-seam refusals judged on the MERGED
-form: a merge must not nest a reduce ``Loop`` inside another reduce ``Loop``, and must not
-entangle a multi-statistic compound (the online-softmax pair) beyond its readable tails — the
-flat same-extent normalize sweep, or a free sweep of flat same-extent additive folds (the
-expectation channels of a fused softmax·V region, which the online-softmax pairing joins into
-one streaming loop) — other shapes fall to the raw-loop escape downstream (no schedule tier, no
-``PLACE`` seam), so evidence could never price the split back. One exact exception is structural:
-recognition may prove two alpha-equivalent computed edges reconstruct one producer through a
-grouped placement cut; the fused cell and that materialized form remain priced siblings. The same
-witness makes the work bound count the child once plus its parent instead of the raw duplicated
-spelling. A later merge may preserve that witness, but never consume it and leave no placement
-inverse for evidence to price. Otherwise ``_total_work`` sums the enclosing free×reduce iteration count of every
-compute leaf, and a merge that grows it by more than ``_BLOWUP_FACTOR`` is refused. That bound is
-what keeps the downstream problem finite, not a
-performance preference: unbounded splicing folds a whole transformer layer into ONE loop nest
-(measured: 57 nested loops with the row statistic replayed inside a ~10¹³-iteration nest) — a
-form no schedule can run and recognition cannot certify. Within the bound, every fused/split
-tradeoff belongs to measured evidence.
+Fusion has only correctness boundaries. Tile lifting and scheduling never gate fusion.
 """
 
 from __future__ import annotations
 
-from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.graph import Graph, Node, Tensor
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp, splice_graph
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.loop.fusion._helpers import closed_loop_consumer_region as _closed_loop_consumer_region
-from emmy.compiler.pipeline.passes.loop.fusion._merge import merge_region as _merge_region
 
 PATTERN = [Pattern("producer", LoopOp)]
-# Region discovery is dynamic. Watching immediate consumers preserves overlap
-# invalidation when matches are enumerated in batches.
-WATCH_CONSUMERS = True
+
+
+def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
+    """Return the maximal downstream ``LoopOp`` region and its live buffers."""
+    region: set[str] = set()
+    pending = [producer.id]
+    while pending:
+        nid = pending.pop()
+        if nid in region:
+            continue
+        region.add(nid)
+        pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
+    if len(region) < 2:
+        return None
+
+    graph_outputs = set(graph.outputs)
+    live: list[str] = []
+    for nid in graph.topological_order():
+        if nid not in region:
+            continue
+        for buf in graph.nodes[nid].buffer_names():
+            if buf in graph_outputs or graph.buffer_users(buf) - region:
+                live.append(buf)
+    return (region, tuple(live)) if live else None
+
+
+def _build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str, ...]) -> LoopOp | None:
+    """Splice one maximal region, sharing equal upstream demands across roots."""
+    order = [nid for nid in graph.topological_order() if nid in region]
+    sub = Graph()
+    external: list[str] = []
+    for nid in order:
+        for inp in graph.nodes[nid].inputs:
+            producer = graph.producer(inp)
+            assert producer is not None
+            if producer.id not in region and inp not in external:
+                external.append(inp)
+    for ext_id in external:
+        ext_t = graph.buffer(ext_id)
+        assert ext_t is not None
+        sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
+    for nid in order:
+        node = graph.nodes[nid]
+        sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
+    sub.outputs = list(live_outputs)
+
+    result = splice_graph(sub)
+    return result[0] if result is not None else None
+
+
+def _wrap_multi_output_fragment(
+    graph: Graph,
+    merged: LoopOp,
+    live_outputs: tuple[str, ...],
+) -> tuple[Graph, dict[str, str]]:
+    """Wrap one merged LoopOp and map every old live buffer to its new port."""
+    owner = graph.producer(live_outputs[0])
+    assert owner is not None
+    node_id = f"merged_{owner.id}"
+    new_buffers = (node_id, *(f"{node_id}__out{i}" for i in range(1, len(live_outputs))))
+    rename = dict(zip(live_outputs, new_buffers, strict=True))
+
+    tensors: list[Tensor] = []
+    for i, (old, new) in enumerate(zip(live_outputs, new_buffers, strict=True)):
+        tensor = graph.buffer(old)
+        assert tensor is not None
+        tensors.append(Tensor(tensor.name if i == 0 else new, tensor.shape, tensor.dtype))
+    merged = merged.rename_buffers(rename)
+    # Root insertion may reorder sibling loop nests. Kernel ABI order follows
+    # graph liveness, not incidental body order.
+    merged.outputs = dict(zip(new_buffers, tensors, strict=True))
+    frag = Graph()
+    for inp_id in merged.inputs:
+        ext_t = graph.buffer(inp_id)
+        assert ext_t is not None
+        frag.add_node(InputOp(), [], ext_t, node_id=inp_id)
+    frag.add_node(merged, list(merged.inputs), outputs=tensors, node_id=node_id)
+    frag.outputs = list(new_buffers)
+    return frag, rename
 
 
 def rewrite(match: Match, producer: Node) -> Graph | None:
     graph = match.graph
     if not isinstance(producer.op, LoopOp):
         raise RuleSkipped("producer is no longer a LoopOp")
-    users = graph.users(producer.id)
-    found = _closed_loop_consumer_region(graph, producer)
+    found = _loop_consumer_region(graph, producer)
     if found is None:
-        if len(users) > 1:
-            raise RuleSkipped("producer fan-out has no closed reconvergent Loop region")
         raise RuleSkipped("producer has no Loop consumer region")
-    region, sink = found
-    return _merge_region(match, region, sink)
+    region, live_outputs = found
+
+    merged = _build_merged_region(graph, region, live_outputs)
+    if merged is None:
+        raise RuleSkipped("N-way Loop splicer rejected the region")
+
+    fragment, output_map = _wrap_multi_output_fragment(graph, merged, live_outputs)
+    match.consumed = region
+    match.output = live_outputs[0] if len(live_outputs) == 1 else output_map
+    return fragment

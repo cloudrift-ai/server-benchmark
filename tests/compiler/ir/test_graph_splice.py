@@ -1,10 +1,8 @@
 """Tests for ``Graph.splice`` — single- and multi-output forms.
 
-``splice`` is the engine's only graph-rewrite primitive (every rule that
-returns a ``Graph`` fragment is applied through it). The single-output form
-redirects one node's consumers to ``fragment.outputs[0]``; the multi-output
-form (``output={old_id: frag_output_id}``) redirects several at once — used to
-inline one producer into all its consumers in a single rewrite.
+``splice`` is the engine's only graph-rewrite primitive. The single-output form redirects one buffer's consumers to
+``fragment.outputs[0]``; the multi-output form (``output={old_buffer: fragment_buffer}``) redirects several primary
+or secondary buffers at once, onto either separate fragment nodes or ports of one MIMO node.
 """
 
 from emmy.compiler.graph import Graph, Tensor
@@ -25,9 +23,8 @@ def _make_fanout_graph() -> Graph:
     return g
 
 
-def test_splice_single_output_back_compat():
-    """``output`` as a str: one node redirected; the receipt's ``output``
-    carries the single new id."""
+def test_splice_single_output_redirects_consumer():
+    """``output`` as a str redirects one buffer to the fragment output."""
     g = _make_fanout_graph()
     frag = Graph()
     frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
@@ -35,8 +32,7 @@ def test_splice_single_output_back_compat():
     frag.outputs = ["fa"]
 
     receipt = g.splice(frag, consumed={"a"}, output="a")
-    assert receipt.single
-    assert receipt.output == "a"  # promoted back to the friendly output name
+    assert receipt.redirected == {"a": "a"}
     assert g.nodes["ua"].inputs == ["a"]  # downstream rewired to the new node
     assert g.nodes["a"].inputs == ["x"]  # the fragment node reads x directly
     assert "p" in g.nodes  # p not consumed here — still feeds b
@@ -70,3 +66,58 @@ def test_splice_multi_output_redirects_each_consumer():
     assert g.nodes["b"].inputs == ["x"]
     # Graph outputs unchanged in identity (ua/ub kept their ids).
     assert g.outputs == ["ua", "ub"]
+
+
+def test_splice_restores_secondary_output_buffer_identity():
+    """Two old values may redirect to two ports of one MIMO fragment node."""
+    g = _make_fanout_graph()
+    frag = Graph()
+    frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    frag.add_node(
+        ElementwiseOp("negative"),
+        ["x"],
+        outputs=(Tensor("a", (8,)), Tensor("fm__out1", (8,))),
+        node_id="fm",
+    )
+    frag.outputs = ["fm", "fm__out1"]
+
+    receipt = g.splice(frag, consumed={"p", "a", "b"}, output={"a": "fm", "b": "fm__out1"})
+
+    assert receipt.redirected == {"a": "a", "b": "b"}
+    assert g.nodes["a"].buffer_names() == ("a", "b")
+    assert g.nodes["ua"].inputs == ["a"]
+    assert g.nodes["ub"].inputs == ["b"]
+    g.validate()
+
+
+def test_splice_marks_fragment_private_buffers_transient():
+    """A buffer no redirect and no ``fragment.outputs`` entry names has no storage."""
+    g = _make_fanout_graph()
+    frag = Graph()
+    frag.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    frag.add_node(ElementwiseOp("exp"), ["x"], Tensor("mid", (8,)), node_id="mid")
+    frag.add_node(ElementwiseOp("negative"), ["mid"], Tensor("a", (8,)), node_id="fa")
+    frag.outputs = ["fa"]
+
+    g.splice(frag, consumed={"a"}, output="a")
+    assert g.buffer("mid").transient
+    assert not g.buffer("a").transient  # a tensor the source program materialized
+
+
+def test_splice_replacement_inherits_transience():
+    """Decomposing a decomposition's private intermediate keeps it private."""
+    g = _make_fanout_graph()
+    outer = Graph()
+    outer.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    outer.add_node(ElementwiseOp("exp"), ["x"], Tensor("mid", (8,)), node_id="mid")
+    outer.add_node(ElementwiseOp("negative"), ["mid"], Tensor("a", (8,)), node_id="fa")
+    outer.outputs = ["fa"]
+    g.splice(outer, consumed={"a"}, output="a")
+    assert g.buffer("mid").transient
+
+    inner = Graph()
+    inner.add_node(InputOp(), [], Tensor("x", (8,)), node_id="x")
+    inner.add_node(ElementwiseOp("sin"), ["x"], Tensor("mid", (8,)), node_id="remid")
+    inner.outputs = ["remid"]
+    g.splice(inner, consumed={"mid"}, output="mid")
+    assert g.buffer("mid").transient  # inherited, not restated by the rule

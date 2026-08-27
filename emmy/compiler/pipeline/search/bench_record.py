@@ -18,10 +18,12 @@ unmeasured model extrapolation. Two consequences worth knowing before running a 
   opts out of the whole write.
 - **a sweep also fills the tune's bench cache.** ``TerminalBench.prelude`` short-circuits a
   terminal whose kernels all have a ``perf`` row, so a later ``emmy tune`` of the same
-  kernels takes this run's medians as its reward instead of benching them again. Accepted
-  deliberately: the quality bar below is the tuner's own pinned-bench standard and both
-  sides are whole-graph captured benches with per-launch attribution, so the numbers are
-  the same kind of thing. Re-measure with a fresh DB when that is not what you want.
+  kernels takes this run's medians as its reward instead of benching them again. What the
+  cache carries over is one KERNEL's time, and per-launch capture windows do not neutralize
+  the graph around it — the same kernel benched inside a whole-model ``--code`` run and
+  inside an isolated tune terminal meets different L2 residency. It is bounded rather than
+  equivalent: ``run --golden`` replays the very program the tune slices, so there the two
+  graphs usually agree. Re-measure against a fresh DB when they do not.
 
 Recording is **default-on behind a quality bar** (:func:`meets_quality_bar` — the tuner's
 own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
@@ -71,12 +73,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from emmy.compiler.pipeline.search.db import PerfStats
+from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, SearchDB, node_key
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -150,15 +151,15 @@ def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
             skipped += 1
             logger.debug("[record-nodes] kernel %s carries no structural stamp in its chain — skipped", nid)
             continue
-        leaf = partial(BenchLeaf, op_sig=sig, op_key=op.cache_key(), knobs=dict(op.knobs or {}))
+        identity = {"op_sig": sig, "op_key": op.cache_key(), "knobs": dict(op.knobs or {})}
         if status != "ok":
-            leaves.append(leaf(stats=PerfStats.point(FAIL_SENTINEL_US), captured=False, status=status))
+            leaves.append(BenchLeaf(**identity, stats=PerfStats.point(FAIL_SENTINEL_US), captured=False, status=status))
             continue
         launch = per_launch[idx] if idx < len(per_launch) else None
         if launch is None:
             logger.debug("[record-nodes] kernel %s has no per-launch timing — skipped", nid)
             continue
-        leaves.append(leaf(stats=PerfStats.from_launch(launch), captured=captured, status="ok"))
+        leaves.append(BenchLeaf(**identity, stats=PerfStats.from_launch(launch), captured=captured, status="ok"))
     if skipped and not leaves:
         # Silence must never read as success: a graph whose EVERY kernel lost its stamp means a
         # provenance gap in some lowering path, not "nothing to record".
@@ -194,12 +195,15 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     The two tables key the same measurement differently, and deliberately: a ``node`` row is
     filed under the kernel's BIRTH identity (:func:`~...passes.identity.chain_op_sig`) while
     a ``perf`` row's signature is read back off the realized op's own stamps, which tile
-    materialization can add to. That is the tune's own spelling — ``TerminalBench._persist``
-    writes ``cuda_op.knobs`` — so the two writers agree row for row."""
-    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB, node_key  # noqa: PLC0415
+    materialization can add to. That is the tune's own spelling (``TerminalBench._persist``
+    writes ``cuda_op.knobs``), so a row written here and a row the tune wrote for the same
+    kernel land on one key and arbitrate — but the two TABLES' rows are not interchangeable.
 
-    if not leaves:
-        return 0
+    No ``cuda_op`` inventory row is written, which the tune does write. The consequence is
+    narrow and deliberate: ``iter_perf_samples`` joins ``perf`` to ``cuda_op``, so a kernel
+    this machine never tuned contributes deploy evidence without entering the ``--dataset db``
+    training set. Its training copy is the ``node`` row — recording the same measurement into
+    a second training set would put one bench in two corpora with different sampling."""
     run_id = run_id or mint_bench_run_id()
     ctx_key, gpu, h_feats = ctx.structural_key(), ctx.hardware_id(), ctx.features()
     rows = []
@@ -238,7 +242,9 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
             # ``leaf.knobs`` alone, without the ``H_*`` regime the node row carries: the perf
             # table's writers already disagree about that half and its readers strip it, so the
             # row keeps the realized op's own knobs and nothing else.
-            db.record_perf(ctx_key, leaf.op_key, backend="cuda", status="ok", stats=leaf.stats, knobs=leaf.knobs, captured=True)
+            db.record_perf(
+                ctx_key, leaf.op_key, backend="cuda", status=leaf.status, stats=leaf.stats, knobs=leaf.knobs, captured=leaf.captured
+            )
             measured += 1
     finally:
         db.close()

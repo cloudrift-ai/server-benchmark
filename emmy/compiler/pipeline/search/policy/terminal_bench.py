@@ -181,10 +181,12 @@ class TerminalBench:
         # useful here because ``backend.benchmark`` runs the whole graph.
         # This cache has a second filler: ``run --bench`` records its clean captured rows
         # into ``perf`` too (``search/bench_record``), so a terminal whose kernels a manual
-        # sweep already measured is valued from that sweep's medians instead of benched
-        # here. Deliberate — the sweep meets the same pinned-bench standard and both sides
-        # are whole-graph captured benches with per-launch attribution — but it does mean a
-        # tune after a sweep is not a fresh measurement of those kernels.
+        # sweep already measured is valued from that sweep's medians instead of benched here.
+        # A carried-over median is one kernel's, measured inside whatever graph the sweep ran
+        # — the same kernel meets different L2 residency in a whole-model run than in this
+        # isolated terminal. ``run --golden`` replays the program these slices come from, so
+        # there the graphs usually agree; elsewhere a tune after a sweep is not a fresh
+        # measurement of those kernels.
         cached_rows = []
         for node in self.cuda_nodes:
             key = node.op.cache_key()

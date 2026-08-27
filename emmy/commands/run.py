@@ -169,7 +169,7 @@ def register_run_command(subparsers):
             "and — for a row whose bench succeeded under graph capture — as a measured row a later compile reads to "
             "decide the same fork. Nothing is recorded from a run that computed the wrong answer, from a flagged row "
             "(pin mismatch, wrong answer, intensity floor), from a direct --ir input, or from a cross-target "
-            "(--gpu-arch) run, whose timings belong to this card and not to the target it compiled for."
+            "(--gpu-arch) run."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -520,19 +520,11 @@ def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
 
 
 def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
-    """Default-on bench recording (``--no-record-nodes`` opts out): the pinned
-    A/B rows and the greedy isolated re-bench become tune-DB rows — the training
-    data, and the measured evidence, the tune-only write path let every manual sweep
-    evaporate from. Records only at tune-standard measurement quality; the store's own
-    gates (plausibility, quality-aware leaf replacement, keep-best-``ok``) still judge
-    every row. See ``search/bench_record`` for what reaches which table.
-
-    A cross-target run records NOTHING. ``--gpu-arch`` / ``--target`` makes every lowering
-    decision as if on another card, but the cubin is assembled for the LIVE device and runs
-    here (``backend/cuda/nvcc._launchable_arch``), so the measurement belongs to this card
-    while ``Context.probe`` keys the row under the target's capability. Storing it would file
-    this card's numbers under a regime nothing measured — and the tune DB has no column that
-    could later tell them apart."""
+    """Default-on bench recording (``--no-record-nodes`` opts out): the pinned A/B rows and
+    the greedy isolated re-bench become tune-DB rows. ``search/bench_record`` owns what
+    reaches which table and why; this function owns the two conditions only the command
+    layer can see — the measurement quality this run asked for, and whether it compiled for
+    the card it benched on."""
     if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
@@ -562,7 +554,10 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
         return
     db_path = resolve_tune_db()
     n, measured = record_bench_leaves(db_path, Context.probe(), leaves)
-    print(f"[record-nodes] {n} bench row(s) recorded into {db_path}, {measured} of them as measured evidence")
+    print(
+        f"[record-nodes] {n} bench row(s) recorded into {db_path}, {measured} of them as measured evidence "
+        f"a later compile reads — opt out with --no-record-nodes"
+    )
 
 
 def _reset_persisting_l2_cache() -> None:
@@ -2385,14 +2380,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
-    # A golden target re-lowers an in-memory program through the FULL pipeline, so ``loop/stamp``
-    # stamps every kernel and the rebind knob-merge carries its realized knobs onto the terminal
-    # ``CudaOp`` — the same honest rows the ``--code`` path records. A direct ``--ir`` input is left
-    # as it is (serialization drops ``op.knobs`` and ``op.source``); only the golden replay records.
-    # Correctness gates the write here because this path does NOT abort on a bad answer: without
-    # ``--strict`` an ``accuracy_error`` is logged non-fatally and the run continues, and the greedy
-    # isolated row carries no flags of its own — so a target computing the wrong answer would
-    # otherwise record its timings as if they meant something.
+    # A golden replay re-lowers through the full pipeline and records; a direct ``--ir`` input does
+    # not (see ``search/bench_record``). Correctness is checked HERE because, unlike the ``--code``
+    # path, this one does not exit on a bad answer without ``--strict`` — it warns and benches on.
     if embedded is not None and accuracy_error is None:
         _record_bench_nodes(args, ab_benches, greedy_iso)
     if args.profile and greedy_fail is None:

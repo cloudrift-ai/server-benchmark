@@ -215,12 +215,7 @@ derived structural stamps. Registered Boolean values in an explicit `--ab` row r
 not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
-compiler pipeline, which is also why its benched rows are recorded into the tune DB like the `--code` path's: the
-replay re-lowers through every pass, so each kernel carries the structural identity and the realized knobs a stored row
-needs. A run that computed the wrong answer, and a cross-target (`--gpu-arch`) run, record nothing at all;
-`--no-record-nodes` opts out of the whole write. A row whose bench succeeded under graph capture is also stored as
-measured evidence, so a sweep's findings decide the same fork on the next compile instead of only training the prior —
-which also means a sweep changes what a later `run` or `deploy` compiles on that machine. When that replay has
+compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
@@ -230,7 +225,10 @@ nonzero while the pinned schedules receive their normal timed and reference-clea
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
 of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
 Repeated names that resolve to different embedded targets remain ambiguous;
-qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
+qualification scopes a temporary working YAML to one target rather than guessing. Because that replay re-lowers through
+every pass, its benched rows are recorded into the tune DB like the `--code` path's, which is what lets a sweep decide
+a later compile; the compiler-pipeline architecture owns which rows reach which table.
+ A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
 

@@ -1,6 +1,7 @@
 """Working-golden execution tests."""
 
 import argparse
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -255,9 +256,7 @@ def test_a_bench_below_the_tune_standard_records_nothing(recorded, capsys):
 
 
 def test_a_cross_target_run_records_nothing(monkeypatch, recorded, capsys):
-    """``--gpu-arch`` changes every lowering decision, but the cubin is assembled for the LIVE
-    device and runs here — so the timings are this card's while the row would be keyed under the
-    target's capability, and neither table has a column that could later tell them apart."""
+    """The kernel ran on this card; the row would key to the target's capability."""
     from emmy.compiler import target
 
     monkeypatch.setattr(target, "compute_capability", lambda: (9, 0))
@@ -269,14 +268,16 @@ def test_a_cross_target_run_records_nothing(monkeypatch, recorded, capsys):
     assert "NOT recorded" in capsys.readouterr().out
 
 
-def _stub_run_ir(monkeypatch, *, accuracy_error):
-    """Drive ``_handle_run_ir``'s golden path far enough to reach its recording decision.
+def _stub_run_ir(monkeypatch, tmp_path, *, accuracy_error=None, from_ir_file=False):
+    """Drive ``_handle_run_ir`` far enough to reach its recording decision, on either input.
 
     ``CudaBackend`` / ``CompilerDump`` are already parameters of the handler, so the stubs go
     in there; the pass pipeline and the torch-reference probe are the only two module-level
     dependencies left to replace. ``golden_configs`` is empty on purpose — the decision under
     test is whether the recorder is reached at all.
     """
+    import json
+
     from emmy.compiler import pipeline as pipeline_mod
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.graph import Graph, Tensor
@@ -311,15 +312,24 @@ def _stub_run_ir(monkeypatch, *, accuracy_error):
                 "greedy_error": None,
             }
 
+        async def bench_pinned_async(self, _graph, **_kwargs):
+            return bench, None
+
         async def aclose_async_worker(self) -> None:
             pass
 
     graph = Graph()
     graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,)), node_id="x")
+    ir_path = None
+    if from_ir_file:
+        # The live shape of the excluded input: a stage dump plus --ab, which reaches
+        # ``ab_benches`` / ``greedy_iso`` through the handler's own --ab branch.
+        ir_path = tmp_path / "dump.json"
+        ir_path.write_text(json.dumps(graph.to_dict()))
     args = SimpleNamespace(
-        _golden_graph=graph,
-        ir=None,
-        ab=None,
+        _golden_graph=None if from_ir_file else graph,
+        ir=str(ir_path) if from_ir_file else None,
+        ab=["TILE=f2x4"] if from_ir_file else None,
         golden_configs=[],
         dynamic=None,
         dump_dir=None,
@@ -334,16 +344,24 @@ def _stub_run_ir(monkeypatch, *, accuracy_error):
         profile=False,
         no_record_nodes=False,
     )
-    run_mod._handle_run_ir(args, _Backend, SimpleNamespace(resolve=staticmethod(lambda _d: None)))
+    # A --ab row that cannot realize on this stub graph makes the command exit non-zero; the
+    # recording decision is taken before that, which is the part under test.
+    with contextlib.suppress(SystemExit):
+        run_mod._handle_run_ir(args, _Backend, SimpleNamespace(resolve=staticmethod(lambda _d: None)))
     return calls
 
 
-def test_a_golden_replay_reaches_the_recorder(monkeypatch):
-    assert len(_stub_run_ir(monkeypatch, accuracy_error=None)) == 1
+def test_a_golden_replay_reaches_the_recorder(monkeypatch, tmp_path):
+    assert len(_stub_run_ir(monkeypatch, tmp_path)) == 1
 
 
-def test_a_golden_replay_that_computed_the_wrong_answer_records_nothing(monkeypatch):
-    """This path does NOT abort on a bad answer: without ``--strict`` the failure is logged as
-    non-fatal and the run benches anyway, and the greedy isolated row carries no flags of its
-    own — so the recorder has to be gated here or wrong-answer timings become stored evidence."""
-    assert _stub_run_ir(monkeypatch, accuracy_error="emmy vs eager: max_diff 3.2") == []
+def test_a_golden_replay_that_computed_the_wrong_answer_records_nothing(monkeypatch, tmp_path):
+    """Unlike the --code path, this one does not exit on a bad answer without --strict."""
+    assert _stub_run_ir(monkeypatch, tmp_path, accuracy_error="emmy vs eager: max_diff 3.2") == []
+
+
+def test_a_direct_ir_input_records_nothing(monkeypatch, tmp_path):
+    """Serialization drops the knobs and the rewrite chain, so a row off a stage dump would name
+    only what the remaining passes happened to re-decide. The handler serves both inputs, and
+    --ab on a dump reaches the same benched rows, so the exclusion has to hold at the call."""
+    assert _stub_run_ir(monkeypatch, tmp_path, from_ir_file=True) == []

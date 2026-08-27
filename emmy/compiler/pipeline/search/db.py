@@ -62,9 +62,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+
+if TYPE_CHECKING:
+    from emmy.compiler.backend.base import LaunchTime
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +108,7 @@ class PerfStats:
         return cls(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
     @classmethod
-    def from_launch(cls, launch) -> PerfStats:
+    def from_launch(cls, launch: LaunchTime) -> PerfStats:
         """One benched kernel's statistics from its :class:`LaunchTime` — the one spelling
         every writer of a measured row uses, so a kernel benched by ``run --bench`` and the
         same kernel benched by the tune summarize identically.

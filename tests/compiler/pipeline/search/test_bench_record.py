@@ -168,17 +168,6 @@ def test_a_leaf_carries_the_kernels_perf_key_and_capture_flag() -> None:
     assert not bench_leaves(graph, _bench((0.010, None), (0.002, None), captured=False))[0].captured
 
 
-def test_a_launch_without_samples_keeps_its_median_and_no_sample_count() -> None:
-    """``time_ms`` already IS the median of the measured iters, so a launch that reported no
-    per-iter list loses nothing but the spread — which must read as unknown, not as zero."""
-    graph = _graph(_kernel("main", MAIN, MAIN))
-
-    [leaf] = bench_leaves(graph, _bench((0.010, None)))
-
-    assert leaf.stats.median == leaf.stats.min == leaf.stats.mean == 10.0
-    assert leaf.stats.n_samples == 0
-
-
 # --- what reaches which table ---------------------------------------------------------------
 #
 # ``node`` is training data and takes every leaf; ``perf`` is the measured evidence an ordinary
@@ -207,6 +196,27 @@ def _tuned(name: str, work: str, us: float):
     return leaf
 
 
+def test_a_launch_without_samples_keeps_its_median_and_no_sample_count(tmp_path) -> None:
+    """``time_ms`` already IS the median of the measured iters, so a launch that reported no
+    per-iter list loses nothing but the spread — which must read as unknown, not as zero.
+
+    The stored side is the one that matters: ``record_nodes``' quality guard only holds when
+    BOTH sides are known, so a row claiming zero samples at zero variance would read as "not
+    worse" than every stored leaf and displace tune-grade data unconditionally."""
+    graph = _graph(_kernel("main", MAIN, MAIN))
+
+    [leaf] = bench_leaves(graph, _bench((0.010, None)))
+
+    assert leaf.stats.median == leaf.stats.min == leaf.stats.mean == 10.0
+    assert leaf.stats.n_samples == 0
+
+    _, db = _record(tmp_path, leaf)
+    [row] = db.iter_nodes()
+    assert row.value_us == 10.0
+    assert row.n_samples is None and row.variance is None, "an unknown spread must not store as zero"
+    db.close()
+
+
 def test_a_recorded_bench_row_becomes_evidence_a_later_compile_reads(tmp_path) -> None:
     """The whole point: a sweep's measurement has to be able to decide a fork, and only the
     ``perf`` table is consulted while compiling."""
@@ -221,8 +231,8 @@ def test_a_recorded_bench_row_becomes_evidence_a_later_compile_reads(tmp_path) -
 
 
 def test_an_uncaptured_measurement_is_training_data_but_not_evidence(tmp_path) -> None:
-    """Each pinned row benches separately, so capture can hold for one config and fall back for
-    the next inside one sweep — and the evidence table compares medians across configs."""
+    """Capture can hold for one pinned row and fall back for the next inside one sweep, and the
+    evidence table compares medians across configs."""
     graph = _graph(_kernel("main", MAIN, MAIN))
     [leaf] = bench_leaves(graph, _bench((0.010, None), captured=False))
 
@@ -236,7 +246,7 @@ def test_an_uncaptured_measurement_is_training_data_but_not_evidence(tmp_path) -
 
 def test_a_failed_bench_is_training_data_but_not_evidence(tmp_path) -> None:
     """A stored failure would also make a later tune report the terminal failed without
-    benching it — the tune's bench cache hits on any row it finds."""
+    benching it: the tune's bench cache hits on any row it finds."""
     graph = _graph(_kernel("main", MAIN, MAIN))
     [leaf] = bench_leaves(graph, None, status="bench_fail")
 

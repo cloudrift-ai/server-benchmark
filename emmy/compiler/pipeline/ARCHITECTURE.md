@@ -1214,9 +1214,9 @@ onto the terminal op. A direct `--ir` input does not.
   greedy execution computed the wrong answer records nothing — the `--golden` path does not abort on that without
   `--strict`, it logs the failure and benches anyway, and the greedy isolated row carries no flags of its own to catch
   it. And a cross-target run (`--gpu-arch` / `--target`) records nothing: `--target` changes every lowering decision,
-  but the cubin is assembled for the LIVE device and runs on it (`backend/cuda/nvcc._launchable_arch`), so the
-  measurement is this card's while the row would be keyed under the target's capability, and neither table has a column
-  that could later tell the two apart.
+  but the CUDA backend assembles the cubin for the live device so the process can launch it, so the measurement is this
+  card's while the row would be keyed under the target's capability, and neither table has a column that could later
+  tell the two apart.
 - **A clean captured row also becomes measured evidence.** Training data alone can never change a deploy: nothing reads
   the node table while compiling, so a sweep that proved a config fastest still lost every later compile to an
   unmeasured model extrapolation. Such a row is therefore also written to `perf`, keyed by the kernel's `cache_key()` —
@@ -1227,11 +1227,18 @@ onto the terminal op. A direct `--ir` input does not.
   run benches each pinned row separately, so capture can hold for one config and fall back to wall semantics for the
   next inside one sweep. Consequences to know: a sweep changes what the next compile picks — that is the point — and a
   sweep also fills the tune's bench cache, so a tune run after one is valued from the sweep's medians rather than
-  re-benching those kernels.
+  re-benching those kernels. That carry-over is bounded, not free: a per-launch window times one kernel but not the
+  graph around it, so a kernel measured inside a whole-model run met different L2 residency than the isolated terminal
+  the tune would have benched. `run --golden` replays the program those slices come from, where the two graphs usually
+  agree.
 - **The two tables key one measurement differently, on purpose.** A node row is filed under the kernel's birth identity
   (`chain_op_sig`); a `perf` row's signature is read back off the realized op's own stamps, which tile materialization
-  can add `S_warp_eligible` to. That is the tune's own spelling — `TerminalBench._persist` writes `cuda_op.knobs` — so
-  the two writers agree row for row, but the node row and the `perf` row for one kernel are not interchangeable.
+  can add `S_warp_eligible` to. That is the tune's own spelling, so a bench-recorded `perf` row and a tune-written one
+  for the same kernel land on one key and arbitrate — but a node row and a `perf` row are not interchangeable. Nor is
+  a bench-recorded `perf` row a complete substitute for a tuned one: no `cuda_op` inventory row accompanies it, and
+  `iter_perf_samples` joins the two, so for a kernel the machine never tuned these rows are deploy evidence without
+  entering the `--dataset db` training set. The node row is their training copy; recording one bench into two training
+  sets with different sampling is what that avoids.
 - `record_nodes` protects the leaf update by **comparing measurement quality**: a newer measurement that is
   unambiguously worse (fewer `n_samples` AND higher `variance`) never displaces a stored leaf, so a casual bench
   cannot overwrite tune-grade data. When quality is comparable or unknown, newest simply wins, so an honest

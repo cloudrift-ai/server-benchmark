@@ -111,6 +111,12 @@ def main():
     try:
         import torch
         from transformers import AutoModelForCausalLM
+
+        from emmy.compiler.trace.huggingface import (
+            load_architecture_trace_twin,
+            load_quantized_layer_twin,
+            quantized_checkpoint_dir,
+        )
     except ImportError:
         logger.error("torch + transformers required: pip install -e '.[compile,serving]'")
         sys.exit(1)
@@ -126,24 +132,48 @@ def main():
         buckets.append(("-sym", None))
 
     logger.info("Loading %s (%s, CPU trace)...", args.model, args.dtype)
-    with torch.device("cpu"):
-        model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).eval()
-    trunk = getattr(model, "model", model)
-    trunk = getattr(trunk, "language_model", trunk)
-    text_config = getattr(model.config, "text_config", model.config)
+    # A quantized checkpoint stores packed tensors whose shapes are not the twin's declared ones,
+    # so ``from_pretrained`` refuses it outright (``ignore_mismatched_sizes`` is False, and setting
+    # it would load garbage rather than decode). Route through the same quantized twin loaders the
+    # compile path uses, which decode the stored format into real values.
+    #
+    # PER LAYER, not the whole checkpoint: only the target layers' modules are ever read, and the
+    # whole-dict twin of an 8B model is about 47 GB of host memory — the OOM killer takes it on a
+    # 47 GB host before it captures anything. The layer twin streams shards and keeps one layer.
+    quant_dir = quantized_checkpoint_dir(args.model)
+
+    def _load(layer: int | None):
+        with torch.device("cpu"):
+            if quant_dir is None:
+                return AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).eval()
+            if layer is None:
+                # Shapes only: every block on the meta device, so nothing is materialized. NOT
+                # ``load_quantized_trace_twin(..., None)`` — that falls through to the whole-dict
+                # twin, which is the very allocation this avoids.
+                return load_architecture_trace_twin(quant_dir, dtype, args.layer).eval()
+            return load_quantized_layer_twin(quant_dir, dtype, layer).eval()
+
+    # Shape-only for the survey: which layers to capture, and how wide the hidden state is.
+    survey = _load(None)
+    text_config = getattr(survey.config, "text_config", survey.config)
     hidden = text_config.hidden_size
 
     targets = [(args.layer, "")]
-    gl = args.global_layer if args.global_layer is not None else _global_layer(model)
+    gl = args.global_layer if args.global_layer is not None else _global_layer(survey)
     if gl is not None:
         targets.append((gl, "-global"))
     else:
         logger.info("No full_attention layer found — capturing local twins only")
+    del survey
 
     written = []
     for layer, suffix in targets:
         logger.info("Capturing layer %d%s (hidden=%d)...", layer, f" [{suffix.lstrip('-')}]" if suffix else "", hidden)
+        model = _load(layer)
+        trunk = getattr(model, "model", model)
+        trunk = getattr(trunk, "language_model", trunk)
         written += _capture_layer(trunk.layers[layer], hidden, dtype, suffix, out_dir, buckets)
+        del model, trunk
 
     logger.info("\nCaptured %d twins in %s", len(written), out_dir)
     logger.info(

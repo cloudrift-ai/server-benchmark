@@ -191,10 +191,12 @@ def _row_major_k_inner(tensor, load, k_name: str) -> bool:
 def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, pair, inputs) -> Stage | None:
     """Resolve the FOUR-SLAB stage of a block-scaled packed pair — the native fp4 cell.
 
-    The simplest staging in the tier, because nothing is computed: both operands' codes and both
-    operands' raw block scales are stored bytes, so all four slabs are verbatim copies. The
-    packed byte-slab stage next door still compute-fills its scale slab; here the instruction
-    takes the stored e4m3 byte itself, so that fill has nothing left to evaluate.
+    The simplest staging in the tier, because no SCALE is computed: the packed byte-slab stage next
+    door compute-fills its scale slab, while here the instruction takes the stored e4m3 byte itself,
+    so that fill has nothing left to evaluate. Both sides' scales and every stored side's codes are
+    therefore verbatim copies. The one slab still filled is an activation whose codes this very
+    matmul computes — its quantize fused in, leaving no buffer to copy from. The weight side is
+    always stored, which is what the ``pair.b.bits`` check below requires.
 
     The scoped shape: cp.async (the four-descriptor TMA box copy is not built — a missing-code
     fact, stated where the code would live), a k64 cell over 16-element blocks, both code

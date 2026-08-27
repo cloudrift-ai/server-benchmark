@@ -159,7 +159,16 @@ materialized A the atom cannot bind (only the fill's typed slab store converts �
 has no gmem-direct sibling and a `STAGE` pin can only choose its depth. A NESTED-reduce B edge (the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
-refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32) gmem-direct tier rides the same
+refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. ONE computed operand
+has byte-transport siblings beside the fill: a packed-pair (NVFP4) weight cone, whose packed 4-bit values copy
+verbatim as a raw byte slab while only its block scales are compute-filled, so `resolve_warp_stage` answers for it
+and the cp.async and TMA rows sit beside the fill's depths as fork siblings. Which reading applies is a fact about
+the NODE, not about the transport a pin names — a multi-channel product carrying a cp.async or TMA pin still RAISES,
+since the byte-transport emitters carry one channel — and a shape the byte slab declines keeps the generic reading,
+which computes the same values through the fill. Where BOTH operands are packed over one block extent the native fp4
+mma cell multiplies those values as stored and applies their raw block scales itself: that node's atom is read off
+the pair rather than off the A edge's leaf dtype, and its stored slabs copy verbatim — only an activation whose
+values this kernel computes takes a fill underneath them. The fp8 (k32) gmem-direct tier rides the same
 two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
 bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
 overrides.
@@ -179,6 +188,15 @@ reduction domain, a prescan fact, never a rewritten tree.
 offers band variants (the band arms the box-copy mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a
 compute fill has no async load half), budgeted against the CTA thread limit. A `+p` pin that no option can drive
 composes with nothing and the term stays unmapped — the band is part of the inventory, not a row key.
+
+The band splits the CTA into warps that only fetch and warps that only compute, which is why the NVFP4 byte slab
+above refuses it even under TMA, and refuses it as a LEGALITY: that slab's own TMA lowering returns the plain staged
+K-loop rather than the band-splitting one, so it takes no warp inventory and the two halves are never separated —
+while the CTA still widens to hold a band, because the thread budget is set from the inventory alone. The extra warps
+then reach the compute body, where the box copy elects its arming thread on a wrapping linear thread id: thread 0 and
+the band's first thread both match, so one mbarrier takes two arrivals against an arrival count of one and its phase
+parity desynchronizes. That is a hang, not a slow kernel. The native fp4 mma cell needs no rule of its own — its
+stage resolver takes cp.async only, so it never reaches a TMA stage for the question to be asked about.
 
 **The per-cell contraction tier partitions its K like a plain fold.** A contraction is a monoid with a ⊗ lift, so the
 untiled tile candidate composes with the same `coop_reduce_moves` catalog the plain folds offer — the cooperative

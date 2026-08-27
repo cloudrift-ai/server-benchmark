@@ -341,9 +341,10 @@ def _fill_options(state: _State, node, placed: TilePlan, pin: str | None, budget
     ONE computed operand has byte-transport siblings beside the fill: a PACKED-PAIR B, the NVFP4
     weight's decode cone, whose bits copy verbatim as raw packed bytes while only its block scales
     are compute-filled (:func:`_staging.resolve_warp_stage`'s packed arm). Those rows sit beside
-    the fill's, so a shape the byte slab declines simply keeps the generic reading. The exception
-    reads the NODE's own shape, never the pin's transport: a multi-channel product carrying an
-    async or TMA pin still raises, since the byte-transport emitters carry one channel."""
+    the fill's, so a shape the byte slab declines simply keeps the generic reading. Which reading
+    applies is a fact about the NODE, not about the transport the pin names: a multi-channel
+    product carrying an ``smem-async`` or ``smem-tma`` pin still RAISES, since the byte-transport
+    emitters carry one channel."""
     facts = state.facts[id(node)]
     packed = facts.packed[0] is not None
     if pin:

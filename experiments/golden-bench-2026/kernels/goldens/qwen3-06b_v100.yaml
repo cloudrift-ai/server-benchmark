@@ -5020,8 +5020,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 825.3
-      reference_us: 403.5
+      emmy_us: 900.1
+      reference_us: 414.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -5033,15 +5033,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      WORK: t16x8
+      TILE: f4x2
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 209.3
-      reference_us: 31.5
+      emmy_us: 147.5
+      reference_us: 28.5
       reference_backend: torch-eager
 - program: 0
   target:
@@ -5050,20 +5050,20 @@ configs:
     - to_2
     - view
   realizations:
-  - name: k_linear_1fd3d5.d0f217697284.s512
+  - name: k_linear_a44745.962bed4a68ac.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t16x16
-      TILE: f4x4
+      WORK: t16x8
+      TILE: f2x4
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 281.3
-      reference_us: 186.6
+      emmy_us: 361.8
+      reference_us: 186.7
       reference_backend: torch-eager
 - program: 0
   target:
@@ -5072,76 +5072,138 @@ configs:
     - to_4
     - view_1
   realizations:
-  - name: k_linear_a09c5a.f753cb04390b.s512
+  - name: k_linear_acf1a1.98859d74235d.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t16x16
-      TILE: f2x2
+      WORK: t16x8
+      TILE: f2x4
       REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 219.1
-      reference_us: 121.6
+      emmy_us: 214.2
+      reference_us: 116.7
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - unsqueeze
+  realizations:
+  - name: k_unsqueeze_636992.e0770b339983.s512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1.6
+      reference_us: 1.2
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - unsqueeze_1
+  realizations:
+  - name: k_unsqueeze_636992.e0770b339983.unsqueeze_1.s512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 1.4
+      reference_us: 1.2
       reference_backend: torch-eager
 - program: 0
   target:
     origins:
     - add_1
     - add_1_c1_bc
-    - add_2
-    - add_2_c1_bc
     - add_3
-    - add_4
     - cat
-    - cat_1
     - mean_1
-    - mean_2
     - mul_2
     - mul_3
-    - mul_4
-    - mul_5
     - mul_6
     - mul_7
+    - neg
+    - p_attn_q_norm_weight_bc
+    - pow_2
+    - rsqrt_1
+    - rsqrt_1_bc
+    - slice_1
+    - slice_2
+    - to_3
+    - transpose
+    - unsqueeze_1_bc
+    - unsqueeze_bc
+  realizations:
+  - name: k_mean_3cfe9d.08ea6e265d03.s512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 20.2
+      reference_us: 854.9
+      reference_backend: torch-eager
+- program: 0
+  target:
+    origins:
+    - add_2
+    - add_2_c1_bc
+    - add_4
+    - cat_1
+    - mean_2
+    - mul_4
+    - mul_5
     - mul_8
     - mul_9
     - n0
     - n1
-    - neg
     - neg_1
     - p_attn_k_norm_weight_bc
-    - p_attn_q_norm_weight_bc
-    - pow_2
     - pow_3
-    - rsqrt_1
-    - rsqrt_1_bc
     - rsqrt_2
     - rsqrt_2_bc
-    - scaled_dot_product_attention
-    - slice_1
-    - slice_2
     - slice_3
     - slice_4
-    - to_3
     - to_5
-    - transpose
     - transpose_1
-    - unsqueeze
-    - unsqueeze_1
-    - unsqueeze_1_bc
-    - unsqueeze_bc
   realizations:
-  - name: k_sdpa_mean_reduce_29d3df.171afed452e2.s512
+  - name: k_mean_c09f7e.cf53a8e0cdf7.s512
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs: {}
+    knobs:
+      WORK: t16
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 29664.3
-      reference_us: 1935.4
+      emmy_us: 9.7
+      reference_us: 531.1
       reference_backend: torch-eager
 - program: 0
   target:
@@ -5151,15 +5213,11 @@ configs:
     - transpose_2
     - view_2
   realizations:
-  - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.s512
+  - name: k_sdpa_linear_reduce_5b0de4.5dd2bada6768.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    measurements:
-      emmy_us: 2153.5
-      reference_us: 517.1
-      reference_backend: torch-eager
 - program: 0
   target:
     origins:
@@ -5169,15 +5227,11 @@ configs:
     - scaled_dot_product_attention
     - transpose_3
   realizations:
-  - name: k_linear_sdpa_reduce_e24efe.109440eff691.s512
+  - name: k_linear_sdpa_reduce_fc07d0.c637d49d95d9.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    measurements:
-      emmy_us: 3127.3
-      reference_us: 583.7
-      reference_backend: torch-eager
 - program: 0
   target:
     origins:
@@ -5197,36 +5251,22 @@ configs:
     - to_6
     - to_7
   realizations:
-  - name: k_linear_mean_reduce_dc067d.a2e77bf96bb2.s512
+  - name: k_linear_mean_reduce_d623c5.06e185be5bb5.s512
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: w16x2
-      TILE: mma_m8n8k4_f16_f32/f4x1/k4
-      REDUCE: ''
-      STAGE: d1/smem
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 22386.7
-      reference_us: 555.0
-      reference_backend: torch-eager
+    knobs: {}
 - program: 0
   target:
     origins:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_6b4b5f.a59ee74a4345.s512
+  - name: k_linear_a581d9.f74a31662105.s512
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    measurements:
-      emmy_us: 114.6
-      reference_us: 69.1
-      reference_backend: torch-eager
 - program: 1
   target:
     origins:
@@ -5254,8 +5294,8 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 68.7
-      reference_us: 140.4
+      emmy_us: 68.5
+      reference_us: 139.4
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5267,15 +5307,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t256
+      WORK: t128
       TILE: ''
-      REDUCE: coop-t
+      REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 5.6
-      reference_us: 6.5
+      emmy_us: 19.6
+      reference_us: 7.6
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5284,7 +5324,7 @@ configs:
     - to_2
     - view
   realizations:
-  - name: k_linear_49a16b.119bca97a211.s1
+  - name: k_linear_5ecb68.c689d51043ce.s1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -5296,7 +5336,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 28.0
+      emmy_us: 27.5
       reference_us: 33.4
       reference_backend: torch-eager
 - program: 1
@@ -5306,7 +5346,7 @@ configs:
     - to_4
     - view_1
   realizations:
-  - name: k_linear_dfb21f.68dcd44586ec.s1
+  - name: k_linear_b76530.c1798114317b.s1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -5318,7 +5358,7 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 18.3
+      emmy_us: 18.4
       reference_us: 33.2
       reference_backend: torch-eager
 - program: 1
@@ -5368,14 +5408,14 @@ configs:
     - unsqueeze_1_bc
     - unsqueeze_bc
   realizations:
-  - name: k_sdpa_mean_reduce_0a2624.e5230d7bf4e8.s1
+  - name: k_sdpa_mean_reduce_8053eb.9f5d2c76a683.s1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 106.4
-      reference_us: 418.1
+      emmy_us: 26.9
+      reference_us: 417.7
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5391,8 +5431,8 @@ configs:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 96.8
-      reference_us: 42.0
+      emmy_us: 31.2
+      reference_us: 41.6
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5403,14 +5443,14 @@ configs:
     - scaled_dot_product_attention
     - transpose_3
   realizations:
-  - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.s1
+  - name: k_linear_sdpa_reduce_a26a5c.2d426d5a3ccc.s1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
     measurements:
-      emmy_us: 127.4
-      reference_us: 45.7
+      emmy_us: 48.1
+      reference_us: 45.5
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5431,20 +5471,20 @@ configs:
     - to_6
     - to_7
   realizations:
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.s1
+  - name: k_linear_mean_reduce_c1b0ae.a3353a1fa9c0.s1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a0: coop
-      WORK: t8
+      REDUCE@a0: coop/r2
+      WORK: t4
       TILE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 16729.1
-      reference_us: 241.7
+      emmy_us: 31153.2
+      reference_us: 245.8
       reference_backend: torch-eager
 - program: 1
   target:
@@ -5452,7 +5492,7 @@ configs:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_2dcd0c.28b342e368a5.s1
+  - name: k_linear_234458.5d84535dccaa.s1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -5464,6 +5504,6 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 52.1
-      reference_us: 11.5
+      emmy_us: 55.2
+      reference_us: 12.4
       reference_backend: torch-eager
